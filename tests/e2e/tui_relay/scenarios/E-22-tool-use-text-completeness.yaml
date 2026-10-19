@@ -9,7 +9,7 @@ acceptance_criteria:
   - Emit visible pre-tool assistant text.
   - Observe the current turn's durable provider state after a tool_use and before post-tool text.
   - Relay the post-tool head/middle/tail body in order without truncation.
-  - Keep completion chrome after the user-visible body.
+  - Reject retired status chrome in messages and every observed edit.
 notes: |
   #2943 P0 coverage for #2749 Pattern A / #2836-style regressions where a
   tool_use frame followed by additional text used to drop or overwrite earlier
@@ -56,9 +56,7 @@ assertions:
   - body_complete:
       head: "[E2E:E22:HEAD]"
       tail: "[E2E:E22:TAIL]"
-  - completion_chrome_after_body:
-      body_marker: "[E2E:E22:TAIL]"
-      required: true
+  - no_status_chrome: true
   - no_duplicate_marker_with_known_gap:
       marker: "[E2E:E22:PRE]"
       known_gap: e22_headless_cumulative_republication_v1 # #5731: content 예외 필요0, 기존 검사 유지

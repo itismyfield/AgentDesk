@@ -1003,6 +1003,7 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── formatting/
 │   │   │   ├── delivery.rs
+│   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── long_send_rollback.rs
 │   │   │   ├── replace_long_message.rs
 │   │   │   ├── replace_long_message_tests.rs
@@ -1011,6 +1012,7 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
+│   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── reachability/
@@ -1393,6 +1395,7 @@ src/
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── herdr_admitted_restart.rs
 │   │   │   ├── herdr_admitted_restart_tests.rs
 │   │   │   ├── herdr_before_start_restart.rs
@@ -1686,6 +1689,8 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── startup_reclaim/
+│   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
@@ -1756,6 +1761,7 @@ src/
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
+│   │   │   │   ├── footer_retirement_raw_tests.rs
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   ├── retired_transport_tests.rs
@@ -1785,6 +1791,7 @@ src/
 │   │   │   ├── controller_heartbeat.rs
 │   │   │   ├── discrete_trigger_marker.rs
 │   │   │   ├── entry.rs
+│   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── jsonl_rotation.rs
@@ -1927,6 +1934,7 @@ src/
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
+│   │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   │   ├── non_bridge_claim.rs
 │   │   │   │   ├── ownership.rs
 │   │   │   │   └── stale_reclaim.rs
@@ -2039,6 +2047,7 @@ src/
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   ├── body_footer_rollover_tests.rs
+│   │   │   │   ├── footer_retirement_raw_history_tests.rs
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
@@ -2069,6 +2078,7 @@ src/
 │   │   │   │   │   └── handler.rs
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
+│   │   │   │   ├── cancelled_body_retirement_tests.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
@@ -2124,6 +2134,7 @@ src/
 │   │   │   ├── entry_abort_mailbox_tests.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
+│   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── guards.rs
 │   │   │   ├── headless_delivery.rs
 │   │   │   ├── intake_settlement.rs
@@ -2290,6 +2301,7 @@ src/
 │   │   ├── dispatch_policy.rs
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
+│   │   ├── footer_retirement.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs

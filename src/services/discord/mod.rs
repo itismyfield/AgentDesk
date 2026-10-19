@@ -19,6 +19,7 @@ mod destructive_cancel_gate;
 mod discord_io;
 pub(crate) mod dispatch_policy;
 pub(crate) mod e2e_control;
+mod footer_retirement;
 mod footer_view_reconciler;
 pub(crate) mod formatting;
 mod gateway;
@@ -154,6 +155,7 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     );
 }
 mod turn_completion_events;
+
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
@@ -202,12 +204,6 @@ mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
-#[allow(unused_imports)]
-pub(in crate::services::discord) use tmux_watcher_registry::{
-    TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
-    TmuxWatcherRegistryGuard, lock_tmux_watcher_registry, tmux_watcher_now_ms,
-};
-
 pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
@@ -216,6 +212,11 @@ pub(in crate::services::discord) use delivery_lease_cell::{
 pub(crate) use recovery_engine::herdr_reader::local_reconnect_health as herdr_reconnect_health;
 #[allow(unused_imports)]
 pub(in crate::services) use relay_coord::TmuxRelayCoord;
+#[allow(unused_imports)]
+pub(in crate::services::discord) use tmux_watcher_registry::{
+    TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
+    TmuxWatcherRegistryGuard, lock_tmux_watcher_registry, tmux_watcher_now_ms,
+};
 pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
@@ -267,8 +268,6 @@ pub(in crate::services) use shared_state::DispatchRoutingState;
 // #3038 S3: same scope rationale as S2 — the cluster-E members were
 // `pub(super)` on `SharedData` (visible up to `crate::services`).
 pub(in crate::services) use shared_state::RestartLifecycle;
-pub(crate) use turn_bridge::TmuxCleanupPolicy;
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -276,6 +275,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+pub(crate) use turn_bridge::TmuxCleanupPolicy;
 
 use tokio::sync::Mutex;
 

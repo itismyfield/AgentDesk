@@ -1,0 +1,43 @@
+id: E-61
+title: O 턴 중 재시작 뒤 본문 보존과 요약 정확히 1
+agent_mode: real_live
+coverage_class: live
+cells: [claude-pipe, claude-tui]
+isolation: required
+destructive: true
+durable_delivery_probe: true
+notes: |
+  Deployment-coordinator live acceptance only, on an isolated O channel.
+  Existing restart opt-in and foreign-active guards apply. The durable receipt
+  must prove O ownership; no output mode is inferred from the cell name.
+steps:
+  - send_provider_hold_prompt:
+      ok_marker: "[E2E:E61:BEFORE]"
+      late_marker: "[E2E:E61:AFTER]"
+      hold_seconds: 30
+  - wait_for_provider_hold_state:
+      ok_marker: "[E2E:E61:BEFORE]"
+      late_marker: "[E2E:E61:AFTER]"
+      timeout_s: 180
+      poll_interval_s: 1
+  - wait_for_discord_text: "[E2E:E61:BEFORE]"
+    timeout_s: 180
+  - restart_dcserver:
+      target: dev
+  - wait_for_discord_text: "[E2E:E61:AFTER]"
+    timeout_s: 300
+assertions:
+  - provider_hold_marker_seen: "[E2E:E61:BEFORE]"
+  - ordered_text_present:
+      - "[E2E:E61:BEFORE]"
+      - "[E2E:E61:AFTER]"
+  - no_duplicate_marker: "[E2E:E61:BEFORE]"
+  - no_duplicate_marker: "[E2E:E61:AFTER]"
+  - no_status_chrome: true
+  - completion_per_turn:
+      exact: 1
+      marker: "[E2E:E61:AFTER]"
+  - turn_summary_after_body:
+      body_marker: "[E2E:E61:AFTER]"
+      header: "-# ✅"
+      output_owner: o

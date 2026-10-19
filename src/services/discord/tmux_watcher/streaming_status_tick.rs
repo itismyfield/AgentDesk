@@ -756,6 +756,8 @@ pub(super) async fn update_streaming_status_tick(
             ) else {
                 break;
             };
+            let visible_status =
+                crate::services::discord::footer_retirement::visible_anchor(&status_block);
             if !guard_rollover(ctx, msg_id, raw_current_portion, &plan.frozen_chunk).await {
                 break;
             }
@@ -779,7 +781,7 @@ pub(super) async fn update_streaming_status_tick(
                     match crate::services::discord::http::send_channel_message(
                         &http,
                         channel_id,
-                        &status_block,
+                        visible_status,
                     )
                     .await
                     {
@@ -790,7 +792,7 @@ pub(super) async fn update_streaming_status_tick(
                             placeholder_from_restored_inflight = false;
                             watcher_did_rollover_this_interval = true;
                             response_sent_offset += raw_split_at;
-                            last_edit_text = status_block;
+                            last_edit_text = visible_status.to_string();
                             if ctx.legacy_mode.is_legacy() {
                                 persist_watcher_stream_progress(
                                     &watcher_provider,

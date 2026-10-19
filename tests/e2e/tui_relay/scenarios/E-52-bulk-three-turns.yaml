@@ -1,5 +1,5 @@
 id: E-52
-title: 일괄 활성화 연속 3턴, placeholder 잔존과 턴당 완료 카드 확인
+title: 일괄 활성화 연속 3턴, 본문 순서와 퇴역 상태 표시 재출현 확인
 agent_mode: real_live
 coverage_class: live
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
@@ -36,12 +36,4 @@ assertions:
   - no_duplicate_marker: "[E2E:E52:TURN-2]"
   - no_duplicate_marker: "[E2E:E52:TURN-3]"
   - no_placeholder_left: true
-  - completion_per_turn:
-      exact: 1
-      marker: "[E2E:E52:TURN-1]"
-  - completion_per_turn:
-      exact: 1
-      marker: "[E2E:E52:TURN-2]"
-  - completion_per_turn:
-      exact: 1
-      marker: "[E2E:E52:TURN-3]"
+  - no_status_chrome: true

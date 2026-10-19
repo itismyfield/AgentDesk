@@ -1,5 +1,5 @@
-//! A tool-first idle turn on O's channel shows its tool in the live panel at once, through the
-//! real idle-tail prefix, bridge and stream tick, with the default status interval.
+//! A tool-first idle turn on O's channel still opens through the real idle-tail bridge, while
+//! retired Legacy status surfaces make no tool-panel writes with the default status interval.
 use super::*;
 
 fn panel_bodies(gateway: &S3Gateway) -> Vec<String> {
@@ -14,8 +14,8 @@ fn tool(name: &str) -> StreamMessage {
     }
 }
 
-/// One Claude idle turn opened by a Bash call, then Done (`then_done`) or, once Bash shows, Read
-/// and Done. None when the idle prefix stays shut.
+/// One Claude idle turn opened by a Bash call, then Done (`then_done`) or, once Bash is consumed,
+/// Read and Done. None when the idle prefix stays shut.
 fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<String>> {
     let _telemetry = crate::services::observability::lock_env_then_runtime();
     let temp = tempfile::tempdir().unwrap();
@@ -112,26 +112,42 @@ fn tool_first_turn(o_owned: bool, then_done: bool, channel: u64) -> Option<Vec<S
         );
         let observe = async {
             if !then_done {
-                // Well inside the 5s status interval: only the tool fast lane can edit by then.
-                let shown = tokio::time::timeout(Duration::from_secs(2), async {
-                    while !panel_bodies(&gateway)
-                        .iter()
-                        .any(|body| body.contains("Bash"))
+                // Observe consumed tool data rather than a retired visible panel.
+                let consumed = tokio::time::timeout(Duration::from_secs(2), async {
+                    while !shared
+                        .ui
+                        .placeholder_live_events
+                        .render_status_panel(channel, &provider, 0)
+                        .contains("Bash")
                     {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                 });
                 let dump = || gateway.traffic_dump();
                 assert!(
-                    shown.await.is_ok(),
-                    "Bash shows while the text is withheld:{}",
+                    consumed.await.is_ok(),
+                    "Bash opens the idle turn while text is withheld:{}",
                     dump()
                 );
-                // Spinner ticks and a next tool wait for the interval: no edit storm.
+                let live = crate::services::discord::inflight::load_inflight_state(
+                    &provider,
+                    channel.get(),
+                )
+                .expect("opened O turn remains durable");
+                assert_eq!(live.runtime_kind, Some(runtime));
+                assert!(
+                    panel_bodies(&gateway).is_empty(),
+                    "retired O panel writes no Legacy chrome:{}",
+                    dump()
+                );
                 tokio::time::sleep(Duration::from_millis(1200)).await;
                 tx.send(tool("Read")).unwrap();
                 tokio::time::sleep(Duration::from_millis(1200)).await;
-                assert_eq!(panel_bodies(&gateway).len(), 1, "{}", dump());
+                assert!(
+                    panel_bodies(&gateway).is_empty(),
+                    "next tool makes no Legacy panel write:{}",
+                    dump()
+                );
                 tx.send(done()).unwrap();
             }
             drop(tx);
@@ -152,13 +168,13 @@ fn o_channel_panel_shows_a_first_tool_before_the_status_interval() {
     let opened = "a tool call opens O's idle stream";
     let bodies = tool_first_turn(true, false, 583_325_101).expect(opened);
     assert!(
-        bodies.last().is_some_and(|body| body.contains("Read")),
-        "the last tool still unshown at the end is shown once: {bodies:?}"
+        bodies.is_empty(),
+        "the retired O panel sends no Legacy chrome: {bodies:?}"
     );
     let quick = tool_first_turn(true, true, 583_325_201).expect(opened);
     assert!(
-        quick.iter().any(|body| body.contains("Bash")),
-        "a tool that ends inside the status interval is still shown once: {quick:?}"
+        quick.is_empty(),
+        "a quick O tool turn sends no Legacy panel chrome: {quick:?}"
     );
     let body_free = |bodies: &[String]| bodies.iter().all(|body| !body.contains("ADK-C2A"));
     assert!(

@@ -135,7 +135,9 @@ impl Runtime {
     /// Bot posts other than turn placeholders.
     fn notices(&self) -> Vec<String> {
         let messages = self.h.messages().into_iter().map(|(_, text)| text);
-        messages.filter(|text| text != "...").collect()
+        messages
+            .filter(|text| !matches!(text.as_str(), "..." | "⠋ 계속 처리 중"))
+            .collect()
     }
 
     fn starts(&self) -> usize {

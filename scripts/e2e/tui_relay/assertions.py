@@ -16,6 +16,7 @@ from typing import Any, Sequence
 
 from .tool_cards import is_tool_card, tool_card_body
 from .turn_summary import TURN_SUMMARY_PATTERN, is_turn_summary, turn_summary_body
+from .status_chrome import no_status_chrome, turn_summary_after_body
 # Discord author ids:
 #   - Our driver uses the "명령봇" account to push prompts via /api/discord/send.
 #     We must exclude this id from the relay window so prompts are not counted
@@ -193,7 +194,6 @@ def is_relay_response(message: dict[str, Any]) -> bool:
 def relay_body(message: dict[str, Any]) -> str | None:
     """Return the body used by relay-marker assertions for one message.
 
-    Session banners require the exact ``<banner>\n\n<body>`` separator.
     Strip recognized footer tails and complete tool cards before matching
     answer markers; preserve arbitrary prose and interior card examples.
     """

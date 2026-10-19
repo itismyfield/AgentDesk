@@ -2,7 +2,7 @@ id: E-35
 title: 새 normal Discord response의 exact durable receipt + covering frontier
 agent_mode: real_live
 coverage_class: live
-# Herdr: Discord body/completion checks only; durable receipt/frontier proof is not_applicable.
+# Herdr: Discord body/chrome checks only; durable receipt/frontier proof is not_applicable.
 cells: [claude-pipe, claude-tui, claude-herdr, codex-herdr]
 isolation: required
 durable_delivery_probe: true
@@ -16,6 +16,4 @@ assertions:
   - text_present: "[E2E:E35:{run_id}:OK]"
   - no_duplicate_marker: "[E2E:E35:{run_id}:OK]"
   - no_duplicate_content: true
-  - completion_chrome_after_body:
-      body_marker: "[E2E:E35:{run_id}:OK]"
-      required: true
+  - no_status_chrome: true

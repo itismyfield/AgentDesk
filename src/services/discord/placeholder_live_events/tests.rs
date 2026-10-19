@@ -527,11 +527,8 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
         .expect("representative relay body should roll over");
     let rollover_seed = build_streaming_placeholder_text("", &status_block);
 
-    assert_eq!(rollover_seed, status_block);
-    assert!(
-        plan.display_snapshot
-            .ends_with(&format!("\n\n{status_block}"))
-    );
+    assert_eq!(rollover_seed, "⠋ 계속 처리 중");
+    assert!(!plan.display_snapshot.contains(&status_block));
     for status_panel_fragment in [
         "마지막 도구",
         "[Bash]",

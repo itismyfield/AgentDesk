@@ -1,8 +1,8 @@
 //! Tests for the watcher-side two-message status panel (#3805 P2 PR-C/D, #4860).
 
 use super::*;
+use crate::services::discord::footer_retirement::legacy_for_test;
 use std::sync::Arc;
-
 #[test]
 fn creation_gate_off_is_byte_identical_true_regardless_of_answer() {
     // OFF: the block runs exactly as today whether or not the answer exists.
@@ -115,7 +115,7 @@ fn reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays() {
     managed.tmux_session_name = Some("AgentDesk-claude-a".to_string());
     managed.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
     managed.turn_source = crate::services::discord::inflight::TurnSource::Managed;
-
+    let _legacy = legacy_for_test();
     assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
         true,
         true,

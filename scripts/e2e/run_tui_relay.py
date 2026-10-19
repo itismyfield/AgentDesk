@@ -1027,7 +1027,7 @@ ASSERTION_OPTIONS = {
     **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
                          "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
                          "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
-                         "fixture_no_health_degradation", "no_placeholder_left")},
+                         "fixture_no_health_degradation", "no_placeholder_left", "no_status_chrome")},
     "message_count_between_markers": {"min", "max"},
     "raw_message_count_between_markers": {"min", "max", "include_our_send"},
     "relay_latency_within": {"max_seconds"}, "body_complete": {"head", "tail"},
@@ -1044,6 +1044,7 @@ ASSERTION_OPTIONS = {
     "fixture_state": {"followup_probe_accepted"},
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
+    "turn_summary_after_body": {"body_marker", "header", "before_marker", "tool_label", "output_owner"},
     "autonomous_background_turn": {"armed_marker", "auto_marker"},
 }
 
@@ -1082,7 +1083,7 @@ def validate_scenario_schema(scenario):
                 raise ValueError(f"{action} requires mapping options")
             if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text", "provider_text_present"} and not isinstance(value, str):
                 raise ValueError(f"{action} requires text")
-            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome"} and value is not True:
+            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome", "no_status_chrome"} and value is not True:
                 raise ValueError(f"{action} must be true")
             if "post_send_sleep_s" in entry:
                 delay = entry["post_send_sleep_s"]
@@ -4829,6 +4830,14 @@ def run_assertion(
         if not hasattr(assertions, "no_placeholder_left"):
             raise assertions.AssertionError("assertion not available yet: no_placeholder_left")
         assertions.no_placeholder_left(window)
+    elif spec.get("no_status_chrome"):
+        assertions.no_status_chrome(window)
+    elif "turn_summary_after_body" in spec:
+        params = {key: expand_marker(value) for key, value in spec["turn_summary_after_body"].items()}
+        owner = params.pop("output_owner", None)
+        if owner is not None and (owner not in {"o", "legacy"} or (record or {}).get("durable_record_probe", {}).get("status") != "evaluated" or record["durable_record_probe"].get("output_owner") != owner):
+            raise HarnessEvidenceError("turn summary output owner lacks matching evaluated durable receipt")
+        assertions.turn_summary_after_body(window, **params)
     elif "completion_per_turn" in spec:
         if not hasattr(assertions, "completion_per_turn"):
             raise assertions.AssertionError("assertion not available yet: completion_per_turn")

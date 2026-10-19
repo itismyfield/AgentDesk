@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "footer_retirement_raw_tests.rs"]
+mod footer_retirement_raw_tests;
+
 #[test]
 fn retired_tick_with_legacy_ownership_preserves_long_body_and_row() {
     const CHILD: &str = "AGENTDESK_N4D1B_RETIRED_TICK_CHILD";

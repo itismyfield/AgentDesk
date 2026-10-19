@@ -177,7 +177,10 @@ pub(super) async fn run_rollover_loop(
                 {
                     break;
                 }
-                match TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block).await {
+                let visible_anchor =
+                    crate::services::discord::footer_retirement::visible_anchor(&status_block);
+                match TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor).await
+                {
                     Ok(next_msg_id) => {
                         let next_response_sent_offset = *tick.response_sent_offset + raw_split_at;
                         assert_response_sent_offset_progress(
@@ -203,7 +206,7 @@ pub(super) async fn run_rollover_loop(
                         *tick.pending_current_message_candidate = Some(next_msg_id);
                         *tick.bridge_created_response_placeholder_msg_id = Some(next_msg_id);
                         rolled_over_this_interval = true;
-                        *tick.last_edit_text = status_block;
+                        *tick.last_edit_text = visible_anchor.to_string();
                         *tick.last_status_edit = tokio::time::Instant::now() - status_interval;
                         tick.inflight_state.current_msg_id =
                             durable_current_msg_id_from_detached(*tick.current_msg_id);
@@ -451,3 +454,7 @@ pub(super) async fn refresh_streaming_response(
     }
     ControlFlow::Continue(())
 }
+
+#[cfg(test)]
+#[path = "footer_retirement_raw_history_tests.rs"]
+mod footer_retirement_raw_history_tests;

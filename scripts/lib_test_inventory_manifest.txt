@@ -3865,6 +3865,10 @@ services::discord::formatting::status_panel_v2_formatter_tests::rollover_seed_st
 services::discord::formatting::status_panel_v2_formatter_tests::single_message_panel_s0_streaming_footer_present_and_final_body_absent
 services::discord::formatting::status_panel_v2_formatter_tests::status_panel_disabled_codex_formatter_keeps_legacy_tool_markers
 services::discord::formatting::status_panel_v2_formatter_tests::text_ends_with_streaming_footer_detects_korean_footer
+services::discord::formatting::streaming_status::footer_retirement_tests::retired_empty_anchors_and_exhausted_budget_use_only_minimal_status
+services::discord::formatting::streaming_status::footer_retirement_tests::retired_snapshots_preserve_legacy_body_and_rollover_bytes
+services::discord::formatting::streaming_status::footer_retirement_tests::retired_status_panel_edits_omit_footer_for_both_providers
+services::discord::formatting::streaming_status::footer_retirement_tests::retirement_is_default_and_legacy_override_is_scoped
 services::discord::formatting::tool_markdown::assignment_redaction_tests::summaries_mask_quoted_and_spaced_assignments_before_display
 services::discord::gateway::answer_flush_gate_tests::active_turn_placeholder_does_not_wait_on_barrier
 services::discord::gateway::answer_flush_gate_tests::queued_notice_placeholder_waits_for_flush
@@ -3872,6 +3876,7 @@ services::discord::gateway::answer_flush_gate_tests::queued_notice_returns_immed
 services::discord::gateway::outbound_messages::classified_edit_tests::only_authoritative_missing_allows_placeholder_replacement_4888
 services::discord::gateway::outbound_messages::classified_post_tests::authoritative_card_post_rejection_stays_permanent
 services::discord::gateway::outbound_messages::classified_post_tests::production_card_post_preserves_transient_500_503_and_transport_vs_permanent_403
+services::discord::gateway::outbound_messages::intake_placeholder_retirement_tests::intake_post_and_edit_expose_processing_not_standalone_dots
 services::discord::gateway::outbound_messages::placeholder_tests::queued_barrier_cancellation_prevents_http
 services::discord::gateway::outbound_messages::placeholder_tests::real_post_patch_preserve_http_results_and_reply_reference
 services::discord::gateway::tests::default_long_message_delivery_chunks_over_limit_body
@@ -6237,6 +6242,8 @@ services::discord::recovery_engine::recovery_retry_backoff_tests::backoff_attemp
 services::discord::recovery_engine::recovery_retry_backoff_tests::backoff_clamps_attempts_beyond_schedule
 services::discord::recovery_engine::recovery_retry_backoff_tests::backoff_preserves_3_attempt_total_budget
 services::discord::recovery_engine::recovery_status_panel::tests::current_flag_helper_matches_for_flags
+services::discord::recovery_engine::recovery_two_message_panel::footer_retirement_tests::retired_recovery_completion_keeps_only_an_existing_same_turn_panel
+services::discord::recovery_engine::recovery_two_message_panel::footer_retirement_tests::retired_recovery_does_not_probe_recreate_or_reanchor_panels
 services::discord::recovery_engine::recovery_two_message_panel::tests::ordering_is_only_repair_evidence
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_after_bind_cannot_leak_recovery_panel
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_after_final_reload_keeps_recovery_panel_protected
@@ -7668,6 +7675,8 @@ services::discord::standby_relay::tests::standby_polling_start_offset_uses_turn_
 services::discord::standby_relay::tests::standby_runtime_root_restores_env_after_panic_absent
 services::discord::standby_relay::tests::standby_runtime_root_restores_env_after_panic_present
 services::discord::standby_relay::tests::tui_assistant_fallback_extracts_final_text_without_result_event
+services::discord::startup_reclaim::intake_placeholder_retirement_tests::intake_retirement_does_not_turn_prose_or_other_spinners_into_orphan_candidates
+services::discord::startup_reclaim::intake_placeholder_retirement_tests::old_and_processing_intake_placeholders_share_exact_orphan_cleanup_guards
 services::discord::startup_reclaim::tests::configured_candidates_are_provider_scoped_and_deduplicated
 services::discord::startup_reclaim::tests::every_inflight_discord_identity_is_protected_from_placeholder_cleanup
 services::discord::startup_reclaim::tests::finalize_keeps_code_fences_balanced
@@ -8116,6 +8125,8 @@ services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_a
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_authority::soft_stop_requires_pre_frame_turn_authority
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_authority::unauthorized_soft_terminal_drains_before_terminal_tail
 services::discord::tmux::tmux_watcher::single_message_footer::body_footer_rollover_tests::watcher_body_footer_preserves_class_rollover_for_ascii_and_korean
+services::discord::tmux::tmux_watcher::single_message_footer::footer_retirement_tests::retired_watcher_builder_preserves_actual_footer_budget_input
+services::discord::tmux::tmux_watcher::single_message_footer::footer_retirement_tests::retired_watcher_disables_new_surfaces_but_keeps_upgrade_completion
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_completion_skips_separate_panel_completion
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_footer_disables_separate_panel_creation_and_binding
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_footer_mode_requires_both_flags
@@ -8151,6 +8162,10 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::recovered_session_bound_codex_stream_tick_reaches_http
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_o_tick_preserves_row_and_observes_actual_legacy_control
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_empty_existing_anchor_raw_patch_is_minimal
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_failed_tail_patch_keeps_the_visible_rollover_anchor_in_cache
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_tool_only_raw_post_is_minimal_before_the_body_patch
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::retired_tick_with_legacy_ownership_preserves_long_body_and_row
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_progress_no_false_authority
@@ -9013,6 +9028,7 @@ services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reo
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::delegated_actor_proofs_do_not_accumulate
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_leaves_row_and_lease_untouched_when_a_proof_fails
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_takes_a_legacy_watcher_row_and_the_result_resumes_after_restart
+services::discord::tui_prompt_relay::synthetic_start::claim::intake_placeholder_retirement_tests::synthetic_inflight_tracks_the_actual_processing_placeholder_byte_length
 services::discord::tui_prompt_relay::synthetic_start::claim::n1a_tests::n1a_synthetic_claim_has_no_row_or_lease_until_unconfirmed
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::refused_watcher_turn_is_reowned_for_the_bridge_after_its_watcher_dies
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::reown_restamps_another_source_from_the_prompt_end_and_keeps_an_alias_start
@@ -9746,6 +9762,10 @@ services::discord::turn_bridge::stale_resume::tests::result_event_detects_claude
 services::discord::turn_bridge::stale_resume::tests::result_event_ignores_unrelated_errors
 services::discord::turn_bridge::stale_resume::tests::stream_error_helpers_compose_message_and_stderr
 services::discord::turn_bridge::stale_resume::tests::terminal_reset_matchers_cover_no_output_and_existing_provider_failures
+services::discord::turn_bridge::status_panel::footer_retirement_tests::retired_bridge_builder_preserves_actual_footer_budget_input
+services::discord::turn_bridge::status_panel::footer_retirement_tests::retired_bridge_creates_no_panel_in_either_layout
+services::discord::turn_bridge::status_panel::footer_retirement_tests::retired_completion_without_panel_or_after_404_never_posts_fallback
+services::discord::turn_bridge::status_panel::footer_retirement_tests::retired_upgrade_panels_complete_by_edit_for_success_and_failure
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::actual_bridge_children_run_through_cleanup_and_retry_completion
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::alias_skipped_old_turn_does_not_remove_newer_owners_inflight_row
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::background_refreshes_keep_delivered_wip_warning_through_final_refresh_5350
@@ -9840,6 +9860,8 @@ services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_s
 services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
 services::discord::turn_bridge::stream_tick::o_panel::body_footer_rollover_tests::bridge_body_footer_preserves_class_rollover_for_ascii_and_korean
 services::discord::turn_bridge::stream_tick::o_panel::tool_activity_tests::o_status_only_frame_uses_the_same_summary_and_class_renderer
+services::discord::turn_bridge::stream_tick::output::footer_retirement_raw_history_tests::retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor
+services::discord::turn_bridge::stream_tick::output::footer_retirement_raw_history_tests::retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_budget
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent_anchor_becomes_real_only_after_guarded_bind
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::failed_anchor_bind_keeps_absence_and_deletes_candidate
@@ -10005,6 +10027,9 @@ services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recove
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::the_stored_violation_carries_the_rows_dispatch_session_and_turn_keys
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests::busy_claude_followup_timeout_preserves_session_and_skips_output_recovery
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests::ordinary_empty_resume_still_uses_fresh_session_recovery
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::cancelled_body_retirement_tests::a_cancelled_partial_body_has_no_new_stopped_suffix_in_either_formatter_mode
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::cancelled_body_retirement_tests::an_empty_cancel_can_still_emit_its_standalone_notice_without_placeholder_dots
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::cancelled_body_retirement_tests::cancellation_retirement_does_not_erase_restart_handoff_failure_guidance
 services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance::tests::terminal_prompt_too_long_replace_delivers_actionable_folded_guidance
 services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence::tests::a_response_that_is_not_silenced_emits_nothing
 services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence::tests::busy_readiness_timeout_keeps_notice_deliverable
