@@ -578,16 +578,13 @@ fn run_publish_hook() {
     });
 }
 
-/// Provider-terminal settlement is not yet wired; tests exercise only delivery machinery.
+/// Settlement runs wherever Herdr hosts turns; a test override can only switch it off.
 pub(crate) fn herdr_stop_settlement_available() -> bool {
     #[cfg(all(test, unix))]
-    {
-        HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get())
+    if !HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get()) {
+        return false;
     }
-    #[cfg(not(all(test, unix)))]
-    {
-        false
-    }
+    cfg!(unix)
 }
 
 #[cfg(test)]

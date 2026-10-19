@@ -1182,7 +1182,7 @@ fn cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit() {
             &current_token(case, runtime).unwrap(),
             &case.token
         ));
-        finish_execution(Some(&case.token));
+        finish_execution(Some(&case.token), false);
         assert_eq!(state.closed_probe(), Some(true));
         let ExitDecision::PolicyClose(proof) = seal_exit(&case.token, false, false) else {
             panic!("a no-attempt exit with a cold stop is a before-start proof");
@@ -1329,3 +1329,6 @@ mod home_stop;
 
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;
+
+#[path = "herdr_stop_pane_tests.rs"]
+mod herdr_stop_pane;

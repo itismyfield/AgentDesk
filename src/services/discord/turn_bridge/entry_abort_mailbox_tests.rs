@@ -715,7 +715,7 @@ async fn herdr_cold_case(
         }
         Cold::StopWithoutEvidence => intent.user_stop.store(true, Ordering::Release),
         Cold::StopAfterSeal => {
-            crate::services::provider::herdr_before_start::finish_execution(Some(&cancel));
+            crate::services::provider::herdr_before_start::finish_execution(Some(&cancel), false);
             crate::services::provider::herdr_before_start::EXIT_OBSERVED
                 .set(Some(|state| state.user_stop.store(true, Ordering::Release)));
         }

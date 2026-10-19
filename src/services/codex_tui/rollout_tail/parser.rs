@@ -601,8 +601,18 @@ pub(super) fn herdr_eof(
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
     }
-    // No drain, deadline or idle wait ends a Herdr turn.
-    if !is_alive() {
+    use crate::services::provider::herdr_before_start::mutant;
+    let gone = || !mutant("prb_newline_required") && !is_alive();
+    if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, gone) {
+        return Some(None);
+    }
+    // No drain, deadline or idle wait ends a Herdr turn, nor a dead writer once its input went to an
+    // execution: the row pass settles that turn.
+    let submitted = actor.herdr_interrupt_state().is_some_and(|herdr| {
+        let input = herdr.submission.lock().unwrap_or_else(|e| e.into_inner());
+        input.execution.is_some()
+    });
+    if (!submitted || mutant("prb_codex_reader_liveness")) && !is_alive() {
         let offset = turn.0.saturating_add(state.bytes_read);
         return Some(Some(ReadOutputResult::SessionDied { offset }));
     }

@@ -1,5 +1,5 @@
-//! A prior process's path-less Herdr row ends once its provider is seen idle or its execution gone:
-//! one notice, an exact clear, then the idle queue. Every unclear read leaves the row as it was.
+//! A prior process's path-less Herdr row ends once its provider is seen idle or its execution gone,
+//! and a live turn's once its execution is gone. Every unclear read leaves the row as it was.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -49,12 +49,7 @@ pub(super) fn held_at_restore(
 
 /// A prior process's Herdr row with no path, kind, receipt, planned hand-off or other owner.
 fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current: u64) -> bool {
-    let hosted_provider = match provider {
-        ProviderKind::Claude => true,
-        ProviderKind::Codex => crate::services::turn_host::herdr_turn_switched_on_for(provider),
-        _ => false,
-    };
-    hosted_provider
+    hosted_provider(provider)
         && state.channel_id != 0
         && !inflight::row_is_current_generation(state, current)
         && state
@@ -73,6 +68,15 @@ fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current:
             || recovery_tmux_session_name(provider, state)
                 .is_some_and(|name| super::turn_bridge::herdr_marked(&name)))
         && !inflight::before_start_receipt_present(provider, state.channel_id)
+}
+
+/// Claude, and Codex while its Herdr switch is on.
+fn hosted_provider(provider: &ProviderKind) -> bool {
+    match provider {
+        ProviderKind::Claude => true,
+        ProviderKind::Codex => crate::services::turn_host::herdr_turn_switched_on_for(provider),
+        _ => false,
+    }
 }
 
 /// Channels whose row an end task is reading now.
@@ -100,7 +104,8 @@ pub(in crate::services::discord) async fn row_end_pass(
     let current = shared.restart.current_generation;
     for row in inflight::load_inflight_states(provider) {
         let key = (provider.as_str().to_owned(), row.channel_id);
-        if !target(provider, &row, current)
+        let live = live::live_target(provider, &row, current).is_some();
+        if !(live || target(provider, &row, current))
             || !ENDING
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -116,7 +121,10 @@ pub(in crate::services::discord) async fn row_end_pass(
         }
         super::task_supervisor::spawn_observed("herdr_row_end", async move {
             let _ending = ending;
-            end_row(&shared, &provider, row).await;
+            match live {
+                true => _ = live::end_live(&shared, &provider, row).await,
+                false => end_row(&shared, &provider, row).await,
+            }
         });
     }
 }
@@ -514,6 +522,9 @@ fn mutant(name: &str) -> bool {
     cfg!(test) && std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
 }
 
+#[path = "herdr_row_end_live.rs"]
+mod live;
+
 #[cfg(test)]
 #[path = "herdr_row_end_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

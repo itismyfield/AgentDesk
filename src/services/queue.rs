@@ -57,6 +57,8 @@ use crate::services::turn_lifecycle::{
 };
 use poise::serenity_prelude::ChannelId;
 
+mod herdr_stop;
+
 /// Schedule preserved work and return only the depth observed after the drain attempt.
 async fn schedule_post_cancel_queue_drain(
     health_registry: Option<&Arc<HealthRegistry>>,
@@ -475,19 +477,8 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
-    /// Cancel an in-flight turn for `channel_id`.
-    ///
-    /// When `force == false` (the default for the public REST surface) the
-    /// active provider session and watcher are *preserved*: the queue gets
-    /// drained but any tool/process subtree under the live turn keeps
-    /// running. This matches what an operator usually means by "remove queue
-    /// item" / "cancel queue" — they are reorganising the channel's mailbox,
-    /// not asking us to SIGKILL the cargo build that is currently running.
-    ///
-    /// When `force == true` we fall back to the historical hard-kill path
-    /// (`force_kill_turn` → `kill_pid_tree` → SIGTERM/SIGKILL on the process
-    /// group). Reserve this for explicit recovery scenarios where the live
-    /// turn has to be torn down (#1196).
+    /// Cancels `channel_id`'s turn: `force` hard-kills it; otherwise its session and queue stay,
+    /// and a live Herdr turn this process started takes its holder `/stop` instead.
     pub async fn cancel_turn(
         &self,
         health_registry: Option<&Arc<HealthRegistry>>,
@@ -608,6 +599,10 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
+        let herdr = herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
+        if let Some(stopped) = herdr.await {
+            return Ok(stopped);
+        }
         // Capture identifies discarded sources for durable reporting; it does not restore them.
         let queue_capture =
             crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;

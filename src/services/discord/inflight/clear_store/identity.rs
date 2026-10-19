@@ -277,13 +277,15 @@ pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
 }
 
 /// Clears a restart-settled admitted Herdr row only while the locked fresh row is still that
-/// delivered episode: its nonce, a prior generation, its kind, ack, anchor and save generation.
+/// episode: its nonce, a prior generation, its kind, anchor and save generation, and its delivery
+/// ack or, with `o_body`, O still owning the destination body that row would have delivered.
 #[cfg(unix)]
 pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
     nonce: &str,
     current_generation: u64,
+    o_body: bool,
 ) -> GuardedClearOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedClearOutcome::Missing;
@@ -310,12 +312,15 @@ pub(in crate::services::discord) fn clear_admitted_restart_terminal(
     let pin = crate::services::discord::inflight::InflightEpisodePin::from_state(snapshot);
     let other_kind =
         fresh.tui_terminal_kind.is_none() || fresh.tui_terminal_kind != snapshot.tui_terminal_kind;
+    let o_owned = o_body
+        && crate::services::discord::turn_bridge::before_start_stop::o_owns_body(&fresh)
+            == Some(true);
     if nonce.is_empty()
         || fresh.turn_nonce.as_deref() != Some(nonce)
         || (super::reconcile_gate::row_is_current_generation(&fresh, current_generation)
             && checked("restart_clear_current_generation_unchecked"))
         || (other_kind && checked("restart_clear_kind_unchecked"))
-        || !fresh.terminal_delivery_committed
+        || !(fresh.terminal_delivery_committed || o_owned)
         || (fresh.save_generation != snapshot.save_generation
             && checked("restart_clear_generation_unchecked"))
         || (!pin.matches_state(&fresh) && checked("restart_clear_pin_unchecked"))

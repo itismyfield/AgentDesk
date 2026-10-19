@@ -17,6 +17,8 @@ pub(in super::super) enum Cut {
 }
 
 const PHASE: &str = "ADK_CUT_PHASE";
+/// Set on a reference restore: it runs with settlement off, as production did before it.
+const REFERENCE: &str = "ADK_CUT_REFERENCE";
 const FILTER: &str = "restart_real_cutpoints_reach_their_runtime_boundaries_pg";
 /// Each cut and its case number, in the order the children run.
 const CUTS: [(&str, u64); 5] = [
@@ -80,14 +82,17 @@ fn channel(n: u64) -> ChannelId {
 }
 
 /// Runs this binary's cut test as `phase` in a new process; returns the pid on its `marker` line.
-fn run_phase(phase: &str, root: &Path, db: &str, marker: &str) -> u32 {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([FILTER, "--test-threads=1", "--nocapture"])
+fn run_phase(phase: &str, root: &Path, db: &str, marker: &str, reference: bool) -> u32 {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([FILTER, "--test-threads=1", "--nocapture"]);
+    command
         .env(PHASE, phase)
         .env("ADK_CUT_ROOT", root)
-        .env("ADK_CUT_DB", db)
-        .output()
-        .unwrap();
+        .env("ADK_CUT_DB", db);
+    if reference {
+        command.env(REFERENCE, "1");
+    }
+    let output = command.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{phase}: {stdout}\n{stderr}");
@@ -326,6 +331,9 @@ async fn admit_cut(
 async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
     use crate::services::discord::recovery_engine::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let reference = std::env::var_os(REFERENCE).is_some();
+    crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
+        .set(!reference);
     let shared = crate::services::discord::host_teardown_gate::test_support::shared_on(pool).await;
     let mut guards = Vec::new();
     for (_, n) in CUTS {
@@ -371,12 +379,12 @@ async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
             .collect();
         let row = inflight::load_inflight_state(&ProviderKind::Claude, channel(n).get());
         let case = format!("cut={cut} shown={shown:?}");
-        assert!(
-            shown.iter().all(|text| !text.contains(TRANSCRIPT)),
-            "{case}"
-        );
         match cut {
-            "aborted" | "completed" => {
+            "aborted" | "completed" if !reference => {
+                assert!(
+                    shown.iter().all(|text| !text.contains(TRANSCRIPT)),
+                    "{case}"
+                );
                 let text = if cut == "aborted" {
                     ADMITTED_ABORT_NOTICE
                 } else {
@@ -385,20 +393,22 @@ async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
                 assert!(shown.iter().any(|shown| shown.contains(text)), "{case}");
                 assert!(row.is_none(), "{case}: the settled row is cleared");
             }
+            "aborted" | "completed" => {}
+            // No turn of this process: what restart left must match the reference restore.
             _ => {
-                assert!(shown.is_empty(), "{case}: a held turn writes nothing");
                 let rows = inflight::inflight_runtime_root().unwrap();
                 let path =
                     inflight::inflight_state_path(&rows, &ProviderKind::Claude, channel(n).get());
                 let before = std::fs::read(root.join(format!("{cut}.before"))).unwrap();
-                assert_eq!(
-                    std::fs::read(path).ok(),
-                    Some(before),
-                    "{case}: the row stays"
-                );
                 let source = std::fs::read(root.join(format!("{cut}.source-before"))).unwrap();
-                let path = root.join(format!("AgentDesk-claude-p10-stop-{n}.jsonl"));
-                assert_eq!(std::fs::read(path).unwrap(), source, "{case}");
+                let transcript = root.join(format!("AgentDesk-claude-p10-stop-{n}.jsonl"));
+                let outcome = format!(
+                    "shown={shown:?} row={} unchanged={} source_unchanged={}",
+                    row.is_some(),
+                    std::fs::read(path).ok() == Some(before),
+                    std::fs::read(transcript).unwrap() == source,
+                );
+                std::fs::write(root.join(format!("{cut}.outcome")), outcome).unwrap();
             }
         }
     }
@@ -406,64 +416,21 @@ async fn restore_cuts(root: &Path, pool: &sqlx::PgPool) {
 }
 
 /// Intent, Sent, Indeterminate and each admitted kind's durable write are reached in their own
-/// processes; a fresh process keeps the unadmitted turns held and settles the admitted ones.
+/// processes; a fresh process settles the admitted ones and ends the unadmitted turns, which no
+/// process there started, as a reference restore without settlement does.
 #[tokio::test(flavor = "current_thread")]
 async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
     let Ok(phase) = std::env::var(PHASE) else {
-        let root = tempfile::tempdir().unwrap();
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        db.connect_and_migrate().await.close().await;
-        let mut pids = vec![std::process::id()];
-        for (cut, _) in CUTS {
-            let marker = format!("CUT_DONE {cut}");
-            pids.push(run_phase(cut, root.path(), &db.database_url, &marker));
+        // Children inherit this process's PATH, so no test may swap in its fake tmux meanwhile.
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let restarted = cut_run(false).await;
+        let reference = cut_run(true).await;
+        for (cut, _) in &CUTS[..3] {
+            let outcome = |root: &tempfile::TempDir| {
+                std::fs::read_to_string(root.path().join(format!("{cut}.outcome"))).unwrap()
+            };
+            assert_eq!(outcome(&restarted), outcome(&reference), "{cut}");
         }
-        let seen: Vec<Value> = CUTS
-            .iter()
-            .map(|(cut, _)| witness(root.path(), cut))
-            .collect();
-        for (witness, (cut, _)) in seen.iter().zip(CUTS) {
-            assert_eq!(witness["cut"], cut);
-            assert_ne!(witness["turn_nonce"], witness["execution_nonce"], "{cut}");
-        }
-        let expect = |cut: &str, reached: Value| {
-            let witness = &seen[CUTS.iter().position(|(name, _)| *name == cut).unwrap()];
-            assert_eq!(witness["reached"], reached, "{cut}: {witness}");
-            let past = std::fs::read_to_string(ran_past(root.path(), cut));
-            assert!(past.is_err(), "{cut} ran past its boundary: {past:?}");
-            witness.clone()
-        };
-        let intent = expect("intent", serde_json::json!(["intent_recorded"]));
-        assert_eq!(intent["escapes"], 0, "{intent}");
-        assert_eq!(intent["submission"], "Unsubmitted", "{intent}");
-        assert_eq!(intent["turn_start"], false, "{intent}");
-        assert_eq!(intent["user_stop"], true, "{intent}");
-        for (cut, delivery, input) in [
-            ("sent", "sent", "Submitted"),
-            ("indeterminate", "indeterminate", "Unknown"),
-        ] {
-            let returned = format!("escape_returned:{delivery}");
-            let witness = expect(cut, serde_json::json!(["intent_recorded", returned]));
-            assert_eq!(witness["escapes"], 1, "{cut}: the socket took one Escape");
-            assert_eq!(witness["submission"], input, "{witness}");
-            assert_eq!(witness["turn_start"], true, "{witness}");
-        }
-        for (cut, kind) in [("aborted", "Aborted"), ("completed", "Completed")] {
-            let reached = serde_json::json!([format!("admitted_persisted:Some({kind})")]);
-            let witness = expect(cut, reached);
-            assert_eq!(witness["durable_kind"], kind, "{witness}");
-        }
-        pids.push(run_phase(
-            "RESTORE",
-            root.path(),
-            &db.database_url,
-            "CUT_RESTORE_RETURNED",
-        ));
-        let count = pids.len();
-        pids.sort_unstable();
-        pids.dedup();
-        assert_eq!(pids.len(), count, "every phase is its own process");
-        db.drop().await;
         return;
     };
     let root = PathBuf::from(std::env::var_os("ADK_CUT_ROOT").unwrap());
@@ -479,4 +446,72 @@ async fn restart_real_cutpoints_reach_their_runtime_boundaries_pg() {
     }
     let (_, n) = CUTS.into_iter().find(|(cut, _)| *cut == phase).unwrap();
     persist_cut(&phase, n, &root, &pool).await
+}
+
+/// Every cut in its own process, then a restore in another; `reference` restores without
+/// settlement. Returns the root the restore wrote its outcomes under.
+async fn cut_run(reference: bool) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    db.connect_and_migrate().await.close().await;
+    let mut pids = vec![std::process::id()];
+    for (cut, _) in CUTS {
+        let marker = format!("CUT_DONE {cut}");
+        pids.push(run_phase(
+            cut,
+            root.path(),
+            &db.database_url,
+            &marker,
+            false,
+        ));
+    }
+    let seen: Vec<Value> = CUTS
+        .iter()
+        .map(|(cut, _)| witness(root.path(), cut))
+        .collect();
+    for (witness, (cut, _)) in seen.iter().zip(CUTS) {
+        assert_eq!(witness["cut"], cut);
+        assert_ne!(witness["turn_nonce"], witness["execution_nonce"], "{cut}");
+    }
+    let expect = |cut: &str, reached: Value| {
+        let witness = &seen[CUTS.iter().position(|(name, _)| *name == cut).unwrap()];
+        assert_eq!(witness["reached"], reached, "{cut}: {witness}");
+        let past = std::fs::read_to_string(ran_past(root.path(), cut));
+        assert!(past.is_err(), "{cut} ran past its boundary: {past:?}");
+        witness.clone()
+    };
+    let intent = expect("intent", serde_json::json!(["intent_recorded"]));
+    assert_eq!(intent["escapes"], 0, "{intent}");
+    assert_eq!(intent["submission"], "Unsubmitted", "{intent}");
+    assert_eq!(intent["turn_start"], false, "{intent}");
+    assert_eq!(intent["user_stop"], true, "{intent}");
+    for (cut, delivery, input) in [
+        ("sent", "sent", "Submitted"),
+        ("indeterminate", "indeterminate", "Unknown"),
+    ] {
+        let returned = format!("escape_returned:{delivery}");
+        let witness = expect(cut, serde_json::json!(["intent_recorded", returned]));
+        assert_eq!(witness["escapes"], 1, "{cut}: the socket took one Escape");
+        assert_eq!(witness["submission"], input, "{witness}");
+        assert_eq!(witness["turn_start"], true, "{witness}");
+    }
+    for (cut, kind) in [("aborted", "Aborted"), ("completed", "Completed")] {
+        let reached = serde_json::json!([format!("admitted_persisted:Some({kind})")]);
+        let witness = expect(cut, reached);
+        assert_eq!(witness["durable_kind"], kind, "{witness}");
+    }
+    let restored = "CUT_RESTORE_RETURNED";
+    pids.push(run_phase(
+        "RESTORE",
+        root.path(),
+        &db.database_url,
+        restored,
+        reference,
+    ));
+    let count = pids.len();
+    pids.sort_unstable();
+    pids.dedup();
+    assert_eq!(pids.len(), count, "every phase is its own process");
+    db.drop().await;
+    root
 }

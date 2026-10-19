@@ -328,6 +328,11 @@ impl Cold {
         let channel = self.channel.get();
         let frame =
             crate::services::discord::router::message_handler::producer_error_frame(channel, error);
+        self.bridge_frames(frame).await
+    }
+
+    /// The bridge over the executor's stream holding `frame`, if any, run to its exit.
+    async fn bridge_frames(&self, frame: Option<StreamMessage>) -> (BridgeCompletionSignal, bool) {
         let mut bridge = seed_context("", self.row.clone());
         bridge.provider = self.provider.clone();
         bridge.gateway = self.shown.clone();
@@ -637,6 +642,78 @@ async fn cold_error_does_not_clear_successor() {
         let expected = (exit, true, false, active);
         assert_eq!(kept, expected, "{successor:?}");
     }
+}
+
+/// A submitted turn whose executor failed with no stop ends as any failed turn does: its error is
+/// shown, its row and mailbox are released, and the channel takes its next input.
+#[tokio::test(flavor = "current_thread")]
+async fn a_submitted_turn_whose_executor_failed_without_a_stop_ends_normally() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _codex = codex_cli();
+    for (n, provider) in [ProviderKind::Claude, ProviderKind::Codex]
+        .into_iter()
+        .enumerate()
+    {
+        let turn = cold(provider.clone(), 5_340_663_000 + n as u64).await;
+        let state = turn.cancel.herdr_interrupt_state().unwrap();
+        {
+            let mut input = state.submission.lock().unwrap();
+            assert!(state.prepare_input(&mut input));
+            state.finish_input(&mut input, HerdrSubmission::Submitted, false);
+        }
+        let (result, _) = turn.execute(turn.owner.clone()).await;
+        let error = result.unwrap_err();
+        let (_, holds) = turn.bridge(error.clone()).await;
+        let case = format!("{provider:?}: {error}");
+        let bodies = turn.shown.bodies();
+        assert!(
+            bodies.iter().any(|body| body.contains(&error)),
+            "{case}: {bodies:?}"
+        );
+        assert!(!holds, "{case}");
+        assert!(turn.durable().is_none(), "{case}");
+        assert_eq!(turn.active(), 0, "{case}");
+        let next = Arc::new(CancelToken::new());
+        let message = MessageId::new(turn.row.user_msg_id + 1);
+        let started = discord::mailbox_try_start_turn(
+            &turn.shared,
+            turn.channel,
+            next,
+            UserId::new(1),
+            message,
+        );
+        assert!(started.await, "{case}: the next input starts");
+    }
+}
+
+/// A turn the row pass already settled and woke leaves its bridge nothing to finish: no body is
+/// shown and the row, the mailbox and the active count stay as that settlement left them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_bridge_whose_turn_the_row_pass_settled_finishes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let turn = cold(ProviderKind::Claude, 5_340_664_000).await;
+    let state = turn.cancel.herdr_interrupt_state().unwrap();
+    {
+        let mut input = state.submission.lock().unwrap();
+        assert!(state.prepare_input(&mut input));
+        state.finish_input(&mut input, HerdrSubmission::Submitted, false);
+    }
+    turn.cancel.mark_completion_cleanup();
+    turn.cancel.cancelled.store(true, Ordering::Release);
+    let (_, holds) = turn.bridge_frames(None).await;
+    assert_eq!(turn.shown.bodies(), Vec::<String>::new());
+    let row = turn.durable().map(|row| row.turn_nonce);
+    assert_eq!(
+        row,
+        Some(turn.row.turn_nonce.clone()),
+        "the row is the settlement's"
+    );
+    assert!(holds, "the mailbox is the settlement's");
+    assert_eq!(turn.active(), 1, "the active turn is the settlement's");
 }
 
 #[path = "entry_abort_cold_error_tests/provider_failure_tests.rs"]
