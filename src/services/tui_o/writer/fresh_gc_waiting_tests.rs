@@ -46,7 +46,7 @@ async fn wake(stop: &watch::Sender<bool>, elapsed: Duration) {
 
 async fn scenario(case: Case) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _dedupe_lock = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =

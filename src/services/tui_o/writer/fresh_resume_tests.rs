@@ -8,6 +8,18 @@ mod negative;
 #[path = "fresh_obligation_tests.rs"]
 mod obligations;
 
+pub(super) struct DedupeGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl DedupeGuard {
+    pub(super) fn acquire() -> Self {
+        Self {
+            _guard: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+        }
+    }
+}
+
 struct ScopeFixture {
     previous: crate::config::Config,
     _hosting: std::sync::MutexGuard<'static, ()>,
@@ -118,7 +130,7 @@ fn answer(source: &SourceId, id: &str) {
 
 async fn scenario(in_place: bool, retired_old: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _dedupe_lock = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =
@@ -291,7 +303,7 @@ async fn unsealed_current_native_unit_holds_in_place_rescope_without_dropping_wo
 
 async fn held_work(retired: bool, unsealed: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _dedupe_lock = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =

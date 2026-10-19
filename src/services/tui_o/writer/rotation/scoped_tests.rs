@@ -222,7 +222,7 @@ mod contracts {
             _: u64,
             _: String,
         ) -> impl std::future::Future<Output = PostOutcome> + Send + 'static {
-            async { panic!("no POST before source rejection") }
+            std::future::poll_fn(|_| panic!("no POST before source rejection"))
         }
         async fn history_after(&self, _: u64, _: u64) -> Result<Vec<SeenMessage>, String> {
             panic!("no history before source rejection")

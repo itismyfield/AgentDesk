@@ -6,6 +6,10 @@ use crate::services::tui_o::cutover::test_override;
 use crate::services::tui_o::repost::o_piece_delivery::admitted_keys;
 use crate::services::tui_prompt_dedupe as dedupe;
 
+struct RepostDedupeGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
 #[tokio::test]
 async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() {
     if !test_override::isolated_binding_case(concat!(
@@ -15,9 +19,11 @@ async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() 
         return;
     }
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe = dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let _dedupe = RepostDedupeGuard {
+        _guard: dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    };
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _tmux =
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);

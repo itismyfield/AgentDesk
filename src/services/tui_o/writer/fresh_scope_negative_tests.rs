@@ -86,9 +86,7 @@ enum Case {
 
 async fn exercise(case: Case) {
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe = dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
+    let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _tmux =
@@ -110,7 +108,7 @@ async fn exercise(case: Case) {
                     dedupe::clear_relaunch::with_fresh_scope(
                         CANARY_CHANNEL,
                         None,
-                        &[old.clone()],
+                        std::slice::from_ref(&old),
                         true,
                         |_, _| installed = true
                     ),
@@ -125,7 +123,7 @@ async fn exercise(case: Case) {
                 dedupe::clear_relaunch::with_fresh_scope(
                     CANARY_CHANNEL + 1,
                     None,
-                    &[old.clone()],
+                    std::slice::from_ref(&old),
                     true,
                     |_, _| installed = true
                 ),
@@ -150,7 +148,7 @@ async fn exercise(case: Case) {
                 dedupe::clear_relaunch::with_fresh_scope(
                     CANARY_CHANNEL,
                     None,
-                    &[old.clone()],
+                    std::slice::from_ref(&old),
                     true,
                     |_, _| installed = true
                 ),
@@ -189,7 +187,7 @@ async fn exercise(case: Case) {
             let result = dedupe::clear_relaunch::with_fresh_scope(
                 CANARY_CHANNEL,
                 None,
-                &[old.clone()],
+                std::slice::from_ref(&old),
                 true,
                 |_, _| installed = true,
             );

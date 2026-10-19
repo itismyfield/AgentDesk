@@ -7,20 +7,23 @@ pub(crate) type AdmissionObserver =
     Box<dyn FnOnce(Option<&InflightObs>, Option<&std::sync::Arc<CancelToken>>)>;
 
 #[cfg(test)]
+pub(crate) type InitialCaptureObserver = Box<dyn FnOnce(bool)>;
+
+#[cfg(test)]
 thread_local! {
-    pub(super) static AFTER_INITIAL_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce(bool)>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_INITIAL_CAPTURE: std::cell::RefCell<Option<InitialCaptureObserver>> = const { std::cell::RefCell::new(None) };
     pub(super) static ADMISSION_OBSERVER: std::cell::RefCell<Option<AdmissionObserver>> = const { std::cell::RefCell::new(None) };
 }
 
 enum LaunchReason {
-    AbsentVerified(clear_relaunch::Captured),
+    AbsentVerified(Box<clear_relaunch::Captured>),
     ExistingRail,
 }
 
 impl LaunchReason {
     fn captured(&self) -> Option<&clear_relaunch::Captured> {
         match self {
-            Self::AbsentVerified(captured) => Some(captured),
+            Self::AbsentVerified(captured) => Some(captured.as_ref()),
             Self::ExistingRail => None,
         }
     }
@@ -99,7 +102,9 @@ pub(super) fn execute_observed(
         }
     });
     // Only the initial capture selects absence; later checks may only revoke that reason.
-    let reason = captured.map_or(LaunchReason::ExistingRail, LaunchReason::AbsentVerified);
+    let reason = captured.map_or(LaunchReason::ExistingRail, |captured| {
+        LaunchReason::AbsentVerified(Box::new(captured))
+    });
     let captured = reason.captured();
     let inherited_verified = captured.is_some();
     let session_id = if inherited_verified { None } else { session_id };

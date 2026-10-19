@@ -20,7 +20,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
         return;
     }
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _dedupe = DedupeGuard::acquire();
     for obligation in [
         Obligation::None,
         Obligation::LocalRetry,
@@ -96,7 +96,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
             dedupe::clear_relaunch::with_fresh_scope(
                 CANARY_CHANNEL,
                 None,
-                &[old.clone()],
+                std::slice::from_ref(&old),
                 true,
                 |_, _| could_install = true,
             ),
