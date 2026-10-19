@@ -145,7 +145,7 @@ async fn drive(
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_budget() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -215,7 +215,7 @@ async fn retired_bridge_rollover_raw_history_uses_minimal_anchor_with_legacy_bud
 
 #[tokio::test(flavor = "current_thread")]
 async fn retired_bridge_empty_and_tool_only_raw_edits_use_minimal_anchor() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",

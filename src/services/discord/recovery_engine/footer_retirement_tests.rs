@@ -55,7 +55,7 @@ fn state() -> inflight::InflightTurnState {
 
 #[tokio::test]
 async fn retired_recovery_does_not_probe_recreate_or_reanchor_panels() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",

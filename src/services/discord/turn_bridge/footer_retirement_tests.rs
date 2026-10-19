@@ -103,7 +103,7 @@ fn state(channel: u64) -> InflightTurnState {
 
 #[tokio::test]
 async fn retired_bridge_creates_no_panel_in_either_layout() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -139,7 +139,7 @@ async fn retired_bridge_creates_no_panel_in_either_layout() {
 
 #[tokio::test]
 async fn retired_completion_without_panel_or_after_404_never_posts_fallback() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -180,7 +180,7 @@ async fn retired_completion_without_panel_or_after_404_never_posts_fallback() {
 
 #[tokio::test]
 async fn retired_upgrade_panels_complete_by_edit_for_success_and_failure() {
-    let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
