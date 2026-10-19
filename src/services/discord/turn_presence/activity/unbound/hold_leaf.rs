@@ -1,6 +1,7 @@
 //! The Hold leaf behind an Unbound `session_identity_unresolved` answer, logged once per channel
 //! until another answer settles; only labels, counts, booleans and tmux session names.
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 const IDENTITY_UNRESOLVED: &str = "session_identity_unresolved";
@@ -8,6 +9,26 @@ const LISTED_OWNERS: usize = 16;
 
 /// Last leaf logged per channel; absent once the channel settles on any other answer.
 static LOGGED: LazyLock<Mutex<BTreeMap<u64, &'static str>>> = LazyLock::new(Default::default);
+
+static SUPERSEDED: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+
+pub(super) fn superseded(reason: &'static str) {
+    let index = match reason {
+        "owner_epoch" => 0,
+        "membership" => 1,
+        "providers_busy" => 2,
+        "watch_busy" => 3,
+        "registry_busy" => 4,
+        "core_busy" => 5,
+        _ => return,
+    };
+    let count = SUPERSEDED[index].fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::info!(
+        reason,
+        superseded_count = count,
+        "[turn_presence] unbound observation superseded"
+    );
+}
 
 /// The Hold leaf and the judgment inputs it was decided from.
 #[derive(Debug, Clone, PartialEq, Eq)]

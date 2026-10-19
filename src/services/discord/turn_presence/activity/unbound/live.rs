@@ -184,6 +184,7 @@ fn registrations(config: &Config) -> Result<Vec<RegisteredChannelBinding>, Strin
 #[derive(Clone)]
 struct Files {
     fallback: Vec<RegisteredChannelBinding>,
+    bindings: Vec<BindingEvent>,
     candidates: Result<Candidates, String>,
     row: Result<Option<InflightTurnState>, String>,
     row_identity: String,
@@ -207,6 +208,7 @@ impl Files {
             };
             let log = ChannelBindingLog::new(channel, shadow);
             let candidates = observe_candidates(channel, provider, core, &fallback, &log);
+            let bindings = log.binding_events_since(channel, 0)?;
             let row = inflight::load_inflight_state_read_only_result(provider, channel);
             let row_identity = serde_json::to_string(&row).map_err(|e| e.to_string())?;
             let traces = candidates
@@ -226,6 +228,7 @@ impl Files {
             let seq = *seq_watch.borrow();
             Ok(Self {
                 fallback,
+                bindings,
                 candidates,
                 row,
                 row_identity,
@@ -237,6 +240,7 @@ impl Files {
     }
     fn same(&self, other: &Self) -> bool {
         self.fallback == other.fallback
+            && self.bindings == other.bindings
             && self.candidates == other.candidates
             && self.row_identity == other.row_identity
             && self.seq == other.seq
@@ -255,8 +259,7 @@ struct Snapshot {
     exact: HostedLookup,
     canonical: HostedLookup,
     owners: BTreeMap<String, Option<u64>>,
-    /// Recorded routine turn channels of the sessions no watcher owns.
-    routines: Result<BTreeMap<String, u64>, String>,
+    ownership: Option<ownership::OwnerInputs>,
     ports: Arc<LivePorts>,
 }
 impl Snapshot {
@@ -340,7 +343,7 @@ impl Snapshot {
             exact,
             canonical,
             owners: BTreeMap::new(),
-            routines: Ok(BTreeMap::new()),
+            ownership: None,
             ports,
         })
     }
@@ -350,6 +353,8 @@ impl Snapshot {
         channel: ChannelId,
         ports: Arc<LivePorts>,
     ) -> Result<(Self, Observation, Self), String> {
+        let membership = ownership::Membership::collect(shared).await?;
+        let epoch = ownership::epoch()?;
         let mut before = Self::collect(shared, provider, channel, ports.clone()).await?;
         let inventory = tokio::task::spawn_blocking(move || observe_inventory(channel.get()))
             .await
@@ -366,24 +371,16 @@ impl Snapshot {
         if let Inventory::Sessions(live) = &inventory.inventory {
             names.extend(live.iter().cloned());
         }
-        before.owners = names
-            .into_iter()
-            .map(|name| {
-                let owner = shared
-                    .tmux_watchers
-                    .owner_channel_for_tmux_session(&name)
-                    .map(|id| id.get());
-                (name, owner)
-            })
-            .collect();
-        let unowned: Vec<String> = (before.owners.iter())
-            .filter(|(_, owner)| owner.is_none())
-            .map(|(name, _)| name.clone())
-            .collect();
-        let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
-        let routines = routine_owner::routine_turn_channels;
-        before.routines = routines(pool, &shared.token_hash, channel.get(), &unowned).await;
-        let after = Self::collect(shared, provider, channel, ports).await?;
+        names.sort();
+        names.dedup();
+        let first =
+            ownership::OwnerInputs::collect(shared, membership.clone(), epoch, &names).await?;
+        before.owners = first.effective_owners(channel.get());
+        before.ownership = Some(first);
+        let mut after = Self::collect(shared, provider, channel, ports).await?;
+        let next = ownership::OwnerInputs::collect(shared, membership, epoch, &names).await?;
+        after.owners = next.effective_owners(channel.get());
+        after.ownership = Some(next);
         Ok((before, inventory, after))
     }
     fn same_inputs(&self, other: &Self) -> bool {
@@ -393,16 +390,14 @@ impl Snapshot {
             && self.files.same(&other.files)
             && self.exact == other.exact
             && self.canonical == other.canonical
+            && match (&self.ownership, &other.ownership) {
+                (Some(old), Some(new)) => old.same(new),
+                (None, None) => true,
+                _ => false,
+            }
     }
-    /// Watcher owners, with the recorded routine turn channel of a session no watcher owns.
     fn effective_owners(&self) -> BTreeMap<String, Option<u64>> {
-        let routines = self.routines.as_ref().ok();
-        (self.owners.iter())
-            .map(|(name, owner)| {
-                let routine = routines.and_then(|routines| routines.get(name).copied());
-                (name.clone(), owner.or(routine))
-            })
-            .collect()
+        self.owners.clone()
     }
     fn memory_current(&self) -> bool {
         let Some(shared) = self.shared.upgrade() else {
@@ -434,13 +429,10 @@ impl Snapshot {
             return false;
         }
         *self.files.seq_watch.borrow() == self.files.seq
-            && self.owners.iter().all(|(name, owner)| {
-                shared
-                    .tmux_watchers
-                    .owner_channel_for_tmux_session(name)
-                    .map(|id| id.get())
-                    == *owner
-            })
+            && self
+                .ownership
+                .as_ref()
+                .is_none_or(ownership::OwnerInputs::current)
     }
     async fn revalidate(&self, namespace: &Observation) -> bool {
         let Some(shared) = self.shared.upgrade() else {
@@ -456,7 +448,6 @@ impl Snapshot {
         };
         if !before.same_inputs(&next)
             || !self.same_inputs(&next)
-            || before.routines != self.routines
             || !namespace.same_namespace(&fresh)
             || namespace.inventory != fresh.inventory
             || !fresh.current()
@@ -579,56 +570,10 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     snapshot: Option<Snapshot>,
     namespace: Option<Observation>,
 }
-impl Stamp {
-    pub(in crate::services::discord::turn_presence::activity) async fn publish<R>(
-        &self,
-        watch: &Mutex<Watch>,
-        publish: impl FnOnce() -> R,
-    ) -> Option<R> {
-        self.publish_checked(watch, || ())?;
-        if let Some(snapshot) = &self.snapshot {
-            if !snapshot.revalidate(self.namespace.as_ref()?).await {
-                return None;
-            }
-        }
-        self.publish_checked(watch, publish)
-    }
-    fn publish_checked<R>(&self, watch: &Mutex<Watch>, publish: impl FnOnce() -> R) -> Option<R> {
-        let guard = lock(watch);
-        let shared = self.shared.upgrade()?;
-        if shared
-            .tmux_watchers
-            .channel_binding(&self.channel)
-            .is_some()
-            || crate::config::runtime_root() != self.runtime_root
-        {
-            return None;
-        }
-        let core = shared.core.try_lock().ok()?;
-        if core
-            .sessions
-            .get(&self.channel)
-            .and_then(|s| s.channel_name.as_ref())
-            != self.basis.as_ref()
-        {
-            return None;
-        }
-        drop(core);
-        let config = crate::config_live_reload::current();
-        if !match (&self.config, &config) {
-            (Some(old), Some(now)) => Arc::ptr_eq(old, now),
-            (None, None) => true,
-            _ => false,
-        } {
-            return None;
-        }
-        (guard.key.is_none()
-            && (guard.generation, guard.revision) == (self.generation, self.revision)
-            && self.snapshot.as_ref().is_none_or(Snapshot::memory_current)
-            && self.namespace.as_ref().is_none_or(Observation::current))
-        .then(publish)
-    }
-}
+#[path = "live_ownership.rs"]
+mod ownership;
+#[path = "live_publication.rs"]
+mod publication;
 
 pub(in crate::services::discord::turn_presence::activity) async fn read(
     shared: &Arc<SharedData>,
@@ -661,8 +606,15 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
     let result = collect(shared, provider, channel, ports).await;
     let (mut answer, snapshot, namespace, hold) = match result {
         Ok((answer, snapshot, namespace, hold)) => (answer, Some(snapshot), Some(namespace), hold),
-        Err(_) => (
-            observed(Activity::Unknown, "session_probe_failed"),
+        Err(error) => (
+            observed(
+                Activity::Unknown,
+                if ownership::superseded_error(&error) {
+                    "superseded"
+                } else {
+                    "session_probe_failed"
+                },
+            ),
             None,
             None,
             None,

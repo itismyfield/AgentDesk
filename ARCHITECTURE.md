@@ -1112,6 +1112,7 @@ src/
 │   │   │   ├── test_support.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
+│   │   │   ├── unbound_owners.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── host_teardown_gate/
@@ -1870,6 +1871,7 @@ src/
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tmux_watcher_registry/
 │   │   │   ├── fences.rs
+│   │   │   ├── owner_observation.rs
 │   │   │   └── session_binding.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
@@ -2209,6 +2211,7 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
+│   │   │   │   │   ├── cross_runtime_owners.rs
 │   │   │   │   │   ├── dormancy_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
@@ -2216,6 +2219,8 @@ src/
 │   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── live.rs
 │   │   │   │   │   ├── live_owner_tests.rs
+│   │   │   │   │   ├── live_ownership.rs
+│   │   │   │   │   ├── live_publication.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs

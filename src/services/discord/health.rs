@@ -69,7 +69,11 @@ pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
 mod turn_deliver;
+mod unbound_owners;
 mod unpaired_active_token;
+#[cfg(test)]
+pub(crate) use super::tmux_watcher_registry::owner_publication_fence_held_for_tests;
+pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
 pub(in crate::services::discord) mod watcher_respawn;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
@@ -636,18 +640,6 @@ impl HealthRegistry {
         hashes.sort();
         hashes.dedup();
         hashes
-    }
-
-    /// #3293: every registered runtime regardless of provider. Used by the
-    /// provider-unfiltered mailbox-registry purge, which must visit every
-    /// instance registry because a bogus entry may live in any of them.
-    pub(in crate::services::discord) async fn all_registered_shared(&self) -> Vec<Arc<SharedData>> {
-        self.providers
-            .lock()
-            .await
-            .iter()
-            .map(|entry| entry.shared.clone())
-            .collect()
     }
 
     pub(super) async fn register_http(&self, provider: String, http: Arc<serenity::Http>) {
