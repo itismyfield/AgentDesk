@@ -318,7 +318,8 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
         Some(inject::TurnVerdict::KnownModelTurn(a.clone()))
     );
     let nonce = "c4f20001";
-    let prompt = crate::services::claude_tui::busy_inject::frame("discord", "ann", nonce, PROMPT2);
+    let prompt =
+        crate::services::claude_tui::busy_inject::frame("discord", "200", "ann", nonce, PROMPT2);
     let dir = root.join("inject-pane");
     std::fs::create_dir(&dir).unwrap();
     let program = dir.join("tmux");
@@ -376,7 +377,8 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
                 session: &session,
                 rollout: &rollout,
                 source: "discord",
-                author: "ann",
+                author: "200",
+                name: "ann",
                 nonce,
                 text: PROMPT2,
                 target_turn: &target,
@@ -565,6 +567,7 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
                         message,
                         handback: Box::new((entry, format!("discord:{channel}:{message}"))),
                         guard,
+                        name: "ann".into(),
                     },
                 )
                 .await

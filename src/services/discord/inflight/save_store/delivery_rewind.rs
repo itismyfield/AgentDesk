@@ -1,20 +1,26 @@
-//! Identity-guarded delivery-rewind save operations.
+//! Identity- and owner-guarded delivery-rewind save operations.
 
 use super::*;
 
+#[cfg(test)]
+#[path = "delivery_rewind/tests.rs"]
+mod tests;
+
 pub(in crate::services::discord) fn save_inflight_delivery_rewind_if_matches_identity(
     state: &InflightTurnState,
+    expected_owner: StreamRelayAuthority,
     reason: InflightDeliveryRewindReason,
 ) -> Result<bool, String> {
     let Some(root) = inflight_runtime_root() else {
         return Err("Home directory not found".to_string());
     };
-    save_inflight_delivery_rewind_if_matches_identity_in_root(&root, state, reason)
+    save_inflight_delivery_rewind_if_matches_identity_in_root(&root, state, expected_owner, reason)
 }
 
 pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
+    expected_owner: StreamRelayAuthority,
     reason: InflightDeliveryRewindReason,
 ) -> Result<bool, String> {
     let Some(provider) = state.provider_kind() else {
@@ -33,6 +39,9 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
         return Ok(false);
     }
     if on_disk.terminal_delivery_committed {
+        return Ok(false);
+    }
+    if StreamRelayAuthority::from_state(&on_disk) != expected_owner {
         return Ok(false);
     }
     let mut updated = on_disk;

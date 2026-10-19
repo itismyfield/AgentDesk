@@ -379,7 +379,10 @@ fn a_clear_discards_an_unknown_head_from_disk_even_when_its_writes_fail() {
         );
 
         let cleared = restart.clear(ctx()).await;
-        assert_eq!(cleared.persistence, Default::default());
+        assert_eq!(
+            (cleared.persistence.retried, cleared.persistence.failed),
+            Default::default()
+        );
         assert!(queued(&restart).await.is_empty());
         let written = disk(channel);
         assert_eq!(written["items"], serde_json::json!([]));
@@ -919,7 +922,11 @@ fn without_a_claim_the_queue_file_stays_the_legacy_array() {
         let content = std::fs::read_to_string(queue_path(channel)).unwrap();
         let items: Vec<PendingQueueItem> = serde_json::from_str(&content).unwrap();
         assert_eq!(content, serde_json::to_string_pretty(&items).unwrap());
-        assert_eq!(handle.clear(ctx()).await.persistence, Default::default());
+        let persistence = handle.clear(ctx()).await.persistence;
+        assert_eq!(
+            (persistence.retried, persistence.failed),
+            Default::default()
+        );
         let content = std::fs::read_to_string(queue_path(channel)).unwrap();
         let empty: Vec<PendingQueueItem> = Vec::new();
         assert_eq!(content, serde_json::to_string_pretty(&empty).unwrap());

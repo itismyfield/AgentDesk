@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use super::composer_lock::{ComposerAdmission, DraftSighting};
 use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
+use crate::services::tui_input::human_frame::{holds_inject, shows_inject};
 use crate::services::tui_o::shadow::ShadowProvider;
 
 /// Larger inputs are refused before any tmux call.
@@ -150,6 +151,8 @@ pub(crate) struct Request<'a> {
     pub transcript: &'a Path,
     pub source: &'a str,
     pub author: &'a str,
+    /// The author's name as Discord shows it.
+    pub name: &'a str,
     pub nonce: &'a str,
     pub text: &'a str,
 }
@@ -159,20 +162,8 @@ pub(crate) fn fresh_nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
-/// The header line keeps the first character off `/`, `!` and `#` and names the source.
-pub(crate) fn frame(source: &str, author: &str, nonce: &str, text: &str) -> String {
-    let clean = |value: &str| -> String {
-        value
-            .chars()
-            .map(|c| if c.is_control() || c == ']' { ' ' } else { c })
-            .collect()
-    };
-    format!(
-        "[📱 {} · {} · {nonce}]\n{text}",
-        clean(source),
-        clean(author)
-    )
-}
+/// The header line keeps the first character off `/`, `!` and `#` and names the person.
+pub(crate) use crate::services::tui_input::human_frame::inject as frame;
 
 fn marker(nonce: &str) -> String {
     format!(" · {nonce}]")
@@ -534,7 +525,7 @@ pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
             DraftSighting::Settled
         }
         (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(rows))
-            if !rows.iter().any(|row| row.contains("[📱 ")) =>
+            if !rows.iter().any(|row| row.contains("[📱 ")) && !holds_inject(&rows) =>
         {
             DraftSighting::PersonDraft
         }
@@ -572,12 +563,14 @@ pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
     }
 }
 
-/// AgentDesk frames every Discord prompt it types as `[User: …]`.
+/// AgentDesk frames every Discord prompt it types as `[User: …]`; a running turn's input left
+/// in the composer reads as a person's draft, as the older `[📱 …]` one did.
 fn agentdesk_prompt(rows: &[String]) -> bool {
     let first = rows.first().map(|row| row.trim_start()).unwrap_or_default();
     first
         .get(..6)
         .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
+        && !shows_inject(rows)
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.

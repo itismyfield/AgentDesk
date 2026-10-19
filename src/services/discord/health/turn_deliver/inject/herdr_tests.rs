@@ -8,7 +8,9 @@ use std::sync::Arc;
 use poise::serenity_prelude::{self as serenity, ChannelId};
 use serde_json::{Value, json};
 
-use super::super::super::inject_tests::{InjectPane, queue_texts, register_inject_runtime};
+use super::super::super::inject_tests::{
+    InjectPane, name_rest, queue_texts, register_inject_runtime,
+};
 use super::super::super::{HumanInputDelivery, HumanInputRequest, deliver_human_input};
 use super::super::test_hook;
 use crate::db::dispatched_sessions::hosted_execution::{
@@ -193,10 +195,9 @@ fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
         let sends = rig.sends();
         assert_eq!(sends.len(), 2, "{sends:?}");
         let pasted = sends[0]["text"].as_str().unwrap();
-        assert!(
-            pasted.starts_with("\u{1b}[200~[📱 imessage · 200 · "),
-            "{pasted:?}"
-        );
+        let header =
+            "\u{1b}[200~[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · ";
+        assert!(pasted.starts_with(header), "{pasted:?}");
         assert!(pasted.ends_with("]\nstatus?\u{1b}[201~"), "{pasted:?}");
         assert_eq!(sends[1]["keys"], json!(["enter"]));
         assert_eq!(pane.tmux_calls(), 0);
@@ -342,6 +343,7 @@ fn queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg() {
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     runtime().block_on(async {
+        let _names = name_rest("ann", 200).await;
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let registry = HealthRegistry::new();
@@ -385,6 +387,7 @@ fn queued_herdr_head_stays_queued_when_the_execution_changes_before_the_paste_pg
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     runtime().block_on(async {
+        let _names = name_rest("ann", 200).await;
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let registry = HealthRegistry::new();
@@ -444,6 +447,7 @@ fn queued_herdr_head_without_the_exact_receipt_stays_unknown_and_holds_the_tail_
     let channels = [(unlogged, NODE), (mixed, NODE)];
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &channels);
     runtime().block_on(async {
+        let _names = name_rest("ann", 200).await;
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let registry = HealthRegistry::new();

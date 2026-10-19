@@ -139,7 +139,7 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
     })?;
     tokio::task::spawn_blocking(move || {
         let pane = view.read_execution();
-        if !crate::cli::herdr::confirmed_ended(&record, &pane) {
+        if !view.ended(&record, &pane) {
             return Err(TerminationResult::Indeterminate(format!("pane: {pane:?}")));
         }
         match target.provider_absent() {
@@ -154,7 +154,7 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
 /// What a fresh read of a stored execution shows; nothing is closed or written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExecutionEnd {
-    /// The pane is gone or back at its own shell, and the provider process is gone.
+    /// The pane is gone or left to a lone shell the execution ended under; its provider is gone.
     Ended,
     /// The pane no longer runs it, but the provider process lives.
     ProviderAlive,
@@ -400,15 +400,18 @@ pub(crate) async fn terminate_explicit_herdr(
         fence.reopen();
         return TerminationResult::Refused("no local endpoint".into());
     };
-    let pane = match tokio::task::spawn_blocking(move || view.read_execution()).await {
-        Ok(pane) => pane,
+    let read = record.clone();
+    let ended = match tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()))
+        .await
+    {
+        Ok(ended) => ended,
         Err(e) => {
             fence.reopen();
             return TerminationResult::Indeterminate(e.to_string());
         }
     };
     unsent.disarm();
-    if !crate::cli::herdr::confirmed_ended(record, &pane) {
+    if !ended {
         // Blocking socket work remains outside the async executor; the fence stays owned here.
         let close_target = target.clone();
         let close_fence = fence.clone();

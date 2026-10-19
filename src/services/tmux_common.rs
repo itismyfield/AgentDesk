@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
+use crate::services::tui_input::human_frame;
 
 // Same-pane source mutations linearize here; lock order is authority -> STATE.
 static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
@@ -216,10 +217,8 @@ fn tmux_line_is_claude_tui_prompt_draft(line: &str) -> bool {
     let rest = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     // AgentDesk injects submitted Discord turns as lines like
     // `❯ [User: name (ID: ...)] ...`. Those are pane history, not an active
-    // composer draft, so do not block the transcript-idle readiness fallback.
-    let discord_submitted_prompt = rest
-        .get(..6)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"));
+    // composer draft (a running turn's `· 📱` input still is one).
+    let discord_submitted_prompt = human_frame::opens_discord_prompt(rest);
     !rest.is_empty() && !discord_submitted_prompt
 }
 
@@ -984,10 +983,7 @@ fn claude_tui_stranded_followup_draft_backspace_budget(
         .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
     // Only AgentDesk-injected `[User: …]` text is recoverable this way; an empty
     // composer or a non-injected suggestion ghost is handled by the normal path.
-    if !rest
-        .get(..6)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
-    {
+    if !human_frame::opens_discord_prompt(rest) {
         return None;
     }
     // A genuine stranded draft sits under ONLY idle-suggestion chrome. (That
@@ -1015,11 +1011,7 @@ pub(crate) fn claude_tui_prompt_draft_backspace_budget_from_line(line: &str) -> 
     let rest = trim_prompt_line(line)
         .strip_prefix(CLAUDE_TUI_PROMPT_MARKER)?
         .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-    if rest.is_empty()
-        || rest
-            .get(..6)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
-    {
+    if rest.is_empty() || human_frame::opens_discord_prompt(rest) {
         return None;
     }
     Some(rest.chars().count().saturating_add(4).min(512))

@@ -26,7 +26,7 @@ const HIDDEN_HEADERS: &[&str] = &[
 pub(crate) const PRELUDE_HEADER_LINES: &[&str] = &[
     "You are chatting with a user through Discord.",
     "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.",
-    "Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix. Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.",
+    "Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix, mid-turn input (`· 📱`) too. Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.",
 ];
 
 const HIDDEN_LINE_PREFIXES: &[&str] = &[

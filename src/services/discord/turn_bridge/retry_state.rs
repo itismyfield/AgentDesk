@@ -174,213 +174,21 @@ pub(super) fn should_reset_gemini_retry_attempt_state(
         || has_post_tool_text
 }
 
-fn normalized_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
-    let mut offset = response_sent_offset.min(full_response.len());
-    while offset > 0 && !full_response.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
-pub(super) fn sync_response_delivery_state(
-    full_response: &str,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-) {
-    *response_sent_offset = normalized_response_sent_offset(full_response, *response_sent_offset);
-    inflight_state.full_response = full_response.to_string();
-    inflight_state.response_sent_offset = *response_sent_offset;
-}
-
-pub(super) fn sync_terminal_error_delivery_state(
-    full_response: &str,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-) {
-    *response_sent_offset = 0;
-    sync_response_delivery_state(full_response, response_sent_offset, inflight_state);
-}
-
-pub(super) fn bridge_confirmed_response_sent_offset_seed(
-    owner: super::super::inflight::RelayOwnerKind,
-    response_sent_offset: usize,
-) -> usize {
-    match owner {
-        super::super::inflight::RelayOwnerKind::None => response_sent_offset,
-        super::super::inflight::RelayOwnerKind::Watcher
-        | super::super::inflight::RelayOwnerKind::StandbyRelay
-        | super::super::inflight::RelayOwnerKind::SessionBoundRelay
-        | super::super::inflight::RelayOwnerKind::Unknown => 0,
-    }
-}
-
-pub(super) fn bridge_should_reclaim_relay_from_missing_watcher(
-    watcher_owns_assistant_relay: bool,
-    standby_relay_owns_output: bool,
-    live_watcher_registered: bool,
-) -> bool {
-    watcher_owns_assistant_relay && !standby_relay_owns_output && !live_watcher_registered
-}
-
-fn refresh_delivery_rewind_state(inflight_state: &mut InflightTurnState) -> bool {
-    let Some(provider) = inflight_state.provider_kind() else {
-        return false;
-    };
-    let expected_identity =
-        super::super::inflight::InflightTurnIdentity::from_state(inflight_state);
-    let Some(mut reloaded) =
-        super::super::inflight::load_inflight_state(&provider, inflight_state.channel_id)
-    else {
-        return false;
-    };
-    if !expected_identity.matches_state(&reloaded) {
-        return false;
-    }
-    reloaded.preserve_intake_settlement_authority_from(inflight_state);
-    *inflight_state = reloaded;
-    true
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DeliveryRewindPersistOutcome {
-    Saved,
-    Rejected,
-    PersistError,
-}
-
-impl DeliveryRewindPersistOutcome {
-    fn saved(self) -> bool {
-        matches!(self, Self::Saved)
-    }
-}
-
-fn persist_delivery_rewind(
-    inflight_state: &mut InflightTurnState,
-    reason: super::super::inflight::InflightDeliveryRewindReason,
-    channel_id: ChannelId,
-) -> DeliveryRewindPersistOutcome {
-    match super::super::inflight::save_inflight_delivery_rewind_if_matches_identity(
-        inflight_state,
-        reason,
-    ) {
-        Ok(saved) => {
-            if saved {
-                refresh_delivery_rewind_state(inflight_state);
-                DeliveryRewindPersistOutcome::Saved
-            } else {
-                DeliveryRewindPersistOutcome::Rejected
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                channel_id = channel_id.get(),
-                reason = reason.as_str(),
-                error = %error,
-                "turn_bridge failed to persist legitimate delivery rewind; preserving local rewind state"
-            );
-            DeliveryRewindPersistOutcome::PersistError
-        }
-    }
-}
-
-pub(super) fn persist_terminal_error_delivery_rewind(
-    inflight_state: &mut InflightTurnState,
-    channel_id: ChannelId,
-) -> DeliveryRewindPersistOutcome {
-    persist_delivery_rewind(
-        inflight_state,
-        super::super::inflight::InflightDeliveryRewindReason::TerminalErrorReset,
-        channel_id,
-    )
-}
-
-pub(super) fn persist_reclaim_delivery_rewind(
-    inflight_state: &mut InflightTurnState,
-    channel_id: ChannelId,
-) -> DeliveryRewindPersistOutcome {
-    persist_delivery_rewind(
-        inflight_state,
-        super::super::inflight::InflightDeliveryRewindReason::MissingWatcherReclaim,
-        channel_id,
-    )
-}
-
-pub(super) fn sync_terminal_error_delivery_state_for_bridge_owner(
-    full_response: &str,
-    response_sent_offset: &mut usize,
-    bridge_confirmed_response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-    channel_id: ChannelId,
-    watcher_relay_owns_output: bool,
-) -> bool {
-    if watcher_relay_owns_output {
-        inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
-    }
-    sync_terminal_error_delivery_state(full_response, response_sent_offset, inflight_state);
-    let persisted = persist_terminal_error_delivery_rewind(inflight_state, channel_id);
-    if matches!(persisted, DeliveryRewindPersistOutcome::Rejected) {
-        refresh_delivery_rewind_state(inflight_state);
-    }
-    *response_sent_offset = inflight_state.response_sent_offset;
-    *bridge_confirmed_response_sent_offset = *response_sent_offset;
-    persisted.saved()
-}
-
-pub(super) fn rewind_delivery_on_reclaim(
-    full_response: &str,
-    bridge_confirmed_response_sent_offset: usize,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-    channel_id: ChannelId,
-) -> bool {
-    if *response_sent_offset <= bridge_confirmed_response_sent_offset {
-        return false;
-    }
-    *response_sent_offset = bridge_confirmed_response_sent_offset;
-    sync_response_delivery_state(full_response, response_sent_offset, inflight_state);
-    tracing::warn!(
-        channel_id = channel_id.get(),
-        response_sent_offset,
-        "turn_bridge rewound response_sent_offset after reclaiming missing watcher"
-    );
-    true
-}
-
-pub(super) fn rewind_and_persist_delivery_on_reclaim(
-    full_response: &str,
-    bridge_confirmed_response_sent_offset: usize,
-    response_sent_offset: &mut usize,
-    inflight_state: &mut InflightTurnState,
-    channel_id: ChannelId,
-) -> bool {
-    let pre_reclaim_state = inflight_state.clone();
-    let pre_reclaim_response_sent_offset = *response_sent_offset;
-    if !rewind_delivery_on_reclaim(
-        full_response,
-        bridge_confirmed_response_sent_offset,
-        response_sent_offset,
-        inflight_state,
-        channel_id,
-    ) {
-        return false;
-    }
-    match persist_reclaim_delivery_rewind(inflight_state, channel_id) {
-        DeliveryRewindPersistOutcome::Saved => {
-            *response_sent_offset = inflight_state.response_sent_offset;
-            return true;
-        }
-        DeliveryRewindPersistOutcome::Rejected => {
-            if refresh_delivery_rewind_state(inflight_state) {
-                *response_sent_offset = inflight_state.response_sent_offset;
-            } else {
-                *inflight_state = pre_reclaim_state;
-                *response_sent_offset = pre_reclaim_response_sent_offset;
-            }
-        }
-        DeliveryRewindPersistOutcome::PersistError => {}
-    }
-    false
-}
+#[path = "retry_state/delivery_rewind.rs"]
+mod delivery_rewind;
+#[cfg(test)]
+pub(super) use delivery_rewind::sync_terminal_error_delivery_state;
+#[cfg(test)]
+use delivery_rewind::{
+    DeliveryRewindPersistOutcome, persist_reclaim_delivery_rewind,
+    persist_terminal_error_delivery_rewind, refresh_delivery_rewind_state,
+    rewind_delivery_on_reclaim,
+};
+pub(super) use delivery_rewind::{
+    ReclaimDeliveryOutcome, bridge_confirmed_response_sent_offset_seed,
+    bridge_should_reclaim_relay_from_missing_watcher, rewind_and_persist_delivery_on_reclaim,
+    sync_response_delivery_state, sync_terminal_error_delivery_state_for_bridge_owner,
+};
 
 /// #5938: this is a body mutation like any other — it blanks the bridge-local
 /// body AND the durable row body in the same breath — so it has to appear in the
@@ -732,13 +540,16 @@ mod tests {
             super::super::super::inflight::RelayOwnerKind::Watcher,
             response_sent_offset,
         );
-        assert!(rewind_and_persist_delivery_on_reclaim(
-            full_response,
-            bridge_confirmed,
-            &mut response_sent_offset,
-            &mut state,
-            channel,
-        ));
+        assert_eq!(
+            rewind_and_persist_delivery_on_reclaim(
+                full_response,
+                bridge_confirmed,
+                &mut response_sent_offset,
+                &mut state,
+                channel,
+            ),
+            ReclaimDeliveryOutcome::Saved
+        );
         assert_eq!(
             state.status_message_id,
             Some(41_100_091),
@@ -784,7 +595,11 @@ mod tests {
         stale_reclaim.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::None);
 
         assert_eq!(
-            persist_reclaim_delivery_rewind(&mut stale_reclaim, channel),
+            persist_reclaim_delivery_rewind(
+                &mut stale_reclaim,
+                super::super::inflight::StreamRelayAuthority::from_state(&committed),
+                channel,
+            ),
             DeliveryRewindPersistOutcome::Rejected,
             "reclaim RMW must not reopen an already committed watcher row"
         );
@@ -886,8 +701,9 @@ mod tests {
         let mut response_sent_offset = state.response_sent_offset;
         sync_terminal_error_delivery_state(error_response, &mut response_sent_offset, &mut state);
 
+        let expected_owner = super::super::inflight::StreamRelayAuthority::from_state(&state);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            persist_terminal_error_delivery_rewind(&mut state, channel)
+            persist_terminal_error_delivery_rewind(&mut state, expected_owner, channel)
         }));
         assert_eq!(
             result.expect("reasoned rewind must not trip debug assert"),

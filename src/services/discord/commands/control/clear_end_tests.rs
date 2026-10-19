@@ -19,6 +19,11 @@ use crate::services::provider_teardown::tests::test_support::FakeTmux;
 const OLD_SESSION: &str = "provider-session-before-clear";
 const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
 
+/// The cleared notice with its count of discarded waiting messages.
+fn cleared(discarded: usize) -> String {
+    format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 {discarded}건을 비웠어요.")
+}
+
 async fn clear(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> String {
     let http = Arc::new(serenity::Http::new(""));
     let notify = SoftClearNotifyMode::Suppress;
@@ -133,7 +138,7 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
 
         let reply = clear(&shared, &provider, channel).await;
 
-        assert_eq!(reply, SESSION_CLEARED_RESPONSE, "{provider:?}");
+        assert_eq!(reply, cleared(1), "{provider:?}");
         assert!(
             token.cancelled.load(Ordering::SeqCst),
             "{provider:?}: the turn stops"
@@ -172,7 +177,7 @@ async fn a_clear_whose_tmux_kill_fails_commits_and_warns_pg() {
 
     let reply = clear(&shared, &provider, channel).await;
 
-    let warned = format!("{SESSION_CLEARED_RESPONSE}\n⚠️ {END_UNCONFIRMED}");
+    let warned = format!("{}\n⚠️ {END_UNCONFIRMED}", cleared(0));
     assert_eq!(reply, warned);
     assert!(managed.ended(), "the process ends and the kill is tried");
     assert!(crate::services::platform::tmux::has_session(&managed.tmux));
@@ -189,8 +194,8 @@ async fn a_clear_whose_tmux_probe_fails_kills_and_warns_only_if_the_kill_fails_p
     let (db, pool) = postgres().await;
     let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let provider = ProviderKind::Claude;
-    let warned = format!("{SESSION_CLEARED_RESPONSE}\n⚠️ {END_UNCONFIRMED}");
-    for (n, (kill_fails, reply)) in [(true, warned.as_str()), (false, SESSION_CLEARED_RESPONSE)]
+    let warned = format!("{}\n⚠️ {END_UNCONFIRMED}", cleared(0));
+    for (n, (kill_fails, reply)) in [(true, warned), (false, cleared(0))]
         .into_iter()
         .enumerate()
     {
@@ -239,7 +244,7 @@ async fn a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg() 
 
     let reply = clear(&shared, &provider, channel).await;
 
-    assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+    assert_eq!(reply, cleared(0));
     assert!(managed.ended(), "the managed tmux and process end");
     pool.close().await;
     db.drop().await;
@@ -278,7 +283,7 @@ async fn a_clear_keeps_its_transition_until_the_session_has_ended_pg() {
     let during = intake(&shared, channel, fallback.clone()).await;
     assert!(during.is_err(), "no input takes the channel mid-teardown");
     managed.fake.release_kills();
-    assert_eq!(task.await.unwrap(), SESSION_CLEARED_RESPONSE);
+    assert_eq!(task.await.unwrap(), cleared(0));
     let after = intake(&shared, channel, fallback).await;
     let after = after.unwrap_or_else(|_| panic!("the transition is free after the clear"));
     assert_eq!(after.state.0, None, "the next input reads a fresh session");
@@ -326,7 +331,7 @@ fn a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg() {
 
         let reply = clear(&shared, &provider, channel).await;
 
-        assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+        assert_eq!(reply, cleared(0));
         assert_eq!(rig.writes().len(), 1, "one close reaches the pane");
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(herdr::row(&pool, &key).await, Some(retired));
@@ -376,7 +381,7 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
 
         let reply = clear(&shared, &provider, channel).await;
 
-        assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+        assert_eq!(reply, cleared(0));
         assert!(rig.writes().is_empty(), "no pane is closed");
         assert!(managed.ended(), "the managed tmux and process end");
         pool.close().await;
@@ -437,7 +442,7 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
 
         switches.set_terminate(Some(true));
         let reply = clear(&shared, &provider, channel).await;
-        assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+        assert_eq!(reply, cleared(0));
         assert_eq!(rig.writes().len(), 1, "one close reaches the pane");
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(herdr::row(&pool, &key).await, Some(retired));

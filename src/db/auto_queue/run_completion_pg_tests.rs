@@ -316,6 +316,49 @@ async fn gate_saved_after_readiness_read_blocks_completion_pg() {
     }
 }
 
+// With grace and a pending gate both opened mid-completion, the refusal reports
+// the gate first, matching the readiness check order.
+#[tokio::test]
+async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db).await;
+    seed_entry(&pool, "entry-done", "failed").await;
+    let (writer, resume) = paused_completion(&pool, "readiness_read").await;
+    set_grace(&pool, 30.0).await;
+    super::phase_gates::save_phase_gate_state_on_pg(
+        &pool,
+        "run-1",
+        0,
+        &super::phase_gates::PhaseGateStateWrite {
+            status: "pending".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("commit phase gate through its writer");
+    assert_completion_blocked(
+        &pool,
+        writer,
+        resume,
+        RunCompletionBlockedReason::BlockingPhaseGate,
+    )
+    .await;
+    // Grace is still open behind the gate: clearing the gate exposes it.
+    assert!(
+        super::phase_gates::clear_phase_gate_state_on_pg(&pool, "run-1", 0)
+            .await
+            .expect("clear phase gate through its writer")
+    );
+    assert_eq!(
+        finalize_run_if_ready_pg(&pool, "run-1")
+            .await
+            .expect("completion after gate clears"),
+        blocked(RunCompletionBlockedReason::PhaseGateGraceWindow)
+    );
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 // Reopening a terminal entry does not take the run token; UPDATE must see it.
 #[tokio::test]
 async fn entry_reopened_after_readiness_read_blocks_completion_pg() {

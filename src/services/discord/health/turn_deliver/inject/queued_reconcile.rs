@@ -9,6 +9,7 @@ use super::queued_support::RECONCILED;
 use super::{HumanInputRequest, InjectAttempt, SharedData, channel_name, live_tui_session};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject;
+use crate::services::tui_input::human_frame::{self, Mode};
 use crate::services::turn_orchestrator::{PendingQueueItem, QueueIdentity};
 use poise::serenity_prelude::ChannelId;
 
@@ -135,7 +136,7 @@ static RESUME: Mutex<Option<HashMap<ScanKey, u64>>> = Mutex::new(None);
 struct Want {
     key: ScanKey,
     from: u64,
-    /// The frame up to its nonce.
+    /// The pre-v1 frame up to its nonce.
     lead: String,
     source: String,
     author: String,
@@ -202,7 +203,7 @@ impl Want {
         };
         let source = format!("discord:{channel}:{}", original.message_id);
         let author = original.author_id.to_string();
-        let lead = busy_inject::frame(&source, &author, "", "");
+        let lead = human_frame::legacy_inject(&source, &author, "", "");
         let key = (
             bound.path.clone(),
             bound.file,
@@ -294,14 +295,25 @@ impl Want {
         })
     }
 
-    /// The nonce of the frame `body` is exactly, bare or in one paste block.
+    /// The nonce of the frame `body` is exactly, bare or in one paste block: the v1 frame this
+    /// head's source and author rebuild under the name it shows, or the frame pasted before v1.
     fn nonce_in(&self, body: &str) -> Option<String> {
+        let header = body
+            .find("[User: ")
+            .and_then(|at| human_frame::parse(&body[at..]));
+        if let Some((header, _)) = header.filter(|(header, _)| header.mode == Mode::Inject) {
+            let (name, nonce) = (header.name, header.nonce);
+            let frame = busy_inject::frame(&self.source, &self.author, name, nonce, &self.text);
+            if header.author == self.author && busy_inject::exact_receipt(body, &frame) {
+                return Some(nonce.to_string());
+            }
+        }
         let at = body.find(&self.lead)? + self.lead.len();
         let nonce = body.get(at..at + 8)?;
         let hex = nonce
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        let frame = busy_inject::frame(&self.source, &self.author, nonce, &self.text);
+        let frame = human_frame::legacy_inject(&self.source, &self.author, nonce, &self.text);
         (hex && busy_inject::exact_receipt(body, &frame)).then(|| nonce.to_string())
     }
 
