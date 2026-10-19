@@ -1201,7 +1201,7 @@ _rollback_release_binary() {
         echo "   turning a one-node deploy failure into a cluster-wide outage."
         echo ""
         echo "   FAIL-FORWARD: leaving the NEW binary live (it is what is currently running under"
-        echo "   launchd). The rollback backups $rel_backup and ${ADK_REL:-}/policies.prev are kept for manual use."
+        echo "   launchd). The rollback backup at $rel_backup (with policies.prev, if any) is kept for manual use."
         echo ""
         echo "   MANUAL INTERVENTION REQUIRED:"
         echo "     1. Check whether the new binary is actually serving:"
@@ -1254,7 +1254,6 @@ _rollback_release_binary() {
         echo "✗ Rollback stop was not confirmed — backup preserved; manual intervention required" >&2
         return 0
     fi
-    _restore_policy_generation "$ADK_REL"
     # The bad binary is never locked (uchg is deferred to the success path), so
     # nouchg here is defensive. mv is an atomic same-dir rename: the backup
     # replaces the bad binary in one step — at no instant are both copies gone.
@@ -1267,6 +1266,7 @@ _rollback_release_binary() {
     # below. A failed chflags can never leave the good binary restored but the
     # service stopped.
     chflags uchg "$rel_binary" 2>/dev/null || true
+    _restore_policy_generation "$ADK_REL"
     echo "↩ Previous binary restored — restarting release..."
     xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
     if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then

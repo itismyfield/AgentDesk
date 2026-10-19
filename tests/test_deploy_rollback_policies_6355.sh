@@ -124,13 +124,13 @@ wait_for_http_service_health() {
     WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON=""
     [ "$(cat "$ADK_REL/bin/agentdesk")" != "bin-${FIXTURE_BAD_GEN:-none}" ]
 }
-# Fails only the rename that would bring policies.prev back, when asked to.
+# Fails only the rollback rename named by FIXTURE_FAIL_RESTORE (policy | binary).
 mv() {
-    if [ "${FIXTURE_FAIL_POLICY_RESTORE:-0}" = 1 ] \
-        && [ "$*" = "$ADK_REL/policies.prev $ADK_REL/policies" ]; then
-        echo "mv: stub refused $*" >&2
-        return 1
-    fi
+    case "${FIXTURE_FAIL_RESTORE:-}:$*" in
+        "policy:$ADK_REL/policies.prev $ADK_REL/policies"|"binary:-f $ADK_REL/bin/agentdesk.prev $ADK_REL/bin/agentdesk")
+            echo "mv: stub refused $*" >&2
+            return 1 ;;
+    esac
     command mv "$@"
 }
 
@@ -142,13 +142,13 @@ setup_release() {
     if [ -n "$2" ]; then mkdir -p "$ADK_REL/policies"; printf '%s\n' "$2" >"$ADK_REL/policies/generation"; fi
 }
 # Runs one deploy of generation $1 through the real code; the EXIT trap fires as in production.
-# $2 failing generation ("none" = healthy), $3 migration ahead of the backup, $4 fail the policy restore.
+# $2 failing generation ("none" = healthy), $3 migration ahead of the backup, $4 rename to fail.
 deploy_gen() {
     : >"$TMP_ROOT/boots"
     DEPLOY_RC=0
     FIXTURE_BAD_GEN="$2"
     FIXTURE_MIGRATION_AHEAD="${3:-0}"
-    FIXTURE_FAIL_POLICY_RESTORE="${4:-0}"
+    FIXTURE_FAIL_RESTORE="${4:-}"
     (
         ROLLBACK_ARMED=0
         DEPLOY_OK=0
@@ -179,6 +179,9 @@ assert_eq "the old binary restarted on the old policies" "bin=bin-1 policies=1" 
 assert_absent "binary backup consumed" "$ADK_REL/bin/agentdesk.prev"
 assert_absent "policy backup consumed" "$ADK_REL/policies.prev"
 assert_absent "no transient policy dir left" "$ADK_REL/policies.old"
+deploy_gen 3 none
+assert_generation "a redeploy after the rollback" 3 3
+assert_absent "policy backup dropped after the redeploy" "$ADK_REL/policies.prev"
 
 echo "successful deploy keeps the new generation and drops both backups"
 setup_release 1 1
@@ -229,11 +232,18 @@ assert_out "the missing policy generation is reported" "No previous policy gener
 
 echo "a failed policy restore still restores the binary and says so"
 setup_release 1 1
-deploy_gen 2 2 0 1
+deploy_gen 2 2 0 policy
 assert_out "the restore failure is reported" "Failed to restore previous policies"
 assert_generation "binary restored, new policies put back" 1 2
 assert_eq "previous policies kept for manual recovery" 1 "$(cat "$ADK_REL/policies.prev/generation" 2>/dev/null || echo none)"
 assert_eq "the release was still restarted" "bin=bin-1 policies=2" "$(cat "$TMP_ROOT/boots")"
+
+echo "a failed binary restore leaves both generations new"
+setup_release 1 1
+deploy_gen 2 2 0 binary
+assert_out "the binary restore failure is reported" "Failed to restore previous binary"
+assert_generation "nothing restored" 2 2
+assert_eq "previous policies kept with the binary backup" 1 "$(cat "$ADK_REL/policies.prev/generation" 2>/dev/null || echo none)"
 
 echo "a binary backup left without a paired policy backup is reported"
 setup_release 1 1

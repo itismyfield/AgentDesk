@@ -38,8 +38,8 @@ _swap_policy_generation() {
     rm -rf "$rel/policies.old"
 }
 
-# Rollback only, with the release stopped. Best-effort: never blocks the binary
-# restore or the restart, but reports every way the generations can diverge.
+# Rollback only, after the binary is restored and before the restart. Best-effort:
+# never blocks the restart, but reports every way the generations can diverge.
 _restore_policy_generation() {
     local rel="$1"
     if [ ! -d "$rel/policies.prev" ]; then
