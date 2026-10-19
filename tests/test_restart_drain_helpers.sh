@@ -1040,11 +1040,11 @@ run_detached_operator_gate() {
     fi
     # shellcheck disable=SC2329
     tmux() { printf '%s\n' "${@: -1}" >"$case_dir/helper-path"; }
-    ADK_REL="$case_dir/adk" REPO="$case_dir" SCRIPT_DIR="$case_dir/scripts"
-    REPORT_CHANNEL_ID=1 REPORT_PROVIDER=claude DEPLOY_DELAY_SECS=0 DEPLOY_TEST_MODE=0
-    POST_DEPLOY_SMOKE_SCOPE=full DEPLOY_LOCK_FILE=x DEPLOY_LOCK_TIMEOUT_SECS=1
-    DEPLOY_PEER_VERDICT_TIMEOUT_SECS=1 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1 BUNDLE_ID=x PLIST_REL=x
-    _spawn_detached_helper >/dev/null 2>&1
+    ADK_REL="$case_dir/adk" REPO="$case_dir" SCRIPT_DIR="$case_dir/scripts" \
+      REPORT_CHANNEL_ID=1 REPORT_PROVIDER=claude DEPLOY_DELAY_SECS=0 DEPLOY_TEST_MODE=0 \
+      POST_DEPLOY_SMOKE_SCOPE=full DEPLOY_LOCK_FILE=x DEPLOY_LOCK_TIMEOUT_SECS=1 \
+      DEPLOY_PEER_VERDICT_TIMEOUT_SECS=1 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1 \
+      BUNDLE_ID=x PLIST_REL=x _spawn_detached_helper >/dev/null 2>&1
   )
   helper=$(cat "$case_dir/helper-path" 2>/dev/null || true)
   set +e
