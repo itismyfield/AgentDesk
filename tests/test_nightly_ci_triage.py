@@ -371,6 +371,56 @@ class NightlyTriage(unittest.TestCase):
                 self.assertEqual(issue["state"], "closed")
                 self.assertIn(marker(*events[-1][:2]), issue["comments"][-1]["body"].splitlines())
 
+    def test_closed_pass_edit_errors_reprocess_without_duplicates_or_late_reopen(self):
+        original_body = "\n".join([NS, marker(198), green(199)])
+        original_comments = [{"body": "Earlier failure\n" + marker(199)}]
+        for fault in ("fail_before", "fail_after"):
+            for passed, late in (((201, 1), (200, 2)), ((200, 2), (200, 1))):
+                with self.subTest(fault=fault, passed=passed, late=late):
+                    self.save({"issues": [], "calls": [], "writes": [], fault: "edit"})
+                    self.seed(state="closed", body=original_body, comments=original_comments)
+                    self.passing(*passed)
+                    expected_body = "\n".join([NS, marker(198), green(*passed)])
+                    self.assertEqual(self.run_entry(success=False, sync=True),
+                        [] if fault == "fail_before" else ["edit"])
+                    data = self.load()
+                    self.assertEqual(data["calls"][-1][1:4], ["issue", "edit", "7"])
+                    issue = data["issues"][0]
+                    self.assertEqual(issue["body"].splitlines(),
+                        (original_body if fault == "fail_before" else expected_body).splitlines())
+                    self.assertEqual((issue["state"], issue["comments"]),
+                        ("closed", original_comments))
+
+                    data = self.load(); data.pop(fault); self.save(data)
+                    self.assertEqual(self.run_entry(sync=True),
+                        ["edit"] if fault == "fail_before" else [])
+                    self.assertEqual(self.run_entry(sync=True), [])
+                    data = self.load()
+                    issue = data["issues"][0]
+                    self.assertEqual(issue["body"].splitlines(), expected_body.splitlines())
+                    self.assertEqual((issue["state"], issue["comments"]),
+                        ("closed", original_comments))
+                    self.assertEqual(data["writes"], ["edit"])
+
+                    self.payload = event()
+                    self.payload["workflow_run"].update(id=late[0], run_attempt=late[1])
+                    self.assertEqual(self.run_entry(), ["comment"])
+                    self.assertEqual(self.run_entry(sync=True), [])
+                    data = self.load()
+                    issue = data["issues"][0]
+                    self.assertEqual(issue["state"], "closed")
+                    self.assertEqual(issue["comments"][:-1], original_comments)
+                    self.assertEqual(len(issue["comments"]), len(original_comments) + 1)
+                    lines = issue["body"].splitlines() + [line
+                        for comment in issue["comments"] for line in comment["body"].splitlines()]
+                    self.assertEqual(lines.count(green(*passed)), 1)
+                    self.assertEqual(lines.count(green(199)), 0)
+                    for failure in ((198, 1), (199, 1), late):
+                        self.assertEqual(lines.count(marker(*failure)), 1)
+                    self.assertEqual(data["writes"], ["edit", "comment"])
+                    self.assertFalse(any(call[1:3] == ["issue", "reopen"]
+                        for call in data["calls"]))
+
     def test_out_of_order_outcomes_keep_the_newest_one(self):
         # A pass handled after a newer recorded failure leaves the issue open.
         self.seed(comments=[{"body": marker(201)}])
