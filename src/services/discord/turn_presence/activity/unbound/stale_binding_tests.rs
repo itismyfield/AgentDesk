@@ -693,6 +693,25 @@ async fn s1_historical_and_canonical_host_runtime_nonce_traces_are_required_pg()
         std::fs::remove_dir(path).unwrap();
         fixture.positive().await;
     }
+
+    let nonce = fixture.marker(&fixture.canonical_name, "spawn_nonce", b" \n");
+    crate::services::discord::host_defer_gate::tests::map_channel(
+        &fixture.shared,
+        fixture.channel,
+        &format!("s1-canonical-{}", fixture.channel),
+    )
+    .await;
+    fixture.positive().await;
+    fixture
+        .shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .remove(&fixture.channel);
+    fixture.hold("session_probe_failed").await;
+    std::fs::remove_file(nonce).unwrap();
+    fixture.positive().await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -770,7 +789,7 @@ async fn s1_saved_idle_rejects_canonical_row_status_nonce_key_and_alias_changes_
         let (stamp, watch) = fixture.publication_control().await;
         match case {
             "status" => {
-                sqlx::query("UPDATE sessions SET status = 'stopped' WHERE id = $1")
+                sqlx::query("UPDATE sessions SET status = 'disconnected' WHERE id = $1")
                     .bind(fixture.row_id)
                     .execute(fixture.pool())
                     .await

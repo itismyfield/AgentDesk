@@ -210,6 +210,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_presence::activity::unbound::herdr_bound::tests
   --skip services::discord::turn_presence::activity::unbound::live::owner_tests
   --skip services::discord::turn_presence::activity::unbound::live::review_tests
+  --skip services::discord::turn_presence::activity::unbound::live::stale_binding_tests
   --skip services::discord::turn_presence::activity::unbound::routine_owner::registered_receipt_tests
   --skip services::discord::turn_presence::activity::unbound::routine_owner::tests
   --skip services::discord::turn_presence::activity::unbound::tests

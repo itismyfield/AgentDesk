@@ -493,6 +493,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/receipt_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/routine_registered_receipt_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
               - 'src/services/discord/turn_presence/activity_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'

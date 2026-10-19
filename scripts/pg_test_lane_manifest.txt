@@ -282,6 +282,7 @@ src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
 src/services/discord/turn_presence/activity/unbound/receipt_tests.rs
 src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs
 src/services/discord/turn_presence/activity/unbound/routine_registered_receipt_tests.rs
+src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs
 src/services/discord/turn_presence/activity/unbound/unit_tests.rs
 src/services/discord/turn_presence/activity_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
@@ -648,6 +649,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::cross_ru
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::nonce_tests
 services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_tests
 services::discord::turn_presence::activity::unbound::live::review_tests
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests
 services::discord::turn_presence::activity::unbound::routine_owner::registered_receipt_tests
 services::discord::turn_presence::activity::unbound::routine_owner::tests
 services::discord::turn_presence::activity::unbound::tests
@@ -2343,6 +2345,17 @@ services::discord::turn_presence::activity::unbound::live::review_tests::s1e_suc
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_canonical_missing_namespace_or_tuple_mismatch_keeps_hold_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_either_historical_or_canonical_live_candidate_holds_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_exact_alias_pointing_to_another_row_keeps_hold_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_historical_and_canonical_host_runtime_nonce_traces_are_required_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_hosted_records_and_nonlocal_registration_are_not_recovered_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_inflight_unreadable_log_or_inventory_never_proves_absence_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_restored_stale_binding_uses_canonical_target_and_keeps_old_candidate_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_saved_idle_rejects_canonical_row_status_nonce_key_and_alias_changes_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_saved_idle_rejects_historical_and_recovered_candidate_trace_changes_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_saved_idle_rejects_same_seq_binding_nonce_payload_and_seq_changes_pg
+services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_saved_inflight_hold_also_rejects_nonce_only_rewrite_pg
 services::discord::turn_presence::activity::unbound::routine_owner::registered_receipt_tests::registered_receipt_raw_proof_keeps_exact_keys_empty_queries_and_invalid_rows_pg
 services::discord::turn_presence::activity::unbound::routine_owner::tests::routine_turn_channels_need_exact_started_records_pg
 services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg

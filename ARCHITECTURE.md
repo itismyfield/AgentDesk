@@ -2215,6 +2215,7 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
+│   │   │   │   │   ├── canonical_target.rs
 │   │   │   │   │   ├── clear_owner_race_tests.rs
 │   │   │   │   │   ├── cross_runtime_owner_e2e_tests.rs
 │   │   │   │   │   ├── cross_runtime_owners.rs
@@ -2236,6 +2237,7 @@ src/
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
+│   │   │   │   │   ├── stale_binding_tests.rs
 │   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
