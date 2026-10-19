@@ -178,6 +178,9 @@ fn run(
                             wrapper_witness
                                 .verify(&wrapper, false, false)
                                 .map_err(|e| e.to_string())?;
+                            if json["type"] == "result" {
+                                super::custody::before_terminal(context);
+                            }
                             write_line(&mut wrapper, &bytes)?;
                             wrapper_witness
                                 .appended(&wrapper, &bytes)

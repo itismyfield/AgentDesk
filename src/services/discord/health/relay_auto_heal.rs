@@ -335,6 +335,7 @@ impl SharedData {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn apply_watchdog_orphan_token_cleanup(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -566,12 +567,12 @@ fn nudge_existing_watcher_for_backlog(
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
     token: RelayFrontierToken,
 ) -> RedriveNudge {
     #[cfg(test)]
     let _test_clock = stall_liveness::set_redrive_grace_test_clock(
-        now_unix_secs,
+        _now_unix_secs,
         snapshot.inflight_identity.clone(),
     );
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {

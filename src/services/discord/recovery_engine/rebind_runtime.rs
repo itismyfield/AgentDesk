@@ -399,6 +399,7 @@ fn codex_rebind_saved_output_is_normalized_relay(
     std::path::Path::new(saved_output_path) == std::path::Path::new(&relay_output_path)
 }
 
+#[cfg(test)]
 fn persist_codex_tui_rebind_rollout_cursor(
     tmux_session_name: &str,
     rollout_path: &std::path::Path,

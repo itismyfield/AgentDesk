@@ -17,12 +17,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
+#[path = "producer_resume/custody.rs"]
+mod custody;
 #[path = "producer_resume/proof.rs"]
 mod proof;
 #[path = "producer_resume/witness.rs"]
 mod witness;
 #[path = "producer_resume/writer.rs"]
 mod writer;
+pub(in crate::services::discord) use custody::waiting_for_receipt;
 use witness::{Stamp, Witness};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +141,7 @@ struct Context {
     tmux: String,
     cancel: Arc<AtomicBool>,
     pin: InflightEpisodePin,
+    completion_key: super::super::turn_finalizer::TurnKey,
     raw_path: String,
     session_id: String,
     binding_required: bool,
@@ -305,12 +309,19 @@ fn prepare(
             return Err(Held(error));
         }
     };
+    let completion_key = super::super::turn_finalizer::TurnKey::new(
+        channel,
+        state.effective_finalizer_turn_id(),
+        shared.restart.current_generation,
+    )
+    .with_episode_nonce(state.turn_nonce.as_deref());
     let context = Context {
         shared,
         channel,
         tmux,
         cancel,
         pin,
+        completion_key,
         raw_path,
         binding_required,
         marker_required,

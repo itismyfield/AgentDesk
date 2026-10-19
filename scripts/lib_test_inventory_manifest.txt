@@ -6194,6 +6194,7 @@ services::discord::recovery_engine::producer_resume::entry_tests::r2_periodic_re
 services::discord::recovery_engine::producer_resume::entry_tests::r6_contention_retains_event_order_and_clear_blocks_old_output
 services::discord::recovery_engine::producer_resume::entry_tests::r6_live_publication_stops_on_episode_cancel_reset_or_source_guard_change
 services::discord::recovery_engine::producer_resume::entry_tests::r8_http_failure_keeps_original_actor_until_receipt_commit
+services::discord::recovery_engine::producer_resume::entry_tests::r8_receipt_write_failure_holds_recovered_actor_after_http_success
 services::discord::recovery_engine::producer_resume::entry_tests::r9_applicability_requires_old_codex_wrapper_episode_and_retains_scope_fences
 services::discord::recovery_engine::producer_resume::proof::tests::composed_response_must_prefix_native_text
 services::discord::recovery_engine::producer_resume::proof::tests::incident_rollout_prefix_matches_recorded_wrapper_hash_in_actual_rust_path

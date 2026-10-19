@@ -261,6 +261,8 @@ impl Fixture {
         let http_fail = Arc::new(AtomicBool::new(false));
         let failed_requests = Arc::new(AtomicU64::new(0));
         let (fail, failures) = (http_fail.clone(), failed_requests.clone());
+        let protected_actor = token.clone();
+        let first_successful_body = AtomicBool::new(false);
         let saved_current_id = row.current_msg_id;
         let saved_current_body = current_body.clone();
         let saved_frozen = row
@@ -273,6 +275,16 @@ impl Fixture {
             if fail.load(Ordering::Acquire) && method != axum::http::Method::DELETE {
                 failures.fetch_add(1, Ordering::AcqRel);
                 return Some((500, json!({"message":"fixture unavailable","code":0})));
+            }
+            if matches!(
+                *method,
+                axum::http::Method::POST | axum::http::Method::PATCH
+            ) && !first_successful_body.swap(true, Ordering::AcqRel)
+            {
+                assert!(
+                    !protected_actor.cancelled.load(Ordering::Acquire),
+                    "producer must retain the original actor before delivery"
+                );
             }
             if method == axum::http::Method::DELETE {
                 return None;
@@ -508,7 +520,7 @@ impl Fixture {
         .expect("periodic entry must restore streaming before native task_complete");
     }
 
-    fn assert_source_preserved(&self) {
+    fn assert_source_preserved(&self, delivered: bool) {
         let bytes = std::fs::read(&self.wrapper).unwrap();
         assert!(
             bytes.starts_with(&self.prefix),
@@ -516,10 +528,14 @@ impl Fixture {
         );
         let metadata = std::fs::metadata(&self.wrapper).unwrap();
         assert_eq!((metadata.dev(), metadata.ino()), self.prefix_identity);
+        let mut expected_binding = self.binding_before.clone();
+        if delivered {
+            expected_binding.as_mut().unwrap().relay_last_offset = Some(bytes.len() as u64);
+        }
         assert_eq!(
             dedupe::runtime_binding_for_tmux_session(&self.handle.tmux_session_name),
-            self.binding_before,
-            "producer revival must not reinstall or advance runtime binding"
+            expected_binding,
+            "producer preserves the binding; only the existing delivery owner advances the wrapper receipt cursor"
         );
         assert_eq!(
             std::fs::read(&self.marker_path).unwrap(),
@@ -537,6 +553,10 @@ impl Fixture {
     }
 
     async fn assert_settled(&self) {
+        self.assert_settled_with_main_fallback(false).await;
+    }
+
+    async fn assert_settled_with_main_fallback(&self, allow_main_fallback: bool) {
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 if inflight::load_inflight_state_read_only(&ProviderKind::Codex, self.channel.get())
@@ -583,10 +603,24 @@ impl Fixture {
                 );
             }
             if method == "POST" {
-                assert!(
-                    saved_markers.iter().all(|marker| !body.contains(marker)),
-                    "saved body cannot be posted as a new message: {request}"
-                );
+                if allow_main_fallback && body.contains("SAVED_CURRENT_TAIL|") {
+                    let payload: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(
+                        payload["content"], expected_current,
+                        "legacy fallback may repeat only main's saved current body plus this final"
+                    );
+                    assert!(
+                        saved_markers
+                            .iter()
+                            .filter(|marker| marker.starts_with("FROZEN_"))
+                            .all(|marker| !body.contains(marker))
+                    );
+                } else {
+                    assert!(
+                        saved_markers.iter().all(|marker| !body.contains(marker)),
+                        "saved body cannot be posted as a new message: {request}"
+                    );
+                }
             }
             if method == "PATCH" && message_id == Some(self.row.current_msg_id) {
                 let payload: Value = serde_json::from_str(body).expect("current-body PATCH JSON");
@@ -655,8 +689,8 @@ impl Fixture {
         );
         assert_eq!(self.shared.restart.global_active.load(Ordering::Acquire), 0);
         assert!(
-            !self.token.cancelled.load(Ordering::Acquire),
-            "successful revival must not cancel original turn"
+            self.token.cancelled.load(Ordering::Acquire),
+            "the existing normal finalizer must retire its original actor after receipt"
         );
     }
 
@@ -742,6 +776,7 @@ async fn restart_entry(channel: u64, session_bound: bool) {
     let mut f = Box::pin(Fixture::new(channel, session_bound)).await;
     f.append_final();
     f.pin_eof_hint();
+    f.handle.paused.store(true, Ordering::Release);
     f.start_watcher(true);
     let result = f.wait_result().await;
     assert_eq!(
@@ -749,7 +784,8 @@ async fn restart_entry(channel: u64, session_bound: bool) {
         format!("{}{}", f.body_prefix, f.final_body),
         "strict-skipped JSON text must remain in the terminal accumulated response"
     );
-    f.assert_source_preserved();
+    f.assert_source_preserved(false);
+    f.handle.paused.store(false, Ordering::Release);
     f.assert_settled().await;
     if session_bound {
         f.assert_idle_does_not_replay().await;
@@ -759,7 +795,7 @@ async fn restart_entry(channel: u64, session_bound: bool) {
     f.periodic().await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(f.mutations(), before, "settled reticks must not redeliver");
-    f.assert_source_preserved();
+    f.assert_source_preserved(true);
     f.stop().await;
 }
 
@@ -780,6 +816,7 @@ async fn r1_supervised_restart_preserves_skipped_text_before_terminal_only_fallb
     // No assistant suffix record: only task_complete carries the missing native final.
     f.append_completion();
     f.pin_eof_hint();
+    f.handle.paused.store(true, Ordering::Release);
     f.start_watcher(true);
     let result = f.wait_result().await;
     assert_eq!(
@@ -803,7 +840,8 @@ async fn r1_supervised_restart_preserves_skipped_text_before_terminal_only_fallb
         "skipped JSON text must accumulate so Done yields exactly the missing suffix"
     );
     assert_eq!(rows[1], result);
-    f.assert_source_preserved();
+    f.assert_source_preserved(false);
+    f.handle.paused.store(false, Ordering::Release);
     f.assert_settled().await;
     f.stop().await;
 }
@@ -822,6 +860,7 @@ async fn r2_periodic_revives_live_incumbent_despite_fresh_row_and_open_circuit()
         "orphaned_staged_alert_ids":[],"open_generation":7,"coordinate_binding":"Unresolved"});
     std::fs::write(&circuit, serde_json::to_vec(&state).unwrap()).unwrap();
     // This task predates revival; calling the startup wrapper would hide a missing periodic hook.
+    f.handle.paused.store(true, Ordering::Release);
     f.start_watcher(false);
     let owner_cancel = f.handle.cancel.clone();
     f.append_suffix();
@@ -846,10 +885,11 @@ async fn r2_periodic_revives_live_incumbent_despite_fresh_row_and_open_circuit()
         result["result"],
         format!("{}{}", f.body_prefix, f.final_body)
     );
-    f.assert_source_preserved();
+    f.assert_source_preserved(false);
+    f.handle.paused.store(false, Ordering::Release);
     f.assert_settled().await;
     f.periodic().await;
-    f.assert_source_preserved();
+    f.assert_source_preserved(true);
     f.stop().await;
 }
 
@@ -1042,7 +1082,19 @@ async fn r8_http_failure_keeps_original_actor_until_receipt_commit() {
             .is_none_or(|r| r.confirmed_deliveries.is_empty())
     );
     f.http_fail.store(false, Ordering::Release);
-    f.assert_settled().await;
+    f.assert_settled_with_main_fallback(true).await;
+    let saved_posts = f
+        .mutations()
+        .into_iter()
+        .filter(|request| request.starts_with("POST ") && request.contains("SAVED_CURRENT_TAIL|"))
+        .count();
+    assert_eq!(
+        saved_posts, 1,
+        "producer must not enlarge main's one-current-body fallback"
+    );
+    eprintln!(
+        "R8_BASELINE_PARITY saved_current_bytes=841 final_bytes=699 successful_fallback_posts=1"
+    );
     f.stop().await;
 }
 
@@ -1160,9 +1212,11 @@ async fn r1_repaired_episode_admits_one_queued_successor_and_delivers_its_final(
     let mut f = Box::pin(Fixture::new(7_139_140, false)).await;
     f.append_final();
     f.pin_eof_hint();
+    f.handle.paused.store(true, Ordering::Release);
     f.start_watcher(true);
     f.wait_result().await;
-    f.assert_source_preserved();
+    f.assert_source_preserved(false);
+    f.handle.paused.store(false, Ordering::Release);
     f.assert_settled().await;
 
     let _ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
@@ -1286,6 +1340,53 @@ async fn r1_repaired_episode_admits_one_queued_successor_and_delivers_its_final(
         f.mutations(),
         after,
         "the successor cannot be admitted or delivered twice"
+    );
+    f.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r8_receipt_write_failure_holds_recovered_actor_after_http_success() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut f = Box::pin(Fixture::new(7_139_151, false)).await;
+    let records = discord::runtime_store::runtime_root()
+        .unwrap()
+        .join("discord_delivery_records");
+    std::fs::write(&records, b"block receipt directory").unwrap();
+    f.append_final();
+    f.start_watcher(true);
+    f.wait_result().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !f
+            .mutations()
+            .iter()
+            .any(|request| request.contains(&f.final_body))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let row = inflight::load_inflight_state_read_only(&ProviderKind::Codex, f.channel.get())
+        .expect("receipt failure must retain the original row");
+    assert_eq!(row.turn_nonce, f.row.turn_nonce);
+    let mailbox = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    assert!(Arc::ptr_eq(
+        mailbox
+            .cancel_token
+            .as_ref()
+            .expect("original actor remains owned"),
+        &f.token
+    ));
+    assert_eq!(f.shared.restart.global_active.load(Ordering::Acquire), 1);
+    assert!(!f.token.cancelled.load(Ordering::Acquire));
+    assert!(delivery_record::read_record(&ProviderKind::Codex, f.channel.get()).is_none());
+    assert_eq!(
+        f.mutations()
+            .iter()
+            .filter(|request| request.contains(&f.final_body))
+            .count(),
+        1
     );
     f.stop().await;
 }

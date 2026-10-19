@@ -111,6 +111,26 @@ pub(super) async fn run_terminal_commit_epilogue(
     locals: TerminalCommitEpilogueLocals<'_>,
     state: &mut TerminalCommitEpilogueState<'_>,
 ) -> TerminalCommitEpilogueOutcome {
+    if locals.terminal_output_committed
+        && let Some(key) = watcher_completion_key(
+            context.shared,
+            context.channel_id,
+            locals.inflight_before_relay.as_ref(),
+            context.tmux_session_name,
+            locals.current_offset,
+        )
+        && crate::services::discord::recovery_engine::producer_resume::waiting_for_receipt(
+            context.shared,
+            context.provider_kind,
+            key,
+        )
+    {
+        tracing::warn!(
+            channel_id = context.channel_id.get(),
+            "repaired Codex terminal held until exact receipt commits"
+        );
+        return TerminalCommitEpilogueOutcome::Fallthrough;
+    }
     let shared = context.shared;
     let channel_id = context.channel_id;
     let watcher_provider = context.watcher_provider;
