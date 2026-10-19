@@ -3,6 +3,8 @@ use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
+#[cfg(unix)]
+pub(in crate::services::discord) mod codex_clear_compat;
 pub(super) mod kickoff;
 
 #[cfg(test)]
@@ -221,8 +223,15 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
     // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         use super::turn_presence::activity::{Activity, activity_now};
+        use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
         let observed = activity_now(shared, provider, channel_id).await;
-        if observed.activity != Activity::Idle {
+        let cleared_canary_launch = observed.activity == Activity::Unknown
+            && observed.reason == "session_identity_unresolved"
+            && matches!(provider, ProviderKind::Codex)
+            && channel_id.get() == CANARY_CHANNEL
+            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+            && crate::services::tui_prompt_dedupe::clear_relaunch::relaunch_open(CANARY_TMUX);
+        if observed.activity != Activity::Idle && !cleared_canary_launch {
             tracing::info!(
                 provider = provider.as_str(),
                 channel_id = channel_id.get(),

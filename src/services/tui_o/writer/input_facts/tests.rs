@@ -83,6 +83,24 @@ fn delayed_supply_replays_order_and_never_exposes_backlog_idle() {
     );
 }
 
+// Input injected while a turn runs joins that turn; only its closer ends it.
+#[test]
+fn a_prompt_inside_an_open_turn_keeps_that_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("parent.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let mut facts = InputFacts::open(binding(&path, ShadowProvider::Claude, 23)).unwrap();
+    append(&path, &[user("a", "first"), user("b", "while busy")]);
+    let open_a = TurnState::Open {
+        native_turn_id: Some("a".into()),
+    };
+    assert_eq!(facts.poll(u64::MAX).unwrap().state, open_a);
+    assert_eq!(shapes(&facts), ["opened a"]);
+    append(&path, &[idle()]);
+    assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
+    assert_eq!(shapes(&facts), ["closed a aborted=false"]);
+}
+
 #[test]
 fn claude_parent_tools_and_background_notification_ignore_child_file() {
     let root = tempfile::tempdir().unwrap();

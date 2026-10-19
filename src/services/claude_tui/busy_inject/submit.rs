@@ -109,7 +109,17 @@ fn inject_gated_with(
         std::thread::sleep,
         || {
             super::super::composer_lock::try_with_composer_mutation_lock(request.session, || {
-                inject_locked(pane, request, &text, timing, stash, turn_gate)
+                use crate::services::tui_prompt_dedupe as dedupe;
+                let own = matches!(turn_gate, TurnGate::AnyTurn);
+                // The hook may observe the frame before its submission receipt returns.
+                if own {
+                    dedupe::record_discord_originated_prompt("claude", request.session, &text);
+                }
+                let report = inject_locked(pane, request, &text, timing, stash, turn_gate);
+                if own && matches!(&report.outcome, Outcome::NotSent(_)) {
+                    dedupe::remove_discord_originated_prompt("claude", request.session, &text);
+                }
+                report
             })
         },
     );

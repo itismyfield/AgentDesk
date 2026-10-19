@@ -15,8 +15,8 @@ const COMPLETED_LITERAL_OWNERS: &[(&str, usize)] = &[
 
 /// Production files allowed to bind the run status from a parameter.
 const PARAMETERIZED_STATUS_OWNERS: &[(&str, usize)] = &[
-    // Operator cancel/end force-termination `terminalize_selected_runs_with_pg`.
-    ("src/services/auto_queue/cancel_run.rs", 1),
+    // Operator cancel/end force-termination `terminalize_selected_runs_on_pg_tx`.
+    ("src/services/auto_queue/cancel_run/terminalize_tx.rs", 1),
     // Restore hand-off re-opens a cancelled run.
     ("src/services/auto_queue/fsm.rs", 1),
 ];

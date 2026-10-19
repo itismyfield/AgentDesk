@@ -96,6 +96,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_end_tests
   --skip services::discord::commands::control::clear_entry_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
+  --skip services::discord::commands::control::codex_clear_relaunch_tests
+  --skip services::discord::commands::control::codex_clear_retirement_tests
   --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
@@ -125,8 +127,10 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
+  --skip services::discord::queue_dispatch::codex_clear_compat::tests
   --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
+  --skip services::discord::recovery_engine::herdr_row_end::tests::rig
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests
@@ -203,7 +207,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_presence::activity::tests
   --skip services::discord::turn_presence::activity::unbound::dormancy_tests
   --skip services::discord::turn_presence::activity::unbound::herdr_bound::tests
+  --skip services::discord::turn_presence::activity::unbound::live::owner_tests
   --skip services::discord::turn_presence::activity::unbound::live::review_tests
+  --skip services::discord::turn_presence::activity::unbound::routine_owner::tests
   --skip services::discord::turn_presence::activity::unbound::tests
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
@@ -262,6 +268,7 @@ NON_PG_FILTER_REPLAY=(
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::parse_phase_gate_context_returns_none_without_run_id
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::pass_alias_matches_phase_gate_pass_verdict_when_checks_pass
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::whitespace_padded_check_status_is_not_inferred_as_pass
+  db::auto_queue::run_owner_guard_pg_tests::wait_helpers_reject_a_waiter_observed_after_the_deadline
   db::automation_candidates::verdict_tests::card_update_guards_require_exactly_one_row
   db::automation_candidates::verdict_tests::crashed_always_discards
   db::automation_candidates::verdict_tests::final_iteration_boundary
@@ -817,6 +824,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_presence::activity::unbound::tests::u_candidate_conflicts
   services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
   services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
+  services::discord::turn_presence::activity::unbound::tests::u_outside_or_elsewhere_sessions_never_hide_own_evidence
   services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
   services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
   services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn

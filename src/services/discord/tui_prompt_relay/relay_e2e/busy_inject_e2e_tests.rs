@@ -21,6 +21,8 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ActiveTurnKind;
 
+#[path = "idle_inject_echo_e2e_tests.rs"]
+mod idle_echo;
 #[path = "busy_inject_thread_e2e_tests.rs"]
 mod thread;
 #[path = "busy_inject_turn_mode_e2e_tests.rs"]

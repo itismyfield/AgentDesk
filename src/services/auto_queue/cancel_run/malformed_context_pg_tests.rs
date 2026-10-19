@@ -264,3 +264,139 @@ async fn public_end_ignores_unrelated_malformed_context_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// The census counts a live dispatch tied to the target only by a finished entry while a
+/// foreign gate keeps it live, and skips terminal and unassociated dispatches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_cancel_counts_surviving_associated_dispatch_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (run_id, dispatch_id, unrelated) =
+        seed_run_beside_unrelated_malformed_dispatches(&pool, "census").await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status)
+         VALUES ('run-census-foreign', 'agent-malformed', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed foreign run");
+    for (dispatch, status) in [
+        ("dispatch-census-survivor", "pending"),
+        ("dispatch-census-done", "completed"),
+    ] {
+        let card = format!("card-{dispatch}");
+        seed_agent_and_card(&pool, &card).await;
+        seed_dispatch(&pool, dispatch, &card, status, None).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index)
+             VALUES ($1, $2, $3, 'agent-malformed', 'done', $4, 0)",
+        )
+        .bind(format!("entry-{dispatch}"))
+        .bind(&run_id)
+        .bind(&card)
+        .bind(dispatch)
+        .execute(&pool)
+        .await
+        .expect("seed finished entry");
+    }
+    sqlx::query(
+        "INSERT INTO auto_queue_phase_gates (run_id, phase, status, dispatch_id)
+         VALUES ('run-census-foreign', 1, 'pending', 'dispatch-census-survivor')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed foreign gate");
+
+    let response = cancel_selected_runs_with_pg(
+        None,
+        &pool,
+        std::slice::from_ref(&run_id),
+        "auto_queue_cancel",
+    )
+    .await
+    .expect("cancel run");
+
+    assert_eq!(response["remaining_live_dispatches"], 1);
+    assert_eq!(response["cancelled_dispatches"], 1);
+    assert_eq!(dispatch_status(&pool, &dispatch_id).await, "cancelled");
+    assert_eq!(
+        dispatch_status(&pool, "dispatch-census-survivor").await,
+        "pending"
+    );
+    assert_eq!(
+        dispatch_status(&pool, "dispatch-census-done").await,
+        "completed"
+    );
+    for dispatch in &unrelated {
+        assert_eq!(dispatch_status(&pool, dispatch).await, "pending");
+    }
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A census failure aborts the cancel transaction: the caller gets the error and the run,
+/// entry, dispatch and cleanup enrollment are all left as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_cancel_census_failure_rolls_back_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (run_id, dispatch_id, _unrelated) =
+        seed_run_beside_unrelated_malformed_dispatches(&pool, "census-fail").await;
+    // This database only: the owner-context read fails once the target run is terminal,
+    // which on the cancel path is the census after the run update.
+    sqlx::query("ALTER FUNCTION json_extract(text, text) RENAME TO json_extract_census_real")
+        .execute(&pool)
+        .await
+        .expect("rename json_extract");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION json_extract(input TEXT, path TEXT) RETURNS TEXT
+         LANGUAGE plpgsql VOLATILE AS $$
+         BEGIN
+             IF path = '$.phase_gate.run_id' AND EXISTS (
+                 SELECT 1 FROM auto_queue_runs
+                 WHERE id = '{run_id}' AND status IN ('cancelled', 'completed')
+             ) THEN
+                 RAISE EXCEPTION 'census sentinel';
+             END IF;
+             RETURN json_extract_census_real(input, path);
+         END
+         $$"
+    )))
+    .execute(&pool)
+    .await
+    .expect("install census sentinel");
+
+    let result = cancel_selected_runs_with_pg(
+        None,
+        &pool,
+        std::slice::from_ref(&run_id),
+        "auto_queue_cancel",
+    )
+    .await;
+
+    let error = result.expect_err("census failure must fail the cancel");
+    assert!(
+        error.contains("count postgres live dispatches") && error.contains("census sentinel"),
+        "{error}"
+    );
+    assert_eq!(run_status(&pool, &run_id).await, "active");
+    assert_eq!(dispatch_status(&pool, &dispatch_id).await, "dispatched");
+    let entry_status: String = sqlx::query_scalar(
+        "SELECT status FROM auto_queue_entries WHERE id = 'entry-malformed-census-fail'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load entry status");
+    assert_eq!(entry_status, "dispatched");
+    let cleanup_tasks: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks")
+            .fetch_one(&pool)
+            .await
+            .expect("count cleanup tasks");
+    assert_eq!(cleanup_tasks, 0);
+
+    pool.close().await;
+    pg_db.drop().await;
+}

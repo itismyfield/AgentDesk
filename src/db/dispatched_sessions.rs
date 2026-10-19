@@ -2,6 +2,7 @@ use serde_json::json;
 use sqlx::{PgPool, Row};
 
 use crate::db::agents::resolve_agent_channel_for_provider_pg;
+use crate::db::auto_queue::run_owner_guard as owner_guard;
 use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
 };
@@ -666,6 +667,17 @@ pub(crate) async fn create_retry_dispatch_pg(
         })?;
 
     let owner_before_failed_sync = prepare_retry_owner_on_pg_tx(&mut tx, meta).await?;
+    // Without an entry owner the copied context run is locked here, before the origin row.
+    let locked_owner_run = owner_before_failed_sync
+        .as_ref()
+        .map(|owner| owner.run_id.clone());
+    let locked_owner_run = locked_owner_run.as_deref();
+    owner_guard::guard_context_owner_publication_on_pg_tx(
+        &mut tx,
+        meta.context.as_deref(),
+        locked_owner_run,
+    )
+    .await?;
     let reason = json!({"reason": "force_kill_session", "retry": true});
     let mut deferred_observability = Vec::new();
     let changed = crate::dispatch::set_dispatch_status_on_pg_tx_async(
@@ -717,32 +729,18 @@ pub(crate) async fn create_retry_dispatch_pg(
         }
     }
 
-    sqlx::query(
-        "INSERT INTO task_dispatches (
-            id,
-            kanban_card_id,
-            to_agent_id,
-            dispatch_type,
-            status,
-            title,
-            context,
-            retry_count,
-            created_at,
-            updated_at
-        ) VALUES (
-            $1, $2, $3, $4, 'pending', $5, $6, $7, NOW(), NOW()
-        )",
-    )
-    .bind(&dispatch_id)
-    .bind(&meta.card_id)
-    .bind(meta.to_agent_id.as_deref())
-    .bind(dispatch_type)
-    .bind(title)
-    .bind(meta.context.as_deref().unwrap_or("{}"))
-    .bind(meta.retry_count + 1)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("insert postgres retry dispatch {dispatch_id}: {error}"))?;
+    let row = owner_guard::NewRetryDispatchRow {
+        id: &dispatch_id,
+        kanban_card_id: &meta.card_id,
+        to_agent_id: meta.to_agent_id.as_deref(),
+        dispatch_type,
+        title,
+        context: meta.context.as_deref().unwrap_or("{}"),
+        retry_count: meta.retry_count + 1,
+    };
+    owner_guard::insert_retry_dispatch_row_on_pg_tx(&mut tx, &row, locked_owner_run)
+        .await
+        .map_err(|error| format!("insert postgres retry dispatch {dispatch_id}: {error}"))?;
 
     sqlx::query(
         "INSERT INTO dispatch_events (

@@ -240,7 +240,7 @@ impl InjectPane {
     }
 
     /// Leaves only the channel name to name the pane.
-    async fn drop_row(&self, shared: &SharedData) {
+    pub(in crate::services::discord) async fn drop_row(&self, shared: &SharedData) {
         crate::services::discord::inflight::clear_inflight_state(
             &ProviderKind::Claude,
             self.channel,

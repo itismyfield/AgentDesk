@@ -1180,6 +1180,15 @@ pub(crate) async fn companion_activity_for_log_for_tests(
     (observed.reason, observed.activity == Activity::Idle)
 }
 
+/// The actual Unbound collector's verdict before its public reason is aggregated.
+pub(in crate::services::discord) async fn unbound_verdict_for_tests(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<String, String> {
+    super::unbound::live::tests::verdict_for_tests(shared, provider, channel).await
+}
+
 async fn companion_next_incarnation_keeps_terminal_meaning(channel: u64, unfinished: bool) {
     use crate::services::discord::router::message_handler::codex_resume_companion_queue_tests::Fixture;
     use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;

@@ -14,12 +14,14 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct ForwardedChunk<'a> {
 /// forwarded text is a SUFFIX of the decoded chunk, so the forwarded bytes end
 /// there too. A rewind replays those same offsets under a fresh relay
 /// `sequence`, which is what lets the sink tell replay from genuinely new output.
+/// `producer` is the reading watcher's `watcher_instance_id`.
 pub(in crate::services::discord::tmux::tmux_watcher) fn forwarded_chunk<'a>(
     decoded_text: &'a str,
     buffer_len: usize,
     buffer_start_offset: u64,
     pre_turn_bytes_skipped: usize,
     source_authority: impl Into<SupervisorFrameSourceAuthority>,
+    producer: u64,
 ) -> ForwardedChunk<'a> {
     let text = watcher_forward_text_after_pre_turn_skip(
         decoded_text,
@@ -30,9 +32,13 @@ pub(in crate::services::discord::tmux::tmux_watcher) fn forwarded_chunk<'a>(
         let end = buffer_start_offset.saturating_add(buffer_len as u64);
         (end.saturating_sub(text.len() as u64), end)
     });
+    let source_authority = source_authority_with_span(source_authority, source_span);
     ForwardedChunk {
         text,
-        source_authority: source_authority_with_span(source_authority, source_span),
+        source_authority: SupervisorFrameSourceAuthority {
+            producer: Some(producer),
+            ..source_authority
+        },
     }
 }
 
@@ -128,6 +134,7 @@ mod tests {
             relay_generation_mtime_ns: None,
             relay_source_stamp: None,
             source_span: chunk.source_authority.source_span,
+            read_source: chunk.source_authority.read_source(),
         }
     }
 
@@ -154,11 +161,11 @@ mod tests {
     /// earlier read, so the forwarded suffix is `[1005, 1010)`.
     #[test]
     fn forwarded_span_names_the_suffix_the_buffer_ends_with() {
-        let chunk = forwarded_chunk("abcdef", 10, 1_000, 5, authority());
+        let chunk = forwarded_chunk("abcdef", 10, 1_000, 5, authority(), 1);
         assert_eq!(chunk.text, "bcdef");
         assert_eq!(chunk.source_authority.source_span, Some((1_005, 1_010)));
 
-        let empty = forwarded_chunk("abcdef", 10, 1_000, 10, authority());
+        let empty = forwarded_chunk("abcdef", 10, 1_000, 10, authority(), 1);
         assert_eq!(empty.text, "");
         assert_eq!(empty.source_authority.source_span, None);
     }
@@ -193,7 +200,7 @@ mod tests {
         let anchor = first.start_offset.expect("decoded text");
         all_data.push_str(&first.text);
         let first_len = all_data.len() as u64;
-        let chunk = forwarded_chunk(&first.text, all_data.len(), anchor, 0, authority());
+        let chunk = forwarded_chunk(&first.text, all_data.len(), anchor, 0, authority(), 1);
         assert_eq!(
             chunk.source_authority.source_span,
             Some((base, base + first_len))
@@ -211,7 +218,7 @@ mod tests {
             "the abandoned read's tail re-anchored the replay"
         );
         all_data.push_str(&replay.text);
-        let chunk = forwarded_chunk(&replay.text, all_data.len(), anchor, 0, authority());
+        let chunk = forwarded_chunk(&replay.text, all_data.len(), anchor, 0, authority(), 1);
         assert_eq!(
             chunk.source_authority.source_span,
             Some((base, base + transcript.len() as u64))
@@ -222,5 +229,74 @@ mod tests {
         assert_eq!(deliveries[0].response_text.matches("alpha").count(), 1);
         assert_eq!(deliveries[0].response_text.matches("안녕").count(), 1);
         assert_eq!(suppressed_for(597_901) - before, 1);
+    }
+
+    #[derive(Default)]
+    struct CapturingSink(std::sync::Mutex<Vec<StreamFrame>>);
+
+    #[async_trait::async_trait]
+    impl crate::services::cluster::stream_relay::RelaySink for CapturingSink {
+        async fn deliver(
+            &self,
+            frame: &StreamFrame,
+        ) -> Result<
+            crate::services::cluster::stream_relay::RelaySinkOutcome,
+            crate::services::cluster::stream_relay::RelaySinkError,
+        > {
+            self.0.lock().unwrap().push(frame.clone());
+            Ok(crate::services::cluster::stream_relay::RelaySinkOutcome::FrameAccepted)
+        }
+    }
+
+    /// The frame leaving the watcher names the descriptor it read and the
+    /// watcher that read it, with no source stamp (the Legacy default).
+    #[tokio::test]
+    async fn watcher_forward_carries_opened_fd_identity_without_stamp() {
+        use crate::services::cluster::stream_relay::{ReadSource, spawn_stream_relay};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-a.jsonl");
+        let line = assistant("from file A");
+        std::fs::write(&path, &line).unwrap();
+        let identity = SourceFileIdentity::from_open_file(&std::fs::File::open(&path).unwrap());
+        assert_ne!(identity, SourceFileIdentity::Unavailable);
+        let read = WatcherSourceAuthority {
+            source_file: identity,
+            ..authority()
+        };
+        let mut decoder = Utf8ChunkDecoder::default();
+        let decoded = decoder.decode_source_for_buffer(line.as_bytes(), 0, read, "");
+        let chunk = forwarded_chunk(&decoded.text, decoded.text.len(), 0, 0, read, 7);
+
+        let binding = binding("712011");
+        let sink = Arc::new(CapturingSink::default());
+        let relay = spawn_stream_relay(binding.clone(), sink.clone());
+        let registry = Arc::new(RelayProducerRegistry::new());
+        registry.register(binding.expected_session_name.clone(), relay.producer());
+        let mut cached = None;
+        let session = &binding.expected_session_name;
+        forward_turn_chunk_to_supervisor_relay(
+            session,
+            &chunk,
+            0,
+            &registry,
+            &mut cached,
+            None,
+            None,
+        );
+        for _ in 0..200 {
+            if !sink.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let frames = sink.0.lock().unwrap().clone();
+        assert_eq!(frames.len(), 1, "the forward reaches the sink");
+        let expected = ReadSource {
+            file: identity,
+            producer: 7,
+        };
+        assert_eq!(frames[0].read_source, Some(expected));
+        assert_eq!(frames[0].relay_source_stamp, None);
     }
 }

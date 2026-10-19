@@ -353,6 +353,8 @@ async fn run_entry_readiness_on_pg_tx(
 /// entry choke points, done-entry reactivation, retry attachment, campaign
 /// handoff append, activate's empty-run completion `complete_run_if_empty`,
 /// and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
+/// Owner publication joins them through `run_owner_guard`: context creation, entry-less retry,
+/// dispatch-carrying gate saves, force-pause cleanup, status-writer and review-recovery revival.
 /// Retry already takes the d1 retry token first and then the run token before its
 /// failed-sync and replacement attachment. Later cards/entries/runs/slots
 /// ordering is serialized by that first run token for these participants.
@@ -360,8 +362,8 @@ async fn run_entry_readiness_on_pg_tx(
 /// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
 ///
 /// `lock_phase_gate_state_on_pg_tx` uses PostgreSQL's two-argument advisory
-/// key space. It is separate from the one-argument `aq_run:<run_id>` token and
-/// does not serialize phase-gate state writes with cancel.
+/// key space, separate from the one-argument `aq_run:<run_id>` token. A save that carries
+/// dispatches takes sorted run tokens and the dispatch rows before this key.
 ///
 /// The only other `completed` writers are the destructive admin owners pinned by
 /// `run_completion_contract_tests`: the operator `end` command and the two resets.
