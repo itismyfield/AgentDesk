@@ -117,7 +117,8 @@ ssh() {
 write_peer_checkout() {
     local dir="$1"
     mkdir -p "$dir/scripts"
-    cp "$REPO_ROOT/scripts/_defaults.sh" "$dir/scripts/_defaults.sh"
+    # The resolution block sources the deploy helpers next to the script.
+    cp "$REPO_ROOT"/scripts/_*.sh "$dir/scripts/"
     {
         printf '#!/usr/bin/env bash\nset -euo pipefail\n'
         printf '%s\n' "$resolution_block"
