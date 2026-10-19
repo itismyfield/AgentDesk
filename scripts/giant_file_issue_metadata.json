@@ -1,9 +1,9 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-10-19T09:16:44Z",
+  "refreshed_at": "2026-10-19T09:19:10Z",
   "ratchets": {
     "closed_deadline_entries": 69,
-    "transition_list_entries": 74
+    "transition_list_entries": 69
   },
   "issues": [
     {
