@@ -4,6 +4,12 @@ The cell-based E2E harness exercises every (provider, runtime) cell against a
 dedicated Discord channel. The legacy single-pair smoke against
 `adk-dashboard-e2e` is being archived in favour of this matrix.
 
+**Live scenarios are manual execution specifications, not CI-executed coverage.**
+The [scenario execution contract](../../tests/e2e/tui_relay/scenarios/README.md)
+defines the live prerequisites, manual commands, fixture/known-gap meanings and
+the conditional automatic post-deploy subset (`E-1`, `E-35`, `E-50`, `E-51`).
+CI inventories live rows and executes the two local fixture rows.
+
 ## Cells
 
 | Cell           | Provider | Runtime    | Worker agent            | Channel                  |
@@ -29,6 +35,7 @@ is in that list.
 id: E-1
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI.
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 steps:
   - send_prompt: ...

@@ -2,6 +2,7 @@ id: E-37
 title: Codex /model completes locally, then an ordinary message is admitted at once and answered exactly once
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Post-deploy subset: README.md.
 cells: [codex-pipe, codex-tui]
 isolation: required
 acceptance_criteria:

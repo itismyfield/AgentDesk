@@ -2,6 +2,7 @@ id: E-54
 title: S15 Discord !stop interrupts a hold turn, then is harmless while idle
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Post-deploy subset: README.md.
 cells: [claude-tui]
 isolation: required
 destructive: true
