@@ -14,6 +14,19 @@ type OwnerRacePause = (
 );
 #[cfg(test)]
 static OWNER_RACE_PAUSES: std::sync::Mutex<Vec<OwnerRacePause>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static OWNER_RACE_KICKS: std::sync::Mutex<Vec<(ChannelId, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(in crate::services::discord) fn owner_race_kick_attempts(channel: ChannelId) -> usize {
+    OWNER_RACE_KICKS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.0 == channel)
+        .map_or(0, |entry| entry.1)
+}
 
 #[cfg(test)]
 pub(in crate::services::discord) fn install_owner_race_pause(
@@ -32,6 +45,12 @@ pub(in crate::services::discord) fn install_owner_race_pause(
             .any(|pause| pause.0 == channel && pause.1 == stage)
     );
     pauses.push((channel, stage, entered.clone(), resume.clone()));
+    if stage == "kickoff_before_take" {
+        let mut counts = OWNER_RACE_KICKS.lock().unwrap();
+        if !counts.iter().any(|entry| entry.0 == channel) {
+            counts.push((channel, 0));
+        }
+    }
     (entered, resume)
 }
 
@@ -40,6 +59,15 @@ pub(in crate::services::discord) async fn owner_race_pause(
     channel: ChannelId,
     stage: &'static str,
 ) {
+    if stage == "kickoff_before_take"
+        && let Some(entry) = OWNER_RACE_KICKS
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry.0 == channel)
+    {
+        entry.1 += 1;
+    }
     let pause = {
         let mut pauses = OWNER_RACE_PAUSES.lock().unwrap();
         pauses

@@ -150,3 +150,7 @@ async fn routine_turn_channels(
 #[cfg(test)]
 #[path = "routine_owner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "routine_registered_receipt_tests.rs"]
+mod registered_receipt_tests;

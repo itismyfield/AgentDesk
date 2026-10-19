@@ -47,3 +47,6 @@ impl HealthRegistry {
         Ok(publish())
     }
 }
+
+#[cfg(test)]
+mod tests;

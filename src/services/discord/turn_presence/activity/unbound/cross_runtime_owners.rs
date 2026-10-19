@@ -126,3 +126,7 @@ impl OwnerEvidence {
         channels.first().copied()
     }
 }
+
+#[cfg(test)]
+#[path = "cross_runtime_owners_tests.rs"]
+mod tests;

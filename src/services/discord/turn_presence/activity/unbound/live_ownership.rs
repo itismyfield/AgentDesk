@@ -211,3 +211,7 @@ pub(super) fn superseded_error(reason: &str) -> bool {
             | "core_busy"
     )
 }
+
+#[cfg(test)]
+#[path = "newlive_ownership_file_tests.rs"]
+mod file_tests;

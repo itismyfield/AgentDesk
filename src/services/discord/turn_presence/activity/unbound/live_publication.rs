@@ -34,6 +34,8 @@ impl Stamp {
         {
             return None;
         }
+        #[cfg(test)]
+        owner_tests::before_owner_publication(self.channel.get());
         let shared = self.shared.upgrade()?;
         let apply = || -> Result<Option<R>, &'static str> {
             let guard = watch.try_lock().map_err(|_| "watch_busy")?;

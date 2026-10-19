@@ -530,3 +530,10 @@ async fn unresolved_hold_leaf_is_logged_once_per_transition_pg() {
 
 #[path = "receipt_tests.rs"]
 mod receipt_tests;
+
+#[path = "cross_runtime_owner_e2e_tests.rs"]
+mod cross_runtime_owner_e2e_tests;
+
+pub(super) fn before_owner_publication(channel: u64) {
+    cross_runtime_owner_e2e_tests::before_publication(channel);
+}

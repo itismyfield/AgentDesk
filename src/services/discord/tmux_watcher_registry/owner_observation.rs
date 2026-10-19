@@ -58,3 +58,6 @@ impl Drop for PublicationScope {
 pub(crate) fn owner_publication_fence_held_for_tests() -> bool {
     PUBLICATION_HELD.get()
 }
+
+#[cfg(test)]
+mod tests;

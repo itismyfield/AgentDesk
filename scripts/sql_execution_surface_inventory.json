@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "fd06195b575c854d18c85e536acb8087283421c1",
+  "measured_at_sha": "a591df001366b128c7c6aeed88a5728682a063ac",
   "records": [
     {
       "root": "migrations/postgres",
@@ -36059,6 +36059,60 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:00df5a6c0029ed79df3226b65074dd34020d904f39e27d72c13b26f85964fe89"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:17c510aea8b5938708503f8e1cb3accbbf2f98df28890ea8884804b56b9173f1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:497b61d6041008d18ee5cda8e09216b0d8d5d011e867d05bb03bd084031e5deb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1e86eb1c560e957b2bc9576f511a6d5a0578e580e576f6c146dba3f7a526e09c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7131fc005938f60f5e7a083de56316fe4415270b939f715661696be70a51202e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7c07c6c62532351920d9b3555ab48af66d340f5f5b6f1c7488b48a912c2abbc2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -36235,6 +36289,24 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:87ae60f9cd3b34ee4c884283d3e36c058a026e53fe73a14d6feb18215f23074b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/routine_registered_receipt_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0b0561f260a3e99caa9266c6026c1c961438a4fe8bdf9aa27d48d451440ff0e3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/routine_registered_receipt_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a2cf2e6ed213f2e0a78d787d1e459fdd74efdab22b1eb12bb3845e15ba81af23"
     },
     {
       "root": "src",
