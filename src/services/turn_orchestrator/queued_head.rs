@@ -1,6 +1,7 @@
 //! A queued head reserved for a busy Claude TUI: its durable phase, the sources already submitted,
 //! and the check every queue write runs while a head is reserved. Nothing here submits input.
 use super::active_source_dedup::strip_source_message_id_from_intervention;
+use super::dispatch_reservation::queue_unread;
 use std::path::Path;
 
 use super::pending_queue_persistence::{
@@ -64,6 +65,10 @@ pub(crate) struct PersistedHeadInjection {
     pub(crate) identity: QueueIdentity,
     pub(crate) original: PendingQueueItem,
     pub(crate) phase: HeadPhase,
+    /// The paste this head may have become, named before it could start; only an older binary's
+    /// record lacks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attempt: Option<mend::HeadAttempt>,
 }
 
 /// The part of a channel snapshot beyond its items; written only while one of them is set.
@@ -180,10 +185,10 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("read {}: {error}", path.display())),
+        Err(error) => return Err(queue_unread(format!("read {}: {error}", path.display()))),
     };
-    let (_, meta) =
-        parse_snapshot(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let (_, meta) = parse_snapshot(&content)
+        .map_err(|e| queue_unread(format!("parse {}: {e}", path.display())))?;
     Ok(meta.filter(SnapshotMeta::is_set))
 }
 
@@ -247,7 +252,11 @@ pub(super) fn adopt(
     let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
     let path = pending_queue_file_path(provider, token_hash, channel_id)
         .ok_or_else(|| format!("pending queue root unavailable for channel {channel_id}"))?;
-    ledger.meta = read_snapshot_meta(&path)?.unwrap_or_default();
+    // A file a clear could not rewrite holds no head or record this actor may adopt.
+    ledger.meta = match state.remint_fence.trusts_queue(&key) {
+        true => read_snapshot_meta(&path)?.unwrap_or_default(),
+        false => SnapshotMeta::default(),
+    };
     ledger.persisted_meta = meta_value(&ledger.meta);
     ledger.lease = None;
     ledger.adopted = Some(key);
@@ -260,17 +269,26 @@ pub(super) fn meta_value(meta: &SnapshotMeta) -> Option<serde_json::Value> {
         .then(|| serde_json::to_value(meta).expect("snapshot metadata serializes"))
 }
 
+/// After a queue write landed: its metadata is what disk holds, and the namespace is trusted again.
 pub(super) fn record_write(state: &mut ChannelMailboxState) {
     state.queued_head.persisted_meta = meta_value(&state.queued_head.meta);
+    if let Some(namespace) = &state.queued_head.adopted {
+        state.remint_fence.trust_queue(namespace);
+    }
 }
 
-/// Refuses unless the metadata on disk is what this owner last wrote.
+/// Refuses unless the metadata on disk is what this owner last wrote; a file a clear could not
+/// rewrite is no record at all.
 fn validate_disk(
     state: &mut ChannelMailboxState,
     channel: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Result<(), String> {
     adopt(state, channel, persistence)?;
+    let namespace = super::remint_fence::namespace(persistence);
+    if !state.remint_fence.trusts_queue(&namespace) {
+        return Ok(());
+    }
     let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
         .ok_or("pending queue root unavailable")?;
     let meta = read_snapshot_meta(&path)?.unwrap_or_default();
@@ -298,32 +316,46 @@ pub(super) fn refuse_destructive(
     Ok(())
 }
 
-/// An explicit clear drops the head and its lease, and takes the disk record as read even when it
-/// changed outside its owner, so the clear's write replaces it. Returns the ledger to restore.
+/// An explicit clear drops the head and its lease without reading disk; the submitted sources this
+/// owner recorded stay recorded, so none of them can replay. The clear's writer sets what disk holds.
 pub(super) fn release_for_clear(
     state: &mut ChannelMailboxState,
-    channel: ChannelId,
     persistence: &QueuePersistenceContext,
-) -> Result<HeadLedger, String> {
-    adopt(state, channel, persistence)?;
-    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
-        .ok_or("pending queue root unavailable")?;
-    let disk = read_snapshot_meta(&path)?.unwrap_or_default();
+) {
+    let key = super::remint_fence::namespace(persistence);
     let previous = std::mem::take(&mut state.queued_head);
-    let mut meta = disk.clone();
-    meta.head_injection = None;
-    // Sources the owner recorded as submitted stay recorded, so none of them can replay.
-    let owned = previous.meta.terminal_identities.iter();
-    let missing = owned.filter(|t| !disk.terminal_identities.contains(t));
-    meta.terminal_identities
-        .extend(missing.cloned().collect::<Vec<_>>());
-    state.queued_head = HeadLedger {
-        adopted: previous.adopted.clone(),
-        meta,
-        lease: None,
-        persisted_meta: meta_value(&disk),
+    let owned = previous.adopted.as_ref() == Some(&key);
+    let terminal_identities = match owned {
+        true => previous.meta.terminal_identities,
+        false => Vec::new(),
     };
-    Ok(previous)
+    state.queued_head = HeadLedger {
+        adopted: Some(key),
+        meta: SnapshotMeta {
+            head_injection: None,
+            terminal_identities,
+        },
+        lease: None,
+        persisted_meta: None,
+    };
+}
+
+/// Adds the submitted sources a trusted queue file records to the ledger before a clear rewrites
+/// it; an unreadable file adds none.
+pub(super) fn keep_disk_terminal(state: &mut ChannelMailboxState, path: &Path) {
+    let disk = match read_snapshot_meta(path) {
+        Ok(disk) => disk.unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "clear kept no submitted sources from an unreadable queue file");
+            return;
+        }
+    };
+    let terminal = &mut state.queued_head.meta.terminal_identities;
+    for identity in disk.terminal_identities {
+        if !terminal.contains(&identity) {
+            terminal.push(identity);
+        }
+    }
 }
 
 /// A head nobody owns, after a restart or a dropped ticket: a reservation never pasted is
@@ -473,6 +505,7 @@ pub(super) fn blocks_claims(
     state.queued_head.meta.head_injection.is_some()
 }
 
+pub(crate) mod mend;
 pub(crate) mod prefix;
 
 pub(super) use claim::step;
@@ -488,11 +521,26 @@ mod claim {
         lease: Arc<HeadLease>,
         identity: QueueIdentity,
         item: Box<Intervention>,
+        attempt: Option<mend::HeadAttempt>,
     }
 
     impl HeadTicket {
         pub(crate) fn item(&self) -> &Intervention {
             &self.item
+        }
+
+        /// Names the paste about to start in `session_id`'s transcript, so the MayHaveSent settle
+        /// records it with the head; a paste that cannot be named must not be typed.
+        pub(crate) fn name_paste(
+            &mut self,
+            nonce: &str,
+            transcript: &Path,
+            session_id: Option<String>,
+        ) -> Result<(), mend::AttemptUnavailable> {
+            let session_id = session_id.ok_or(mend::AttemptUnavailable::Session)?;
+            let attempt = mend::HeadAttempt::before_paste(nonce, transcript, session_id)?;
+            self.attempt = Some(attempt);
+            Ok(())
         }
     }
 
@@ -538,6 +586,7 @@ mod claim {
             persistence: QueuePersistenceContext,
             reply: oneshot::Sender<HeadSettle>,
         },
+        Mend(mend::MendMsg),
     }
 
     impl HeadMsg {
@@ -549,6 +598,7 @@ mod claim {
                 Self::Settle { ticket, reply, .. } => {
                     let _ = reply.send(HeadSettle::NotCommitted(ticket, error));
                 }
+                Self::Mend(msg) => msg.refuse(error),
             }
         }
     }
@@ -591,6 +641,7 @@ mod claim {
                 state.last_persistence = Some(persistence.clone());
                 let _ = reply.send(settle(state, channel_id, ticket, outcome, &persistence));
             }
+            HeadMsg::Mend(msg) => mend::step(state, channel_id, msg),
         }
     }
 
@@ -621,13 +672,16 @@ mod claim {
             return QueuedHeadClaim::PersistenceFailed(error);
         }
         let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
-        let marker =
+        let namespace = super::super::remint_fence::namespace(persistence);
+        let marker = state.remint_fence.trusts_marker(&namespace).then(|| {
             super::super::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
                 provider, token_hash, channel_id,
-            );
+            )
+        });
         let marker_held = match marker {
-            Ok(marker) => marker.is_some(),
-            Err(error) => return QueuedHeadClaim::PersistenceFailed(error),
+            Some(Ok(marker)) => marker.is_some(),
+            Some(Err(error)) => return QueuedHeadClaim::PersistenceFailed(error),
+            None => false,
         };
         let owned = marker_held
             || state.pending_user_dispatch.is_some()
@@ -666,6 +720,7 @@ mod claim {
             identity: identity.clone(),
             original,
             phase,
+            attempt: None,
         });
         ledger.lease = Some(lease.clone());
         if let Err(error) = persist_queue(state, channel_id, persistence) {
@@ -678,6 +733,7 @@ mod claim {
             lease,
             identity,
             item,
+            attempt: None,
         })
     }
 
@@ -707,6 +763,9 @@ mod claim {
         match (outcome, phase) {
             (HeadOutcome::MayHaveSent, HeadPhase::Reserved) => {
                 set_phase(&mut state.queued_head, HeadPhase::MayHaveSent);
+                if let Some(head) = state.queued_head.meta.head_injection.as_mut() {
+                    head.attempt = ticket.attempt.clone();
+                }
             }
             (HeadOutcome::Injected, HeadPhase::MayHaveSent) => {
                 state.intervention_queue.remove(0);

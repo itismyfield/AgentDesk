@@ -3,6 +3,8 @@ use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
+#[cfg(unix)]
+mod absent_tmux_host_tests;
 mod compact_summary_tests;
 
 fn compact_command_name_first_stub() -> &'static str {
@@ -534,14 +536,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
 // runtime binding + channel mapping must NOT spam the per-poll drift/skip
 // WARN forever. After the rehydrate pass evicts the mirror, the next idle
 // relay iteration finds NO runtime binding to iterate and NO channel mapping
-// to drift on — proving the 0.5s spam is stopped. A unique, never-created
-// session name guarantees `tmux_session_has_live_pane` is false.
+// to drift on — proving the 0.5s spam is stopped. A private `tmux` that reports
+// every session missing pins the dead verdict against PATH-swapping fixtures.
 #[cfg(unix)]
 #[test]
 fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
-    let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _host = absent_tmux_host_tests::AbsentTmuxHost::isolate();
     let shared = super::super::make_shared_data_for_tests();
     // A session that does not exist on this host (pane gone / orphaned).
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471-DEAD-ORPHAN-fix3105";
@@ -3290,16 +3290,17 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
 
 // #5464 S2 — the completion ACK partition, pinned by BEHAVIOR.
 //
-// `finish_idle_bridge_completion` takes four dispositions and EXACTLY ONE —
-// `Finalized` — is an acknowledgement: only it may return `Ok`, and only it
-// may clear the prompt anchor. Three were already pinned (s3t1/s3t5 for
-// `EntryAborted`/`RecvError`, s3t4 for `Finalized`); `Err(Elapsed)` had no
-// behavioral coverage, so `docs/relay-state-contract.md:41` — "Never use
-// `>= N`, another turn's ACK, timeout-as-success, blind skip, or blind
-// resend" — rested on nothing executable for the timeout case. Driving all
-// four against ONE anchor makes a changed production disposition RED on its
-// per-arm assertion. The expected-table invariant separately guarantees that
-// the table itself names exactly one acknowledgement before any arm runs.
+// `finish_idle_bridge_completion` accepts four completion dispositions, but
+// has a fifth outcome when `Finalized` arrives with OUR uncommitted durable
+// row: delivery validation returns `Err` and the prompt anchor must survive.
+// `s3t1`/`s3t5` pin `EntryAborted`/`RecvError`, `s3t4` pins the absent/foreign
+// `Finalized` acknowledgement, and `completion_timeout_is_not_an_ack...` pins
+// `Err(Elapsed)`. The matching-own-row `Finalized` outcome is exercised in
+// `bridge_completion::tests::tui_direct_bridge_completion_rejects_uncommitted_matching_inflight`;
+// its retained-anchor assertion kills X6 (clearing before delivery validation).
+// These checks keep the contract at `docs/relay-state-contract.md:41` — never
+// use timeout-as-success, blind skip, or blind resend — executable on each
+// completion path.
 #[cfg(unix)]
 #[test]
 fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
@@ -6423,7 +6424,7 @@ mod synthetic_terminal_ordering_tests;
 mod retired_pending_start_claim_tests;
 
 #[cfg(unix)]
-mod pending_start_input_fence_tests;
+mod pending_start_worker_claim_tests;
 
 #[cfg(unix)]
 mod relayerless_claim_tests {

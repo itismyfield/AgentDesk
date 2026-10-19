@@ -585,23 +585,6 @@ pub(in crate::services::discord) mod capsule_observation {
         pub utf8_state: String,
     }
 
-    impl Summary {
-        pub(in crate::services::discord) fn origin_is_retired(&self) -> bool {
-            !self.origin.is_legacy()
-        }
-    }
-
-    pub(in crate::services::discord) fn recorded_original(
-        shared: &SharedData,
-        channel: ChannelId,
-    ) -> Option<serde_json::Value> {
-        let store = shared.tmux_relay_coord(channel).cancel_handoffs.clone();
-        let recorded = store.recorded.lock().unwrap_or_else(|e| e.into_inner());
-        recorded
-            .as_ref()
-            .map(|episode| serde_json::to_value(&episode.original).unwrap())
-    }
-
     pub(in crate::services::discord) async fn pending(
         shared: &SharedData,
         channel: ChannelId,

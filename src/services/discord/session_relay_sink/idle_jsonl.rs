@@ -238,6 +238,8 @@ pub(super) struct IdleCursor {
     pub offset: u64,
     pub source: (ProviderKind, u64, String, SourceFileIdentity),
     pub first_restore: bool,
+    /// `relay_output_replacements` for the path when this cursor was created.
+    pub replacements: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

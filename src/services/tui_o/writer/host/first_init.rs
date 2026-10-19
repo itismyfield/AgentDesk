@@ -1,4 +1,5 @@
-//! A channel's first activation: the init it starts from, written only unless Legacy took it.
+//! A channel's first activation: the init it starts from, written only under the gate's admission
+//! and only unless Legacy took it.
 //! A Codex channel may start with no source bound yet, or over sources holding only metadata.
 
 use std::path::Path;
@@ -21,7 +22,7 @@ use crate::services::tui_o::writer::codex_adoption::scan::{Scanned, scan};
 use crate::services::tui_o::writer::codex_adoption::{Parse, Suffix};
 use crate::services::tui_o::writer::{deferred, late_adopt, renumbered};
 
-use super::recover::{Recovered, recover};
+use super::recover::{Recovered, recover_boot};
 
 /// Bytes a channel's metadata prefixes may hold; the read runs under the adoption lock.
 const METADATA_BUDGET: u64 = 1 << 20;
@@ -57,77 +58,90 @@ pub(super) async fn start<I: HostIo>(
             release(candidate, &alarms, channel, "legacy cursor not established");
             return None;
         }
-        let facts = loop {
-            unless_stopped(stopping, until_owned(gate)).await?;
-            let facts = unless_stopped(stopping, io.activation_facts(channel, provider)).await?;
-            // Facts read before a lost gate are not acted on; wait for Owned and read again.
-            if owned_now(channel, gate) {
-                break facts;
-            }
-        };
-        let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
-        let created = match legacy {
-            None if provider == ShadowProvider::Codex => {
-                let sources = || codex_sources(&*log, channel);
-                activation::activate_with(&fresh, channel, facts, local, candidate, sources)
-            }
-            None => activation::activate(&fresh, channel, facts, &*log, local, candidate),
-            Some(legacy) => 'held: {
-                // Sessions on another node or an override end it before an open turn defers it.
-                let last = facts.as_ref().ok().and_then(ActivationFacts::final_blocker);
-                if let Some(detail) = last {
-                    release(candidate, &alarms, channel, &detail);
-                    return None;
+        let created = loop {
+            let facts = loop {
+                unless_stopped(stopping, until_owned(gate)).await?;
+                let facts =
+                    unless_stopped(stopping, io.activation_facts(channel, provider)).await?;
+                // Facts read before a lost gate are not acted on; wait for Owned and read again.
+                if owned_now(channel, gate) {
+                    break facts;
                 }
-                let events = log.binding_events_since(channel, 0);
-                let events = events.map_err(|error| format!("binding log: {error}"));
-                // O's own copy names each file once; the shared log keeps every dev it read.
-                let events = events.map(renumbered::first_named);
-                let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
-                let current = events.as_deref().ok().and_then(adoption::current);
-                let first = deferred::first(&**io, channel, provider, &legacy, events);
-                let snapshot = match unless_stopped(stopping, first).await? {
-                    deferred::First::Adopt(snapshot) => snapshot,
-                    deferred::First::Wait(refused) => {
-                        let detail = refused.to_string();
-                        let Some((source, _)) = current else {
-                            release(candidate, &alarms, channel, &detail);
-                            return None;
-                        };
-                        if !candidate.defer(channel) {
-                            release(candidate, &alarms, channel, &detail);
-                            return None;
-                        }
-                        tracing::info!(channel, %refused, "[tui_o] adoption waits for Legacy");
-                        let waiting = deferred::Waiting {
-                            io: &**io,
-                            channel,
-                            provider,
-                            candidate,
-                            gate: &**gate,
-                            store: &fresh,
-                            log: &*log,
-                            legacy,
-                            bound: (source, seq),
-                            late: false,
-                        };
-                        let retried = deferred::retry(waiting, refused, seq);
-                        if unless_stopped(stopping, retried).await != Some(true) {
-                            return None;
-                        }
-                        break 'held Ok(());
-                    }
-                    deferred::First::Leave(refused) => {
-                        release(candidate, &alarms, channel, &refused.to_string());
+            };
+            let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
+            let decided = match legacy.clone() {
+                None if provider == ShadowProvider::Codex => {
+                    let sources = || codex_sources(&*log, channel);
+                    admitted(channel, gate, || {
+                        activation::activate_with(&fresh, channel, facts, local, candidate, sources)
+                    })
+                }
+                None => admitted(channel, gate, || {
+                    activation::activate(&fresh, channel, facts, &*log, local, candidate)
+                }),
+                Some(legacy) => 'held: {
+                    // Sessions on another node or an override end it before an open turn defers it.
+                    let last = facts.as_ref().ok().and_then(ActivationFacts::final_blocker);
+                    if let Some(detail) = last {
+                        release(candidate, &alarms, channel, &detail);
                         return None;
                     }
-                };
-                let sources = || {
-                    snapshot
-                        .recheck(&*legacy, &*log, channel)
-                        .map_err(String::from)
-                };
-                activation::activate_with(&fresh, channel, facts, local, candidate, sources)
+                    let events = log.binding_events_since(channel, 0);
+                    let events = events.map_err(|error| format!("binding log: {error}"));
+                    // O's own copy names each file once; the shared log keeps every dev it read.
+                    let events = events.map(renumbered::first_named);
+                    let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
+                    let current = events.as_deref().ok().and_then(adoption::current);
+                    let first = deferred::first(&**io, channel, provider, &legacy, events);
+                    let snapshot = match unless_stopped(stopping, first).await? {
+                        deferred::First::Adopt(snapshot) => snapshot,
+                        deferred::First::Wait(refused) => {
+                            let detail = refused.to_string();
+                            let Some((source, _)) = current else {
+                                release(candidate, &alarms, channel, &detail);
+                                return None;
+                            };
+                            if !candidate.defer(channel) {
+                                release(candidate, &alarms, channel, &detail);
+                                return None;
+                            }
+                            tracing::info!(channel, %refused, "[tui_o] adoption waits for Legacy");
+                            let waiting = deferred::Waiting {
+                                io: &**io,
+                                channel,
+                                provider,
+                                candidate,
+                                gate: &**gate,
+                                store: &fresh,
+                                log: &*log,
+                                legacy,
+                                bound: (source, seq),
+                                late: false,
+                            };
+                            let retried = deferred::retry(waiting, refused, seq);
+                            if unless_stopped(stopping, retried).await != Some(true) {
+                                return None;
+                            }
+                            break 'held Some(Ok(()));
+                        }
+                        deferred::First::Leave(refused) => {
+                            release(candidate, &alarms, channel, &refused.to_string());
+                            return None;
+                        }
+                    };
+                    let sources = || {
+                        snapshot
+                            .recheck(&*legacy, &*log, channel)
+                            .map_err(String::from)
+                    };
+                    admitted(channel, gate, || {
+                        activation::activate_with(&fresh, channel, facts, local, candidate, sources)
+                    })
+                }
+            };
+            // A gate closed after the facts were judged wrote nothing; wait for Owned again.
+            if let Some(created) = decided {
+                break created;
             }
         };
         if let Err(detail) = created {
@@ -140,7 +154,7 @@ pub(super) async fn start<I: HostIo>(
             return None;
         }
     }
-    match recover(runtime_root, channel, None) {
+    match recover_boot(runtime_root, channel, stopping).await? {
         Ok(Recovered::Store(store)) => {
             io.adopted(channel, provider);
             let bindings = log;
@@ -157,9 +171,39 @@ pub(super) async fn start<I: HostIo>(
     }
 }
 
+/// Writes the first `init` under the gate's admission: a drain's close or a lease transition waits
+/// for its synchronous I/O and the activation serial lock. `None` once the gate is not Owned.
+fn admitted(
+    _channel: u64,
+    gate: &OwnershipGate,
+    activate: impl FnOnce() -> Result<(), String>,
+) -> Option<Result<(), String>> {
+    #[cfg(test)]
+    if std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some("first_init_unfenced") {
+        return Some(activate());
+    }
+    #[cfg(test)]
+    {
+        use activation::test_hook::{Step, note_refused, run};
+        if let Err(detail) = run(_channel, Step::BeforeAdmit) {
+            return Some(Err(detail));
+        }
+        let admitted = gate.admit(|_| activate());
+        if admitted.is_none() {
+            note_refused(_channel);
+        }
+        admitted
+    }
+    #[cfg(not(test))]
+    gate.admit(|_| activate())
+}
+
 /// A Codex init judged under the adoption lock: none while the typed log names no source, else
 /// each bound source from the end of a prefix holding only metadata.
-fn codex_sources<B: BindingEvents>(bindings: &B, channel: u64) -> Result<Vec<InitSource>, String> {
+pub(super) fn codex_sources<B: BindingEvents>(
+    bindings: &B,
+    channel: u64,
+) -> Result<Vec<InitSource>, String> {
     let events = bindings.binding_events_since(channel, 0);
     let events = events.map_err(|error| format!("binding log: {error}"))?;
     if !events.iter().any(names_source) {

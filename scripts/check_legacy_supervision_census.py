@@ -17,10 +17,10 @@ D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
 ENTRIES = {}
 # Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
-# "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
+# "*" pins a whole file.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'eb11a170ba7bf7d135a352e69f4a1d8a3810a28284615e651383923a427baccd'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '8741eb7722fa56b8dce703f6c80bd2e89bda4bcd206ef9499af621d4e447d0f4'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
@@ -29,9 +29,10 @@ PROTECTED = {
         'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
-    'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1d692d44f1073550b7163ffac6d16a1c2ed51c42f23edd1d5524dc824181ae27'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1ae7b07a407e0e867fa3bc3e2c28e51b2541ed818a3c75974784d4da577cbbac'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
+# The deleted RETIRED gate (#6325 23C): any production return of its owner or readers fails.
+RETIRED_GATE = re.compile(r"\b(?:legacy_supervision|legacy_retired|retired_in|RetiredForTest)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 
 def digest(code):
@@ -85,7 +86,9 @@ def audit(sources, entries=ENTRIES, protected=PROTECTED, skips=frozenset()):
             errors.append(f"{path}: unclassified primitive file")
         if path in entries or path in skips or path in tests:
             continue
-        pattern = SYMBOL if not ("RETIRED" in code and "legacy_supervision" in code) else re.compile(SYMBOL.pattern + r"|\bRETIRED\b")
+        if "/legacy_supervision" in path:
+            errors.append(f"{path}: deleted RETIRED owner restored")
+        pattern = re.compile(SYMBOL.pattern + "|" + RETIRED_GATE.pattern)
         for match in pattern.finditer(code):
             owners = FN.findall(code[:match.start()])
             line = code[:match.start()].count("\n") + 1
@@ -109,42 +112,45 @@ def sync_skips(root, promoted_paths=(), deleted_paths=()):
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
+    pin.validate_basename_mounts(files, basename, resolved)
     path = root / "scripts/test_only_module_skip_pin_paths.py"
     if not path.is_file():
         path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
-    actual = {p.relative_to(root).as_posix() for p in basename | resolved}
+    actual = {p.relative_to(root).as_posix() for p in resolved}
+    pinned = pin.PINNED_RESOLVER_TEST_ONLY_FILES
     existing = {p.relative_to(root).as_posix() for p in files}
     promoted = set(promoted_paths)
     deleted = set(deleted_paths)
     for rel in sorted(deleted):
         if (root / rel).exists() or (root / rel).is_symlink():
             raise RuntimeError("deletion path still exists: " + rel)
-        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+        if rel not in pinned:
             raise RuntimeError("deletion is not pinned: " + rel)
     for rel in sorted(promoted):
         if rel not in existing:
             raise RuntimeError("promotion path missing: " + rel)
         if rel in actual:
             raise RuntimeError("promotion remains test-only: " + rel)
-        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+        if rel not in pinned:
             raise RuntimeError("promotion is not pinned: " + rel)
-    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted - deleted:
+    if pinned - actual - promoted - deleted:
         raise RuntimeError("refusing pin removal")
     for rel in sorted(promoted | deleted):
         pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
         source, count = re.subn(pattern, '', source)
         if count != 1:
             raise RuntimeError("removal pin is ambiguous: " + rel)
-    for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
-        measured = {p.relative_to(root).as_posix() for p in paths}
-        for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
-            start = source.index(name + " =")
-            end = source.index("\n    }\n)", start)
-            directory = re.escape(Path(rel).parent.as_posix() + '/')
-            sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
-            at = start + sibling.start() if sibling else end
-            source = source[:at] + '\n        "' + rel + '",' + source[at:]
+    for rel in sorted(actual - pinned):
+        start = source.index("PINNED_RESOLVER_TEST_ONLY_FILES =")
+        closing = re.search(r"\n[ \t]*\}\s*\)", source[start:])
+        if closing is None:
+            raise RuntimeError("resolver pin closing delimiter missing")
+        end = start + closing.start()
+        directory = re.escape(Path(rel).parent.as_posix() + '/')
+        sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
+        at = start + sibling.start() if sibling else end
+        source = source[:at] + '\n        "' + rel + '",' + source[at:]
     path.write_text(source)
 
 

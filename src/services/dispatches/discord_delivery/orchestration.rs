@@ -40,9 +40,8 @@ fn shared_discord_http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-fn resolve_dispatch_thread_owner_user_id(pg_pool: Option<&PgPool>) -> Option<u64> {
-    let config = crate::config::load_graceful();
-    crate::services::escalation_settings::effective_owner_user_id_with_backends(pg_pool, &config)
+fn resolve_dispatch_thread_owner_user_id() -> Option<u64> {
+    crate::config::load_graceful().discord.owner_id
 }
 
 fn context_slot_index(dispatch_context: Option<&serde_json::Value>) -> Option<i64> {
@@ -293,7 +292,7 @@ async fn apply_dispatch_status_reaction_state(
 pub(crate) struct HttpDispatchTransport {
     announce_bot_token: Option<String>,
     discord_api_base: String,
-    thread_owner_user_id: Option<u64>,
+    pub(super) thread_owner_user_id: Option<u64>,
     pg_pool: Option<PgPool>,
 }
 
@@ -304,7 +303,7 @@ impl HttpDispatchTransport {
                 crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
             ),
             discord_api_base: discord_api_base_url(),
-            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(pg_pool.as_ref()),
+            thread_owner_user_id: resolve_dispatch_thread_owner_user_id(),
             pg_pool,
         }
     }

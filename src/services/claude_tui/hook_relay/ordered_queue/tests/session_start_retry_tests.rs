@@ -125,9 +125,9 @@ impl Retry {
         std::fs::read_dir(dir).map_or(0, |d| d.count())
     }
 
-    /// Waits up to 5s; the caller asserts the outcome so a mutant fails at its own assertion.
+    /// Waits up to `LIVENESS`; the caller asserts the outcome so a mutant fails at its assertion.
     async fn settled(&self, mut done: impl FnMut(&Self) -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + LIVENESS;
         while !done(self) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -145,7 +145,7 @@ impl Drop for Retry {
             stop.store(true, Ordering::Release);
         }
         for (_, worker) in self.workers.drain(..) {
-            let _ = worker.join();
+            release_worker(worker);
         }
         set_test_root(None);
         reset_deferred_adoptions_for_tests();

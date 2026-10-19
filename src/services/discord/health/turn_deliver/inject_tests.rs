@@ -27,7 +27,8 @@ const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"con
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
 /// Scripted `tmux` of `size` (80,24) pasting only at `live`: folded, or flat with `draw`/`draw.rows`;
-/// Enter records the complete submitted buffer. `gate`/`hold` park keys/capture until `go`.
+/// Enter records the complete submitted buffer, or the `receipt` JSON line with `@BODY@` as it and
+/// `@HEAD@` as its header line. `gate`/`hold` park keys/capture until `go`.
 const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -60,7 +61,10 @@ if-shell)
       cat "$d/draw"; printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"
       if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
       cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
-  send-keys*) python3 -c 'import json,sys; print(json.dumps({"type":"queue-operation","operation":"enqueue","content":open(sys.argv[1]).read(),"sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}))' "$d/buffer" >> "$d/transcript.jsonl" ;;
+  send-keys*) python3 -c 'import json,os,sys; b=open(sys.argv[1]).read(); t=sys.argv[2]
+r=open(t).read().strip() if os.path.exists(t) else json.dumps({"type":"queue-operation","operation":"enqueue","content":"@BODY@","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"})
+e=lambda v: json.dumps(v)[1:-1]
+print(r.replace("@BODY@", e(b)).replace("@HEAD@", e(b.split("\n")[0])))' "$d/buffer" "$d/receipt" >> "$d/@T@" ;;
   esac ;;
 esac
 exit 0
@@ -75,6 +79,10 @@ pub(crate) struct InjectPane {
 }
 
 impl InjectPane {
+    /// The pane's Claude session, which names its transcript file as Claude does.
+    pub(crate) const SESSION: &str = "0b5ac7e2-6d1f-4a3e-9c84-2f7d1e6a9b30";
+    pub(crate) const TRANSCRIPT: &str = "0b5ac7e2-6d1f-4a3e-9c84-2f7d1e6a9b30.jsonl";
+
     pub(crate) fn new(channel: u64, mode: &str) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
@@ -83,7 +91,7 @@ impl InjectPane {
             channel,
             stash_allowlist: None,
         };
-        pane.set("transcript.jsonl", BUSY_TURN);
+        pane.set(Self::TRANSCRIPT, BUSY_TURN);
         pane.set("attach", "0");
         pane.set(
             "cap.before",
@@ -93,7 +101,9 @@ impl InjectPane {
         let program = pane.path("tmux");
         pane.set(
             "tmux",
-            &FAKE_TMUX.replace("@D@", &pane.dir.path().display().to_string()),
+            &FAKE_TMUX
+                .replace("@D@", &pane.dir.path().display().to_string())
+                .replace("@T@", Self::TRANSCRIPT),
         );
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let session = pane.session();
@@ -116,7 +126,7 @@ impl InjectPane {
             .expect("external turn row");
         let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
             runtime_kind: RuntimeHandoffKind::ClaudeTui,
-            output_path: pane.path("transcript.jsonl").display().to_string(),
+            output_path: pane.path(Self::TRANSCRIPT).display().to_string(),
             relay_output_path: None,
             input_fifo_path: None,
             session_id: None,
@@ -134,7 +144,7 @@ impl InjectPane {
         self.stash_allowlist = allowlisted.then(|| StashChannelGuard::new(self.channel));
         let script = FAKE_STASH_TUI
             .replace("@D@", &self.dir.path().display().to_string())
-            .replace("@T@", &self.path("transcript.jsonl").display().to_string());
+            .replace("@T@", &self.path(Self::TRANSCRIPT).display().to_string());
         self.set("tmux", &script);
         for (name, value) in [
             ("attached", "4".to_string()),
@@ -182,7 +192,7 @@ impl InjectPane {
     }
 
     pub(crate) fn records(&self) -> Vec<String> {
-        self.lines("transcript.jsonl")
+        self.lines(Self::TRANSCRIPT)
             .into_iter()
             .skip(2)
             .map(|line| {
@@ -230,7 +240,7 @@ impl InjectPane {
     }
 
     /// Leaves only the channel name to name the pane.
-    async fn drop_row(&self, shared: &SharedData) {
+    pub(in crate::services::discord) async fn drop_row(&self, shared: &SharedData) {
         crate::services::discord::inflight::clear_inflight_state(
             &ProviderKind::Claude,
             self.channel,
@@ -865,30 +875,6 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
         ));
     }
     assert_eq!(observed, expected);
-}
-
-/// A channel whose input moved to the input runtime keeps its pane untouched.
-#[tokio::test(flavor = "current_thread")]
-async fn a_channel_closed_to_legacy_input_takes_no_paste() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let ch = 6_245_801;
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let pane = InjectPane::new(ch, "all");
-    let fence = crate::services::discord::input_runtime::fence::Gate::protect;
-    let gate = fence(ProviderKind::Claude, ch).expect("gate");
-    let _closing = gate.close().expect("closing");
-    let request = HumanInputRequest {
-        channel_id: ChannelId::new(ch),
-        provider: ProviderKind::Claude,
-        text: "status?".to_string(),
-        author_id: 200,
-        source: "imessage".to_string(),
-        metadata: None,
-        channel_name_hint: None,
-    };
-    let outcome = inject::attempt(&shared, &request, inject::Origin::External).await;
-    let refused = inject::InjectAttempt::NotSent("input_runtime_owned");
-    assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
 }
 
 /// A row stamped with another runtime stops the attempt before the session-transition guard
@@ -1545,7 +1531,7 @@ async fn an_idle_transcript_stops_before_the_reservation_and_the_pane() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let pane = InjectPane::new(ch, "all");
     let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
-    pane.set("transcript.jsonl", &ended);
+    pane.set(InjectPane::TRANSCRIPT, &ended);
     let transition = shared.session_transition_lock(ChannelId::new(ch));
     let _held = transition.try_lock_owned().expect("transition free");
     let request = HumanInputRequest {
@@ -1641,7 +1627,7 @@ async fn a_deliver_waiting_on_a_handback_claims_behind_it_and_the_kick_runs_the_
     end_turn(&shared, ch).await;
     pane.idle();
     pane.set(
-        "transcript.jsonl",
+        InjectPane::TRANSCRIPT,
         &format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n"),
     );
     let c = tokio::spawn({
@@ -1808,7 +1794,7 @@ async fn a_vetoed_delivery_logs_its_veto_and_ids_without_the_text() {
     register_inject_runtime(&registry, &[ch], None).await;
     let pane = InjectPane::new(ch, "all");
     let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
-    pane.set("transcript.jsonl", &ended);
+    pane.set(InjectPane::TRANSCRIPT, &ended);
     let (delivered, logs) = deliver_logged(&registry, ch).await;
 
     let Ok(HumanInputDelivery::Queued {
@@ -1850,7 +1836,7 @@ async fn a_pane_veto_stays_logged_when_the_delivery_starts_or_fails() {
         let shared = register_inject_runtime(&registry, &[ch], None).await;
         let pane = InjectPane::new(ch, "all");
         let ended = format!("{BUSY_TURN}{{\"type\":\"result\",\"subtype\":\"success\"}}\n");
-        pane.set("transcript.jsonl", &ended);
+        pane.set(InjectPane::TRANSCRIPT, &ended);
         pane.drop_row(&shared).await;
         if start {
             start_without_gateway(ch);
@@ -1866,3 +1852,6 @@ async fn a_pane_veto_stays_logged_when_the_delivery_starts_or_fails() {
         assert!(line.contains("inject_attempted=true"), "{line}");
     }
 }
+
+#[path = "inject/turn_mode_reading_tests.rs"]
+mod turn_mode_reading;

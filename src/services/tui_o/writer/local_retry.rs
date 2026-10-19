@@ -20,7 +20,8 @@ pub(crate) struct Pending {
 pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
     (0..ledger.next_serial()).find_map(|serial| {
         let root = ledger.piece(serial)?;
-        if root.local_retry != Some(LocalRetryMark::Budget)
+        if ledger.excluded(&root.unit_key).is_some()
+            || root.local_retry != Some(LocalRetryMark::Budget)
             || root.outcome != Some(PieceOutcome::NotFound)
             || ledger.latest_piece(&root.unit_key, root.piece_index)?.0 != serial
         {
@@ -77,6 +78,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let Some(root) = pending(self.store().ledger()) else {
             return Step::Done;
         };
+        if let Some(step) = self.exclude_tool_result(&root.piece.unit_key) {
+            return step;
+        }
         if now < root.due {
             return Step::LeaseBusy;
         }

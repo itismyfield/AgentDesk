@@ -1,4 +1,3 @@
-use super::codex_adoption_runtime::boot::{BootRole, record_role};
 use super::*;
 #[cfg(test)]
 use crate::services::cluster::channel_home_boot::restore_mutant;
@@ -308,13 +307,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         boot_config.tui_o.as_ref(),
     );
     super::turn_presence::supervisor::register(&provider, &confirmed);
-    // Installed before the relay starts, so the first discovery pass is observed; off, `None`.
-    let adoption = super::codex_adoption_runtime::install(
-        &shared,
-        &provider,
-        &token_hash,
-        boot_config.tui_o.as_ref(),
-    );
     super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());
 
     // Phase 5.2 of intake-node-routing (issue #2009): populate
@@ -336,7 +328,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     }
 
     if !modules.gateway {
-        record_role(adoption.as_ref(), BootRole::RestWorker);
         health_registry
             .register_worker(provider.as_str().to_string(), shared.clone())
             .await;
@@ -398,7 +389,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         GatewayLeaseOutcome::Proceed(Some(acquired)) => (Some(acquired.lease), acquired.waiter),
         GatewayLeaseOutcome::Proceed(None) => (None, None),
         GatewayLeaseOutcome::Standby => {
-            record_role(adoption.as_ref(), BootRole::Standby);
             // Standby can execute full turns through the intake worker. Always
             // register its SharedData so detailed health proves either the real
             // active state or an explicit idle provider entry. This also makes
@@ -429,7 +419,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         }
     };
 
-    record_role(adoption.as_ref(), BootRole::Gateway);
     // Register and fence the gateway runtime before it can admit intake-worker
     // work. The poise setup callback no longer owns marker-poller startup.
     health_registry
@@ -441,16 +430,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Registered before the writer host reads the registry for each channel's gate.
     start_channel_homes(&shared, &provider, HomeRole::Gateway, &homes).await;
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
-    if boot_config
-        .tui_o
-        .as_ref()
-        .is_some_and(|config| config.shadow.enabled)
-    {
-        static SHADOW_REMOVAL_WARNING: std::sync::Once = std::sync::Once::new();
-        SHADOW_REMOVAL_WARNING.call_once(|| {
-            tracing::warn!("shadow observer was removed; setting ignored");
-        });
-    }
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
     run_bot_spawn_sigterm_handler(&shared, provider.clone());
@@ -665,11 +644,6 @@ fn legacy_reset(
             }
         })
     })
-}
-
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn c2b_standby_health_fixture_for_test() {
-    bootstrap_tests::standby_registration_settles_the_reconcile_obligation();
 }
 
 #[cfg(test)]

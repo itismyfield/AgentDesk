@@ -1,4 +1,5 @@
 //! #5937 — who may take the mailbox turn slot while work is already waiting.
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use poise::serenity_prelude::MessageId;
@@ -14,6 +15,32 @@ use super::{
 /// work. The idle-queue backstop runs every 60s, so three missed rounds mean
 /// the drain is wedged and holding arrivals back only feeds the overflow cap.
 pub(super) const INBOUND_ORDER_FAIL_OPEN_AFTER: Duration = Duration::from_secs(3 * 60);
+
+/// How often one head may come back to the queue front without claiming the slot
+/// and still wipe the stall clock: one return per backstop round the window spans.
+const RESTORES_DISCOUNTED_PER_HEAD: u32 = 3;
+
+/// The ids of the head `RequeueFront` last put back, and how often in a row it came
+/// back without claiming the slot.
+#[derive(Debug, Default)]
+pub(super) struct HeadRestoreStreak {
+    head: HashSet<MessageId>,
+    restores: u32,
+}
+
+/// A head back at the queue front ends a drain round, so its first returns wipe the
+/// stall clock. Past those it is a wedge: the clock keeps running toward the fail-open.
+pub(super) fn discount_restored_head(state: &mut ChannelMailboxState, head: &HashSet<MessageId>) {
+    let streak = &mut state.inbound_restore_streak;
+    if streak.head.is_disjoint(head) {
+        streak.restores = 0;
+    }
+    streak.head.clone_from(head);
+    streak.restores = streak.restores.saturating_add(1);
+    if streak.restores <= RESTORES_DISCOUNTED_PER_HEAD {
+        state.inbound_stall_since = None;
+    }
+}
 
 /// Whether a turn claim may take an idle slot ahead of queued work.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -107,6 +134,7 @@ fn inbound_order_defers_claim(
             .contains(&user_message_id)
     {
         state.inbound_stall_since = None;
+        state.inbound_restore_streak = HeadRestoreStreak::default();
         return false;
     }
     let foreign_backlog = state.intervention_queue.iter().any(|item| {
@@ -126,9 +154,8 @@ fn inbound_order_defers_claim(
     if stalled_since.elapsed() < INBOUND_ORDER_FAIL_OPEN_AFTER {
         return true;
     }
-    // #5937 r3 — a full window of free-slot stall also proves this reservation's
-    // holder is gone: retire it and admit in the same pass. Returning `true`
-    // instead buys order for nobody — a retired reservation defers no one after.
+    // The same stalled window proves the reservation's holder is gone, so retire it. With no
+    // backlog queued nothing is left ahead; with one, admitting here is the fail-open itself.
     if reserved {
         retire_stalled_pending_dispatch(state);
     }
@@ -234,3 +261,7 @@ mod tests {
         assert!(!defers(&mut state, 5_937_454), "and stays open after");
     }
 }
+
+#[cfg(test)]
+#[path = "inbound_order_restore_tests.rs"]
+mod restore_tests;

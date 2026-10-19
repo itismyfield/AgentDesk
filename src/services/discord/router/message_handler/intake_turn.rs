@@ -32,9 +32,6 @@ pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
 mod input_effect_tests {
-    use super::*;
-    use crate::services::discord::input_runtime::fence::{self, Gate};
-    use futures::FutureExt;
 
     #[test]
     fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
@@ -42,7 +39,7 @@ mod input_effect_tests {
         let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
         let body = source.split_once(handler_marker.as_str()).unwrap().1;
         let start = body
-            .find("    let Some((route, bootstrapped_fresh_thread_session, redirected_permit))")
+            .find("    let Some((route, bootstrapped_fresh_thread_session))")
             .unwrap();
         let end = body[start..]
             .find("    let (mut session_id, mut memento_context_loaded")
@@ -54,70 +51,36 @@ mod input_effect_tests {
             "role override must not shadow the original native-clear provider"
         );
         assert!(
-            transition.contains("final_admission(&final_provider, channel_id, redirected_permit)")
-        );
-        assert!(
             transition.contains("(http, shared, token, &provider)"),
             "runtime transition and native-clear admission retain settings.provider"
         );
         let runtime = include_str!("intake_turn/runtime_transition.rs");
         assert!(runtime.contains("&mut t.recovered_fresh"));
     }
-
-    #[tokio::test]
-    async fn c1b_worker_core_refuses_closing_before_settings_or_voice_consumption() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(6_325_601);
-        let gate = Gate::protect(shared.provider.clone(), channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let closing = gate.close().unwrap();
-        let message = MessageId::new(6_325_502);
-        let announcement: crate::voice::prompt::VoiceTranscriptAnnouncement =
-            serde_json::from_value(serde_json::json!({
-                "transcript": "retained input", "user_id": "7", "utterance_id": "c1b-retained",
-                "language": "ko", "verbose_progress": false, "started_at": null,
-                "completed_at": null, "samples_written": null
-            }))
-            .unwrap();
-        crate::voice::announce_meta::global_store().insert(message, announcement.clone());
-        let settings = shared.settings.write().await;
-        let http = Arc::new(serenity::http::Http::new("Bot input-test-no-network"));
-        let request = IntakeRequest {
-            intake_outbox_id: None,
-            channel_id: channel,
-            user_msg_id: MessageId::new(6_325_502),
-            source_message_ids: Vec::new(),
-            busy_followup_retry_user_msg_id: MessageId::new(6_325_502),
-            request_owner: UserId::new(7),
-            request_owner_name: "test".into(),
-            user_text: "input".into(),
-            reply_to_user_message: false,
-            defer_watcher_resume: false,
-            wait_for_completion: false,
-            merge_consecutive: false,
-            reply_context: None,
-            has_reply_boundary: false,
-            dm_hint: Some(false),
-            turn_kind: TurnKind::Foreground,
-            preserve_on_cancel: false,
-        };
-        let result = execute_intake_turn_core(&http, &shared, "test", request, Vec::new())
-            .now_or_never()
-            .expect("refusal cannot wait on settings or network");
-        assert!(result.unwrap_err().to_string().contains("Closing"));
-        assert!(shared.core.lock().await.sessions.get(&channel).is_none());
-        assert_eq!(
-            crate::voice::announce_meta::global_store().take(message),
-            Some(announcement)
-        );
-        drop(settings);
-        closing.drain().await;
-    }
 }
 
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
     use super::*;
+
+    #[test]
+    fn intake_body_keeps_a_small_caller_future() {
+        fn future_bytes<F>(
+            _: impl FnOnce(
+                &'static IntakeDeps<'static>,
+                bool,
+                IntakeRequest,
+                (bool, Option<adk_thread::Route>),
+                crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+                Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+            ) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let bytes = future_bytes(handle_text_message);
+        println!("INTAKE_CALLER_FUTURE_BYTES={bytes}");
+        assert!(bytes <= 1024, "intake caller embeds {bytes} bytes");
+    }
 
     #[test]
     fn builder_adopts_worker_intake_outbox_identity() {
@@ -249,25 +212,6 @@ mod intake_outbox_state_builder_tests {
     }
 }
 
-use super::super::intake_gate::ledger as live;
-use crate::services::discord::input_runtime::fence::effect;
-
-impl IntakeDeps<'_> {
-    pub(in crate::services::discord) async fn hold_live(
-        shared: &Arc<SharedData>,
-        http: &Arc<serenity::Http>,
-        provider: &crate::services::provider::ProviderKind,
-        message: &serenity::Message,
-        kind: crate::services::discord::input_runtime::intake::admit::SourceKind,
-        prompt: Option<String>,
-    ) -> Result<bool, Error> {
-        Box::pin(live::hold_live(
-            shared, http, provider, message, kind, prompt,
-        ))
-        .await
-    }
-}
-
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
@@ -276,525 +220,490 @@ pub(super) async fn handle_text_message(
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
-    let permit = live::legacy_effect(deps, request.channel_id).await?;
-    if permit.is_none() && effect::current().is_none() {
-        return Box::pin(handle_text_message_admitted(
-            deps,
-            preserve_on_cancel,
-            request,
-            (_queued_drain, queued),
-            preloaded_uploads,
-            gate_resolved_voice_announcement,
-        ))
-        .await;
-    }
-    let (http, cache, ctx, shared, token) = (
-        deps.http.clone(),
-        deps.cache.cloned(),
-        deps.ctx_for_chained_dispatch.cloned(),
-        deps.shared.clone(),
-        deps.token.to_owned(),
-    );
-    effect::run(permit, async move {
-        Box::pin(handle_text_message_admitted(
-            &IntakeDeps {
-                http: &http,
-                cache: cache.as_ref(),
-                ctx_for_chained_dispatch: ctx.as_ref(),
-                shared: &shared,
-                token: &token,
-            },
-            preserve_on_cancel,
-            request,
-            (_queued_drain, queued),
-            preloaded_uploads,
-            gate_resolved_voice_announcement,
-        ))
-        .await
-    })
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_text_message_admitted(
-    deps: &IntakeDeps<'_>,
-    preserve_on_cancel: bool,
-    request: IntakeRequest,
-    (_queued_drain, queued): (bool, Option<adk_thread::Route>),
-    preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
-    gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Result<IntakeExecution, Error> {
-    let IntakeDeps {
-        http,
-        cache,
-        ctx_for_chained_dispatch,
-        shared,
-        token,
-    } = *deps;
-    let IntakeRequest {
-        intake_outbox_id,
-        channel_id,
-        user_msg_id,
-        source_message_ids,
-        busy_followup_retry_user_msg_id,
-        request_owner,
-        request_owner_name: request_owner_name_owned,
-        user_text: user_text_owned,
-        reply_to_user_message,
-        defer_watcher_resume,
-        wait_for_completion,
-        merge_consecutive,
-        reply_context,
-        has_reply_boundary,
-        dm_hint,
-        turn_kind,
-        preserve_on_cancel: _,
-    } = request;
-    let request_owner_name = request_owner_name_owned.as_str();
-    let user_text = user_text_owned.as_str();
-    let original_channel_id = channel_id;
-    live::legacy_allowed(shared, http, &shared.provider, channel_id).await?;
-    let stored_voice_announcement =
-        crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
-    let has_stored_voice_announcement = stored_voice_announcement.is_some();
-    let has_legacy_voice_announcement =
-        crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text);
-    let is_readable_voice_announcement =
-        crate::voice::prompt::is_readable_voice_transcript_announcement(user_text);
-    let voice_announcement_ref = if is_readable_voice_announcement {
-        crate::voice::prompt::parse_voice_transcript_announcement_ref(user_text)
-    } else {
-        None
-    };
-    let announce_bot_id = if has_stored_voice_announcement
-        || has_legacy_voice_announcement
-        || is_readable_voice_announcement
-    {
-        super::super::super::resolve_announce_bot_user_id(shared).await
-    } else {
-        None
-    };
-    let (voice_announcement, voice_announcement_already_accepted) =
-        voice_intake::resolve_intake_voice_announcement(
+    // Keep the intake body on the heap so worker and local caller frames stay small.
+    Box::pin(async move {
+        let IntakeDeps {
+            http,
+            cache,
+            ctx_for_chained_dispatch,
             shared,
+            token,
+        } = *deps;
+        let IntakeRequest {
+            intake_outbox_id,
             channel_id,
             user_msg_id,
+            source_message_ids,
+            busy_followup_retry_user_msg_id,
             request_owner,
-            announce_bot_id,
+            request_owner_name: request_owner_name_owned,
+            user_text: user_text_owned,
+            reply_to_user_message,
+            defer_watcher_resume,
+            wait_for_completion,
+            merge_consecutive,
+            reply_context,
+            has_reply_boundary,
+            dm_hint,
+            turn_kind,
+            preserve_on_cancel: _,
+        } = request;
+        let request_owner_name = request_owner_name_owned.as_str();
+        let user_text = user_text_owned.as_str();
+        let original_channel_id = channel_id;
+        let stored_voice_announcement =
+            crate::voice::announce_meta::global_store().take_with_acceptance(user_msg_id);
+        let has_stored_voice_announcement = stored_voice_announcement.is_some();
+        let has_legacy_voice_announcement =
+            crate::voice::prompt::is_voice_transcript_announcement_candidate(user_text);
+        let is_readable_voice_announcement =
+            crate::voice::prompt::is_readable_voice_transcript_announcement(user_text);
+        let voice_announcement_ref = if is_readable_voice_announcement {
+            crate::voice::prompt::parse_voice_transcript_announcement_ref(user_text)
+        } else {
+            None
+        };
+        let announce_bot_id = if has_stored_voice_announcement
+            || has_legacy_voice_announcement
+            || is_readable_voice_announcement
+        {
+            super::super::super::resolve_announce_bot_user_id(shared).await
+        } else {
+            None
+        };
+        let (voice_announcement, voice_announcement_already_accepted) =
+            voice_intake::resolve_intake_voice_announcement(
+                shared,
+                channel_id,
+                user_msg_id,
+                request_owner,
+                announce_bot_id,
+                is_readable_voice_announcement,
+                &voice_announcement_ref,
+                gate_resolved_voice_announcement,
+                stored_voice_announcement,
+            )
+            .await;
+        // #3464: scope unauthorized voice announcements to the owning agent — a
+        // non-owning agent must not fall through to generic handling and answer
+        // (multi-agent reply storm). Decision + one-shot warn live in
+        // `voice_announcement_scope` (this file is LoC-frozen).
+        if super::voice_announcement_scope::drop_unauthorized_voice_announcement(
+            has_stored_voice_announcement,
+            has_legacy_voice_announcement,
             is_readable_voice_announcement,
-            &voice_announcement_ref,
-            gate_resolved_voice_announcement,
-            stored_voice_announcement,
-        )
-        .await;
-    // #3464: scope unauthorized voice announcements to the owning agent — a
-    // non-owning agent must not fall through to generic handling and answer
-    // (multi-agent reply storm). Decision + one-shot warn live in
-    // `voice_announcement_scope` (this file is LoC-frozen).
-    if super::voice_announcement_scope::drop_unauthorized_voice_announcement(
-        has_stored_voice_announcement,
-        has_legacy_voice_announcement,
-        is_readable_voice_announcement,
-        voice_announcement.is_some(),
-        announce_bot_id,
-        request_owner,
-        channel_id,
-        user_msg_id,
-    ) {
-        return Ok(IntakeExecution::Executed);
-    }
-    let is_voice_announcement = voice_announcement.is_some();
-    let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
-        let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
-        if let Some(started_at) = announcement.started_at.as_deref() {
-            context.push_str(&format!("\nvoice_started_at: {started_at}"));
-        }
-        if let Some(completed_at) = announcement.completed_at.as_deref() {
-            context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
-        }
-        if let Some(samples_written) = announcement.samples_written {
-            context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
-        }
-        crate::voice::prompt::voice_bridge_prompt(
-            &announcement.transcript,
-            &announcement.language,
-            announcement.verbose_progress,
-            Some(&context),
-        )
-    });
-    // #2266: keep the original Discord author (the announce bot, for a voice-transcript announcement) so the race-loss enqueue path can
-    // attribute the queued `Intervention` to the announce bot. When the
-    // queued turn later re-enters `handle_text_message` via the
-    // dispatch/kickoff hooks, the same `announce_bot_id == Some(request_owner)`
-    // check (line ~2274) will pass and the reinserted voice payload (or
-    // the embedded copy lifted into `stored_voice_announcement`) will be
-    // honored instead of treated as spoofed. The post-rebind
-    // `request_owner` below is the voice user id, used only for the rest
-    // of the active-turn flow.
-    let original_request_owner = request_owner;
-    let voice_request_owner_name;
-    let request_owner = voice_announcement
-        .as_ref()
-        .and_then(|announcement| announcement.user_id.parse::<u64>().ok())
-        .map(UserId::new)
-        .unwrap_or(request_owner);
-    let request_owner_name = if let Some(announcement) = voice_announcement.as_ref() {
-        voice_request_owner_name = format!("voice-user-{}", announcement.user_id);
-        voice_request_owner_name.as_str()
-    } else {
-        request_owner_name
-    };
-    let user_text = voice_announcement
-        .as_ref()
-        .map(|announcement| announcement.transcript.as_str())
-        .unwrap_or(user_text);
-    let voice_route_outcome = route_voice_transcript_announcement_once(
-        shared.pg_pool.as_ref(),
-        channel_id,
-        user_msg_id,
-        voice_announcement_already_accepted,
-        voice_announcement.as_ref(),
-        |announcement| {
-            let voice_barge_in = shared.voice_barge_in.clone();
-            let shared = Arc::clone(shared);
-            async move {
-                voice_barge_in
-                    .try_handle_voice_transcript_announcement(&shared, channel_id, &announcement)
-                    .await
-            }
-        },
-    )
-    .await;
-    if voice_route_outcome.bypasses_normal_turn() {
-        return Ok(IntakeExecution::Executed);
-    }
-    if !is_voice_announcement && live::try_text_reply(shared, http, channel_id, user_text).await? {
-        return Ok(IntakeExecution::Executed);
-    }
-    let channel_lookup = channel_id.to_channel(http).await.ok();
-    let live_events = &shared.ui.placeholder_live_events;
-    live_events.observe_panel_channel_kind(channel_id, dm_hint, channel_lookup.as_ref());
-    let is_dm_channel = matches!(channel_lookup, Some(serenity::Channel::Private(_)));
-    let is_dm_channel = super::super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
-    shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
-    let (settings_provider, allowed_tools) = {
-        let settings = shared.settings.read().await;
-        (settings.provider.clone(), settings.allowed_tools.clone())
-    };
-    let dm_default_agent = if is_dm_channel {
-        super::super::super::agentdesk_config::resolve_dm_default_agent(&settings_provider)
-    } else {
-        None
-    };
-    let (early_stale_session_id, early_channel_name) = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .map(|session| (session.session_id.clone(), session.channel_name.clone()))
-            .unwrap_or_default()
-    };
-    let early_thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
-    let early_resolved_channel_name = if early_channel_name.is_none() {
-        let (channel_name, _) = resolve_channel_category(http, cache, channel_id).await;
-        channel_name
-    } else {
-        None
-    };
-    let early_role_binding = resolve_thread_role_binding(
-        channel_id,
-        early_channel_name
-            .as_deref()
-            .or(early_resolved_channel_name.as_deref()),
-        early_thread_parent.as_ref(),
-    )
-    .role_binding
-    .or_else(|| {
-        dm_default_agent
-            .as_ref()
-            .map(|resolved| resolved.role_binding.clone())
-    });
-    let early_provider = early_role_binding
-        .as_ref()
-        .and_then(|binding| binding.provider.clone())
-        .unwrap_or_else(|| settings_provider.clone());
-    let early_fast_mode_channel_id =
-        effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
-    let inbound = (channel_id, channel_id, _queued_drain);
-    let input = (preloaded_uploads, None);
-    let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
-    let Some(preloaded_uploads) = admitted.await? else {
-        return Ok(IntakeExecution::Executed);
-    };
-    if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
-        &early_provider,
-        user_text,
-        super::super::super::commands::channel_codex_goals_setting(
-            shared,
-            early_fast_mode_channel_id,
-        )
-        .await,
-    ) {
-        consume_codex_goal_lifecycle_command(
-            http,
-            shared,
-            &early_provider,
+            voice_announcement.is_some(),
+            announce_bot_id,
+            request_owner,
             channel_id,
-            command,
-            early_stale_session_id,
+            user_msg_id,
+        ) {
+            return Ok(IntakeExecution::Executed);
+        }
+        let is_voice_announcement = voice_announcement.is_some();
+        let voice_prompt_text = voice_announcement.as_ref().map(|announcement| {
+            let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
+            if let Some(started_at) = announcement.started_at.as_deref() {
+                context.push_str(&format!("\nvoice_started_at: {started_at}"));
+            }
+            if let Some(completed_at) = announcement.completed_at.as_deref() {
+                context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
+            }
+            if let Some(samples_written) = announcement.samples_written {
+                context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
+            }
+            crate::voice::prompt::voice_bridge_prompt(
+                &announcement.transcript,
+                &announcement.language,
+                announcement.verbose_progress,
+                Some(&context),
+            )
+        });
+        // #2266: keep the original Discord author (the announce bot, for a voice-transcript announcement) so the race-loss enqueue path can
+        // attribute the queued `Intervention` to the announce bot. When the
+        // queued turn later re-enters `handle_text_message` via the
+        // dispatch/kickoff hooks, the same `announce_bot_id == Some(request_owner)`
+        // check (line ~2274) will pass and the reinserted voice payload (or
+        // the embedded copy lifted into `stored_voice_announcement`) will be
+        // honored instead of treated as spoofed. The post-rebind
+        // `request_owner` below is the voice user id, used only for the rest
+        // of the active-turn flow.
+        let original_request_owner = request_owner;
+        let voice_request_owner_name;
+        let request_owner = voice_announcement
+            .as_ref()
+            .and_then(|announcement| announcement.user_id.parse::<u64>().ok())
+            .map(UserId::new)
+            .unwrap_or(request_owner);
+        let request_owner_name = if let Some(announcement) = voice_announcement.as_ref() {
+            voice_request_owner_name = format!("voice-user-{}", announcement.user_id);
+            voice_request_owner_name.as_str()
+        } else {
+            request_owner_name
+        };
+        let user_text = voice_announcement
+            .as_ref()
+            .map(|announcement| announcement.transcript.as_str())
+            .unwrap_or(user_text);
+        let voice_route_outcome = route_voice_transcript_announcement_once(
+            shared.pg_pool.as_ref(),
+            channel_id,
+            user_msg_id,
+            voice_announcement_already_accepted,
+            voice_announcement.as_ref(),
+            |announcement| {
+                let voice_barge_in = shared.voice_barge_in.clone();
+                let shared = Arc::clone(shared);
+                async move {
+                    voice_barge_in
+                        .try_handle_voice_transcript_announcement(&shared, channel_id, &announcement)
+                        .await
+                }
+            },
         )
         .await;
-        return Ok(IntakeExecution::Executed);
-    }
-    // #5660 [R1]: ordinary inputs own their session state before later awaits.
-    let session_info = {
-        let mut data = shared.core.lock().await;
-        load_session_runtime_state(&mut data.sessions, channel_id)
-    };
-    let mut pending_uploads = preloaded_uploads;
-    let mut session_was_cleared = None;
-    if !pre_admission_control::may_complete_locally(user_text) {
-        let (taken_uploads, cleared) =
-            pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
-        pending_uploads.splice(0..0, taken_uploads);
-        session_was_cleared = Some(cleared);
-        #[cfg(test)]
-        super::super::intake_dispatch::after_upload_take(original_channel_id).await;
-    }
-    let provider = settings_provider;
-    let parsed_dispatch = super::super::super::adk_session::parse_dispatch_id(user_text);
-    let dispatch_id_for_thread =
-        dispatch_runtime::unheld_dispatch(shared, original_channel_id, parsed_dispatch).await;
-    let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
-        super::super::lookup_dispatch_info(shared.api_port, did).await
-    } else {
-        None
-    };
-    let pre_session_dispatch_type = dispatch_info_cached
-        .as_ref()
-        .and_then(|info| info.dispatch_type.as_deref());
+        if voice_route_outcome.bypasses_normal_turn() {
+            return Ok(IntakeExecution::Executed);
+        }
+        if !is_voice_announcement
+            && shared
+                .voice_barge_in
+                .try_handle_voice_channel_text_reply(http, channel_id, user_text, &shared.provider)
+                .await
+        {
+            return Ok(IntakeExecution::Executed);
+        }
+        let channel_lookup = channel_id.to_channel(http).await.ok();
+        let live_events = &shared.ui.placeholder_live_events;
+        live_events.observe_panel_channel_kind(channel_id, dm_hint, channel_lookup.as_ref());
+        let is_dm_channel = matches!(channel_lookup, Some(serenity::Channel::Private(_)));
+        let is_dm_channel = super::super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
+        shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
+        let (settings_provider, allowed_tools) = {
+            let settings = shared.settings.read().await;
+            (settings.provider.clone(), settings.allowed_tools.clone())
+        };
+        let dm_default_agent = if is_dm_channel {
+            super::super::super::agentdesk_config::resolve_dm_default_agent(&settings_provider)
+        } else {
+            None
+        };
+        let (early_stale_session_id, early_channel_name) = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .map(|session| (session.session_id.clone(), session.channel_name.clone()))
+                .unwrap_or_default()
+        };
+        let early_thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
+        let early_resolved_channel_name = if early_channel_name.is_none() {
+            let (channel_name, _) = resolve_channel_category(http, cache, channel_id).await;
+            channel_name
+        } else {
+            None
+        };
+        let early_role_binding = resolve_thread_role_binding(
+            channel_id,
+            early_channel_name
+                .as_deref()
+                .or(early_resolved_channel_name.as_deref()),
+            early_thread_parent.as_ref(),
+        )
+        .role_binding
+        .or_else(|| {
+            dm_default_agent
+                .as_ref()
+                .map(|resolved| resolved.role_binding.clone())
+        });
+        let early_provider = early_role_binding
+            .as_ref()
+            .and_then(|binding| binding.provider.clone())
+            .unwrap_or_else(|| settings_provider.clone());
+        let early_fast_mode_channel_id =
+            effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
+        let inbound = (channel_id, channel_id, _queued_drain);
+        let input = (preloaded_uploads, None);
+        let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
+        let Some(preloaded_uploads) = admitted.await? else {
+            return Ok(IntakeExecution::Executed);
+        };
+        if let GoalCommandKind::Lifecycle(command) = classify_codex_goal_command_for_provider(
+            &early_provider,
+            user_text,
+            super::super::super::commands::channel_codex_goals_setting(
+                shared,
+                early_fast_mode_channel_id,
+            )
+            .await,
+        ) {
+            consume_codex_goal_lifecycle_command(
+                http,
+                shared,
+                &early_provider,
+                channel_id,
+                command,
+                early_stale_session_id,
+            )
+            .await;
+            return Ok(IntakeExecution::Executed);
+        }
+        // #5660 [R1]: ordinary inputs own their session state before later awaits.
+        let session_info = {
+            let mut data = shared.core.lock().await;
+            load_session_runtime_state(&mut data.sessions, channel_id)
+        };
+        let mut pending_uploads = preloaded_uploads;
+        let mut session_was_cleared = None;
+        if !pre_admission_control::may_complete_locally(user_text) {
+            let (taken_uploads, cleared) =
+                pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
+            pending_uploads.splice(0..0, taken_uploads);
+            session_was_cleared = Some(cleared);
+            #[cfg(test)]
+            super::super::intake_dispatch::after_upload_take(original_channel_id).await;
+        }
+        let provider = settings_provider;
+        let parsed_dispatch = super::super::super::adk_session::parse_dispatch_id(user_text);
+        let dispatch_id_for_thread =
+            dispatch_runtime::unheld_dispatch(shared, original_channel_id, parsed_dispatch).await;
+        let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
+            super::super::lookup_dispatch_info(shared.api_port, did).await
+        } else {
+            None
+        };
+        let pre_session_dispatch_type = dispatch_info_cached
+            .as_ref()
+            .and_then(|info| info.dispatch_type.as_deref());
 
-    let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =
-        match session_info {
-            Some(info) => (info.0, info.1, info.2, false),
-            None => {
-                // Try auto-start from role_map workspace
-                let ch_name = {
-                    let data = shared.core.lock().await;
-                    data.sessions
-                        .get(&channel_id)
-                        .and_then(|s| s.channel_name.clone())
-                };
-                let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
-                if workspace.is_none()
-                    && let Some((parent_id, parent_name)) = early_thread_parent.as_ref()
-                {
-                    let parent_ch_name = parent_name.clone().or_else(|| {
-                        let data = shared.core.try_lock().ok()?;
+        let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =
+            match session_info {
+                Some(info) => (info.0, info.1, info.2, false),
+                None => {
+                    // Try auto-start from role_map workspace
+                    let ch_name = {
+                        let data = shared.core.lock().await;
                         data.sessions
-                            .get(parent_id)
-                            .and_then(|session| session.channel_name.clone())
-                    });
-                    workspace = resolve_thread_workspace(
-                        channel_id,
-                        ch_name.as_deref(),
-                        Some(&(*parent_id, parent_ch_name)),
-                    );
-                    if workspace.is_some() {
+                            .get(&channel_id)
+                            .and_then(|s| s.channel_name.clone())
+                    };
+                    let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
+                    if workspace.is_none()
+                        && let Some((parent_id, parent_name)) = early_thread_parent.as_ref()
+                    {
+                        let parent_ch_name = parent_name.clone().or_else(|| {
+                            let data = shared.core.try_lock().ok()?;
+                            data.sessions
+                                .get(parent_id)
+                                .and_then(|session| session.channel_name.clone())
+                        });
+                        workspace = resolve_thread_workspace(
+                            channel_id,
+                            ch_name.as_deref(),
+                            Some(&(*parent_id, parent_ch_name)),
+                        );
+                        if workspace.is_some() {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] 🧵 Thread auto-start: inherited workspace from parent channel {}",
+                                parent_id
+                            );
+                        }
+                    }
+                    if workspace.is_none()
+                        && let Some(default_agent) = dm_default_agent.as_ref()
+                    {
+                        workspace = Some(default_agent.workspace.clone());
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::info!(
-                            "  [{ts}] 🧵 Thread auto-start: inherited workspace from parent channel {}",
-                            parent_id
+                            "  [{ts}] 💬 DM auto-start: using default agent '{}' workspace",
+                            default_agent.role_binding.role_id
                         );
                     }
-                }
-                if workspace.is_none()
-                    && let Some(default_agent) = dm_default_agent.as_ref()
-                {
-                    workspace = Some(default_agent.workspace.clone());
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 💬 DM auto-start: using default agent '{}' workspace",
-                        default_agent.role_binding.role_id
-                    );
-                }
-                if let Some(ws_path) = workspace {
-                    let ws = std::path::Path::new(&ws_path);
-                    if ws.is_dir() {
-                        let canonical = ws
-                            .canonicalize()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|_| ws_path.clone());
-                        // Resolve channel name from Discord API before worktree
-                        // creation so the path uses the real name, not "unknown".
-                        let (ch_name_api, cat_name) =
-                            resolve_channel_category(http, cache, channel_id).await;
-                        let ch_name = match super::super::super::resolve_thread_parent(
-                            http, channel_id,
-                        )
-                        .await
-                        {
-                            Some((_parent_id, parent_name)) => {
-                                let parent =
-                                    parent_name.unwrap_or_else(|| format!("{}", _parent_id));
-                                Some(super::super::super::synthetic_thread_channel_name(
-                                    &parent, channel_id,
-                                ))
-                            }
-                            None => ch_name_api,
-                        };
-
-                        // Check worktree: always use worktree for thread sessions,
-                        // or when conflict detected with another session on same path.
-                        // Use both dispatch_thread_parents (for reused threads) AND Discord API
-                        // thread detection (for first-turn in newly created threads where
-                        // dispatch_thread_parents hasn't been populated yet).
-                        let (wt_info, provider_isolation_applied) = {
-                            let is_thread =
-                                shared.dispatch.thread_parents.contains_key(&channel_id)
-                                    || super::super::super::resolve_thread_parent(http, channel_id)
-                                        .await
-                                        .is_some();
-                            let data = shared.core.lock().await;
-                            let conflict =
-                                detect_worktree_conflict(&data.sessions, &canonical, channel_id);
-                            drop(data);
-                            let provider_isolation_policy =
-                                super::super::super::agentdesk_config::resolve_worktree_isolation_policy(
-                                    channel_id,
-                                    ch_name.as_deref(),
-                                );
-                            let provider_isolation_required =
-                                provider_isolation_policy.as_ref().is_some_and(|policy| {
-                                    should_force_provider_worktree_isolation(
-                                        policy.non_main_provider_channel,
-                                        policy.isolate_override,
-                                        pre_session_dispatch_type,
-                                    )
-                                });
-                            let needs_worktree =
-                                is_thread || conflict.is_some() || provider_isolation_required;
-                            let wt_info = if needs_worktree {
-                                let reason = if is_thread {
-                                    "thread session"
-                                } else if provider_isolation_required {
-                                    "provider isolation"
-                                } else {
-                                    "conflict"
-                                };
-                                let ch = ch_name.as_deref().unwrap_or("unknown");
-                                // #3207 (part 2): reuse this channel's EXISTING managed
-                                // worktree when one is persisted, instead of rotating a new
-                                // timestamped worktree every cold start. A rotated worktree
-                                // moves the cwd's claude project dir, so the prior session's
-                                // transcript is gone and `--resume` is structurally impossible
-                                // → fresh session + lost conversation. Reusing the worktree
-                                // keeps the sid's jsonl discoverable so the launch genuinely
-                                // resumes. Same persisted mapping + safety filters as the
-                                // #3011 thread-bootstrap reuse.
-                                let reused = resolve_reusable_worktree(
-                                    shared.pg_pool.as_ref(),
-                                    &shared.token_hash,
-                                    &provider,
-                                    ch,
-                                    channel_id.get(),
-                                    &canonical,
-                                );
-                                if let Some(wt) = reused {
-                                    let ts = chrono::Local::now().format("%H:%M:%S");
-                                    tracing::info!(
-                                        "  [{ts}] ↻ Auto-start worktree reused ({reason}): {ch} → {} (branch: {})",
-                                        wt.worktree_path,
-                                        wt.branch_name
-                                    );
-                                    Some(wt)
-                                } else {
-                                    match create_git_worktree(&canonical, ch, provider.as_str()) {
-                                        Ok((wt_path, branch)) => {
-                                            let ts = chrono::Local::now().format("%H:%M:%S");
-                                            tracing::info!(
-                                                "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
-                                                wt_path
-                                            );
-                                            Some(WorktreeInfo {
-                                                original_path: canonical.clone(),
-                                                worktree_path: wt_path,
-                                                branch_name: branch,
-                                            })
-                                        }
-                                        Err(_) => None,
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                            let provider_isolation_applied =
-                                provider_isolation_required && wt_info.is_some();
-                            (wt_info, provider_isolation_applied)
-                        };
-                        let eff_path = wt_info
-                            .as_ref()
-                            .map(|wt| wt.worktree_path.clone())
-                            .unwrap_or_else(|| canonical.clone());
-                        {
-                            let mut data = shared.core.lock().await;
-                            let session = data.sessions.entry(channel_id).or_insert_with(|| {
-                                DiscordSession {
-                                    session_id: None,
-                                    memento_context_loaded: false,
-                                    memento_reflected: false,
-                                    current_path: None,
-                                    history: Vec::new(),
-                                    pending_uploads: Vec::new(),
-                                    cleared: false,
-                                    channel_name: None,
-                                    category_name: None,
-                                    remote_profile_name: None,
-                                    channel_id: Some(channel_id.get()),
-                                    last_active: tokio::time::Instant::now(),
-                                    worktree: None,
-
-                                    born_generation:
-                                        super::super::super::runtime_store::process_generation(),
-                                }
-                            });
-                            session.current_path = Some(eff_path.clone());
-                            session.channel_name = ch_name;
-                            session.category_name = cat_name;
-                            session.channel_id = Some(channel_id.get());
-                            session.last_active = tokio::time::Instant::now();
-                            session.worktree = wt_info;
-                            if provider_isolation_applied {
-                                session.clear_provider_session();
-                                session.memento_context_loaded = false;
-                            }
-                        }
-                        if provider_isolation_applied
-                            && let Some(key) =
-                                build_adk_session_key(shared, channel_id, &provider, None).await
-                        {
-                            super::super::super::adk_session::clear_provider_session_id(
-                                &key,
-                                shared.api_port,
+                    if let Some(ws_path) = workspace {
+                        let ws = std::path::Path::new(&ws_path);
+                        if ws.is_dir() {
+                            let canonical = ws
+                                .canonicalize()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|_| ws_path.clone());
+                            // Resolve channel name from Discord API before worktree
+                            // creation so the path uses the real name, not "unknown".
+                            let (ch_name_api, cat_name) =
+                                resolve_channel_category(http, cache, channel_id).await;
+                            let ch_name = match super::super::super::resolve_thread_parent(
+                                http, channel_id,
                             )
-                            .await;
+                            .await
+                            {
+                                Some((_parent_id, parent_name)) => {
+                                    let parent =
+                                        parent_name.unwrap_or_else(|| format!("{}", _parent_id));
+                                    Some(super::super::super::synthetic_thread_channel_name(
+                                        &parent, channel_id,
+                                    ))
+                                }
+                                None => ch_name_api,
+                            };
+
+                            // Check worktree: always use worktree for thread sessions,
+                            // or when conflict detected with another session on same path.
+                            // Use both dispatch_thread_parents (for reused threads) AND Discord API
+                            // thread detection (for first-turn in newly created threads where
+                            // dispatch_thread_parents hasn't been populated yet).
+                            let (wt_info, provider_isolation_applied) = {
+                                let is_thread =
+                                    shared.dispatch.thread_parents.contains_key(&channel_id)
+                                        || super::super::super::resolve_thread_parent(http, channel_id)
+                                            .await
+                                            .is_some();
+                                let data = shared.core.lock().await;
+                                let conflict =
+                                    detect_worktree_conflict(&data.sessions, &canonical, channel_id);
+                                drop(data);
+                                let provider_isolation_policy =
+                                    super::super::super::agentdesk_config::resolve_worktree_isolation_policy(
+                                        channel_id,
+                                        ch_name.as_deref(),
+                                    );
+                                let provider_isolation_required =
+                                    provider_isolation_policy.as_ref().is_some_and(|policy| {
+                                        should_force_provider_worktree_isolation(
+                                            policy.non_main_provider_channel,
+                                            policy.isolate_override,
+                                            pre_session_dispatch_type,
+                                        )
+                                    });
+                                let needs_worktree =
+                                    is_thread || conflict.is_some() || provider_isolation_required;
+                                let wt_info = if needs_worktree {
+                                    let reason = if is_thread {
+                                        "thread session"
+                                    } else if provider_isolation_required {
+                                        "provider isolation"
+                                    } else {
+                                        "conflict"
+                                    };
+                                    let ch = ch_name.as_deref().unwrap_or("unknown");
+                                    // #3207 (part 2): reuse this channel's EXISTING managed
+                                    // worktree when one is persisted, instead of rotating a new
+                                    // timestamped worktree every cold start. A rotated worktree
+                                    // moves the cwd's claude project dir, so the prior session's
+                                    // transcript is gone and `--resume` is structurally impossible
+                                    // → fresh session + lost conversation. Reusing the worktree
+                                    // keeps the sid's jsonl discoverable so the launch genuinely
+                                    // resumes. Same persisted mapping + safety filters as the
+                                    // #3011 thread-bootstrap reuse.
+                                    let reused = resolve_reusable_worktree(
+                                        shared.pg_pool.as_ref(),
+                                        &shared.token_hash,
+                                        &provider,
+                                        ch,
+                                        channel_id.get(),
+                                        &canonical,
+                                    );
+                                    if let Some(wt) = reused {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        tracing::info!(
+                                            "  [{ts}] ↻ Auto-start worktree reused ({reason}): {ch} → {} (branch: {})",
+                                            wt.worktree_path,
+                                            wt.branch_name
+                                        );
+                                        Some(wt)
+                                    } else {
+                                        match create_git_worktree(&canonical, ch, provider.as_str()) {
+                                            Ok((wt_path, branch)) => {
+                                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                                tracing::info!(
+                                                    "  [{ts}] 🌿 Auto-start worktree ({reason}): {ch} → {}",
+                                                    wt_path
+                                                );
+                                                Some(WorktreeInfo {
+                                                    original_path: canonical.clone(),
+                                                    worktree_path: wt_path,
+                                                    branch_name: branch,
+                                                })
+                                            }
+                                            Err(_) => None,
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                                let provider_isolation_applied =
+                                    provider_isolation_required && wt_info.is_some();
+                                (wt_info, provider_isolation_applied)
+                            };
+                            let eff_path = wt_info
+                                .as_ref()
+                                .map(|wt| wt.worktree_path.clone())
+                                .unwrap_or_else(|| canonical.clone());
+                            {
+                                let mut data = shared.core.lock().await;
+                                let session = data.sessions.entry(channel_id).or_insert_with(|| {
+                                    DiscordSession {
+                                        session_id: None,
+                                        memento_context_loaded: false,
+                                        memento_reflected: false,
+                                        current_path: None,
+                                        history: Vec::new(),
+                                        pending_uploads: Vec::new(),
+                                        cleared: false,
+                                        channel_name: None,
+                                        category_name: None,
+                                        remote_profile_name: None,
+                                        channel_id: Some(channel_id.get()),
+                                        last_active: tokio::time::Instant::now(),
+                                        worktree: None,
+
+                                        born_generation:
+                                            super::super::super::runtime_store::process_generation(),
+                                    }
+                                });
+                                session.current_path = Some(eff_path.clone());
+                                session.channel_name = ch_name;
+                                session.category_name = cat_name;
+                                session.channel_id = Some(channel_id.get());
+                                session.last_active = tokio::time::Instant::now();
+                                session.worktree = wt_info;
+                                if provider_isolation_applied {
+                                    session.clear_provider_session();
+                                    session.memento_context_loaded = false;
+                                }
+                            }
+                            if provider_isolation_applied
+                                && let Some(key) =
+                                    build_adk_session_key(shared, channel_id, &provider, None).await
+                            {
+                                super::super::super::adk_session::clear_provider_session_id(
+                                    &key,
+                                    shared.api_port,
+                                )
+                                .await;
+                            }
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::info!(
+                                "  [{ts}] ▶ Auto-started session from workspace: {eff_path}"
+                            );
+                            let session_state = {
+                                let data = shared.core.lock().await;
+                                data.sessions
+                                    .get(&channel_id)
+                                    .map(|s| (s.session_id.clone(), s.memento_context_loaded))
+                                    .unwrap_or((None, false))
+                            };
+                            (
+                                session_state.0,
+                                session_state.1,
+                                eff_path,
+                                provider_isolation_applied,
+                            )
+                        } else {
+                            rate_limit_wait(shared, channel_id).await;
+                            let _ = channel_id
+                                .say(http, "No active session. Use `/start <path>` first.")
+                                .await;
+                            return Ok(IntakeExecution::Executed);
                         }
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ▶ Auto-started session from workspace: {eff_path}"
-                        );
-                        let session_state = {
-                            let data = shared.core.lock().await;
-                            data.sessions
-                                .get(&channel_id)
-                                .map(|s| (s.session_id.clone(), s.memento_context_loaded))
-                                .unwrap_or((None, false))
-                        };
-                        (
-                            session_state.0,
-                            session_state.1,
-                            eff_path,
-                            provider_isolation_applied,
-                        )
                     } else {
                         rate_limit_wait(shared, channel_id).await;
                         let _ = channel_id
@@ -802,1808 +711,1779 @@ async fn handle_text_message_admitted(
                             .await;
                         return Ok(IntakeExecution::Executed);
                     }
-                } else {
-                    rate_limit_wait(shared, channel_id).await;
-                    let _ = channel_id
-                        .say(http, "No active session. Use `/start <path>` first.")
-                        .await;
-                    return Ok(IntakeExecution::Executed);
                 }
-            }
-        };
-    let add_turn_pending = should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
-        && !(_queued_drain
-            && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
-        && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id);
+            };
+        let add_turn_pending = should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+            && !(_queued_drain
+                && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
+            && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id);
 
-    // ── Dispatch thread auto-creation ──────────────────────────────
-    // When a dispatch message arrives, create a Discord thread for
-    // isolated context.  All subsequent agent output goes to the thread.
-    // Skip if already inside a thread (threads cannot nest).
-    // Thread reuse: if the card already has an active_thread_id, redirect
-    // to the existing thread instead of creating a new one.
-    let is_already_thread = super::super::super::resolve_thread_parent(http, channel_id)
-        .await
-        .is_some();
-    // #259: Fetch dispatch metadata once before thread creation so we can extract
-    // worktree_path for both thread bootstrap and the subsequent session CWD override.
-    // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
-    // All dispatch types now inject worktree_path into context via resolve_card_worktree().
-    let mut dispatch_type_str = dispatch_info_cached
-        .as_ref()
-        .and_then(|info| info.dispatch_type.clone());
-    let dispatch_context_hints = parse_dispatch_context_hints(
-        dispatch_info_cached
+        // ── Dispatch thread auto-creation ──────────────────────────────
+        // When a dispatch message arrives, create a Discord thread for
+        // isolated context.  All subsequent agent output goes to the thread.
+        // Skip if already inside a thread (threads cannot nest).
+        // Thread reuse: if the card already has an active_thread_id, redirect
+        // to the existing thread instead of creating a new one.
+        let is_already_thread = super::super::super::resolve_thread_parent(http, channel_id)
+            .await
+            .is_some();
+        // #259: Fetch dispatch metadata once before thread creation so we can extract
+        // worktree_path for both thread bootstrap and the subsequent session CWD override.
+        // #259: Prefer card-bound worktree over parent channel CWD for dispatch sessions.
+        // All dispatch types now inject worktree_path into context via resolve_card_worktree().
+        let mut dispatch_type_str = dispatch_info_cached
             .as_ref()
-            .and_then(|info| info.context.as_deref()),
-        dispatch_type_str.as_deref(),
-    );
-    let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
-    let dispatch_stale_worktree_path = dispatch_context_hints.stale_worktree_path.clone();
-    let dispatch_target_repo = dispatch_context_hints.target_repo.clone();
-    let dispatch_reset_provider_state = dispatch_context_hints.reset_provider_state;
-    let dispatch_recreate_tmux = dispatch_context_hints.recreate_tmux;
-    let dispatch_retry_resume_session_id = dispatch_context_hints.retry_resume_session_id.clone();
-    if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
-    }
-    // #762: when the dispatch pins an external target_repo but emits no
-    // worktree_path (e.g. refresh fell back without a usable path), resolve
-    // the repo's configured directory first instead of dropping straight into
-    // the default AgentDesk repo. Otherwise external-repo reviews silently
-    // execute in the wrong repo.
-    let dispatch_target_repo_path =
-        resolve_dispatch_target_repo_dir(dispatch_target_repo.as_deref());
-    let dispatch_default_path = dispatch_target_repo_path
-        .clone()
-        .or_else(|| {
-            crate::services::platform::resolve_repo_dir()
-                .filter(|p| std::path::Path::new(p).is_dir())
-        })
-        .unwrap_or_else(|| current_path.clone());
-    let mut dispatch_effective_path = dispatch_worktree_path
-        .clone()
-        .unwrap_or_else(|| dispatch_default_path.clone());
-    if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        if let (Some(stale_path), Some(did)) = (
-            dispatch_stale_worktree_path.as_deref(),
-            dispatch_id_for_thread.as_deref(),
-        ) {
-            tracing::warn!(
-                "  [{ts}] ⚠ Dispatch {did}: context worktree_path no longer exists: {} — falling back to {}",
-                stale_path,
-                dispatch_effective_path
-            );
-        } else if let (Some(did), Some(tr), Some(tr_path)) = (
-            dispatch_id_for_thread.as_deref(),
-            dispatch_target_repo.as_deref(),
-            dispatch_target_repo_path.as_deref(),
-        ) {
-            tracing::info!(
-                "  [{ts}] 🌱 Dispatch {did}: no worktree_path; honoring target_repo '{}' at {}",
-                tr,
-                tr_path
-            );
-        } else {
-            tracing::info!(
-                "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
-                dispatch_effective_path
-            );
+            .and_then(|info| info.dispatch_type.clone());
+        let dispatch_context_hints = parse_dispatch_context_hints(
+            dispatch_info_cached
+                .as_ref()
+                .and_then(|info| info.context.as_deref()),
+            dispatch_type_str.as_deref(),
+        );
+        let dispatch_worktree_path = dispatch_context_hints.worktree_path.clone();
+        let dispatch_stale_worktree_path = dispatch_context_hints.stale_worktree_path.clone();
+        let dispatch_target_repo = dispatch_context_hints.target_repo.clone();
+        let dispatch_reset_provider_state = dispatch_context_hints.reset_provider_state;
+        let dispatch_recreate_tmux = dispatch_context_hints.recreate_tmux;
+        let dispatch_retry_resume_session_id = dispatch_context_hints.retry_resume_session_id.clone();
+        if let (Some(wt), Some(did)) = (&dispatch_worktree_path, &dispatch_id_for_thread) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}] 🌿 Dispatch {did}: resolved worktree CWD: {wt}");
         }
-    }
-    let Some((route, bootstrapped_fresh_thread_session, redirected_permit)) =
-        adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
-            http,
-            cache,
-            shared,
-            provider: &provider,
-            channel_id,
-            original_channel_id,
-            dispatch_id_for_thread: &dispatch_id_for_thread,
-            dispatch_info_cached: &dispatch_info_cached,
-            dispatch_type_str: dispatch_type_str.as_deref(),
-            is_already_thread,
-            user_text,
-            dispatch_effective_path: &dispatch_effective_path,
-            pending_uploads: &mut pending_uploads,
-            session_was_cleared,
-            queued_drain: _queued_drain,
-            queued,
-        })
-        .await?
-    else {
-        return Ok(IntakeExecution::Executed);
-    };
-    let (channel_id, final_provider) = (route.target, route.provider(&provider));
-    let final_permit = adk_thread::final_admission(&final_provider, channel_id, redirected_permit)?;
-    let (http_owned, cache_owned, ctx_owned, shared_owned, token_owned) = (
-        http.clone(),
-        cache.cloned(),
-        ctx_for_chained_dispatch.cloned(),
-        shared.clone(),
-        token.to_owned(),
-    );
-    let user_text_owned = user_text.to_owned();
-    let request_owner_name_owned = request_owner_name.to_owned();
-    crate::services::discord::input_runtime::fence::effect::run(final_permit, async move {
-    let (http, cache, ctx_for_chained_dispatch, shared, token) = (
-        &http_owned, cache_owned.as_ref(), ctx_owned.as_ref(), &shared_owned, token_owned.as_str(),
-    );
-    let user_text = user_text_owned.as_str();
-    let request_owner_name = request_owner_name_owned.as_str();
-    let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
-        dispatch_runtime::prepare_post_redirect_dispatch_runtime(
-            http,
-            shared,
-            channel_id,
-            dispatch_id_for_thread.as_ref(),
-            dispatch_info_cached.clone(),
-            (
-                dispatch_worktree_path.as_ref(),
-                dispatch_target_repo_path.as_ref(),
-            ),
-            (&mut dispatch_type_str, &mut dispatch_effective_path),
-        )
-        .await;
-    let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(
-        (http, shared, token, &provider),
-        (channel_id, original_channel_id),
-        (turn_kind, original_request_owner, user_msg_id, user_text),
-        (&reply_context, has_reply_boundary, merge_consecutive),
-        (&mut pending_uploads, &voice_announcement),
-        (
-            reply_to_user_message,
-            &dispatch_id_for_thread,
-            None,
-            preserve_on_cancel,
-            (_queued_drain, route),
-        ),
-        (session_id, memento_context_loaded, current_path),
-    )
-    .await?
-    else {
-        return Ok(IntakeExecution::deferred(channel_id));
-    };
-    let (mut session_id, mut memento_context_loaded, current_path) =
-        intake_runtime_transition.state.clone();
-    let mut session_strategy_reason = if session_id.is_some() {
-        "runtime_cached_provider_session"
-    } else if bootstrapped_fresh_thread_session {
-        "thread_session_bootstrapped"
-    } else if auto_start_provider_isolated {
-        "provider_channel_worktree_isolated"
-    } else {
-        "no_runtime_provider_session"
-    };
-
-    // #259/#762: Keep runtime/session CWD aligned with the selected dispatch path.
-    // This also corrects reused threads whose cached path differs from target_repo.
-    // Inherited workspace applies only without an authoritative dispatch CWD;
-    // the existing update block persists that selection for later turns.
-    let final_workspace = apply_final_thread_workspace(
-        shared,
-        channel_id,
-        final_thread_parent.as_ref(),
-        (&mut dispatch_effective_path, authoritative),
-    )
-    .await;
-    let mut current_path = if dispatch_session_path_should_update(
-        dispatch_id_for_thread.is_some(),
-        dispatch_type_str.as_deref(),
-        dispatch_worktree_path.is_some(),
-        bootstrapped_fresh_thread_session && !final_workspace,
-        &current_path,
-        &dispatch_effective_path,
-    ) {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            if session.current_path.as_deref() != Some(dispatch_effective_path.as_str()) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🔄 Dispatch session CWD update: {:?} → {}",
-                    session.current_path,
+        // #762: when the dispatch pins an external target_repo but emits no
+        // worktree_path (e.g. refresh fell back without a usable path), resolve
+        // the repo's configured directory first instead of dropping straight into
+        // the default AgentDesk repo. Otherwise external-repo reviews silently
+        // execute in the wrong repo.
+        let dispatch_target_repo_path =
+            resolve_dispatch_target_repo_dir(dispatch_target_repo.as_deref());
+        let dispatch_default_path = dispatch_target_repo_path
+            .clone()
+            .or_else(|| {
+                crate::services::platform::resolve_repo_dir()
+                    .filter(|p| std::path::Path::new(p).is_dir())
+            })
+            .unwrap_or_else(|| current_path.clone());
+        let mut dispatch_effective_path = dispatch_worktree_path
+            .clone()
+            .unwrap_or_else(|| dispatch_default_path.clone());
+        if dispatch_worktree_path.is_none() && dispatch_id_for_thread.is_some() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            if let (Some(stale_path), Some(did)) = (
+                dispatch_stale_worktree_path.as_deref(),
+                dispatch_id_for_thread.as_deref(),
+            ) {
+                tracing::warn!(
+                    "  [{ts}] ⚠ Dispatch {did}: context worktree_path no longer exists: {} — falling back to {}",
+                    stale_path,
                     dispatch_effective_path
                 );
-                session.current_path = Some(dispatch_effective_path.clone());
-            }
-        }
-        dispatch_effective_path.clone()
-    } else {
-        current_path
-    };
-    if let Some(active_info) = active_dispatch_info.as_ref() {
-        let active_hints = parse_dispatch_context_hints(
-            active_info.context.as_deref(),
-            dispatch_type_str.as_deref(),
-        );
-        if let Some(active_worktree_path) = active_hints.worktree_path.as_deref()
-            && current_path != active_worktree_path
-        {
-            let original_path =
-                resolve_dispatch_target_repo_dir(active_hints.target_repo.as_deref())
-                    .unwrap_or_else(|| dispatch_default_path.clone());
-            let mut data = shared.core.lock().await;
-            if let Some(session) = data.sessions.get_mut(&channel_id) {
-                let ts = chrono::Local::now().format("%H:%M:%S");
+            } else if let (Some(did), Some(tr), Some(tr_path)) = (
+                dispatch_id_for_thread.as_deref(),
+                dispatch_target_repo.as_deref(),
+                dispatch_target_repo_path.as_deref(),
+            ) {
                 tracing::info!(
-                    "  [{ts}] 🔄 Active dispatch CWD update: {:?} → {}",
-                    session.current_path,
-                    active_worktree_path
+                    "  [{ts}] 🌱 Dispatch {did}: no worktree_path; honoring target_repo '{}' at {}",
+                    tr,
+                    tr_path
                 );
-                session.current_path = Some(active_worktree_path.to_string());
-                if crate::dispatch::dispatch_type_requires_fresh_worktree(
-                    dispatch_type_str.as_deref(),
-                ) {
-                    session.worktree = Some(WorktreeInfo {
-                        original_path,
-                        worktree_path: active_worktree_path.to_string(),
-                        branch_name: active_hints.worktree_branch.unwrap_or_default(),
-                    });
-                }
-            }
-            current_path = active_worktree_path.to_string();
-        }
-    }
-    // Sanitize input
-    let sanitized_input =
-        ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
-
-    let mut resolved_role_binding = {
-        // For cross-channel dispatch reuse (e.g. review in implementation thread),
-        // resolve role from the override channel instead of the thread's parent.
-        if let Some(alt_ch) = route.role {
-            ResolvedThreadRoleBinding::direct(resolve_role_binding(alt_ch, None))
-        } else {
-            let data = shared.core.lock().await;
-            let ch_name = data
-                .sessions
-                .get(&channel_id)
-                .and_then(|s| s.channel_name.as_deref());
-            resolve_thread_role_binding(channel_id, ch_name, final_thread_parent.as_ref())
-        }
-    };
-    if resolved_role_binding.role_binding.is_none() {
-        resolved_role_binding.role_binding = dm_default_agent
-            .as_ref()
-            .map(|resolved| resolved.role_binding.clone());
-    }
-    let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
-    let role_binding = resolved_role_binding.role_binding;
-
-    // For cross-channel dispatch reuse, override the provider so the turn
-    // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
-    let provider = if route.role.is_some() {
-        role_binding
-            .as_ref()
-            .and_then(|rb| rb.provider.clone())
-            .unwrap_or(provider)
-    } else {
-        provider
-    };
-
-    let execution_permit = crate::services::discord::input_runtime::fence::effect::admit(
-        &provider, channel_id.get(),
-    ).map_err(|failure| format!("execution input admission refused: {failure:?}"))?;
-    crate::services::discord::input_runtime::fence::effect::scope(execution_permit, async {
-    {
-        let channel_name_for_isolation = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|session| session.channel_name.clone())
-        };
-        let isolation_outcome = ensure_provider_worktree_isolation(
-            shared,
-            channel_id,
-            &mut current_path,
-            &provider,
-            channel_name_for_isolation.as_deref(),
-            dispatch_type_str.as_deref(),
-        )
-        .await;
-        reset_provider_session_after_worktree_isolation(
-            shared,
-            channel_id,
-            &provider,
-            isolation_outcome,
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        )
-        .await;
-    }
-
-    if matches!(provider, ProviderKind::Codex)
-        && !dispatch_reset_provider_state
-        && !dispatch_recreate_tmux
-        && let Some(resume_session_id) = dispatch_retry_resume_session_id.as_deref()
-    {
-        if session_id.as_deref() != Some(resume_session_id) {
-            let mut data = shared.core.lock().await;
-            if let Some(session) = data.sessions.get_mut(&channel_id) {
-                session.restore_provider_session(Some(resume_session_id.to_string()));
-                memento_context_loaded = session.memento_context_loaded;
             } else {
-                memento_context_loaded = false;
+                tracing::info!(
+                    "  [{ts}] 🌱 Dispatch fallback CWD: using repo root instead of inherited session path: {}",
+                    dispatch_effective_path
+                );
             }
-            session_id = Some(resume_session_id.to_string());
         }
-        session_strategy_reason = "dispatch_context_retry_resume";
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] ↻ Dispatch retry: using context-supplied Codex resume session for channel {}",
-            channel_id.get()
-        );
-    }
-
-    // Derive dispatch prompt profile before memory recall so ReviewLite can
-    // skip heavy memory work consistently across supported backends.
-    let dispatch_profile = {
-        let dispatch_type = active_dispatch_id_for_prompt
-            .as_ref()
-            .and_then(|_| dispatch_type_str.as_deref());
-        let data = shared.core.lock().await;
-        let channel_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.as_deref());
-        DispatchProfile::for_turn(
-            dispatch_type,
-            settings::resolve_dispatch_profile(channel_id, channel_name),
-        )
-    };
-
-    if dispatch_reset_provider_state || dispatch_recreate_tmux {
-        let reset = super::super::super::commands::reset_channel_provider_state(
-            http,
-            shared,
-            &provider,
-            channel_id,
-            if dispatch_recreate_tmux {
-                "dispatch hard reset"
-            } else {
-                "dispatch provider reset"
-            },
-            dispatch_reset_provider_state,
-            false,
-            dispatch_recreate_tmux,
-        )
-        .await;
-        // A refused reset stops the dispatch before its turn and hands its input back.
-        if reset.report(http, channel_id, "dispatch reset").await {
-            let restore = super::super::super::admin_host_guard::return_intake_input;
-            let input = (pending_uploads, session_was_cleared);
-            restore(shared, original_channel_id, input).await;
+        let Some((route, bootstrapped_fresh_thread_session)) =
+            adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
+                http,
+                cache,
+                shared,
+                provider: &provider,
+                channel_id,
+                original_channel_id,
+                dispatch_id_for_thread: &dispatch_id_for_thread,
+                dispatch_info_cached: &dispatch_info_cached,
+                dispatch_type_str: dispatch_type_str.as_deref(),
+                is_already_thread,
+                user_text,
+                dispatch_effective_path: &dispatch_effective_path,
+                pending_uploads: &mut pending_uploads,
+                session_was_cleared,
+                queued_drain: _queued_drain,
+                queued,
+            })
+            .await?
+        else {
             return Ok(IntakeExecution::Executed);
-        }
-        session_id = None;
-        memento_context_loaded = false;
-        session_strategy_reason =
-            dispatch_reset_lifecycle_code(dispatch_reset_provider_state, dispatch_recreate_tmux);
-        if let Some(ref did) = dispatch_id_for_thread {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ♻️ Dispatch {did}: reset_provider_state={}, recreate_tmux={}, skipping provider session reuse",
-                dispatch_reset_provider_state,
-                dispatch_recreate_tmux
-            );
-        }
-    }
-
-    let fast_mode_channel_id =
-        effective_fast_mode_channel_id(channel_id, final_thread_parent.clone());
-    super::super::super::commands::reset_provider_session_if_pending(
-        http,
-        shared,
-        &provider,
-        channel_id,
-        fast_mode_channel_id,
-    )
-    .await;
-    let prompt_prep_started = std::time::Instant::now();
-
-    let state = (
-        current_path,
-        session_id,
-        memento_context_loaded,
-        session_strategy_reason,
-    );
-    let runtime = resolve_channel_runtime_for_launch(shared, &provider, channel_id, state).await;
-    current_path = runtime.0;
-    session_id = runtime.1;
-    memento_context_loaded = runtime.2;
-    session_strategy_reason = runtime.3;
-    let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
-    let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =
-        pre_admission_control::resolve(
-            (http, shared, &provider, !pending_uploads.is_empty()),
-            (channel_id, fast_mode_channel_id, user_msg_id),
-            (user_text, dispatch_id_for_thread.as_deref()),
-            (dispatch_reset_provider_state, dispatch_recreate_tmux),
-            session_id.clone(),
-        )
-        .await
-    else {
-        return Ok(IntakeExecution::Executed);
-    };
-    // #5660 [R2]: classification passed; the mailbox claim still follows below.
-    let taken_cleared = if let Some(cleared) = session_was_cleared {
-        cleared
-    } else {
-        let (taken_uploads, cleared) =
-            pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
-        pending_uploads.splice(0..0, taken_uploads);
-        cleared
-    };
-    let session_was_cleared = intake_runtime_transition.session_was_cleared(taken_cleared);
-    let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
-    if force_fresh_provider_session {
-        record_fresh_session_context_boundary(shared, channel_id).await?;
-        clear_codex_goal_start_provider_session(
-            shared,
-            channel_id,
-            adk_session_key.as_deref(),
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        )
-        .await;
-    }
-    let sanitized_input = if force_fresh_provider_session {
-        rewrite_fresh_goal_prompt(&sanitized_input)
-    } else {
-        sanitized_input
-    };
-    if session_id.is_none() {
-        if force_fresh_provider_session {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
-                channel_id.get()
-            );
-        } else if session_was_cleared {
-            session_strategy_reason = "session_cleared_by_user";
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to prior /clear",
-                channel_id.get()
-            );
-        } else if dispatch_reset_provider_state || dispatch_recreate_tmux {
-            session_strategy_reason = dispatch_reset_lifecycle_code(
-                dispatch_reset_provider_state,
-                dispatch_recreate_tmux,
-            );
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ↻ Skipping DB provider session restore for dispatch reset_provider_state={} recreate_tmux={}",
-                dispatch_reset_provider_state,
-                dispatch_recreate_tmux
-            );
-        } else if let Some(ref key) = adk_session_key {
-            let restored = super::super::super::adk_session::fetch_provider_session_id(
-                key,
-                &provider,
-                shared.api_port,
+        };
+        let channel_id = route.target;
+        let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
+            dispatch_runtime::prepare_post_redirect_dispatch_runtime(
+                http,
+                shared,
+                channel_id,
+                dispatch_id_for_thread.as_ref(),
+                dispatch_info_cached.clone(),
+                (
+                    dispatch_worktree_path.as_ref(),
+                    dispatch_target_repo_path.as_ref(),
+                ),
+                (&mut dispatch_type_str, &mut dispatch_effective_path),
             )
             .await;
-            if let Some(restored_session_id) = restored {
-                session_strategy_reason = "db_provider_session_restored";
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ↻ Restored provider session_id from DB for {}",
-                    key
-                );
-                let mut data = shared.core.lock().await;
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.restore_provider_session(Some(restored_session_id.clone()));
-                    memento_context_loaded = session.memento_context_loaded;
-                }
-                session_id = Some(restored_session_id);
-            } else if let Some((recovered, recovered_memento_context_loaded)) =
-                restore_live_tui_provider_session_from_binding(
-                    shared,
-                    channel_id,
-                    &provider,
-                    tmux_session_name.as_deref(),
-                    Some(key),
-                )
-                .await
-            {
-                session_strategy_reason = "live_tui_runtime_binding_restored";
-                memento_context_loaded = recovered_memento_context_loaded;
-                session_id = Some(recovered);
-            } else {
-                session_strategy_reason = "no_cached_provider_session";
-                session_id = None;
-            }
+        let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(
+            (http, shared, token, &provider),
+            (channel_id, original_channel_id),
+            (turn_kind, original_request_owner, user_msg_id, user_text),
+            (&reply_context, has_reply_boundary, merge_consecutive),
+            (&mut pending_uploads, &voice_announcement),
+            (
+                reply_to_user_message,
+                &dispatch_id_for_thread,
+                None,
+                preserve_on_cancel,
+                (_queued_drain, route),
+            ),
+            (session_id, memento_context_loaded, current_path),
+        )
+        .await?
+        else {
+            return Ok(IntakeExecution::deferred(channel_id));
+        };
+        let (mut session_id, mut memento_context_loaded, current_path) =
+            intake_runtime_transition.state.clone();
+        let mut session_strategy_reason = if session_id.is_some() {
+            "runtime_cached_provider_session"
+        } else if bootstrapped_fresh_thread_session {
+            "thread_session_bootstrapped"
+        } else if auto_start_provider_isolated {
+            "provider_channel_worktree_isolated"
         } else {
-            session_strategy_reason = "session_key_unavailable";
-        }
-    }
-    let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
+            "no_runtime_provider_session"
+        };
 
-    // #1332: probe turn liveness BEFORE posting any placeholder so a queued
-    // message renders the dedicated `📬 메시지 대기 중` card instead of the
-    // misleading `🔄 백그라운드 처리 중` Active card. The previous order
-    // (send_intake_placeholder → mailbox_try_start_turn) made every queued
-    // message look like processing had already begun.
-    //
-    // Create cancel token — with second check to close the TOCTOU race window.
-    // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
-    // because the async gap between check and insert allows interleaving.
-    // If another message won the race, queue ourselves and clean up.
-    let cancel_token = Arc::new(CancelToken::new());
-    let started = intake_runtime_transition
-        .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
+        // #259/#762: Keep runtime/session CWD aligned with the selected dispatch path.
+        // This also corrects reused threads whose cached path differs from target_repo.
+        // Inherited workspace applies only without an authoritative dispatch CWD;
+        // the existing update block persists that selection for later turns.
+        let final_workspace = apply_final_thread_workspace(
             shared,
             channel_id,
-            cancel_token.clone(),
-            request_owner,
-            user_msg_id,
-            intake_claim_context(
-                adk_session_key.as_deref(),
-                &provider,
-                tmux_session_name.as_deref(),
+            final_thread_parent.as_ref(),
+            (&mut dispatch_effective_path, authoritative),
+        )
+        .await;
+        let mut current_path = if dispatch_session_path_should_update(
+            dispatch_id_for_thread.is_some(),
+            dispatch_type_str.as_deref(),
+            dispatch_worktree_path.is_some(),
+            bootstrapped_fresh_thread_session && !final_workspace,
+            &current_path,
+            &dispatch_effective_path,
+        ) {
+            let mut data = shared.core.lock().await;
+            if let Some(session) = data.sessions.get_mut(&channel_id) {
+                if session.current_path.as_deref() != Some(dispatch_effective_path.as_str()) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 🔄 Dispatch session CWD update: {:?} → {}",
+                        session.current_path,
+                        dispatch_effective_path
+                    );
+                    session.current_path = Some(dispatch_effective_path.clone());
+                }
+            }
+            dispatch_effective_path.clone()
+        } else {
+            current_path
+        };
+        if let Some(active_info) = active_dispatch_info.as_ref() {
+            let active_hints = parse_dispatch_context_hints(
+                active_info.context.as_deref(),
+                dispatch_type_str.as_deref(),
+            );
+            if let Some(active_worktree_path) = active_hints.worktree_path.as_deref()
+                && current_path != active_worktree_path
+            {
+                let original_path =
+                    resolve_dispatch_target_repo_dir(active_hints.target_repo.as_deref())
+                        .unwrap_or_else(|| dispatch_default_path.clone());
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 🔄 Active dispatch CWD update: {:?} → {}",
+                        session.current_path,
+                        active_worktree_path
+                    );
+                    session.current_path = Some(active_worktree_path.to_string());
+                    if crate::dispatch::dispatch_type_requires_fresh_worktree(
+                        dispatch_type_str.as_deref(),
+                    ) {
+                        session.worktree = Some(WorktreeInfo {
+                            original_path,
+                            worktree_path: active_worktree_path.to_string(),
+                            branch_name: active_hints.worktree_branch.unwrap_or_default(),
+                        });
+                    }
+                }
+                current_path = active_worktree_path.to_string();
+            }
+        }
+        // Sanitize input
+        let sanitized_input =
+            ai_screen::sanitize_user_input(voice_prompt_text.as_deref().unwrap_or(user_text));
+
+        let mut resolved_role_binding = {
+            // For cross-channel dispatch reuse (e.g. review in implementation thread),
+            // resolve role from the override channel instead of the thread's parent.
+            if let Some(alt_ch) = route.role {
+                ResolvedThreadRoleBinding::direct(resolve_role_binding(alt_ch, None))
+            } else {
+                let data = shared.core.lock().await;
+                let ch_name = data
+                    .sessions
+                    .get(&channel_id)
+                    .and_then(|s| s.channel_name.as_deref());
+                resolve_thread_role_binding(channel_id, ch_name, final_thread_parent.as_ref())
+            }
+        };
+        if resolved_role_binding.role_binding.is_none() {
+            resolved_role_binding.role_binding = dm_default_agent
+                .as_ref()
+                .map(|resolved| resolved.role_binding.clone());
+        }
+        let memory_scope_channel_id = resolved_role_binding.memory_channel_id(channel_id);
+        let role_binding = resolved_role_binding.role_binding;
+
+        // For cross-channel dispatch reuse, override the provider so the turn
+        // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
+        let provider = if route.role.is_some() {
+            role_binding
+                .as_ref()
+                .and_then(|rb| rb.provider.clone())
+                .unwrap_or(provider)
+        } else {
+            provider
+        };
+
+        {
+            let channel_name_for_isolation = {
+                let data = shared.core.lock().await;
+                data.sessions
+                    .get(&channel_id)
+                    .and_then(|session| session.channel_name.clone())
+            };
+            let isolation_outcome = ensure_provider_worktree_isolation(
+                shared,
+                channel_id,
                 &mut current_path,
+                &provider,
+                channel_name_for_isolation.as_deref(),
+                dispatch_type_str.as_deref(),
+            )
+            .await;
+            reset_provider_session_after_worktree_isolation(
+                shared,
+                channel_id,
+                &provider,
+                isolation_outcome,
                 &mut session_id,
                 &mut memento_context_loaded,
                 &mut session_strategy_reason,
-            ),
-        ))
-        .await;
-    // The claim owns the route: publish it before this turn can be observed.
-    if started {
-        route.publish(shared, &provider);
-    }
-
-    // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
-    // — see latency_spans.rs). Never `.log()`'d on the early returns below.
-    let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
-
-    if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(
-        http,
-        shared,
-        &provider,
-        channel_id,
-        user_msg_id,
-        user_text,
-        started,
-        preserve_on_cancel,
-    )
-    .await
-    {
-        return Ok(IntakeExecution::Executed);
-    }
-
-    claim_bootstrap::bootstrap_claimed_turn(
-        http,
-        shared,
-        started,
-        channel_id,
-        user_msg_id,
-        &provider,
-        adk_session_key.as_deref(),
-    )
-    .await;
-
-    let preserve_queued_view = _queued_drain
-        && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id);
-    let queued_placeholder_handoff = if started && !preserve_queued_view {
-        shared
-            .remove_queued_placeholder(channel_id, user_msg_id)
-            .await
-    } else {
-        None
-    };
-
-    // Active queue views remain intact until execution; dormant handoffs keep their head cleanup.
-    if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
-        for emoji in crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
-            queue_marker::note_removed_current(
-                shared,
-                http,
-                channel_id,
-                user_msg_id,
-                emoji,
-                "dequeue_head_queue_marker_clear",
             )
             .await;
         }
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 📭 DEQUEUE: cleared queue-pending reaction(s) on promoted message (channel {}, msg {})",
-            channel_id,
-            user_msg_id
-        );
-    }
 
-    // A refused claim owns no start attempt; publish only its durable queue view.
-    if !started {
-        return race_loss::handle_race_loss_enqueue(
+        if matches!(provider, ProviderKind::Codex)
+            && !dispatch_reset_provider_state
+            && !dispatch_recreate_tmux
+            && let Some(resume_session_id) = dispatch_retry_resume_session_id.as_deref()
+        {
+            if session_id.as_deref() != Some(resume_session_id) {
+                let mut data = shared.core.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.restore_provider_session(Some(resume_session_id.to_string()));
+                    memento_context_loaded = session.memento_context_loaded;
+                } else {
+                    memento_context_loaded = false;
+                }
+                session_id = Some(resume_session_id.to_string());
+            }
+            session_strategy_reason = "dispatch_context_retry_resume";
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ↻ Dispatch retry: using context-supplied Codex resume session for channel {}",
+                channel_id.get()
+            );
+        }
+
+        // Derive dispatch prompt profile before memory recall so ReviewLite can
+        // skip heavy memory work consistently across supported backends.
+        let dispatch_profile = {
+            let dispatch_type = active_dispatch_id_for_prompt
+                .as_ref()
+                .and_then(|_| dispatch_type_str.as_deref());
+            let data = shared.core.lock().await;
+            let channel_name = data
+                .sessions
+                .get(&channel_id)
+                .and_then(|session| session.channel_name.as_deref());
+            DispatchProfile::for_turn(
+                dispatch_type,
+                settings::resolve_dispatch_profile(channel_id, channel_name),
+            )
+        };
+
+        if dispatch_reset_provider_state || dispatch_recreate_tmux {
+            let reset = super::super::super::commands::reset_channel_provider_state(
+                http,
+                shared,
+                &provider,
+                channel_id,
+                if dispatch_recreate_tmux {
+                    "dispatch hard reset"
+                } else {
+                    "dispatch provider reset"
+                },
+                dispatch_reset_provider_state,
+                false,
+                dispatch_recreate_tmux,
+            )
+            .await;
+            // A refused reset stops the dispatch before its turn and hands its input back.
+            if reset.report(http, channel_id, "dispatch reset").await {
+                let restore = super::super::super::admin_host_guard::return_intake_input;
+                let input = (pending_uploads, session_was_cleared);
+                restore(shared, original_channel_id, input).await;
+                return Ok(IntakeExecution::Executed);
+            }
+            session_id = None;
+            memento_context_loaded = false;
+            session_strategy_reason =
+                dispatch_reset_lifecycle_code(dispatch_reset_provider_state, dispatch_recreate_tmux);
+            if let Some(ref did) = dispatch_id_for_thread {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ♻️ Dispatch {did}: reset_provider_state={}, recreate_tmux={}, skipping provider session reuse",
+                    dispatch_reset_provider_state,
+                    dispatch_recreate_tmux
+                );
+            }
+        }
+
+        let fast_mode_channel_id =
+            effective_fast_mode_channel_id(channel_id, final_thread_parent.clone());
+        super::super::super::commands::reset_provider_session_if_pending(
             http,
             shared,
-            token,
             &provider,
             channel_id,
-            original_channel_id,
-            turn_kind,
-            original_request_owner,
-            user_msg_id,
-            user_text,
-            &reply_context,
-            has_reply_boundary,
-            merge_consecutive,
-            &pending_uploads,
-            &voice_announcement,
-            reply_to_user_message,
-            &dispatch_id_for_thread,
-            None,
-            preserve_on_cancel,
-            race_loss::QueuedIntakeCause::RaceLoss,
-            route,
+            fast_mode_channel_id,
         )
-        .await.map(|_| IntakeExecution::deferred(channel_id));
-    }
+        .await;
+        let prompt_prep_started = std::time::Instant::now();
 
-    // Dispatch redirects keep the reaction on the original Discord message.
-    let _turn_start_attempt = if add_turn_pending {
-        tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
+        let state = (
+            current_path,
+            session_id,
+            memento_context_loaded,
+            session_strategy_reason,
+        );
+        let runtime = resolve_channel_runtime_for_launch(shared, &provider, channel_id, state).await;
+        current_path = runtime.0;
+        session_id = runtime.1;
+        memento_context_loaded = runtime.2;
+        session_strategy_reason = runtime.3;
+        let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
+        let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
+        let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =
+            pre_admission_control::resolve(
+                (http, shared, &provider, !pending_uploads.is_empty()),
+                (channel_id, fast_mode_channel_id, user_msg_id),
+                (user_text, dispatch_id_for_thread.as_deref()),
+                (dispatch_reset_provider_state, dispatch_recreate_tmux),
+                session_id.clone(),
+            )
             .await
-            .attempt()
-    } else {
-        None
-    };
-
-    let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
-        http,
-        shared,
-        &provider,
-        channel_id,
-        busy_followup_retry_user_msg_id,
-        queued_placeholder_handoff,
-    )
-    .await;
-    let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
-        existing_notice
-    } else if let Some(existing) = queued_placeholder_handoff {
-        // #3480: the queued `📬 대기 중` card is now BURIED under what the active
-        // turn streamed while this message waited; reusing it as the live anchor
-        // edits that buried card (looks like a relay drop / huge 2000-char gaps).
-        // Instead POST a FRESH bottom anchor like the clean-start branch below
-        // (same reply-target gating), then DELETE the stale card. The old code's
-        // `ensure_active` visual morph is obsolete once deleted, but on SUCCESS we
-        // must still `detach_by_message` its controller row (seeded Queued by
-        // intake_gate's `ensure_queued`): `remove_queued_placeholder` clears only
-        // the `queued_placeholders` map and `Queued` rows are excluded from
-        // `evict_terminal_entries`, so skipping detach leaks one controller row
-        // per dequeue — the same drop+detach invariant gateway.rs/mod.rs uphold.
-        // Streaming owns the fresh id, so the fresh anchor needs no seeding.
-        match send_intake_placeholder(
-            http.clone(),
-            shared.clone(),
-            channel_id,
-            if reply_to_user_message
-                && dispatch_id_for_thread.is_none()
-                && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
-            {
-                Some((channel_id, user_msg_id))
-            } else {
-                None
-            },
-            false,
-        )
-        .await
-        {
-            Ok(fresh_msg_id) => {
-                // Fresh anchor is live; tear down the buried queued card. Delete
-                // failure is NON-fatal — never abort the turn over a lingering card.
-                // #5035 (A6): the buried card may still stand for OTHER waiting
-                // entries, so the teardown (and the detach it carries) runs only
-                // on a gate release. The hint is just the dequeued head.
-                let stale_disposition = match queued_card_gate::release_or_rekey(
-                    shared,
-                    channel_id,
-                    existing,
-                    &[user_msg_id],
-                )
-                .await
-                {
-                    QueuedCardDisposition::Released(teardown) => {
-                        match queued_card_gate::teardown_delete(http, shared, teardown).await {
-                            Ok(()) => "deleted",
-                            Err(_) => "delete_failed",
-                        }
-                    }
-                    QueuedCardDisposition::Preserved { owner } => {
-                        tracing::info!(
-                            channel_id = channel_id.get(),
-                            stale = existing.get(),
-                            owner = owner.get(),
-                            "#5035: kept the queued card for a live queue entry instead of deleting it"
-                        );
-                        "preserved"
-                    }
-                };
+        else {
+            return Ok(IntakeExecution::Executed);
+        };
+        // #5660 [R2]: classification passed; the mailbox claim still follows below.
+        let taken_cleared = if let Some(cleared) = session_was_cleared {
+            cleared
+        } else {
+            let (taken_uploads, cleared) =
+                pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
+            pending_uploads.splice(0..0, taken_uploads);
+            cleared
+        };
+        let session_was_cleared = intake_runtime_transition.session_was_cleared(taken_cleared);
+        let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
+        if force_fresh_provider_session {
+            record_fresh_session_context_boundary(shared, channel_id).await?;
+            clear_codex_goal_start_provider_session(
+                shared,
+                channel_id,
+                adk_session_key.as_deref(),
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            )
+            .await;
+        }
+        let sanitized_input = if force_fresh_provider_session {
+            rewrite_fresh_goal_prompt(&sanitized_input)
+        } else {
+            sanitized_input
+        };
+        if session_id.is_none() {
+            if force_fresh_provider_session {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 📬➡️🔄 DISPATCH: queued dequeued; posted fresh anchor (channel {}, fresh_msg {}, stale {}, stale_disposition={})",
-                    channel_id,
-                    fresh_msg_id,
-                    existing,
-                    stale_disposition
+                    "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to /goal fresh session request",
+                    channel_id.get()
                 );
-                fresh_msg_id
-            }
-            Err(error) => {
-                // Mirror the clean-start branch: release the mailbox slot so the
-                // channel is not stuck at `current_msg_id == 0`. KEEP `existing`
-                // (the queued card) visible as a fallback since the fresh POST failed.
-                let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-                let kicked = release_mailbox_after_placeholder_post_failure(
-                    shared,
-                    &bot_owner_provider,
-                    channel_id,
+            } else if session_was_cleared {
+                session_strategy_reason = "session_cleared_by_user";
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ Skipping DB provider session restore for channel {} due to prior /clear",
+                    channel_id.get()
+                );
+            } else if dispatch_reset_provider_state || dispatch_recreate_tmux {
+                session_strategy_reason = dispatch_reset_lifecycle_code(
+                    dispatch_reset_provider_state,
+                    dispatch_recreate_tmux,
+                );
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                tracing::info!(
+                    "  [{ts}] ↻ Skipping DB provider session restore for dispatch reset_provider_state={} recreate_tmux={}",
+                    dispatch_reset_provider_state,
+                    dispatch_recreate_tmux
+                );
+            } else if let Some(ref key) = adk_session_key {
+                let restored = super::super::super::adk_session::fetch_provider_session_id(
+                    key,
+                    &provider,
+                    shared.api_port,
                 )
                 .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ DEQUEUE: fresh anchor POST failed after mailbox slot acquired (channel {}, stale {}, error={}); released mailbox slot, kept stale card, kickoff_scheduled={}",
-                    channel_id,
-                    existing,
-                    error,
-                    kicked
-                );
-                let recovery = if kicked {
-                    "mailbox_released_kickoff_rescheduled"
+                if let Some(restored_session_id) = restored {
+                    session_strategy_reason = "db_provider_session_restored";
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ↻ Restored provider session_id from DB for {}",
+                        key
+                    );
+                    let mut data = shared.core.lock().await;
+                    if let Some(session) = data.sessions.get_mut(&channel_id) {
+                        session.restore_provider_session(Some(restored_session_id.clone()));
+                        memento_context_loaded = session.memento_context_loaded;
+                    }
+                    session_id = Some(restored_session_id);
+                } else if let Some((recovered, recovered_memento_context_loaded)) =
+                    restore_live_tui_provider_session_from_binding(
+                        shared,
+                        channel_id,
+                        &provider,
+                        tmux_session_name.as_deref(),
+                        Some(key),
+                    )
+                    .await
+                {
+                    session_strategy_reason = "live_tui_runtime_binding_restored";
+                    memento_context_loaded = recovered_memento_context_loaded;
+                    session_id = Some(recovered);
                 } else {
-                    "mailbox_released_kickoff_skipped"
-                };
-                crate::services::observability::emit_intake_placeholder_post_failed(
-                    provider.as_str(),
-                    channel_id.get(),
-                    Some(user_msg_id.get()),
-                    "dequeue_after_mailbox_slot",
-                    recovery,
-                    &error.to_string(),
-                );
-                return Err::<IntakeExecution, Error>(error.into());
-            }
-        }
-    } else {
-        // Active turn started cleanly — POST a fresh placeholder. On POST failure
-        // we MUST release the mailbox slot we just acquired or the channel stalls
-        // at `current_msg_id == 0` until the cancel token times out (codex P1).
-        match send_intake_placeholder(
-            http.clone(),
-            shared.clone(),
-            channel_id,
-            if reply_to_user_message
-                && dispatch_id_for_thread.is_none()
-                && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
-            {
-                Some((channel_id, user_msg_id))
+                    session_strategy_reason = "no_cached_provider_session";
+                    session_id = None;
+                }
             } else {
-                None
-            },
-            // #3082 P2-3: this turn POSTs its OWN fresh placeholder (not a queued
-            // "📬" notice) and is the one answering, so it must NOT gate behind a
-            // multi-chunk answer flush — that would self-deadlock the active card.
-            false,
-        )
-        .await
-        {
-            Ok(msg_id) => msg_id,
-            Err(error) => {
-                let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-                let kicked = release_mailbox_after_placeholder_post_failure(
-                    shared,
-                    &bot_owner_provider,
-                    channel_id,
-                )
-                .await;
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot, kickoff_scheduled={}",
-                    channel_id,
-                    error,
-                    kicked
-                );
-                // #1984 (codex C — observation): the mailbox slot is
-                // released; whether a follow-up kickoff was scheduled
-                // determines if the user message can still progress.
-                let recovery = if kicked {
-                    "mailbox_released_kickoff_rescheduled"
-                } else {
-                    "mailbox_released_kickoff_skipped"
-                };
-                crate::services::observability::emit_intake_placeholder_post_failed(
-                    provider.as_str(),
-                    channel_id.get(),
-                    Some(user_msg_id.get()),
-                    "intake_after_mailbox_slot",
-                    recovery,
-                    &error.to_string(),
-                );
-                return Err::<IntakeExecution, Error>(error.into());
+                session_strategy_reason = "session_key_unavailable";
             }
         }
-    };
-    let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
-    let retry_reply_context = session_retry_context
-        .as_ref()
-        .map(|c| c.formatted_context.clone());
-    let reply_context = merge_reply_contexts(reply_context, retry_reply_context);
-    // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
-    // into `reply_context`; the owned reminder is kept for the refusal put-back.
-    let (feedback_reminder, reply_context) =
-        take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);
-    // #4196: fold the turn-end WIP warning stashed last turn into `reply_context`
-    // so the agent is reminded to commit/stash its uncommitted changes; the owned
-    // warning is kept for the refusal put-back (same lifecycle as the reminder).
-    let (wip_warning, reply_context) =
-        take_and_merge_wip_warning(shared, &provider, channel_id, reply_context);
+        let turn_id = format!("discord:{}:{}", channel_id.get(), user_msg_id.get());
 
-    // #3813 Phase 1a: the intake placeholder POST returned a live id.
-    intake_latency.mark_placeholder_posted();
-    crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
-    shared
-        .turn_start_times
-        .insert(channel_id, std::time::Instant::now());
-    log_session_strategy_diagnostic(
-        channel_id,
-        &provider,
-        dispatch_profile,
-        session_strategy_reason,
-        session_id.as_deref(),
-        adk_session_key.as_deref(),
-        tmux_session_name.as_deref(),
-        session_retry_context.is_some(),
-        memento_context_loaded,
-    )
-    .await;
-    let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
-    let recovery_message_count = session_retry_context
-        .as_ref()
-        .map(|ctx| ctx.recovery_message_count())
-        .filter(|&count| count > 0);
-    emit_session_strategy_lifecycle(
-        shared,
-        channel_id,
-        &turn_id,
-        adk_session_key.as_deref(),
-        active_dispatch_id_for_prompt.as_deref(),
-        session_id.as_deref(),
-        session_strategy_reason,
-        cli_was_just_spawned,
-        recovery_message_count,
-    )
-    .await;
-
-    // General recall stays model-owned; session anchors use the native instruction layer.
-    let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
-    // Prepend pending file uploads
-    let memory_injection_plan =
-        build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
-    let channel_recent_context = load_channel_recent_context(
-        shared.pg_pool.as_ref(),
-        channel_id,
-        session_id.as_deref(),
-        force_fresh_provider_session,
-        session_was_cleared,
-        // #4658: intake (live user) turns are never scheduled-snapshot turns.
-        false,
-        dispatch_profile,
-        active_dispatch_id_for_prompt.as_deref(),
-        session_retry_context.as_ref(),
-    )
-    .await;
-    let materialized_uploads = crate::services::cluster::attachment_transfer::materialize::prepare(
-        &pending_uploads,
-        shared.pg_pool.as_ref(),
-    )
-    .await?;
-    let context_prompt = TurnContext {
-        provider: &provider,
-        session_id: session_id.as_deref(),
-        uploads: &materialized_uploads.records,
-        trigger: None,
-        reply: reply_context.as_deref(),
-        recent: channel_recent_context.as_ref(),
-        knowledge: memory_injection_plan
-            .shared_knowledge_for_context
-            .as_deref(),
-        author_name: request_owner_name,
-        author_id: request_owner,
-        user_input: sanitized_input,
-    }
-    .build();
-    // Build Discord context info
-    let discord_context = {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel_id);
-        build_system_discord_context(
-            session.and_then(|s| s.channel_name.as_deref()),
-            session.and_then(|s| s.category_name.as_deref()),
-            channel_id,
-            false,
-        )
-    };
-    // Claude keeps SAK in the system prompt for prefix-cache stability.
-    // Non-Claude providers receive SAK in the user context instead.
-    let sak_for_system = memory_injection_plan.sak_for_system_prompt();
-    let current_task_context = active_dispatch_info.as_ref().map(|info| {
-        super::super::super::prompt_builder::CurrentTaskContext {
-            dispatch_id: active_dispatch_id_for_prompt.as_deref(),
-            card_id: info.card_id.as_deref(),
-            dispatch_title: info.dispatch_title.as_deref(),
-            dispatch_context: info.context.as_deref(),
-            card_title: info.card_title.as_deref(),
-            github_issue_url: info.github_issue_url.as_deref(),
+        // #1332: probe turn liveness BEFORE posting any placeholder so a queued
+        // message renders the dedicated `📬 메시지 대기 중` card instead of the
+        // misleading `🔄 백그라운드 처리 중` Active card. The previous order
+        // (send_intake_placeholder → mailbox_try_start_turn) made every queued
+        // message look like processing had already begun.
+        //
+        // Create cancel token — with second check to close the TOCTOU race window.
+        // Multiple messages can pass the initial cancel_tokens check (line 169) concurrently
+        // because the async gap between check and insert allows interleaving.
+        // If another message won the race, queue ourselves and clean up.
+        let cancel_token = Arc::new(CancelToken::new());
+        let started = intake_runtime_transition
+            .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
+                shared,
+                channel_id,
+                cancel_token.clone(),
+                request_owner,
+                user_msg_id,
+                intake_claim_context(
+                    adk_session_key.as_deref(),
+                    &provider,
+                    tmux_session_name.as_deref(),
+                    &mut current_path,
+                    &mut session_id,
+                    &mut memento_context_loaded,
+                    &mut session_strategy_reason,
+                ),
+            ))
+            .await;
+        // The claim owns the route: publish it before this turn can be observed.
+        if started {
+            route.publish(shared, &provider);
         }
-    });
-    let recovery_context_for_manifest =
-        session_retry_context
-            .as_ref()
-            .map(|context| RecoveryContextManifestInput {
-                raw_context: context.raw_context.as_str(),
-                audit_record: context.audit_record.as_ref(),
-            });
-    let built_system_prompt = build_system_prompt_with_manifest(
-        &discord_context,
-        &shared.channel_roster(channel_id, request_owner, request_owner_name),
-        &current_path,
-        channel_id,
-        memory_scope_channel_id,
-        token,
-        role_binding.as_ref(),
-        reply_to_user_message,
-        PromptProfiles::foreground(dispatch_profile),
-        dispatch_type_str.as_deref(),
-        current_task_context.as_ref(),
-        sak_for_system,
-        None,
-        Some(&memory_settings),
-        crate::services::mcp_config::provider_has_memento_mcp(&provider),
-        matches!(&provider, ProviderKind::Claude),
-        recovery_context_for_manifest.as_ref(),
-        channel_recent_context.as_ref(),
-        Some(&turn_id),
-    );
-    let built_system_prompt = built_system_prompt
-        .with_session_anchors(crate::services::memory::SessionAnchorRequest {
-            settings: &memory_settings,
-            provider: &provider,
-            current_path: &current_path,
-            channel_id: channel_id.get(),
-            memory_scope_channel_id: memory_scope_channel_id.get(),
-            role_binding: role_binding.as_ref(),
-            session_id: session_id.as_deref(),
-            fresh: force_fresh_provider_session || session_was_cleared,
-        })
-        .await;
-    let system_prompt_owned = built_system_prompt.system_prompt;
-    if let Some(manifest) = built_system_prompt.manifest {
-        crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);
-    }
-    if sak_for_system.is_some() {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
-            sak_for_system.unwrap().len(),
-            channel_id.get()
-        );
-    }
-    let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
-    // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
-    // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
-    intake_latency.mark_prep_done();
-    let provider_label = provider.as_str();
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
-        channel_id.get(),
-        provider_label,
-        dispatch_profile_label(dispatch_profile),
-        memory_settings.backend.as_str(),
-        session_id.is_some(),
-        prompt_prep_duration_ms
-    );
-    // #1085: track provider-session reuse rate so we can monitor whether the
-    // idle-timeout extension and reset removals are actually translating into
-    // reused sessions (vs. falling back to fresh sessions every turn).
-    crate::services::observability::metrics::record_session_entry(
-        channel_id.get(),
-        provider_label,
-        session_id.is_some(),
-    );
-    // Resolve remote profile for this channel
-    let remote_profile = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|s| s.remote_profile_name.as_ref())
-            .and_then(|name| {
-                let settings = crate::config::Settings::load();
-                settings
-                    .remote_profiles
-                    .iter()
-                    .find(|p| p.name == *name)
-                    .cloned()
-            })
-    };
-    let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
-        &provider,
-        remote_profile.is_none(),
-        tmux_session_name.is_some(),
-        Some(channel_id.get()),
-    );
-    #[cfg(unix)]
-    reconcile_managed_tmux_runtime_kind_for_config(
-        shared,
-        &provider,
-        channel_id,
-        adk_session_key.as_deref(),
-        tmux_session_name.as_deref(),
-        prelaunch_runtime_kind,
-    )
-    .await;
 
-    let model_for_turn =
-        super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
-    let adk_session_name = channel_name.clone();
-    let adk_session_info = derive_adk_session_info(
-        Some(user_text),
-        channel_name.as_deref(),
-        Some(&current_path),
-    );
-    let adk_thread_channel_id =
-        adk_thread::resolve_channel_id(adk_session_name.as_deref(), shared, channel_id);
-    // #222: DB-based dispatch lookup takes priority over text parsing.
-    // In unified threads, user_text may contain a stale DISPATCH: prefix
-    // from a previous dispatch in the same thread. DB lookup uses the
-    // thread→card→dispatch link which is always current.
-    let looked_up_dispatch = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-        shared.api_port,
-        channel_id.get(),
-    )
-    .await
-    .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
-    let dispatch_id = dispatch_runtime::unheld_dispatch(shared, channel_id, looked_up_dispatch).await;
-    post_adk_session_status_for_channel(
-        shared,
-        channel_id,
-        adk_session_key.as_deref(),
-        adk_session_name.as_deref(),
-        model_for_turn.as_deref(),
-        &provider,
-        &adk_session_info,
-        &current_path,
-        dispatch_id.as_deref(),
-        adk_thread_channel_id,
-        role_binding.as_ref(),
-    )
-    .await;
+        // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
+        // — see latency_spans.rs). Never `.log()`'d on the early returns below.
+        let mut intake_latency = super::latency_spans::IntakeLatencySpans::turn_claimed();
 
-    let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset) =
-        prelaunch_inflight_runtime_seed(
-            &provider,
-            remote_profile.is_none(),
-            tmux_session_name.as_deref(),
-            prelaunch_runtime_kind,
-        );
-    let watcher_tmux_name = inflight_tmux_name.clone();
-    let watcher_output_path = prelaunch_watcher_output_path(
-        inflight_tmux_name.as_deref(),
-        inflight_output_path.as_deref(),
-        prelaunch_runtime_kind,
-    );
-    #[cfg(unix)]
-    let mut recapture_offset_after_busy_wait = false;
-    // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
-    // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
-    // ~45s default) via spawn_blocking. If the wait succeeds AND a fresh
-    // diagnostic now says ready, fall through to normal dispatch instead of
-    // dropping the user's message. Only emit the busy notice if the wait
-    // times out / errors, or if the post-wait diagnostic is still busy.
-    #[cfg(unix)]
-    let tui_busy_diagnostic = {
-        let initial = tui_busy_followup_diagnostic(
+        if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(
+            http,
             shared,
             &provider,
             channel_id,
-            tmux_session_name.as_deref(),
-            remote_profile.is_some(),
-            Some(&current_path),
-            session_id.as_deref(),
-        );
-        if let Some(initial_diagnostic) = initial {
-            // #3208 (A): when the authoritative JSONL turn-state says the prior
-            // turn is genuinely in-flight (Streaming/UserSubmitted), do NOT
-            // enter the up-to-45s readiness poll — it would always time out
-            // (the prompt marker is suppressed for the whole agentic turn) and
-            // surface a misleading error after the response already landed.
-            // Route straight to the queue-defer path: the busy diagnostic is
-            // already correct, and the watcher idle signal delivers the queued
-            // input cleanly once the turn reaches Idle.
-            if initial_diagnostic.transcript_turn_state.is_busy() {
-                tracing::info!(
-                    channel_id = channel_id.get(),
-                    user_msg_id = user_msg_id.get(),
-                    tmux_session_name = %initial_diagnostic.tmux_session_name,
-                    transcript_turn_state = initial_diagnostic.transcript_turn_state.as_str(),
-                    "tui follow-up: prior turn genuinely busy per JSONL; deferring to queue without readiness poll"
-                );
-                Some(initial_diagnostic)
-            } else {
-                let wait_session_name = initial_diagnostic.tmux_session_name.clone();
-                let wait_cancel_token = cancel_token.clone();
-                let wait_provider = provider.clone();
-                let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
-                    &wait_provider,
-                    Some(&current_path),
-                    session_id.as_deref(),
-                    tmux_session_name.as_deref(),
-                );
-                match &wait_readiness {
-                    HostedTuiBusyPreflightReadinessWait::Codex => {
-                        tracing::debug!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            tmux_session_name = %wait_session_name,
-                            "hosted tui busy preflight will wait for codex composer readiness"
-                        );
-                    }
-                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-                        transcript_path,
-                    ) => {
-                        tracing::debug!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            tmux_session_name = %wait_session_name,
-                            transcript_path = %transcript_path.display(),
-                            "hosted tui busy preflight will allow claude idle transcript readiness"
-                        );
-                    }
-                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
-                        tracing::debug!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            tmux_session_name = %wait_session_name,
-                            "hosted tui busy preflight will require claude prompt marker readiness"
-                        );
-                    }
-                }
-                let wait_result =
-                    tokio::task::spawn_blocking(move || {
-                        match wait_readiness {
-                HostedTuiBusyPreflightReadinessWait::Codex => {
-                    crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
-                        &wait_session_name,
-                        crate::services::codex_tui::input::PromptReadinessKind::Followup,
-                        Some(&wait_cancel_token),
-                    )
-                }
-                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
-                    transcript_path,
-                ) => crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
-                    &wait_session_name,
-                    crate::services::claude_tui::input::PromptReadinessKind::Followup,
-                    Some(wait_cancel_token.as_ref()),
-                    &transcript_path,
-                ),
-                HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
-                    crate::services::claude_tui::input::wait_for_prompt_ready(
-                        &wait_session_name,
-                        crate::services::claude_tui::input::PromptReadinessKind::Followup,
-                        Some(wait_cancel_token.as_ref()),
-                    )
-                }
-            }
-                    })
-                    .await
-                    .unwrap_or_else(|join_err| {
-                        Err(format!("wait_for_prompt_ready join error: {join_err}"))
-                    });
-                let post_wait_diagnostic = tui_busy_followup_diagnostic(
+            user_msg_id,
+            user_text,
+            started,
+            preserve_on_cancel,
+        )
+        .await
+        {
+            return Ok(IntakeExecution::Executed);
+        }
+
+        claim_bootstrap::bootstrap_claimed_turn(
+            http,
+            shared,
+            started,
+            channel_id,
+            user_msg_id,
+            &provider,
+            adk_session_key.as_deref(),
+        )
+        .await;
+
+        let preserve_queued_view = _queued_drain
+            && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id);
+        let queued_placeholder_handoff = if started && !preserve_queued_view {
+            shared
+                .remove_queued_placeholder(channel_id, user_msg_id)
+                .await
+        } else {
+            None
+        };
+
+        // Active queue views remain intact until execution; dormant handoffs keep their head cleanup.
+        if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
+            for emoji in crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+                queue_marker::note_removed_current(
                     shared,
-                    &provider,
+                    http,
                     channel_id,
-                    tmux_session_name.as_deref(),
-                    remote_profile.is_some(),
-                    Some(&current_path),
-                    session_id.as_deref(),
-                );
-                // #2416: cancellation may have flipped during the up-to-45s wait
-                // (user stop reaction, watchdog, etc.). If it did, do NOT continue
-                // to inject the prompt — fall into the busy-notice / cleanup branch
-                // below by surfacing the initial diagnostic. Closes a Codex-flagged
-                // HIGH on the Discord path mirroring the same fix in claude.rs.
-                match (
-                    wait_result,
-                    post_wait_diagnostic,
-                    cancel_token
-                        .cancelled
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ) {
-                    (_, _, true) => {
-                        tracing::info!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            tmux_session_name = %initial_diagnostic.tmux_session_name,
-                            "claude_tui follow-up: cancellation observed after busy wait; aborting injection"
-                        );
-                        Some(initial_diagnostic)
-                    }
-                    (Ok(()), None, _) => {
-                        recapture_offset_after_busy_wait = true;
-                        tracing::info!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            tmux_session_name = %initial_diagnostic.tmux_session_name,
-                            "claude_tui follow-up: busy at first check, became ready after wait_for_prompt_ready"
-                        );
-                        None
-                    }
-                    (Ok(()), Some(diag), _) => {
-                        tracing::warn!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            "claude_tui follow-up: wait_for_prompt_ready returned Ok but post-wait diagnostic still busy"
-                        );
-                        Some(diag)
-                    }
-                    (Err(err), diag_opt, _) => {
-                        let timed_out = match &provider {
-                            ProviderKind::Codex => {
-                                crate::services::codex_tui::input::is_prompt_ready_timeout_error(
-                                    &err,
-                                )
+                    user_msg_id,
+                    emoji,
+                    "dequeue_head_queue_marker_clear",
+                )
+                .await;
+            }
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📭 DEQUEUE: cleared queue-pending reaction(s) on promoted message (channel {}, msg {})",
+                channel_id,
+                user_msg_id
+            );
+        }
+
+        // A refused claim owns no start attempt; publish only its durable queue view.
+        if !started {
+            return race_loss::handle_race_loss_enqueue(
+                http,
+                shared,
+                token,
+                &provider,
+                channel_id,
+                original_channel_id,
+                turn_kind,
+                original_request_owner,
+                user_msg_id,
+                user_text,
+                &reply_context,
+                has_reply_boundary,
+                merge_consecutive,
+                &pending_uploads,
+                &voice_announcement,
+                reply_to_user_message,
+                &dispatch_id_for_thread,
+                None,
+                preserve_on_cancel,
+                race_loss::QueuedIntakeCause::RaceLoss,
+                route,
+            )
+            .await.map(|_| IntakeExecution::deferred(channel_id));
+        }
+
+        // Dispatch redirects keep the reaction on the original Discord message.
+        let _turn_start_attempt = if add_turn_pending {
+            tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
+                .await
+                .attempt()
+        } else {
+            None
+        };
+
+        let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
+            http,
+            shared,
+            &provider,
+            channel_id,
+            busy_followup_retry_user_msg_id,
+            queued_placeholder_handoff,
+        )
+        .await;
+        let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
+            existing_notice
+        } else if let Some(existing) = queued_placeholder_handoff {
+            // #3480: the queued `📬 대기 중` card is now BURIED under what the active
+            // turn streamed while this message waited; reusing it as the live anchor
+            // edits that buried card (looks like a relay drop / huge 2000-char gaps).
+            // Instead POST a FRESH bottom anchor like the clean-start branch below
+            // (same reply-target gating), then DELETE the stale card. The old code's
+            // `ensure_active` visual morph is obsolete once deleted, but on SUCCESS we
+            // must still `detach_by_message` its controller row (seeded Queued by
+            // intake_gate's `ensure_queued`): `remove_queued_placeholder` clears only
+            // the `queued_placeholders` map and `Queued` rows are excluded from
+            // `evict_terminal_entries`, so skipping detach leaks one controller row
+            // per dequeue — the same drop+detach invariant gateway.rs/mod.rs uphold.
+            // Streaming owns the fresh id, so the fresh anchor needs no seeding.
+            match send_intake_placeholder(
+                http.clone(),
+                shared.clone(),
+                channel_id,
+                if reply_to_user_message
+                    && dispatch_id_for_thread.is_none()
+                    && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                {
+                    Some((channel_id, user_msg_id))
+                } else {
+                    None
+                },
+                false,
+            )
+            .await
+            {
+                Ok(fresh_msg_id) => {
+                    // Fresh anchor is live; tear down the buried queued card. Delete
+                    // failure is NON-fatal — never abort the turn over a lingering card.
+                    // #5035 (A6): the buried card may still stand for OTHER waiting
+                    // entries, so the teardown (and the detach it carries) runs only
+                    // on a gate release. The hint is just the dequeued head.
+                    let stale_disposition = match queued_card_gate::release_or_rekey(
+                        shared,
+                        channel_id,
+                        existing,
+                        &[user_msg_id],
+                    )
+                    .await
+                    {
+                        QueuedCardDisposition::Released(teardown) => {
+                            match queued_card_gate::teardown_delete(http, shared, teardown).await {
+                                Ok(()) => "deleted",
+                                Err(_) => "delete_failed",
                             }
-                            _ => crate::services::claude_tui::input::is_prompt_ready_timeout_error(
-                                &err,
-                            ),
-                        };
-                        tracing::warn!(
-                            channel_id = channel_id.get(),
-                            user_msg_id = user_msg_id.get(),
-                            timed_out,
-                            error = %err,
-                            "claude_tui follow-up: wait_for_prompt_ready failed; emitting busy notice"
-                        );
-                        Some(diag_opt.unwrap_or(initial_diagnostic))
-                    }
+                        }
+                        QueuedCardDisposition::Preserved { owner } => {
+                            tracing::info!(
+                                channel_id = channel_id.get(),
+                                stale = existing.get(),
+                                owner = owner.get(),
+                                "#5035: kept the queued card for a live queue entry instead of deleting it"
+                            );
+                            "preserved"
+                        }
+                    };
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] 📬➡️🔄 DISPATCH: queued dequeued; posted fresh anchor (channel {}, fresh_msg {}, stale {}, stale_disposition={})",
+                        channel_id,
+                        fresh_msg_id,
+                        existing,
+                        stale_disposition
+                    );
+                    fresh_msg_id
+                }
+                Err(error) => {
+                    // Mirror the clean-start branch: release the mailbox slot so the
+                    // channel is not stuck at `current_msg_id == 0`. KEEP `existing`
+                    // (the queued card) visible as a fallback since the fresh POST failed.
+                    let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+                    let kicked = release_mailbox_after_placeholder_post_failure(
+                        shared,
+                        &bot_owner_provider,
+                        channel_id,
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ DEQUEUE: fresh anchor POST failed after mailbox slot acquired (channel {}, stale {}, error={}); released mailbox slot, kept stale card, kickoff_scheduled={}",
+                        channel_id,
+                        existing,
+                        error,
+                        kicked
+                    );
+                    let recovery = if kicked {
+                        "mailbox_released_kickoff_rescheduled"
+                    } else {
+                        "mailbox_released_kickoff_skipped"
+                    };
+                    crate::services::observability::emit_intake_placeholder_post_failed(
+                        provider.as_str(),
+                        channel_id.get(),
+                        Some(user_msg_id.get()),
+                        "dequeue_after_mailbox_slot",
+                        recovery,
+                        &error.to_string(),
+                    );
+                    return Err::<IntakeExecution, Error>(error.into());
                 }
             }
         } else {
-            None
-        }
-    };
-    #[cfg(unix)]
-    if let Some(diagnostic) = tui_busy_diagnostic {
-        let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-        let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
-            shared,
-            &bot_owner_provider,
+            // Active turn started cleanly — POST a fresh placeholder. On POST failure
+            // we MUST release the mailbox slot we just acquired or the channel stalls
+            // at `current_msg_id == 0` until the cancel token times out (codex P1).
+            match send_intake_placeholder(
+                http.clone(),
+                shared.clone(),
+                channel_id,
+                if reply_to_user_message
+                    && dispatch_id_for_thread.is_none()
+                    && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+                {
+                    Some((channel_id, user_msg_id))
+                } else {
+                    None
+                },
+                // #3082 P2-3: this turn POSTs its OWN fresh placeholder (not a queued
+                // "📬" notice) and is the one answering, so it must NOT gate behind a
+                // multi-chunk answer flush — that would self-deadlock the active card.
+                false,
+            )
+            .await
+            {
+                Ok(msg_id) => msg_id,
+                Err(error) => {
+                    let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+                    let kicked = release_mailbox_after_placeholder_post_failure(
+                        shared,
+                        &bot_owner_provider,
+                        channel_id,
+                    )
+                    .await;
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ INTAKE: placeholder POST failed after mailbox slot acquired (channel {}, error={}); released mailbox slot, kickoff_scheduled={}",
+                        channel_id,
+                        error,
+                        kicked
+                    );
+                    // #1984 (codex C — observation): the mailbox slot is
+                    // released; whether a follow-up kickoff was scheduled
+                    // determines if the user message can still progress.
+                    let recovery = if kicked {
+                        "mailbox_released_kickoff_rescheduled"
+                    } else {
+                        "mailbox_released_kickoff_skipped"
+                    };
+                    crate::services::observability::emit_intake_placeholder_post_failed(
+                        provider.as_str(),
+                        channel_id.get(),
+                        Some(user_msg_id.get()),
+                        "intake_after_mailbox_slot",
+                        recovery,
+                        &error.to_string(),
+                    );
+                    return Err::<IntakeExecution, Error>(error.into());
+                }
+            }
+        };
+        let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
+        let retry_reply_context = session_retry_context
+            .as_ref()
+            .map(|c| c.formatted_context.clone());
+        let reply_context = merge_reply_contexts(reply_context, retry_reply_context);
+        // #4307 PR-B: fold the voluntary tool_feedback reminder stashed last turn
+        // into `reply_context`; the owned reminder is kept for the refusal put-back.
+        let (feedback_reminder, reply_context) =
+            take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);
+        // #4196: fold the turn-end WIP warning stashed last turn into `reply_context`
+        // so the agent is reminded to commit/stash its uncommitted changes; the owned
+        // warning is kept for the refusal put-back (same lifecycle as the reminder).
+        let (wip_warning, reply_context) =
+            take_and_merge_wip_warning(shared, &provider, channel_id, reply_context);
+
+        // #3813 Phase 1a: the intake placeholder POST returned a live id.
+        intake_latency.mark_placeholder_posted();
+        crate::services::discord::increment_global_active(shared, "intake_after_mailbox_slot");
+        shared
+            .turn_start_times
+            .insert(channel_id, std::time::Instant::now());
+        log_session_strategy_diagnostic(
             channel_id,
+            &provider,
+            dispatch_profile,
+            session_strategy_reason,
+            session_id.as_deref(),
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
+            session_retry_context.is_some(),
+            memento_context_loaded,
         )
         .await;
-        let enqueue_outcome = enqueue_busy_tui_followup_for_retry(
+        let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
+        let recovery_message_count = session_retry_context
+            .as_ref()
+            .map(|ctx| ctx.recovery_message_count())
+            .filter(|&count| count > 0);
+        emit_session_strategy_lifecycle(
             shared,
-            &bot_owner_provider,
             channel_id,
-            original_request_owner,
-            user_msg_id,
-            user_text,
-            preserve_on_cancel,
+            &turn_id,
+            adk_session_key.as_deref(),
+            active_dispatch_id_for_prompt.as_deref(),
+            session_id.as_deref(),
+            session_strategy_reason,
+            cli_was_just_spawned,
+            recovery_message_count,
+        )
+        .await;
+
+        // General recall stays model-owned; session anchors use the native instruction layer.
+        let memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+        // Prepend pending file uploads
+        let memory_injection_plan =
+            build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
+        let channel_recent_context = load_channel_recent_context(
+            shared.pg_pool.as_ref(),
+            channel_id,
+            session_id.as_deref(),
+            force_fresh_provider_session,
+            session_was_cleared,
+            // #4658: intake (live user) turns are never scheduled-snapshot turns.
+            false,
+            dispatch_profile,
+            active_dispatch_id_for_prompt.as_deref(),
+            session_retry_context.as_ref(),
+        )
+        .await;
+        let materialized_uploads = crate::services::cluster::attachment_transfer::materialize::prepare(
+            &pending_uploads,
+            shared.pg_pool.as_ref(),
+        )
+        .await?;
+        let context_prompt = TurnContext {
+            provider: &provider,
+            session_id: session_id.as_deref(),
+            uploads: &materialized_uploads.records,
+            trigger: None,
+            reply: reply_context.as_deref(),
+            recent: channel_recent_context.as_ref(),
+            knowledge: memory_injection_plan
+                .shared_knowledge_for_context
+                .as_deref(),
+            author_name: request_owner_name,
+            author_id: request_owner,
+            user_input: sanitized_input,
+        }
+        .build();
+        // Build Discord context info
+        let discord_context = {
+            let data = shared.core.lock().await;
+            let session = data.sessions.get(&channel_id);
+            build_system_discord_context(
+                session.and_then(|s| s.channel_name.as_deref()),
+                session.and_then(|s| s.category_name.as_deref()),
+                channel_id,
+                false,
+            )
+        };
+        // Claude keeps SAK in the system prompt for prefix-cache stability.
+        // Non-Claude providers receive SAK in the user context instead.
+        let sak_for_system = memory_injection_plan.sak_for_system_prompt();
+        let current_task_context = active_dispatch_info.as_ref().map(|info| {
+            super::super::super::prompt_builder::CurrentTaskContext {
+                dispatch_id: active_dispatch_id_for_prompt.as_deref(),
+                card_id: info.card_id.as_deref(),
+                dispatch_title: info.dispatch_title.as_deref(),
+                dispatch_context: info.context.as_deref(),
+                card_title: info.card_title.as_deref(),
+                github_issue_url: info.github_issue_url.as_deref(),
+            }
+        });
+        let recovery_context_for_manifest =
+            session_retry_context
+                .as_ref()
+                .map(|context| RecoveryContextManifestInput {
+                    raw_context: context.raw_context.as_str(),
+                    audit_record: context.audit_record.as_ref(),
+                });
+        let built_system_prompt = build_system_prompt_with_manifest(
+            &discord_context,
+            &shared.channel_roster(channel_id, request_owner, request_owner_name),
+            &current_path,
+            channel_id,
+            memory_scope_channel_id,
+            token,
+            role_binding.as_ref(),
+            reply_to_user_message,
+            PromptProfiles::foreground(dispatch_profile),
+            dispatch_type_str.as_deref(),
+            current_task_context.as_ref(),
+            sak_for_system,
+            None,
+            Some(&memory_settings),
+            crate::services::mcp_config::provider_has_memento_mcp(&provider),
+            matches!(&provider, ProviderKind::Claude),
+            recovery_context_for_manifest.as_ref(),
+            channel_recent_context.as_ref(),
+            Some(&turn_id),
+        );
+        let built_system_prompt = built_system_prompt
+            .with_session_anchors(crate::services::memory::SessionAnchorRequest {
+                settings: &memory_settings,
+                provider: &provider,
+                current_path: &current_path,
+                channel_id: channel_id.get(),
+                memory_scope_channel_id: memory_scope_channel_id.get(),
+                role_binding: role_binding.as_ref(),
+                session_id: session_id.as_deref(),
+                fresh: force_fresh_provider_session || session_was_cleared,
+            })
+            .await;
+        let system_prompt_owned = built_system_prompt.system_prompt;
+        if let Some(manifest) = built_system_prompt.manifest {
+            crate::db::prompt_manifests::spawn_save_prompt_manifest(shared.pg_pool.clone(), manifest);
+        }
+        if sak_for_system.is_some() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📦 SAK in system prompt ({} chars) for channel {}",
+                sak_for_system.unwrap().len(),
+                channel_id.get()
+            );
+        }
+        let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
+        // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
+        // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
+        intake_latency.mark_prep_done();
+        let provider_label = provider.as_str();
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        tracing::info!(
+            "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
+            channel_id.get(),
+            provider_label,
+            dispatch_profile_label(dispatch_profile),
+            memory_settings.backend.as_str(),
+            session_id.is_some(),
+            prompt_prep_duration_ms
+        );
+        // #1085: track provider-session reuse rate so we can monitor whether the
+        // idle-timeout extension and reset removals are actually translating into
+        // reused sessions (vs. falling back to fresh sessions every turn).
+        crate::services::observability::metrics::record_session_entry(
+            channel_id.get(),
+            provider_label,
+            session_id.is_some(),
+        );
+        // Resolve remote profile for this channel
+        let remote_profile = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|s| s.remote_profile_name.as_ref())
+                .and_then(|name| {
+                    let settings = crate::config::Settings::load();
+                    settings
+                        .remote_profiles
+                        .iter()
+                        .find(|p| p.name == *name)
+                        .cloned()
+                })
+        };
+        let prelaunch_runtime_kind = prelaunch_runtime_kind_for_managed_session(
+            &provider,
+            remote_profile.is_none(),
+            tmux_session_name.is_some(),
+            Some(channel_id.get()),
+        );
+        #[cfg(unix)]
+        reconcile_managed_tmux_runtime_kind_for_config(
+            shared,
+            &provider,
+            channel_id,
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
+            prelaunch_runtime_kind,
+        )
+        .await;
+
+        let model_for_turn =
+            super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+        let adk_session_name = channel_name.clone();
+        let adk_session_info = derive_adk_session_info(
+            Some(user_text),
+            channel_name.as_deref(),
+            Some(&current_path),
+        );
+        let adk_thread_channel_id =
+            adk_thread::resolve_channel_id(adk_session_name.as_deref(), shared, channel_id);
+        // #222: DB-based dispatch lookup takes priority over text parsing.
+        // In unified threads, user_text may contain a stale DISPATCH: prefix
+        // from a previous dispatch in the same thread. DB lookup uses the
+        // thread→card→dispatch link which is always current.
+        let looked_up_dispatch = super::super::super::adk_session::lookup_pending_dispatch_for_thread(
+            shared.api_port,
+            channel_id.get(),
+        )
+        .await
+        .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
+        let dispatch_id = dispatch_runtime::unheld_dispatch(shared, channel_id, looked_up_dispatch).await;
+        post_adk_session_status_for_channel(
+            shared,
+            channel_id,
+            adk_session_key.as_deref(),
+            adk_session_name.as_deref(),
+            model_for_turn.as_deref(),
+            &provider,
+            &adk_session_info,
+            &current_path,
+            dispatch_id.as_deref(),
+            adk_thread_channel_id,
+            role_binding.as_ref(),
+        )
+        .await;
+
+        let (inflight_tmux_name, inflight_output_path, inflight_input_fifo, mut inflight_offset) =
+            prelaunch_inflight_runtime_seed(
+                &provider,
+                remote_profile.is_none(),
+                tmux_session_name.as_deref(),
+                prelaunch_runtime_kind,
+            );
+        let watcher_tmux_name = inflight_tmux_name.clone();
+        let watcher_output_path = prelaunch_watcher_output_path(
+            inflight_tmux_name.as_deref(),
+            inflight_output_path.as_deref(),
+            prelaunch_runtime_kind,
+        );
+        #[cfg(unix)]
+        let mut recapture_offset_after_busy_wait = false;
+        // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
+        // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
+        // ~45s default) via spawn_blocking. If the wait succeeds AND a fresh
+        // diagnostic now says ready, fall through to normal dispatch instead of
+        // dropping the user's message. Only emit the busy notice if the wait
+        // times out / errors, or if the post-wait diagnostic is still busy.
+        #[cfg(unix)]
+        let tui_busy_diagnostic = {
+            let initial = tui_busy_followup_diagnostic(
+                shared,
+                &provider,
+                channel_id,
+                tmux_session_name.as_deref(),
+                remote_profile.is_some(),
+                Some(&current_path),
+                session_id.as_deref(),
+            );
+            if let Some(initial_diagnostic) = initial {
+                // #3208 (A): when the authoritative JSONL turn-state says the prior
+                // turn is genuinely in-flight (Streaming/UserSubmitted), do NOT
+                // enter the up-to-45s readiness poll — it would always time out
+                // (the prompt marker is suppressed for the whole agentic turn) and
+                // surface a misleading error after the response already landed.
+                // Route straight to the queue-defer path: the busy diagnostic is
+                // already correct, and the watcher idle signal delivers the queued
+                // input cleanly once the turn reaches Idle.
+                if initial_diagnostic.transcript_turn_state.is_busy() {
+                    tracing::info!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        tmux_session_name = %initial_diagnostic.tmux_session_name,
+                        transcript_turn_state = initial_diagnostic.transcript_turn_state.as_str(),
+                        "tui follow-up: prior turn genuinely busy per JSONL; deferring to queue without readiness poll"
+                    );
+                    Some(initial_diagnostic)
+                } else {
+                    let wait_session_name = initial_diagnostic.tmux_session_name.clone();
+                    let wait_cancel_token = cancel_token.clone();
+                    let wait_provider = provider.clone();
+                    let wait_readiness = hosted_tui_busy_preflight_readiness_wait(
+                        &wait_provider,
+                        Some(&current_path),
+                        session_id.as_deref(),
+                        tmux_session_name.as_deref(),
+                    );
+                    match &wait_readiness {
+                        HostedTuiBusyPreflightReadinessWait::Codex => {
+                            tracing::debug!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                tmux_session_name = %wait_session_name,
+                                "hosted tui busy preflight will wait for codex composer readiness"
+                            );
+                        }
+                        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                            transcript_path,
+                        ) => {
+                            tracing::debug!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                tmux_session_name = %wait_session_name,
+                                transcript_path = %transcript_path.display(),
+                                "hosted tui busy preflight will allow claude idle transcript readiness"
+                            );
+                        }
+                        HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
+                            tracing::debug!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                tmux_session_name = %wait_session_name,
+                                "hosted tui busy preflight will require claude prompt marker readiness"
+                            );
+                        }
+                    }
+                    let wait_result =
+                        tokio::task::spawn_blocking(move || {
+                            match wait_readiness {
+                    HostedTuiBusyPreflightReadinessWait::Codex => {
+                        crate::services::codex_tui::input::wait_until_codex_tui_input_ready(
+                            &wait_session_name,
+                            crate::services::codex_tui::input::PromptReadinessKind::Followup,
+                            Some(&wait_cancel_token),
+                        )
+                    }
+                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(
+                        transcript_path,
+                    ) => crate::services::claude_tui::input::wait_for_prompt_ready_or_idle_transcript(
+                        &wait_session_name,
+                        crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                        Some(wait_cancel_token.as_ref()),
+                        &transcript_path,
+                    ),
+                    HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly => {
+                        crate::services::claude_tui::input::wait_for_prompt_ready(
+                            &wait_session_name,
+                            crate::services::claude_tui::input::PromptReadinessKind::Followup,
+                            Some(wait_cancel_token.as_ref()),
+                        )
+                    }
+                }
+                        })
+                        .await
+                        .unwrap_or_else(|join_err| {
+                            Err(format!("wait_for_prompt_ready join error: {join_err}"))
+                        });
+                    let post_wait_diagnostic = tui_busy_followup_diagnostic(
+                        shared,
+                        &provider,
+                        channel_id,
+                        tmux_session_name.as_deref(),
+                        remote_profile.is_some(),
+                        Some(&current_path),
+                        session_id.as_deref(),
+                    );
+                    // #2416: cancellation may have flipped during the up-to-45s wait
+                    // (user stop reaction, watchdog, etc.). If it did, do NOT continue
+                    // to inject the prompt — fall into the busy-notice / cleanup branch
+                    // below by surfacing the initial diagnostic. Closes a Codex-flagged
+                    // HIGH on the Discord path mirroring the same fix in claude.rs.
+                    match (
+                        wait_result,
+                        post_wait_diagnostic,
+                        cancel_token
+                            .cancelled
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ) {
+                        (_, _, true) => {
+                            tracing::info!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                tmux_session_name = %initial_diagnostic.tmux_session_name,
+                                "claude_tui follow-up: cancellation observed after busy wait; aborting injection"
+                            );
+                            Some(initial_diagnostic)
+                        }
+                        (Ok(()), None, _) => {
+                            recapture_offset_after_busy_wait = true;
+                            tracing::info!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                tmux_session_name = %initial_diagnostic.tmux_session_name,
+                                "claude_tui follow-up: busy at first check, became ready after wait_for_prompt_ready"
+                            );
+                            None
+                        }
+                        (Ok(()), Some(diag), _) => {
+                            tracing::warn!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                "claude_tui follow-up: wait_for_prompt_ready returned Ok but post-wait diagnostic still busy"
+                            );
+                            Some(diag)
+                        }
+                        (Err(err), diag_opt, _) => {
+                            let timed_out = match &provider {
+                                ProviderKind::Codex => {
+                                    crate::services::codex_tui::input::is_prompt_ready_timeout_error(
+                                        &err,
+                                    )
+                                }
+                                _ => crate::services::claude_tui::input::is_prompt_ready_timeout_error(
+                                    &err,
+                                ),
+                            };
+                            tracing::warn!(
+                                channel_id = channel_id.get(),
+                                user_msg_id = user_msg_id.get(),
+                                timed_out,
+                                error = %err,
+                                "claude_tui follow-up: wait_for_prompt_ready failed; emitting busy notice"
+                            );
+                            Some(diag_opt.unwrap_or(initial_diagnostic))
+                        }
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        #[cfg(unix)]
+        if let Some(diagnostic) = tui_busy_diagnostic {
+            let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+            let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
+                shared,
+                &bot_owner_provider,
+                channel_id,
+            )
+            .await;
+            let enqueue_outcome = enqueue_busy_tui_followup_for_retry(
+                shared,
+                &bot_owner_provider,
+                channel_id,
+                original_request_owner,
+                user_msg_id,
+                user_text,
+                preserve_on_cancel,
+                reply_context.clone(),
+                has_reply_boundary,
+                merge_consecutive,
+                pending_uploads.clone(),
+                voice_announcement.clone(),
+            )
+            .await;
+            let queue_depth_after_busy_enqueue =
+                super::super::super::mailbox_snapshot(shared, channel_id)
+                    .await
+                    .intervention_queue
+                    .len();
+            let retry_present_or_accepted = busy_retry::finalize_enqueue(
+                busy_retry::FinalizeEnqueueContext {
+                    shared,
+                    http,
+                    provider: &provider,
+                    channel_id,
+                    user_msg_id,
+                    placeholder_msg_id,
+                    turn_start_attempt: _turn_start_attempt,
+                    session_retry_context: session_retry_context.as_ref(),
+                    feedback_reminder: feedback_reminder.as_deref(),
+                    wip_warning: wip_warning.as_deref(),
+                },
+                &enqueue_outcome,
+            )
+            .await;
+            let queued_card_rendered = false;
+            let queue_kickoff_scheduled =
+                queue_kickoff_scheduled_by_release || retry_present_or_accepted;
+            let mut diagnostic_json = diagnostic.to_json();
+            if let Some(object) = diagnostic_json.as_object_mut() {
+                object.insert(
+                    "queued_for_retry".to_string(),
+                    serde_json::json!(enqueue_outcome.enqueued),
+                );
+                object.insert(
+                    "queue_merged".to_string(),
+                    serde_json::json!(enqueue_outcome.merged),
+                );
+                object.insert(
+                    "queue_depth_after".to_string(),
+                    serde_json::json!(queue_depth_after_busy_enqueue),
+                );
+                object.insert(
+                    "queued_card_rendered".to_string(),
+                    serde_json::json!(queued_card_rendered),
+                );
+                object.insert(
+                    "queue_kickoff_scheduled".to_string(),
+                    serde_json::json!(queue_kickoff_scheduled),
+                );
+                // #2728: when `enqueued == false` we previously had no signal in
+                // the producer-exit diagnostic to distinguish dup-guard / dedup /
+                // actor-unreachable refusals. Surface the refusal kind so the
+                // next adk-cc-style incident can be classified from the log.
+                if let Some(reason) = enqueue_outcome.refusal_reason {
+                    object.insert(
+                        "enqueue_refusal_reason".to_string(),
+                        serde_json::json!(reason.as_str()),
+                    );
+                }
+            }
+            tracing::info!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                diagnostics = %diagnostic_json,
+                "claude_tui follow-up queued because hosted TUI is busy before prompt submission"
+            );
+            crate::services::observability::emit_inflight_lifecycle_event(
+                provider.as_str(),
+                channel_id.get(),
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                Some(turn_id.as_str()),
+                "claude_tui_followup_busy_pre_submit",
+                diagnostic_json,
+            );
+            super::super::super::saturating_decrement_global_active(shared);
+            shared.turn_start_times.remove(&channel_id);
+            post_adk_session_status(
+                adk_session_key.as_deref(),
+                adk_session_name.as_deref(),
+                Some(provider.as_str()),
+                "awaiting_user",
+                &provider,
+                Some(&adk_session_info),
+                None,
+                Some(&current_path),
+                dispatch_id.as_deref(),
+                adk_thread_channel_id,
+                Some(channel_id),
+                role_binding
+                    .as_ref()
+                    .map(|binding| binding.role_id.as_str()),
+                shared.api_port,
+            )
+            .await;
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📬 Claude TUI busy follow-up queued before prompt submission (channel {}, enqueued={}, merged={}, depth={}, card_rendered={}, queue_kickoff_scheduled={})",
+                channel_id,
+                enqueue_outcome.enqueued,
+                enqueue_outcome.merged,
+                queue_depth_after_busy_enqueue,
+                queued_card_rendered,
+                queue_kickoff_scheduled
+            );
+            cancel_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // #3813 Phase 1a: prep done but input deferred pre-submit (TUI busy) —
+            // emit the partial span (input/total render `-`); the retry re-enters
+            // intake and emits its own `submitted` span.
+            intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
+            return Ok(IntakeExecution::deferred(channel_id));
+        }
+        #[cfg(unix)]
+        if recapture_offset_after_busy_wait {
+            let corrected_offset = recapture_inflight_offset_after_successful_busy_wait(
+                inflight_output_path.as_deref(),
+                inflight_offset,
+            );
+            if corrected_offset != inflight_offset {
+                tracing::info!(
+                    channel_id = channel_id.get(),
+                    user_msg_id = user_msg_id.get(),
+                    previous_offset = inflight_offset,
+                    corrected_offset,
+                    "claude_tui follow-up recaptured inflight offset after successful busy wait"
+                );
+            }
+            inflight_offset = corrected_offset;
+        }
+
+        let (logical_channel_id, thread_id, thread_title) =
+            if let Some((parent_id, _parent_name)) = final_thread_parent.as_ref() {
+                let (live_thread_title, _) =
+                    super::super::super::resolve_channel_category(http, cache, channel_id).await;
+                (parent_id.get(), Some(channel_id.get()), live_thread_title)
+            } else {
+                (channel_id.get(), None, None)
+            };
+
+        let mut inflight_state =
+            build_intake_inflight_state(intake_outbox_id, source_message_ids, || {
+                InflightTurnState::new(
+                    provider.clone(),
+                    channel_id.get(),
+                    channel_name.clone(),
+                    request_owner.get(),
+                    user_msg_id.get(),
+                    placeholder_msg_id.get(),
+                    user_text.to_string(),
+                    session_id.clone(),
+                    inflight_tmux_name,
+                    inflight_output_path,
+                    inflight_input_fifo.clone(),
+                    inflight_offset,
+                )
+            });
+        inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
+        inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
+        apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
+        let (worktree_path, worktree_branch, base_commit) = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|session| session.worktree.as_ref())
+                .map(|wt| {
+                    (
+                        Some(wt.worktree_path.clone()),
+                        Some(wt.branch_name.clone()),
+                        crate::services::platform::git_head_commit(&wt.original_path),
+                    )
+                })
+                .unwrap_or((None, None, None))
+        };
+        inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
+        // FIX #6 (Codex P2): persist the originating Intervention's follow-up
+        // requeue context so a PRE-submit busy-timeout requeue
+        // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
+        // Intervention without losing reply context / attachments / voice metadata.
+        inflight_state.set_followup_requeue_context(
             reply_context.clone(),
             has_reply_boundary,
             merge_consecutive,
             pending_uploads.clone(),
             voice_announcement.clone(),
-        )
-        .await;
-        let queue_depth_after_busy_enqueue =
-            super::super::super::mailbox_snapshot(shared, channel_id)
-                .await
-                .intervention_queue
-                .len();
-        let retry_present_or_accepted = busy_retry::finalize_enqueue(
-            busy_retry::FinalizeEnqueueContext {
-                shared,
-                http,
-                provider: &provider,
-                channel_id,
-                user_msg_id,
-                placeholder_msg_id,
-                turn_start_attempt: _turn_start_attempt,
-                session_retry_context: session_retry_context.as_ref(),
-                feedback_reminder: feedback_reminder.as_deref(),
-                wip_warning: wip_warning.as_deref(),
-            },
-            &enqueue_outcome,
-        )
-        .await;
-        let queued_card_rendered = false;
-        let queue_kickoff_scheduled =
-            queue_kickoff_scheduled_by_release || retry_present_or_accepted;
-        let mut diagnostic_json = diagnostic.to_json();
-        if let Some(object) = diagnostic_json.as_object_mut() {
-            object.insert(
-                "queued_for_retry".to_string(),
-                serde_json::json!(enqueue_outcome.enqueued),
-            );
-            object.insert(
-                "queue_merged".to_string(),
-                serde_json::json!(enqueue_outcome.merged),
-            );
-            object.insert(
-                "queue_depth_after".to_string(),
-                serde_json::json!(queue_depth_after_busy_enqueue),
-            );
-            object.insert(
-                "queued_card_rendered".to_string(),
-                serde_json::json!(queued_card_rendered),
-            );
-            object.insert(
-                "queue_kickoff_scheduled".to_string(),
-                serde_json::json!(queue_kickoff_scheduled),
-            );
-            // #2728: when `enqueued == false` we previously had no signal in
-            // the producer-exit diagnostic to distinguish dup-guard / dedup /
-            // actor-unreachable refusals. Surface the refusal kind so the
-            // next adk-cc-style incident can be classified from the log.
-            if let Some(reason) = enqueue_outcome.refusal_reason {
-                object.insert(
-                    "enqueue_refusal_reason".to_string(),
-                    serde_json::json!(reason.as_str()),
-                );
-            }
+            preserve_on_cancel,
+        );
+        inflight_state.logical_channel_id = Some(logical_channel_id);
+        inflight_state.thread_id = thread_id;
+        inflight_state.thread_title = thread_title;
+        if is_voice_announcement {
+            inflight_state.source = crate::dispatch::Source::Voice;
         }
-        tracing::info!(
-            channel_id = channel_id.get(),
-            user_msg_id = user_msg_id.get(),
-            diagnostics = %diagnostic_json,
-            "claude_tui follow-up queued because hosted TUI is busy before prompt submission"
-        );
-        crate::services::observability::emit_inflight_lifecycle_event(
-            provider.as_str(),
-            channel_id.get(),
-            dispatch_id.as_deref(),
-            adk_session_key.as_deref(),
-            Some(turn_id.as_str()),
-            "claude_tui_followup_busy_pre_submit",
-            diagnostic_json,
-        );
-        super::super::super::saturating_decrement_global_active(shared);
-        shared.turn_start_times.remove(&channel_id);
-        post_adk_session_status(
-            adk_session_key.as_deref(),
-            adk_session_name.as_deref(),
-            Some(provider.as_str()),
-            "awaiting_user",
-            &provider,
-            Some(&adk_session_info),
-            None,
-            Some(&current_path),
-            dispatch_id.as_deref(),
-            adk_thread_channel_id,
-            Some(channel_id),
-            role_binding
-                .as_ref()
-                .map(|binding| binding.role_id.as_str()),
-            shared.api_port,
-        )
-        .await;
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 📬 Claude TUI busy follow-up queued before prompt submission (channel {}, enqueued={}, merged={}, depth={}, card_rendered={}, queue_kickoff_scheduled={})",
+        inflight_state.session_key = adk_session_key.clone();
+        inflight_state.dispatch_id = dispatch_id.clone();
+        let replay_request = replay_start::StartRequest {
+            provider: &provider,
             channel_id,
-            enqueue_outcome.enqueued,
-            enqueue_outcome.merged,
-            queue_depth_after_busy_enqueue,
-            queued_card_rendered,
-            queue_kickoff_scheduled
+            agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
+            reply_context: reply_context.as_deref(),
+            uploads: &pending_uploads,
+            session_key: adk_session_key.as_deref(),
+            prompt: &context_prompt,
+        };
+        let checked = replay_start::check(shared, replay_request, &mut inflight_state, &cancel_token);
+        let replay_start = match checked.await {
+            Ok((start, fresh)) => {
+                if fresh {
+                    session_id = None;
+                }
+                start
+            }
+            Err(stopped) => return stopped,
+        };
+        let turn_host = crate::services::turn_host::for_turn(
+            shared.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            adk_session_key.as_deref(),
+        )
+        .await;
+        let submission = crate::services::discord::inflight::install_managed_submission_boundary(
+            &mut inflight_state,
+            &turn_host,
         );
-        cancel_token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        // #3813 Phase 1a: prep done but input deferred pre-submit (TUI busy) —
-        // emit the partial span (input/total render `-`); the retry re-enters
-        // intake and emits its own `submitted` span.
-        intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
-        return Ok(IntakeExecution::deferred(channel_id));
-    }
-    #[cfg(unix)]
-    if recapture_offset_after_busy_wait {
-        let corrected_offset = recapture_inflight_offset_after_successful_busy_wait(
-            inflight_output_path.as_deref(),
-            inflight_offset,
-        );
-        if corrected_offset != inflight_offset {
-            tracing::info!(
-                channel_id = channel_id.get(),
-                user_msg_id = user_msg_id.get(),
-                previous_offset = inflight_offset,
-                corrected_offset,
-                "claude_tui follow-up recaptured inflight offset after successful busy wait"
-            );
+        let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
+            shared,
+            &provider,
+            &inflight_state,
+            &cancel_token,
+        )
+        .await
+        {
+            Ok(registration) => registration,
+            Err(true) => return Ok(IntakeExecution::deferred(channel_id)),
+            Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
+        };
+        inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
+        let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
+        if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
+            return Ok(IntakeExecution::deferred(channel_id));
         }
-        inflight_offset = corrected_offset;
-    }
 
-    let (logical_channel_id, thread_id, thread_title) =
-        if let Some((parent_id, _parent_name)) = final_thread_parent.as_ref() {
-            let (live_thread_title, _) =
-                super::super::super::resolve_channel_category(http, cache, channel_id).await;
-            (parent_id.get(), Some(channel_id.get()), live_thread_title)
+        if preserve_queued_view {
+            tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "queued_replay_input_started")
+                .await;
+        }
+
+        // Create channel for streaming
+        let (tx, rx) = mpsc::channel();
+        let (completion_tx, completion_rx) = if wait_for_completion {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            (Some(tx), Some(rx))
         } else {
-            (channel_id.get(), None, None)
+            (None, None)
         };
 
-    let mut inflight_state =
-        build_intake_inflight_state(intake_outbox_id, source_message_ids, || {
-            InflightTurnState::new(
-                provider.clone(),
-                channel_id.get(),
-                channel_name.clone(),
-                request_owner.get(),
-                user_msg_id.get(),
-                placeholder_msg_id.get(),
-                user_text.to_string(),
-                session_id.clone(),
-                inflight_tmux_name,
-                inflight_output_path,
-                inflight_input_fifo.clone(),
-                inflight_offset,
-            )
-        });
-    inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
-    inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
-    apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
-    let (worktree_path, worktree_branch, base_commit) = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.worktree.as_ref())
-            .map(|wt| {
-                (
-                    Some(wt.worktree_path.clone()),
-                    Some(wt.branch_name.clone()),
-                    crate::services::platform::git_head_commit(&wt.original_path),
-                )
-            })
-            .unwrap_or((None, None, None))
-    };
-    inflight_state.set_worktree_context(worktree_path, worktree_branch, base_commit);
-    // FIX #6 (Codex P2): persist the originating Intervention's follow-up
-    // requeue context so a PRE-submit busy-timeout requeue
-    // (`mailbox_requeue_inflight_for_followup_retry`) can rebuild the retry
-    // Intervention without losing reply context / attachments / voice metadata.
-    inflight_state.set_followup_requeue_context(
-        reply_context.clone(),
-        has_reply_boundary,
-        merge_consecutive,
-        pending_uploads.clone(),
-        voice_announcement.clone(),
-        preserve_on_cancel,
-    );
-    inflight_state.logical_channel_id = Some(logical_channel_id);
-    inflight_state.thread_id = thread_id;
-    inflight_state.thread_title = thread_title;
-    if is_voice_announcement {
-        inflight_state.source = crate::dispatch::Source::Voice;
-    }
-    inflight_state.session_key = adk_session_key.clone();
-    inflight_state.dispatch_id = dispatch_id.clone();
-    let replay_request = replay_start::StartRequest {
-        provider: &provider,
-        channel_id,
-        agent_id: role_binding.as_ref().map(|binding| binding.role_id.as_str()),
-        reply_context: reply_context.as_deref(),
-        uploads: &pending_uploads,
-        session_key: adk_session_key.as_deref(),
-        prompt: &context_prompt,
-    };
-    let checked = replay_start::check(shared, replay_request, &mut inflight_state, &cancel_token);
-    let replay_start = match checked.await {
-        Ok((start, fresh)) => {
-            if fresh {
-                session_id = None;
-            }
-            start
-        }
-        Err(stopped) => return stopped,
-    };
-    let turn_host = crate::services::turn_host::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
-    )
-    .await;
-    let submission = crate::services::discord::inflight::install_managed_submission_boundary(
-        &mut inflight_state,
-        &turn_host,
-    );
-    let original_registration = match crate::services::discord::live_bridge::register_or_requeue(
-        shared,
-        &provider,
-        &inflight_state,
-        &cancel_token,
-    )
-    .await
-    {
-        Ok(registration) => registration,
-        Err(true) => return Ok(IntakeExecution::deferred(channel_id)),
-        Err(false) => return Err("original bridge start deferred; retry enqueue refused".into()),
-    };
-    inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
-    let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);
-    if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {
-        return Ok(IntakeExecution::deferred(channel_id));
-    }
+        let session_id_clone = session_id.clone();
+        let current_path_clone = current_path.clone();
+        let cancel_token_clone = cancel_token.clone();
+        // Pause the tmux-session owner watcher before writing to the provider
+        // FIFO. In thread follow-ups, the watcher may be owned by the parent
+        // channel rather than the requested thread channel.
+        let _ = attach_paused_turn_watcher_for_inflight(
+            shared,
+            http.clone(),
+            &provider,
+            channel_id,
+            watcher_tmux_name,
+            watcher_output_path,
+            inflight_offset,
+            "turn_start_message",
+            final_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
+            &mut inflight_state,
+        )
+        .await;
 
-    if preserve_queued_view {
-        tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "queued_replay_input_started")
-            .await;
-    }
-
-    // Create channel for streaming
-    let (tx, rx) = mpsc::channel();
-    let (completion_tx, completion_rx) = if wait_for_completion {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
-
-    let session_id_clone = session_id.clone();
-    let current_path_clone = current_path.clone();
-    let cancel_token_clone = cancel_token.clone();
-    // Pause the tmux-session owner watcher before writing to the provider
-    // FIFO. In thread follow-ups, the watcher may be owned by the parent
-    // channel rather than the requested thread channel.
-    let _ = attach_paused_turn_watcher_for_inflight(
-        shared,
-        http.clone(),
-        &provider,
-        channel_id,
-        watcher_tmux_name,
-        watcher_output_path,
-        inflight_offset,
-        "turn_start_message",
-        final_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
-        &mut inflight_state,
-    )
-    .await;
-
-    // Auto-sync worktree before sending message to session
-    {
-        let script = super::super::super::runtime_store::agentdesk_root()
-            .unwrap_or_default()
-            .join("scripts/worktree-autosync.sh");
-        if script.exists() {
-            let ws = current_path.clone();
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            match std::process::Command::new(&script)
-                .arg(&ws)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-            {
-                Ok(out) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let msg = stdout.trim();
-                    match out.status.code() {
-                        Some(0) => tracing::info!("  [{ts}] 🔄 worktree-autosync [{ws}]: {msg}"),
-                        Some(1) => {
-                            tracing::info!("  [{ts}] ⏭ worktree-autosync [{ws}]: skipped — {msg}")
+        // Auto-sync worktree before sending message to session
+        {
+            let script = super::super::super::runtime_store::agentdesk_root()
+                .unwrap_or_default()
+                .join("scripts/worktree-autosync.sh");
+            if script.exists() {
+                let ws = current_path.clone();
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                match std::process::Command::new(&script)
+                    .arg(&ws)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let msg = stdout.trim();
+                        match out.status.code() {
+                            Some(0) => tracing::info!("  [{ts}] 🔄 worktree-autosync [{ws}]: {msg}"),
+                            Some(1) => {
+                                tracing::info!("  [{ts}] ⏭ worktree-autosync [{ws}]: skipped — {msg}")
+                            }
+                            _ => tracing::warn!("  [{ts}] ⚠ worktree-autosync [{ws}]: error — {msg}"),
                         }
-                        _ => tracing::warn!("  [{ts}] ⚠ worktree-autosync [{ws}]: error — {msg}"),
+                    }
+                    Err(e) => tracing::warn!("  [{ts}] ⚠ worktree-autosync: failed to run — {e}"),
+                }
+            }
+        }
+
+        let native_fast_mode_override = native_fast_mode_override_for_turn(
+            &provider,
+            super::super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id)
+                .await,
+        );
+        let codex_goals_override = codex_goals_override_for_turn(
+            &provider,
+            super::super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id)
+                .await,
+        );
+
+        // Fetch context compact percent from ADK settings (provider-specific)
+        let ctx_thresholds =
+            super::super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
+        let compact_percent = ctx_thresholds.compact_pct_for(&provider);
+        // Use model-specific context window (reads Codex models cache), falling
+        // back to the provider default if the model isn't found.
+        let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
+
+        // Pre-compute provider-specific compact config
+        let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
+        let compact_lower_bound_tokens = ctx_thresholds.compact_lower_bound_tokens;
+        let compact_token_limit_for_codex = {
+            provider
+                .compact_cli_config(compact_percent, model_context_window)
+                .first()
+                .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
+        };
+        // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
+        let cache_ttl_minutes =
+            super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
+        let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
+            provider: provider.as_str().to_string(),
+            agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
+            channel_id: Some(channel_id.get().to_string()),
+            session_key: adk_session_key.clone(),
+            tmux_session: tmux_session_name.clone(),
+            channel_name: channel_name.clone(),
+            execution_mode: Some("discord_turn".to_string()),
+        };
+        let dispatch_type_for_mcp = dispatch_type_str.clone();
+        // Run the provider in a blocking thread
+        if is_voice_announcement {
+            crate::voice::metrics::mark_agent_start(channel_id.get());
+        }
+        let provider_for_blocking = provider.clone();
+        let execution_pool = shared.pg_pool.clone();
+        let producer_registration = original_registration.clone();
+        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
+            shared.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let _original_registration = producer_registration;
+            let _upload_lifetime = materialized_uploads;
+            let result = crate::services::platform::with_provider_execution_context(
+                provider_execution_context,
+                || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        super::provider_dispatch::execute(
+                            super::provider_dispatch::StreamingTurn {
+                                pool: execution_pool.as_ref(),
+                                provider: &provider_for_blocking,
+                                prompt: &context_prompt,
+                                session_id: session_id_clone.as_deref(),
+                                working_dir: &current_path_clone,
+                                system_prompt: Some(&system_prompt_owned),
+                                allowed_tools: &allowed_tools,
+                                cancel: cancel_token_clone,
+                                remote_profile: remote_profile.as_ref(),
+                                tmux_session_name: tmux_session_name.as_deref(),
+                                teardown: teardown_clearance.as_ref(),
+                                host: &turn_host,
+                                channel_id: channel_id.get(),
+                                model: model_for_turn.as_deref(),
+                                native_fast_mode: native_fast_mode_override,
+                                codex_goals: codex_goals_override,
+                                compact_percent: compact_percent_for_claude,
+                                compact_lower_bound_tokens,
+                                compact_token_limit: compact_token_limit_for_codex,
+                                cache_ttl_minutes,
+                                dispatch_type: dispatch_type_for_mcp.as_deref(),
+                                force_fresh: force_fresh_provider_session,
+                                submission: submission.as_ref(),
+                            },
+                            replay_start,
+                            tx.clone(),
+                        )
+                    }))
+                },
+            );
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("  [streaming] Error: {}", e);
+                    if let Some(message) = super::provider_dispatch::producer_error(submission.as_ref(), channel_id.get(), e) {
+                        let _ = tx.send(message);
                     }
                 }
-                Err(e) => tracing::warn!("  [{ts}] ⚠ worktree-autosync: failed to run — {e}"),
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!("  [streaming] PANIC: {}", msg);
+                    let _ = tx.send(StreamMessage::Error {
+                        message: format!("Internal error (panic): {}", msg),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    });
+                }
             }
-        }
-    }
+        });
 
-    let native_fast_mode_override = native_fast_mode_override_for_turn(
-        &provider,
-        super::super::super::commands::channel_fast_mode_setting(shared, fast_mode_channel_id)
-            .await,
-    );
-    let codex_goals_override = codex_goals_override_for_turn(
-        &provider,
-        super::super::super::commands::channel_codex_goals_setting(shared, fast_mode_channel_id)
-            .await,
-    );
-
-    // Fetch context compact percent from ADK settings (provider-specific)
-    let ctx_thresholds =
-        super::super::super::adk_session::fetch_context_thresholds(shared.api_port).await;
-    let compact_percent = ctx_thresholds.compact_pct_for(&provider);
-    // Use model-specific context window (reads Codex models cache), falling
-    // back to the provider default if the model isn't found.
-    let model_context_window = provider.resolve_context_window(model_for_turn.as_deref());
-
-    // Pre-compute provider-specific compact config
-    let compact_percent_for_claude = Some(ctx_thresholds.compact_pct_for(&provider));
-    let compact_lower_bound_tokens = ctx_thresholds.compact_lower_bound_tokens;
-    let compact_token_limit_for_codex = {
-        provider
-            .compact_cli_config(compact_percent, model_context_window)
-            .first()
-            .map(|(_, v)| v.parse::<u64>().unwrap_or(0))
-    };
-    // #1088: per-channel prompt-cache TTL (None|5|60). Only consumed by Claude.
-    let cache_ttl_minutes =
-        super::super::super::settings::resolve_cache_ttl_minutes(channel_id, None);
-    let provider_execution_context = crate::services::provider_cli::ProviderExecutionContext {
-        provider: provider.as_str().to_string(),
-        agent_id: role_binding.as_ref().map(|binding| binding.role_id.clone()),
-        channel_id: Some(channel_id.get().to_string()),
-        session_key: adk_session_key.clone(),
-        tmux_session: tmux_session_name.clone(),
-        channel_name: channel_name.clone(),
-        execution_mode: Some("discord_turn".to_string()),
-    };
-    let dispatch_type_for_mcp = dispatch_type_str.clone();
-    // Run the provider in a blocking thread
-    if is_voice_announcement {
-        crate::voice::metrics::mark_agent_start(channel_id.get());
-    }
-    let provider_for_blocking = provider.clone();
-    let execution_pool = shared.pg_pool.clone();
-    let producer_registration = original_registration.clone();
-    let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
-        tmux_session_name.as_deref(),
-    )
-    .await;
-    let provider_permit = crate::services::discord::input_runtime::fence::effect::current();
-    tokio::task::spawn_blocking(move || crate::services::discord::input_runtime::fence::blocking(|| {
-        let _input_scope = crate::services::discord::input_runtime::fence::effect::worker_scope(provider_permit);
-        let _original_registration = producer_registration;
-        let _upload_lifetime = materialized_uploads;
-        let result = crate::services::platform::with_provider_execution_context(
-            provider_execution_context,
-            || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    super::provider_dispatch::execute(
-                        super::provider_dispatch::StreamingTurn {
-                            pool: execution_pool.as_ref(),
-                            provider: &provider_for_blocking,
-                            prompt: &context_prompt,
-                            session_id: session_id_clone.as_deref(),
-                            working_dir: &current_path_clone,
-                            system_prompt: Some(&system_prompt_owned),
-                            allowed_tools: &allowed_tools,
-                            cancel: cancel_token_clone,
-                            remote_profile: remote_profile.as_ref(),
-                            tmux_session_name: tmux_session_name.as_deref(),
-                            teardown: teardown_clearance.as_ref(),
-                            host: &turn_host,
-                            channel_id: channel_id.get(),
-                            model: model_for_turn.as_deref(),
-                            native_fast_mode: native_fast_mode_override,
-                            codex_goals: codex_goals_override,
-                            compact_percent: compact_percent_for_claude,
-                            compact_lower_bound_tokens,
-                            compact_token_limit: compact_token_limit_for_codex,
-                            cache_ttl_minutes,
-                            dispatch_type: dispatch_type_for_mcp.as_deref(),
-                            force_fresh: force_fresh_provider_session,
-                            submission: submission.as_ref(),
-                        },
-                        replay_start,
-                        tx.clone(),
-                    )
-                }))
+        // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
+        intake_latency.mark_input_written();
+        super::typing_indicator::spawn_native_typing_indicator(
+            shared,
+            http.clone(),
+            channel_id,
+            inflight_state.effective_finalizer_turn_id(),
+        );
+        dispatch_stamp::stamp_before_bridge_handoff(shared, intake_outbox_id).await;
+        spawn_turn_bridge(
+            shared.clone(),
+            cancel_token.clone(),
+            rx,
+            TurnBridgeContext {
+                provider: provider.clone(),
+                gateway: Arc::new(DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    provider.clone(),
+                    ctx_for_chained_dispatch.map(|live_ctx| LiveDiscordTurnContext {
+                        ctx: live_ctx.clone(),
+                        token: token.to_string(),
+                        request_owner,
+                    }),
+                )),
+                channel_id,
+                user_msg_id: Some(user_msg_id),
+                user_text_owned: user_text.to_string(),
+                request_owner_name: request_owner_name.to_string(),
+                role_binding: role_binding.clone(),
+                adk_session_key,
+                adk_session_name,
+                adk_session_info: Some(adk_session_info),
+                adk_cwd: Some(current_path.clone()),
+                dispatch_id,
+                dispatch_kind: super::super::super::turn_bridge::classify_turn_finished_dispatch_kind(
+                    active_dispatch_info
+                        .as_ref()
+                        .and_then(|info| info.context.as_deref()),
+                    dispatch_type_str.as_deref(),
+                )
+                .map(str::to_string),
+                memory_recall_usage: crate::services::memory::TokenUsage::default(),
+                context_window_tokens: model_context_window,
+                context_compact_percent: compact_percent,
+                current_msg_id: Some(placeholder_msg_id),
+                response_sent_offset: 0,
+                full_response: String::new(),
+                tmux_last_offset: Some(inflight_offset),
+                new_session_id: session_id.clone(),
+                defer_watcher_resume,
+                reuse_status_panel_message: false,
+                completion_tx,
+                is_external_input_tui_direct: false, // #3089 A6b: Discord-origin intake turn
+                inflight_state,
             },
         );
 
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("  [streaming] Error: {}", e);
-                if let Some(message) = super::provider_dispatch::producer_error(submission.as_ref(), channel_id.get(), e) {
-                    let _ = tx.send(message);
-                }
-            }
-            Err(panic_info) => {
-                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                tracing::error!("  [streaming] PANIC: {}", msg);
-                let _ = tx.send(StreamMessage::Error {
-                    message: format!("Internal error (panic): {}", msg),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
-            }
+        // #3813 Phase 1a: full intake span complete — emit the structured line + event.
+        intake_latency.log(channel_id.get(), provider_label, "submitted");
+
+        if let Some(rx) = completion_rx {
+            rx.await
+                .map_err(|_| "queued turn completion wait failed".to_string())?;
         }
-    }));
 
-    // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
-    intake_latency.mark_input_written();
-    super::typing_indicator::spawn_native_typing_indicator(
-        shared,
-        http.clone(),
-        channel_id,
-        inflight_state.effective_finalizer_turn_id(),
-    );
-    dispatch_stamp::stamp_before_bridge_handoff(shared, intake_outbox_id).await;
-    spawn_turn_bridge(
-        shared.clone(),
-        cancel_token.clone(),
-        rx,
-        TurnBridgeContext {
-            provider: provider.clone(),
-            gateway: Arc::new(DiscordGateway::new(
-                http.clone(),
-                shared.clone(),
-                provider.clone(),
-                ctx_for_chained_dispatch.map(|live_ctx| LiveDiscordTurnContext {
-                    ctx: live_ctx.clone(),
-                    token: token.to_string(),
-                    request_owner,
-                }),
-            )),
-            channel_id,
-            user_msg_id: Some(user_msg_id),
-            user_text_owned: user_text.to_string(),
-            request_owner_name: request_owner_name.to_string(),
-            role_binding: role_binding.clone(),
-            adk_session_key,
-            adk_session_name,
-            adk_session_info: Some(adk_session_info),
-            adk_cwd: Some(current_path.clone()),
-            dispatch_id,
-            dispatch_kind: super::super::super::turn_bridge::classify_turn_finished_dispatch_kind(
-                active_dispatch_info
-                    .as_ref()
-                    .and_then(|info| info.context.as_deref()),
-                dispatch_type_str.as_deref(),
-            )
-            .map(str::to_string),
-            memory_recall_usage: crate::services::memory::TokenUsage::default(),
-            context_window_tokens: model_context_window,
-            context_compact_percent: compact_percent,
-            current_msg_id: Some(placeholder_msg_id),
-            response_sent_offset: 0,
-            full_response: String::new(),
-            tmux_last_offset: Some(inflight_offset),
-            new_session_id: session_id.clone(),
-            defer_watcher_resume,
-            reuse_status_panel_message: false,
-            completion_tx,
-            is_external_input_tui_direct: false, // #3089 A6b: Discord-origin intake turn
-            inflight_state,
-        },
-    );
-
-    // #3813 Phase 1a: full intake span complete — emit the structured line + event.
-    intake_latency.log(channel_id.get(), provider_label, "submitted");
-
-    if let Some(rx) = completion_rx {
-        rx.await
-            .map_err(|_| "queued turn completion wait failed".to_string())?;
-    }
-
-    Ok(IntakeExecution::Executed)
-    }).await
-    }).await
+        Ok(IntakeExecution::Executed)
+    })
+    .await
 }
 
 #[cfg(test)]

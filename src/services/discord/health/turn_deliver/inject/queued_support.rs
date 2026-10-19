@@ -4,13 +4,17 @@ use std::sync::Arc;
 
 use super::{
     HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name, herdr,
-    live_tui_session, observe, row_key,
+    live_tui_session, observe, row_key, turn_mode_tmux,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
 
 /// The head was left Unknown by an earlier attempt; nothing types it again.
 pub(super) const HEAD_UNKNOWN: &str = "queued_head_unknown";
+/// The Unknown head was consumed on transcript proof alone; nothing was typed for it.
+pub(super) const RECONCILED: &str = "queued_head_reconciled";
+/// The paste could not be named in its transcript before it started, so it was not typed.
+pub(super) const ATTEMPT_UNNAMED: &str = "queued_paste_unnamed";
 
 pub(super) async fn queued_target_matches(
     shared: &SharedData,
@@ -39,7 +43,9 @@ pub(super) async fn queued_target_matches(
             row.as_ref(),
             named,
         ) == Some((target.session.clone(), target.transcript.clone()))
-        && (!before_effect || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
+        && (!before_effect
+            || (target.herdr.is_none() && turn_mode_tmux(request.channel_id.get()))
+            || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
         && same_herdr_execution(shared, request, target).await
 }
 
@@ -63,6 +69,7 @@ impl InjectAttempt {
     pub(crate) fn queued_report(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Injected { .. } => ("injected", "", "terminal"),
+            Self::NotSent(RECONCILED) => ("reconciled", RECONCILED, "terminal"),
             Self::NotSent(veto) => ("not_sent", veto, "unavailable"),
             Self::HandbackFailed(HEAD_UNKNOWN) => ("blocked", HEAD_UNKNOWN, "unknown"),
             Self::HandbackFailed(detail) => ("blocked", detail, "unavailable"),

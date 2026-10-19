@@ -69,43 +69,8 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn tmux_alive_for_mod
     if !matches!(observed, Ok(Ok(SessionLiveness::Missing))) {
         return true;
     }
-    #[cfg(all(test, unix))]
-    retired_probe_test::after_probe(channel_id.get()).await;
     watch_host_of(shared, &provider, channel_id.get(), name).await != WatchHost::Legacy
         || retired_tmux_evidence(name, output_path, host).as_ref() != Some(&evidence)
-}
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord::tmux::tmux_watcher) mod retired_probe_test {
-    use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
-    use tokio::sync::oneshot;
-
-    type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
-    static PAUSES: LazyLock<Mutex<HashMap<u64, Pause>>> = LazyLock::new(Mutex::default);
-
-    pub(in crate::services::discord::tmux::tmux_watcher) fn pause_after_probe(
-        channel: u64,
-    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (entered, entry) = oneshot::channel();
-        let (release, resume) = oneshot::channel();
-        assert!(
-            PAUSES
-                .lock()
-                .unwrap()
-                .insert(channel, (entered, resume))
-                .is_none()
-        );
-        (entry, release)
-    }
-
-    pub(super) async fn after_probe(channel: u64) {
-        let pause = PAUSES.lock().unwrap().remove(&channel);
-        if let Some((entered, resume)) = pause {
-            let _ = entered.send(());
-            let _ = resume.await;
-        }
-    }
 }
 
 fn retired_tmux_evidence(

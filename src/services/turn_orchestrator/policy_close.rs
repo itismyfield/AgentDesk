@@ -9,8 +9,7 @@ use std::time::Instant;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::{ChannelMailboxState, FinishTurnResult, InterventionMode, QueuePersistenceContext};
-use crate::services::discord::input_runtime::fence::{Failure, PopulationScope};
-use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::provider::CancelToken;
 
 #[path = "policy_tail.rs"]
 pub(crate) mod tail;
@@ -23,48 +22,10 @@ macro_rules! at {
     };
 }
 
-/// The close's one durable effect: the non-blocking exact clear of its acked receipt row, under
-/// the authority the step holds over its channel.
+/// The close's one durable effect: the non-blocking exact clear of its acked receipt row.
 pub(crate) trait PolicyReceipt: Send {
     fn channel(&self) -> u64;
-    fn try_clear(&self, authority: &PolicyAuthority<'_>) -> PolicyClear;
-}
-
-/// The step's write authority over its channel, borrowed from its input fence for the whole step:
-/// a legacy step holds none to lend, a protected one lends its held population scope.
-pub(crate) struct PolicyAuthority<'a>(Held<'a>);
-
-enum Held<'a> {
-    Legacy,
-    Protected(&'a PopulationScope),
-}
-
-impl<'a> PolicyAuthority<'a> {
-    /// The only way to an authority: the step guard's own scope, or legacy when it holds none.
-    pub(super) fn from_step(step: &'a super::input_fence::StepGuard) -> Self {
-        match step.population() {
-            Some(scope) => Self(Held::Protected(scope)),
-            None => Self(Held::Legacy),
-        }
-    }
-
-    pub(crate) fn is_protected(&self) -> bool {
-        matches!(self.0, Held::Protected(_))
-    }
-
-    /// Runs `work` under the borrowed scope, only for the exact row that scope holds.
-    pub(crate) fn borrowed<T>(
-        &self,
-        root: &std::path::Path,
-        provider: &ProviderKind,
-        channel: u64,
-        work: impl FnOnce() -> std::io::Result<T>,
-    ) -> std::io::Result<T> {
-        match self.0 {
-            Held::Protected(scope) => scope.borrowed(root, provider, channel, work),
-            Held::Legacy => Err(std::io::Error::other("a legacy step lends no scope")),
-        }
-    }
+    fn try_clear(&self) -> PolicyClear;
 }
 
 /// How the receipt clear ended; only `Cleared` lets the step release anything.
@@ -76,15 +37,12 @@ pub(crate) enum PolicyClear {
     Mismatch,
     Io,
     Skipped,
-    /// The input fence refused the row's lock; never an IO failure.
-    InputFence(Failure),
 }
 
 /// Why a close released nothing; the turn stays held with its receipt.
 #[derive(Debug)]
 pub(crate) enum PolicyRetain {
     Clear(PolicyClear),
-    InputFence(Failure),
     ActorClosed,
     Panicked,
 }
@@ -207,13 +165,13 @@ impl PolicyCloseRequest {
     }
 }
 
-/// The mailbox arm of a close or its tail claim: a close runs the step under the guard's own
-/// authority and answers; a tail claim is decided against the commit's stamp.
+/// The mailbox arm of a close or its tail claim: a close runs the step and answers; a tail claim
+/// is decided against the commit's stamp.
 pub(super) fn answer(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     msg: super::ChannelMailboxMsg,
-    (guard, recovery_done): (&super::input_fence::StepGuard, &super::RecoveryDoneSignal),
+    recovery_done: &super::RecoveryDoneSignal,
 ) {
     let (request, reply) = match msg {
         super::ChannelMailboxMsg::PolicyClose { request, reply } => (*request, reply),
@@ -224,7 +182,7 @@ pub(super) fn answer(
     };
     #[cfg(test)]
     let lost = request.trace.lost(test_hooks::Loss::MailboxReply);
-    let outcome = step(state, channel_id, request, guard.policy_authority());
+    let outcome = step(state, channel_id, request);
     // Test seam: the step ran and sealed; only its reply is lost.
     #[cfg(test)]
     if lost {
@@ -241,19 +199,18 @@ pub(super) fn refuse_closed(
     "PolicyClose"
 }
 
-/// Runs one close inside the actor under the step's own authority. A panic stops here; one after
+/// Runs one close inside the actor. A panic stops here; one after
 /// the receipt clear still answers `Committed`, as the completion guard finished while unwinding.
 pub(super) fn step(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     request: PolicyCloseRequest,
-    authority: PolicyAuthority<'_>,
 ) -> PolicyMailboxOutcome {
     #[cfg(test)]
     let _settlement = request.trace.settlement();
     let mut removed = None;
     let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        close(state, channel_id, &request, &authority, &mut removed)
+        close(state, channel_id, &request, &mut removed)
     }));
     let outcome = match (run, removed) {
         (Ok(outcome), _) => outcome,
@@ -291,7 +248,6 @@ fn close(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     request: &PolicyCloseRequest,
-    authority: &PolicyAuthority<'_>,
     removed: &mut Option<Arc<CancelToken>>,
 ) -> PolicyMailboxOutcome {
     if request.witnessed(state.policy_witness.as_ref()) {
@@ -301,7 +257,7 @@ fn close(
     request.trace.note_started(state.turn_started_instant);
     at!(request, BeforeClaim);
     if !request.claims(state, channel_id) {
-        return reconcile(state, channel_id, request, authority);
+        return reconcile(state, channel_id, request);
     }
     // Built before the clear, so after it the guard only moves this value into the state.
     let witness = PolicyWitness {
@@ -310,9 +266,8 @@ fn close(
         actor: request.actor.clone(),
     };
     at!(request, BeforeClear);
-    let refused = match request.receipt.try_clear(authority) {
+    let refused = match request.receipt.try_clear() {
         PolicyClear::Cleared => None,
-        PolicyClear::InputFence(failure) => Some(PolicyRetain::InputFence(failure)),
         cleared => Some(PolicyRetain::Clear(cleared)),
     };
     if let Some(refused) = refused {
@@ -362,17 +317,13 @@ fn reconcile(
     state: &ChannelMailboxState,
     channel_id: ChannelId,
     request: &PolicyCloseRequest,
-    authority: &PolicyAuthority<'_>,
 ) -> PolicyMailboxOutcome {
     if !request.reconciles(state, channel_id) {
         return PolicyMailboxOutcome::Superseded;
     }
     // A row already gone is this receipt already cleared; any other answer keeps the hold.
-    match request.receipt.try_clear(authority) {
+    match request.receipt.try_clear() {
         PolicyClear::Cleared | PolicyClear::Missing => PolicyMailboxOutcome::Reconciled,
-        PolicyClear::InputFence(failure) => {
-            PolicyMailboxOutcome::Retained(PolicyRetain::InputFence(failure))
-        }
         refused => PolicyMailboxOutcome::Retained(PolicyRetain::Clear(refused)),
     }
 }
@@ -437,7 +388,6 @@ pub(crate) mod test_hooks {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::thread::ThreadId;
     use std::time::Instant;
 
     type Hook = Box<dyn FnMut(Stage) + Send>;
@@ -510,7 +460,7 @@ pub(crate) mod test_hooks {
         pub(crate) channel: u64,
         pub(crate) request: u64,
         settlement: bool,
-        stages: Mutex<Vec<(Stage, ThreadId)>>,
+        stages: Mutex<Vec<Stage>>,
         counts: [AtomicU64; POINTS],
         seen: AtomicU32,
         not_run: AtomicU32,
@@ -573,7 +523,7 @@ pub(crate) mod test_hooks {
         }
 
         pub(crate) fn stages(&self) -> Vec<Stage> {
-            lock(&self.stages).iter().map(|(stage, _)| *stage).collect()
+            lock(&self.stages).clone()
         }
 
         /// The slot's start instant this request's step compared its cutoff with.
@@ -616,7 +566,7 @@ pub(crate) mod test_hooks {
             let Some(probe) = &self.probe else {
                 return;
             };
-            lock(&probe.stages).push((stage, std::thread::current().id()));
+            lock(&probe.stages).push(stage);
             let hook = lock(&probe.hook).take();
             if let Some(hook) = hook {
                 let mut restore = Restore(probe, Some(hook));
@@ -817,14 +767,5 @@ pub(crate) mod test_hooks {
     /// A captured handle whose actor is gone, so every send to it fails.
     pub(crate) fn closed_mailbox() -> super::super::ChannelMailboxHandle {
         super::super::mailbox_unreachable_tests::closed_handle()
-    }
-
-    /// Runs `work` with the authority a step guard holding `scope` lends; `None` is legacy.
-    pub(crate) fn with_authority<T>(
-        scope: Option<crate::services::discord::input_runtime::fence::PopulationScope>,
-        work: impl FnOnce(&super::PolicyAuthority<'_>) -> T,
-    ) -> T {
-        let step = super::super::input_fence::StepGuard::for_test(scope);
-        work(&super::PolicyAuthority::from_step(&step))
     }
 }

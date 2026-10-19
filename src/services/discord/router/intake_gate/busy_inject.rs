@@ -226,14 +226,14 @@ async fn settle(
     let shared = &data.shared;
     let (channel, message) = (live.channel_id, live.message_id);
     let reaction = match attempt {
-        InjectAttempt::NotSent(veto) if veto == SOURCE_OWNED => return true,
         InjectAttempt::NotSent(veto) => {
-            tracing::debug!(
+            tracing::info!(
                 channel_id = channel.get(),
+                message_id = message.get(),
                 veto,
-                "discord input kept for intake"
+                "discord input injection declined"
             );
-            return false;
+            return veto == SOURCE_OWNED;
         }
         InjectAttempt::Injected { .. } => INJECTED_REACTION,
         InjectAttempt::Unconfirmed { .. } => UNCONFIRMED_REACTION,

@@ -2077,7 +2077,7 @@ def pg_include_findings(words: list[str], spec: CommandSpec, shards: tuple[str, 
             f"no provable derived selection: {selections}"))]
     if shards is None:
         return [("pg-include-shard-unresolved", (
-            "this workflow names PG_INCLUDE_SHARD, so it cannot be proved unset, 0 or 1 "
+            "this workflow names PG_INCLUDE_SHARD, so it cannot be proved unset or a valid shard "
             "at the canonical source point"))]
     at = words.index(PG_INCLUDE_TOKEN)
     findings: list[tuple[str, str]] = []

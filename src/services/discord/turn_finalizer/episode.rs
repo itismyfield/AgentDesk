@@ -723,7 +723,6 @@ impl TurnFinalizer {
                 event: event.clone(),
                 ctx,
                 evidence,
-                input_permit: super::super::input_runtime::fence::effect::current(),
                 shared: shared.clone(),
                 ack,
             })
@@ -764,7 +763,6 @@ impl TurnFinalizer {
         let (ack, rx) = oneshot::channel();
         let msg = FinalizeMsg::PolicyClose {
             intent: Box::new(intent),
-            input_permit: super::super::input_runtime::fence::effect::current(),
             shared,
             ack,
         };

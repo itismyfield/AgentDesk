@@ -150,6 +150,7 @@ mod tests {
             relay_generation_mtime_ns: None,
             relay_source_stamp: None,
             source_span: None,
+            read_source: None,
         };
         sink.deliver(&frame).await.expect("infallible");
         sink.deliver(&frame).await.expect("infallible");

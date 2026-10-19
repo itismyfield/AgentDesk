@@ -32,17 +32,17 @@ use crate::services::tui_o::writer::host::{self, HostIo};
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
 use crate::services::tui_o::writer::{DiscordPort, PostOutcome, WriterAlarm};
 
-const WITHIN: Duration = Duration::from_secs(60);
+pub(super) const WITHIN: Duration = Duration::from_secs(60);
 /// Two drain rounds of the boot watch (`RENEW_EVERY` apart) and a margin.
-const TWO_ROUNDS: Duration = Duration::from_secs(12);
+pub(super) const TWO_ROUNDS: Duration = Duration::from_secs(12);
 
-fn epoch_of(env: &Env) -> i64 {
+pub(super) fn epoch_of(env: &Env) -> i64 {
     get(&env.dir, "epoch").unwrap().parse().unwrap()
 }
 
 /// The parent's side of every reclaiming case: a worker home on MINI, the node's scenario, and
 /// the gateway's reclaim once the node says its responsibility is in place.
-async fn reclaim_while(scenario: &str, within: Duration) -> (Scene, i64) {
+pub(super) async fn reclaim_while(scenario: &str, within: Duration) -> (Scene, i64) {
     reclaim_after(Scene::new().await, None, scenario, within).await
 }
 
@@ -106,7 +106,12 @@ async fn holder_with_baseline(env: &Env) -> (Booted, i64) {
 }
 /// After the reclaim, intake stays closed and the drain waits on `blocker` for two rounds.
 /// Observe completed rounds because health clears its blocker while the next round awaits I/O.
-async fn drains_without_leaving(env: &Env, node: &Booted, epoch: i64, blockers: &[&str]) {
+pub(super) async fn drains_without_leaving(
+    env: &Env,
+    node: &Booted,
+    epoch: i64,
+    blockers: &[&str],
+) {
     wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
     until("intake closes at the same epoch", WITHIN, || {
         let gate = node.gate().expect("registered");
@@ -129,7 +134,7 @@ async fn drains_without_leaving(env: &Env, node: &Booted, epoch: i64, blockers: 
     assert_eq!(node.state().await, Some(HomeState::Reclaiming));
 }
 
-async fn until_left(node: &Booted) {
+pub(super) async fn until_left(node: &Booted) {
     let left = || async { node.state().await == Some(HomeState::Reclaimed) };
     until_async("the drain leaves", Duration::from_secs(90), left).await;
 }

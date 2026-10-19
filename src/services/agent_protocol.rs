@@ -341,6 +341,16 @@ impl SubagentSummary {
 /// The panel code should not depend on provider-specific JSONL shapes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusEvent {
+    /// Display-only tool observation; result bodies never enter this event.
+    ToolActivity {
+        name: Option<String>,
+        input: Option<String>,
+        tool_use_id: Option<String>,
+        success: Option<bool>,
+    },
+    ToolActivityCwd {
+        cwd: String,
+    },
     ToolStart {
         name: String,
         args_summary: Option<String>,

@@ -144,9 +144,10 @@ class NonPgModuleSelectors(FixtureCase):
         skips, replay = membership.non_pg_selection(self.root)
         self.assertEqual(skips, globals + ("pure",))
         self.assertEqual(replay, ("suite::plain_pg_name",))
-        shard_0, shard_1 = membership.pg_include_shards(skips, membership.load_lib_test_inventory(self.root))
-        self.assertEqual(set(shard_0[1:]) | set(shard_1[1:]), {"pure::database", "suite::plain_pg_name"})
-        self.assertFalse(set(shard_0[1:]) & set(shard_1[1:]))
+        shards = membership.pg_include_shards(skips, membership.load_lib_test_inventory(self.root))
+        selected = [test for shard in shards for test in shard[1:]]
+        self.assertEqual(len(shards), membership.PG_SHARD_COUNT)
+        self.assertEqual(sorted(selected), ["pure::database", "suite::plain_pg_name"])
 
     def test_existing_and_new_names_keep_selection_replay_and_both_shards(self) -> None:
         modules = (
@@ -385,8 +386,8 @@ class NonPgFilterContract(unittest.TestCase):
         from unittest.mock import patch
         shards = membership.load_pg_include_shards(self.root)
         self.assertTrue(all(len(args) > 1 for args in shards))
-        missing = (shards[0][:-1], shards[1])
-        overlap = (shards[0], (*shards[1], shards[0][-1]))
+        missing = (shards[0][:-1], *shards[1:])
+        overlap = (shards[0], (*shards[1], shards[0][-1]), *shards[2:])
         for bad, message in ((missing, "PG shards [] select"), (overlap, "PG shards [0, 1] select")):
             with self.subTest(message=message), patch.object(membership, "load_pg_include_shards", return_value=bad):
                 errors = membership.pg_shard_contract_errors(self.root, self.jobs())
@@ -1739,6 +1740,9 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         "python3 scripts/run_test_lane.py --skip pg_ --max-summaries 1 --lane s"
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane pg --expected-ids scripts/ci/ids.txt"
+                        " -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --"
+                        " cargo test --lib -- --exact db::a db::b --test-threads=1",
                         f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
                         '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
             with self.subTest(command=command):
@@ -1771,6 +1775,13 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         f"python3 scripts/run_test_lane.py -- {self.SWEEP}",
                         f"python3 scripts/run_test_lane.py --lane s --max-summaries 0 -- {self.SWEEP}",
+                        # An expected-ids list outside scripts/ci, or chosen at run time.
+                        "python3 scripts/run_test_lane.py --lane s --expected-ids /tmp/ids.txt"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        'python3 scripts/run_test_lane.py --lane s --expected-ids "$IDS"'
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --expected-ids scripts/ci/ids.txt"
+                        ' -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --exact "${ids[@]}"',
                         "cargo.exe test --lib x"):
             with self.subTest(command=command), \
                     self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):

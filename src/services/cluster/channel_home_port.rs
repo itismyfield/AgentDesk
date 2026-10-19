@@ -1,16 +1,22 @@
 //! The drain's reads of a delegated channel in this process: the channel's turn, what the O actor
-//! last published that it owes and the writer's running POSTs. It keeps no state.
+//! last published that it owes and the writer's running POSTs, or that O never held the channel
+//! here. It keeps no state.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
+#[cfg(test)]
+use super::channel_home_boot;
 use super::channel_home_drain::{DrainPort, Owed, ResetRefused};
+use crate::services::tui_o::store;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+use crate::services::tui_o::writer::binding::{BindingEvents, BindingLog};
 use crate::services::tui_o::writer::deliver;
 use crate::services::tui_o::writer::host::{OwedView, Readiness};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
@@ -26,6 +32,7 @@ pub(crate) struct ChannelHomePort {
     readiness: Arc<Readiness>,
     restored: Arc<AtomicBool>,
     persisted: Option<PersistedInput>,
+    store_root: Option<PathBuf>,
 }
 
 impl ChannelHomePort {
@@ -37,6 +44,7 @@ impl ChannelHomePort {
             readiness,
             restored,
             persisted: None,
+            store_root: None,
         }
     }
 
@@ -44,6 +52,34 @@ impl ChannelHomePort {
     pub(crate) fn persisted_by(mut self, persisted: PersistedInput) -> Self {
         self.persisted = Some(persisted);
         self
+    }
+
+    /// Reads a missing actor or POST count as nothing owed when `runtime_root` (the writer host's
+    /// own) holds no store of the channel and this node's P5 log no event of it.
+    pub(crate) fn stored_under(mut self, runtime_root: Option<PathBuf>) -> Self {
+        self.store_root = runtime_root;
+        self
+    }
+
+    /// Whether O never held the channel here. Read after the actor or count was found missing:
+    /// a store is laid out before either exists, and none is laid out once the final close ran.
+    fn never_held(&self, skip_store: bool) -> bool {
+        let Some(root) = &self.store_root else {
+            return false;
+        };
+        let unbound = || {
+            #[cfg(test)]
+            if channel_home_boot::writer_mutant("binding_ignored") {
+                return true;
+            }
+            let events = BindingLog.binding_events_since(self.channel, 0);
+            #[cfg(test)]
+            if channel_home_boot::writer_mutant("p5_err_as_empty") {
+                return events.unwrap_or_default().is_empty();
+            }
+            events.is_ok_and(|events| events.is_empty())
+        };
+        (skip_store || store::no_channel_store(root, self.channel)) && unbound()
     }
 }
 
@@ -75,10 +111,19 @@ impl DrainPort for ChannelHomePort {
     }
 
     /// What the actor publishes from a poll begun after the read asked, so a check after the final
-    /// close sees a poll that ran after it; an ended, halted or silent actor is `None`.
+    /// close sees a poll that ran after it; an ended, halted or silent actor is `None`. With no
+    /// actor, nothing is owed only where O never held the channel here.
     fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
         let view = self.readiness.undelivered(self.channel);
+        #[cfg(test)]
+        let skip_store = channel_home_boot::writer_mutant("owed_ignores_store");
+        #[cfg(not(test))]
+        let skip_store = false;
+        let never_held = view.is_none() && self.never_held(skip_store);
         async move {
+            if never_held {
+                return Some(Owed::default());
+            }
             let OwedView {
                 mut published,
                 demand,
@@ -109,8 +154,15 @@ impl DrainPort for ChannelHomePort {
         }
     }
 
+    /// A count only a writer of the channel makes; without one, zero only where O never held it.
     fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {
-        std::future::ready(deliver::posts_in_flight(self.channel))
+        let count = deliver::posts_in_flight(self.channel);
+        #[cfg(test)]
+        if count.is_none() && channel_home_boot::writer_mutant("posts_ignore_store") {
+            return std::future::ready(Some(0));
+        }
+        let count = count.or_else(|| self.never_held(false).then_some(0));
+        std::future::ready(count)
     }
 
     /// The gateway's session reset is reachable only from the Discord runtime, which supplies it

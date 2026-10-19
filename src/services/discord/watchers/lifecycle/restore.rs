@@ -212,18 +212,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::at(channel_id.get(), "scan").await;
-        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-            continue;
-        }
-
         let recovery = super::super::super::mailbox_snapshot(&shared, *channel_id).await;
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::at(channel_id.get(), "recovery_snapshot").await;
-        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-            continue;
-        }
         if let Some(started) = recovery.recovery_started_at {
             // #2443 — `recovery_done.wait()` is the deterministic graduation
             // signal for this skip. `restore_tmux_watchers` is a one-shot
@@ -254,9 +243,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 false
             };
 
-            if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-                continue;
-            }
             if recovery_completed {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -442,13 +428,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             // touched `.generation` mtime, the regression check classifies
             // as fresh wrapper, clears `last_relayed_offset`, and a rotated
             // jsonl re-relays surviving content.
-            #[cfg(all(test, unix))]
-            n3bc_restore_tests::at(channel_id.get(), "generation").await;
-            if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-                continue;
-            }
-            #[cfg(all(test, unix))]
-            n3bc_restore_tests::attempt(channel_id.get(), "generation_rewrite");
             preserve_session_generation_mtime_after_write(
                 session_name,
                 &gen_marker_path,
@@ -458,9 +437,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         }
 
         let dead = DeadSessionCleanup::probe(channel_id.get(), &channel_name, session_name).await;
-        if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-            continue;
-        }
         if let Some(dc) = dead {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let observed = dc.observed;
@@ -501,9 +477,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             {
                 let rebound =
                     rebind_restored_dispatch_if_missing(shared.pg_pool.as_ref(), &state).await;
-                if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-                    continue;
-                }
                 if rebound == RestoreDispatchRebindOutcome::NotRebound
                     && consume_dispatched_origin_ghost_if_current(shared.pg_pool.as_ref(), &state)
                         .await
@@ -514,13 +487,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     );
                     continue;
                 }
-                #[cfg(all(test, unix))]
-                n3bc_restore_tests::at(channel_id.get(), "mailbox").await;
-                if boot_skip(BootTarget::Channel(&provider, channel_id.get())) {
-                    continue;
-                }
-                #[cfg(all(test, unix))]
-                n3bc_restore_tests::attempt(channel_id.get(), "mailbox_register");
                 let finish_mailbox_on_completion =
                     super::super::super::recovery::reregister_active_turn_from_inflight(
                         &shared, &state,
@@ -606,9 +572,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             );
             continue;
         }
-        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
-            continue;
-        }
 
         if pw.restored_turn.is_none() {
             reconcile_orphan_suppressed_placeholder_for_restored_watcher(
@@ -619,12 +582,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 &pw.session_name,
             )
             .await;
-        }
-
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::at(pw.channel_id.get(), "placeholder").await;
-        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
-            continue;
         }
 
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -646,16 +603,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::attempt(pw.channel_id.get(), "host_probe");
         let host = watch_host_of(shared, &provider, pw.channel_id.get(), &pw.session_name).await;
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::at(pw.channel_id.get(), "host").await;
-        if boot_skip(BootTarget::Channel(&provider, pw.channel_id.get())) {
-            continue;
-        }
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::attempt(pw.channel_id.get(), "watcher_claim");
 
         let claimed = codex_restore::commit_live_direct_resume_fallback(
             &pw.session_name,
@@ -693,7 +641,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
         #[cfg(all(test, unix))]
-        crate::services::discord::tmux::n4d2_entry_support::record_reader_start(
+        crate::services::discord::tmux::watcher_install_fixture::record_reader_start(
             pw.channel_id.get(),
             pw.initial_offset,
         );
@@ -767,8 +715,6 @@ impl DeadSessionCleanup {
     async fn probe(channel_id: u64, channel_name: &str, session_name: &str) -> Option<Self> {
         let probe = crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness;
         let observed = HostLiveness::from(probe(session_name).await);
-        #[cfg(all(test, unix))]
-        n3bc_restore_tests::at(channel_id, "dead_probe").await;
 
         let marker = crate::services::tmux_common::session_dead_marker_path(session_name);
         if observed != HostLiveness::Live {
@@ -780,16 +726,11 @@ impl DeadSessionCleanup {
                 observed,
             });
         }
-        if boot_skip(BootTarget::AnyProvider(channel_id)) {
-            return None;
-        }
         if std::path::Path::new(&marker).exists() {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 🧹 clearing stale .pane_dead marker for {session_name} — tmux session is alive"
             );
-            #[cfg(all(test, unix))]
-            n3bc_restore_tests::attempt(channel_id, "pane_dead_unlink");
             let _ = std::fs::remove_file(&marker);
         }
         None
@@ -863,9 +804,6 @@ async fn clean_dead_startup_session(
     dc: &DeadSessionCleanup,
     effects: &impl DeadSessionEffects,
 ) -> bool {
-    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
-        return false;
-    }
     let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
     let session_key = super::super::super::adk_session::build_namespaced_session_key(
         token_hash, provider, &tmux_name,
@@ -882,9 +820,6 @@ async fn clean_dead_startup_session(
         caller,
     );
     let teardown = teardown.await;
-    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
-        return false;
-    }
     if matches!(teardown, KeyedTeardown::Kept) {
         return false;
     }
@@ -893,9 +828,6 @@ async fn clean_dead_startup_session(
         Some(protection) => effects.fail_dispatch(protection, name).await,
         None => false,
     };
-    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
-        return false;
-    }
     let cleanup_plan = dead_session_cleanup_plan(
         dispatch_protection.is_some() && !dispatch_failed_for_dead_session,
     );
@@ -919,9 +851,6 @@ async fn clean_dead_startup_session(
 
     if cleanup_plan.report_idle_status {
         effects.report_idle(dc, &session_key).await;
-    }
-    if boot_skip(BootTarget::Channel(provider, dc.channel_id)) {
-        return false;
     }
     if cleanup_plan.preserve_tmux_session {
         return false;
@@ -1047,43 +976,6 @@ mod keyed_teardown_tests {
                 crate::services::tmux_common::session_temp_path(&session_name, "exit_reason");
             let killed = std::path::Path::new(&exit_reason).exists();
             assert_eq!(killed, cleaned, "{channel_name}");
-        }
-        pool.close().await;
-        db.drop().await;
-    }
-
-    // A protected channel's dead session waits for its move or handback even when the
-    // guard admits its row; an unprotected sibling with the same row is cleaned.
-    #[tokio::test]
-    async fn c2b_startup_cleanup_leaves_a_protected_channel_alone_pg() {
-        use crate::services::discord::input_runtime::fence::{Gate, test_health};
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let claude = ProviderKind::Claude;
-        let (protected, legacy) = (6_325_573_001u64, 6_325_573_002u64);
-        let gate = Gate::protect(claude.clone(), protected).unwrap();
-        let _health = test_health::Clear::new(&gate);
-        for (channel, cleaned) in [(protected, false), (legacy, true)] {
-            let channel_name = format!("c2b2a-start-{channel}");
-            let session_name = claude.build_tmux_session_name(&channel_name);
-            let key = build_namespaced_session_key(TOKEN, &claude, &session_name);
-            seed_session_row_keyed(&pool, &key, channel, None).await;
-            let _pane = PaneLivenessOverrideGuard::set(&session_name, DeadOrAbsent);
-            let dc = DeadSessionCleanup::probe(channel, &channel_name, &session_name);
-            let dc = dc.await.expect("a dead pane is a candidate");
-            let effects = Recorded::default();
-            let done = clean_dead_startup_session(Some(&pool), TOKEN, &claude, &dc, &effects);
-            assert_eq!(done.await, cleaned, "{channel_name}");
-            let changed: &[&str] = if cleaned {
-                &["fail_dispatch", "idle"]
-            } else {
-                &[]
-            };
-            assert_eq!(*effects.0.lock().unwrap(), changed, "{channel_name}");
-            let exit_reason =
-                crate::services::tmux_common::session_temp_path(&session_name, "exit_reason");
-            assert_eq!(std::path::Path::new(&exit_reason).exists(), cleaned);
         }
         pool.close().await;
         db.drop().await;

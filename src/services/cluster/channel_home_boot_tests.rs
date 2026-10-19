@@ -354,6 +354,39 @@ async fn a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_p
     pg_db.drop().await;
 }
 
+/// A releasing holder whose drain is held keeps its gate and lease until abort-release drops its
+/// row; then its watch unregisters the gate, ends the lease and claims hold no more.
+#[tokio::test]
+async fn a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let epoch = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    let (ports, resets) = (Arc::default(), Arc::default());
+    let refused = counted(&resets, Some("kept session"));
+    let gw = boot(&pool, "gw", rows(&pool).await, vec![], refused, &ports);
+    assert_eq!(start(Some(true), || gw).await.len(), 1);
+    let blocker = || {
+        let health = channel_home::health();
+        health.is_some_and(|health| health["home_draining"][0]["blocker"] == "source_reset")
+    };
+    assert!(eventually(12, blocker).await);
+    assert_eq!(running(C), (true, Some(epoch)), "the holder renews");
+    assert!(channel_home::refusal(ID).is_some() && intake_hold(C, None).is_some());
+
+    let aborted = o_channel_homes::abort_release(&pool, C, epoch, "gw").await;
+    assert_eq!(applied(aborted).state, HomeState::Releasing);
+    assert!(eventually(8, || channel_home::registered(C).is_none()).await);
+    assert!(eventually(2, || running(C) == (false, None)).await);
+    assert_eq!(
+        (channel_home::refusal(ID), intake_hold(C, None)),
+        (None, None)
+    );
+    assert_eq!(o_channel_homes::read_home(&pool, C).await.unwrap(), None);
+    stop(C).await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 fn handles(channel: &str) -> (tokio::task::AbortHandle, tokio::task::AbortHandle) {
     live(|live| {
         let watched = live.get(channel).expect("started");
@@ -510,6 +543,131 @@ async fn an_unrestored_target_adopts_a_released_channel_only_once_restored_pg() 
     channel_home::unregister(C);
     pool.close().await;
     pg_db.drop().await;
+}
+
+/// A restore the test settles: each run counts itself, then waits until `settle` names its result.
+fn held_restore() -> (
+    ChannelRestore,
+    Arc<AtomicUsize>,
+    tokio::sync::watch::Sender<Option<bool>>,
+) {
+    let (settle, settled) = tokio::sync::watch::channel(None);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&runs);
+    let run: ChannelRestore = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        let mut settled = settled.clone();
+        Box::pin(async move {
+            let result = settled
+                .wait_for(Option::is_some)
+                .await
+                .map(|result| *result);
+            result.ok().flatten().unwrap_or(false)
+        })
+    });
+    (run, runs, settle)
+}
+
+/// A target whose boot port restores the channel itself, `candidates` naming the channels whose
+/// Herdr endpoint runs here.
+fn restoring_boot(
+    pool: &PgPool,
+    run: &ChannelRestore,
+    candidates: Vec<u64>,
+) -> Option<Boot<impl Fn(u64) -> BootPort<Idle>>> {
+    let (run, reset) = (Arc::clone(run), counted(&Arc::default(), None));
+    let port =
+        move |_| BootPort::new(Idle, Arc::clone(&reset)).restoring("claude", Arc::clone(&run));
+    Some(Boot {
+        provider: "claude".into(),
+        local: "mini".into(),
+        pool: pool.clone(),
+        rows: listed(pool),
+        candidates,
+        port,
+        writers: None,
+    })
+}
+
+/// A self-restoring target adopts a released candidate unrestored, takes no intake while its
+/// restore runs under the recovery permit, and opens once it installed; a failed one stays closed.
+#[tokio::test]
+async fn a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg() {
+    for installs in [true, false] {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let delegated = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await);
+        let released = o_channel_homes::finish_release(&pool, C, "gw", delegated.epoch).await;
+        let released = applied(released);
+        let epoch = released.epoch;
+        let (run, runs, settle) = held_restore();
+        if installs {
+            start(Some(true), || restoring_boot(&pool, &run, vec![])).await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let waiting = o_channel_homes::read_home(&pool, C).await.unwrap();
+            assert_eq!(
+                waiting,
+                Some(released.clone()),
+                "not a candidate: row untouched"
+            );
+            stop(C).await;
+            channel_home::unregister(C);
+        }
+
+        start(Some(true), || restoring_boot(&pool, &run, vec![ID])).await;
+        let adopted = row_in(&pool, 8, HomeState::Worker).await;
+        let held = (
+            adopted.holder.as_deref(),
+            adopted.target.as_deref(),
+            adopted.epoch,
+        );
+        assert_eq!(held, (Some("mini"), None, epoch), "adopted unrestored");
+        let open = || owned(C) == Some((epoch, HomeIntake::Open));
+        let ran = eventually(10, || runs.load(Ordering::SeqCst) == 1 || open()).await;
+        assert!(ran, "neither its restore ran nor its intake opened");
+        assert_eq!(
+            owned(C),
+            Some((epoch, HomeIntake::Closed)),
+            "closed while it restores"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the restore runs once held");
+        assert!(intake_hold(C, Some(epoch)).is_some());
+        let home = channel_home::registered(C).expect("mounted");
+        let refused = (home.commands_in_flight(), channel_home::refusal(ID));
+        assert_eq!(
+            refused,
+            (1, Some(HomeRefusal::Draining)),
+            "the restore's permit"
+        );
+
+        settle.send(Some(installs)).unwrap();
+        if installs {
+            assert!(
+                eventually(5, open).await,
+                "opens once its restore installed"
+            );
+            assert_eq!(intake_hold(C, Some(epoch)), None);
+        } else {
+            assert!(eventually(5, || home.commands_in_flight() == 0).await);
+            tokio::time::sleep(RENEW_EVERY + Duration::from_secs(1)).await;
+            assert_eq!(
+                owned(C),
+                Some((epoch, HomeIntake::Closed)),
+                "a failed restore"
+            );
+            let row = o_channel_homes::read_home(&pool, C).await.unwrap().unwrap();
+            assert_eq!(
+                (row.state, row.holder.as_deref()),
+                (HomeState::Worker, Some("mini"))
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "restored once per process");
+        assert_eq!(running(C), (true, Some(epoch)));
+        stop(C).await;
+        channel_home::unregister(C);
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 /// A gateway runtime's return of a reclaimed channel to its own writer, through the real writer host.
@@ -676,6 +834,134 @@ mod writer_return {
         assert!(gw.starts.lock().unwrap().len() >= 2);
         gw.post("r1", "restarted");
         assert!(eventually(10, || gw.io.posts.to(WID) == ["restarted"]).await);
+        gw.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// Waits until PG reports a backend queued on a lock that backend `holder` keeps.
+    async fn queued_behind(pool: &PgPool, holder: i32) {
+        for _ in 0..400 {
+            let queued: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if queued {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the return never waited on the row lock");
+    }
+
+    /// A return whose CAS goes stale (row removed and delegated again while it waited) removes
+    /// nothing and starts no gateway writer; the new delegation drains to its target.
+    #[tokio::test]
+    async fn a_stale_return_keeps_the_new_delegation_and_starts_no_writer_pg() {
+        let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
+        let _selected = test_override::force_channels(&[(WID, ClaudeTui)]);
+        let _pending = test_override::force_candidates(&[(WID, ClaudeTui)]);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+        reclaimed(&pool).await;
+        let mut racer = pool.begin().await.unwrap();
+        let racer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *racer)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
+            .bind(WC)
+            .execute(&mut *racer)
+            .await
+            .unwrap();
+        let gw = Gateway::boot(&pool, rows(&pool).await).await;
+        queued_behind(&pool, racer_pid).await;
+        // Another return of the row and the operator's next delegate, committed while it waits.
+        sqlx::query("DELETE FROM o_channel_homes WHERE channel_id = $1")
+            .bind(WC)
+            .execute(&mut *racer)
+            .await
+            .unwrap();
+        let redelegated: i64 = sqlx::query_scalar(
+            "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
+             VALUES ($1, 'claude', 'releasing', 'gw', 'mini', nextval('o_channel_home_epochs'), NOW())
+             RETURNING epoch",
+        )
+        .bind(WC)
+        .fetch_one(&mut *racer)
+        .await
+        .unwrap();
+        racer.commit().await.unwrap();
+
+        let released = || async {
+            let row = o_channel_homes::read_home(&pool, WC).await.unwrap();
+            row.is_some_and(|row| row.state == HomeState::Released)
+        };
+        let mut drained = false;
+        for _ in 0..1500 {
+            if released().await {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(drained, "the new delegation drains to its target");
+        let row = o_channel_homes::read_home(&pool, WC)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.holder, row.target.as_deref()),
+            (None, Some("mini")),
+            "the stale return removed nothing"
+        );
+        assert!(row.epoch > redelegated);
+        assert!(eventually(20, || channel_home::registered(WC).is_none()).await);
+        assert_eq!(
+            *gw.starts.lock().unwrap(),
+            [],
+            "the stale return started no gateway writer"
+        );
+        assert!(!gw.ready.is_hosted(WID));
+        gw.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A return to a gateway that holds no writer candidate for the channel, only a standby store
+    /// off its O home: the row goes and the gate with it, but readiness stays closed.
+    #[tokio::test]
+    async fn a_return_without_a_writer_candidate_keeps_readiness_closed_pg() {
+        use crate::services::tui_o::channel_policy::Adoption;
+        let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
+        let _standby = test_override::force_standby(&[(WID, ClaudeTui)], "mini", Adoption::Pending);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        reclaimed(&pool).await;
+        let gw = Gateway::boot(&pool, rows(&pool).await).await;
+        let mut returned = false;
+        for _ in 0..1000 {
+            if o_channel_homes::read_home(&pool, WC)
+                .await
+                .unwrap()
+                .is_none()
+            {
+                returned = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(returned, "the return removes the reclaimed row");
+        assert!(eventually(5, || channel_home::registered(WC).is_none()).await);
+        // The return's start and the next round's retry, unless a writer got hosted first.
+        let tried = || gw.starts.lock().unwrap().len() >= 2 || gw.ready.is_hosted(WID);
+        assert!(eventually(20, tried).await, "the watch never tried a start");
+        let open = (gw.ready.is_hosted(WID), gw.ready.accepts(WID));
+        assert_eq!(open, (false, false), "readiness opened without a candidate");
         gw.end().await;
         pool.close().await;
         pg_db.drop().await;

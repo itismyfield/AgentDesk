@@ -1,7 +1,6 @@
 //! Transcript identity rules: which records carry output units, how each unit is keyed,
 //! and which records open or close a turn. Changing a rule here requires `IDENTITY_VERSION`.
 
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{ShadowProvider, UnitKind};
@@ -45,10 +44,6 @@ pub fn classify(provider: ShadowProvider, record: &Value) -> Vec<RecordFact> {
 /// Row identity used for turn openers and closers.
 pub fn row_key(record: &Value) -> Option<String> {
     str_at(record, "uuid").map(str::to_owned)
-}
-
-pub fn native_time(record: &Value) -> Option<DateTime<Utc>> {
-    str_at(record, "timestamp")?.parse().ok()
 }
 
 fn claude(record: &Value) -> Vec<RecordFact> {
@@ -163,7 +158,7 @@ fn claude_user(record: &Value) -> Vec<RecordFact> {
     }
 }
 
-/// Each `tool_result` is its own unit keyed by `tool_use_id`; only error results are posted.
+/// Each `tool_result` keeps its native key and historical seal; the writer excludes its body.
 fn claude_tool_result(item: &Value) -> RecordFact {
     let Some(id) = str_at(item, "tool_use_id").filter(|id| !id.is_empty()) else {
         return blocked("tool_result without tool_use_id");

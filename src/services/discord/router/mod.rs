@@ -17,11 +17,14 @@ pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, LocalAdmissionPermit, QueuedAdmissionDisposition,
     admit_queued_intake, admit_text_intake, checkpoint_waits_for_admission,
     dispatch_live_text_intake, dispatch_skill_intake, dispatch_text_intake,
-    finish_admitted_queued_intake, finish_admitted_text_intake, finish_text_intake_admission,
-    live_checkpoint_waits, prepare_admitted_live_attachments, resolve_attachment_admission,
+    finish_admitted_queued_intake, finish_admitted_text_intake,
+    finish_nonlocal_attachment_admission, live_checkpoint_waits, prepare_admitted_live_attachments,
+    resolve_attachment_admission,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;
+#[cfg(test)]
+pub(in crate::services::discord) use intake_gate::stale_turn::thread_guard_test_api;
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
 #[cfg(test)]
 pub(super) use message_handler::set_hosted_tui_promote_busy_for_tests;

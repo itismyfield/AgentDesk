@@ -1,6 +1,24 @@
+mod discovery;
+mod handoff;
+mod options;
+#[cfg(test)]
+pub(crate) use discovery::find_rollout_by_session_id_under;
+pub(crate) use discovery::{
+    default_codex_home, observe_rollout_turn_state, rollout_file_matches_cwd,
+};
+pub use discovery::{default_codex_sessions_dir, find_rollout_by_session_id};
+use discovery::{latest_rollout_for_cwd_and_session_since, rollout_file_len, same_path};
+use handoff::{
+    discord_handoff_tail_options, pane_busy_probe_for_tmux,
+    tail_latest_rollout_for_cwd_with_handoff_options,
+};
+#[cfg(test)]
+use options::DEFAULT_PANE_BUSY_VETO_CAP_SECS;
+
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashSet;
-use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -33,31 +51,6 @@ use parser::{
     join_streamed_message_boundary, observe_rollout_user_prompt, token_count_status,
     tool_call_message, tool_result_message,
 };
-
-const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
-/// Legacy EOF drain fallback; modern turns complete from provider records or hooks.
-/// Tool-call gating suppresses this drain while tools remain in flight.
-const DEFAULT_TERMINAL_DRAIN_MS: u64 = 1000;
-/// Event-less rollouts need a longer quiet window to survive pauses between output bursts.
-const DEFAULT_LEGACY_TERMINAL_DRAIN_MS: u64 = 15000;
-/// Upper bound on how long the tailer will sit at EOF waiting for the assistant
-/// response to begin streaming. Without this guard, a stuck Codex TUI (tool
-/// loop, network hang, etc.) keeps the tailer thread alive indefinitely and the
-/// caller never sees a terminal `StreamMessage::Done`.
-const DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS: u64 = 30 * 60;
-/// #2419 follow-up: bounded recovery for a pending tool call whose matching
-/// `function_call_output` never arrives (hung tool, malformed line, call_id
-/// mismatch, Codex schema skew). Without this, `has_pending_tool_call()`
-/// would hold the drain gate shut forever while the tmux pane stays alive,
-/// stranding the Discord turn. 5 minutes of inactivity after the last
-/// lifecycle event is well past any realistic tool runtime — at that point
-/// we surface a terminal Done so the bridge can advance.
-const DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS: u64 = 5 * 60;
-/// A fresh pane marker may extend pending-tool recovery, but never indefinitely.
-/// Two additional minutes start only after the five-minute inactivity deadline,
-/// covering normal foreground commands that typically finish within seconds or
-/// tens of seconds while still forcing a wedged TUI turn to fail open.
-const DEFAULT_PANE_BUSY_VETO_CAP_SECS: u64 = 2 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
@@ -130,86 +123,6 @@ pub struct RolloutTailOptions {
     own_turn: Option<String>,
 }
 
-impl Default for RolloutTailOptions {
-    fn default() -> Self {
-        Self {
-            wait_for_rollout: Duration::from_secs(DEFAULT_ROLLOUT_WAIT_SECS),
-            terminal_drain: Duration::from_millis(DEFAULT_TERMINAL_DRAIN_MS),
-            assistant_response_deadline: Some(Duration::from_secs(
-                DEFAULT_ASSISTANT_RESPONSE_DEADLINE_SECS,
-            )),
-            pending_tool_call_deadline: Some(Duration::from_secs(
-                DEFAULT_PENDING_TOOL_CALL_DEADLINE_SECS,
-            )),
-            enable_task_complete_fast_path: true,
-            legacy_terminal_drain: Some(Duration::from_millis(DEFAULT_LEGACY_TERMINAL_DRAIN_MS)),
-            apply_pending_tool_deadline_without_assistant_text: true,
-            tmux_session_name: None,
-            discord_origin_prompt: None,
-            pane_busy_probe: None,
-            pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
-            terminal_range_eligible: false,
-            own_turn: None,
-        }
-    }
-}
-
-/// The Codex home this host reads rollouts under, honouring the `CODEX_HOME`
-/// override. Split out of `default_codex_sessions_dir` for #5452 PR-A so
-/// `tmux_common::classify_watcher_jsonl_owner` recognises a provider-owned file
-/// anywhere under the home rather than only under `sessions/` — Codex keeps
-/// other state there too, and none of it is AgentDesk's to rewrite.
-pub(crate) fn default_codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
-}
-
-pub fn default_codex_sessions_dir() -> Option<PathBuf> {
-    default_codex_home().map(|home| home.join("sessions"))
-}
-
-pub(crate) fn observe_rollout_turn_state(
-    rollout_path: &Path,
-) -> crate::services::tui_turn_state::TuiTurnState {
-    crate::services::tui_turn_state::observe_codex_jsonl_turn_state(rollout_path)
-}
-
-pub(crate) fn rollout_file_matches_cwd(rollout_path: &Path, cwd: &Path) -> bool {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    rollout_session_cwd_matches(rollout_path, &canonical_cwd)
-}
-
-fn pane_busy_probe_for_tmux(
-    tmux_session_name: &str,
-) -> Box<dyn FnMut() -> super::input::CodexPaneBusySignal + Send> {
-    let tmux_session_name = tmux_session_name.to_string();
-    let mut tracker = super::input::CodexPaneBusySignalTracker::default();
-    Box::new(move || tracker.probe_tmux(&tmux_session_name))
-}
-
-/// The options every Discord-originated handoff tail sets, built in one place.
-///
-/// #5264 PR-B: `terminal_range_eligible` defaults to `false`, and `emit_done` gates the
-/// `CodexTuiTerminalDone` emission on it. An entry point that forgets to decide it
-/// therefore falls back to the legacy `Done`, produces no `CodexRange`, and skips the
-/// pinned terminal cutover — with no compile error and no failing assertion anywhere.
-/// The resumed entry point shipped with exactly that omission. Constructing the options
-/// once makes the omission impossible instead of merely detectable.
-fn discord_handoff_tail_options(
-    tmux_session_name: &str,
-    discord_origin_prompt: Option<&str>,
-) -> RolloutTailOptions {
-    RolloutTailOptions {
-        tmux_session_name: Some(tmux_session_name.to_string()),
-        discord_origin_prompt: discord_origin_prompt.map(ToString::to_string),
-        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
-        terminal_range_eligible: discord_origin_prompt.is_some_and(|text| !text.trim().is_empty()),
-        ..RolloutTailOptions::default()
-    }
-}
-
 pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
     cwd: &Path,
     modified_since: SystemTime,
@@ -228,72 +141,6 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
         is_alive,
         options,
     )
-}
-
-fn tail_latest_rollout_for_cwd_with_handoff_options<L: Into<PaneLiveness>>(
-    cwd: &Path,
-    modified_since: SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> L,
-    options: RolloutTailOptions,
-) -> Result<CodexTuiTailResult, String> {
-    if super::verified_tail::is_verified(options.tmux_session_name.as_deref()) {
-        let binding = super::verified_tail::wait_for_binding(
-            options.tmux_session_name.as_deref().unwrap_or_default(),
-            cancel_token.as_deref(),
-        )?;
-        let rollout_path = PathBuf::from(&binding.output_path);
-        return tail_rollout_file_until_assistant_response_with_pane_busy_probe(
-            &rollout_path,
-            binding.last_offset,
-            binding.session_id,
-            &sender,
-            cancel_token,
-            is_alive,
-            options,
-        )
-        .map(|(read_result, outcome)| CodexTuiTailResult {
-            read_result,
-            rollout_path: outcome.rollout_path,
-            final_offset: outcome.final_offset,
-            session_id: outcome.session_id,
-        });
-    }
-    let sessions_dir = default_codex_sessions_dir()
-        .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
-    let mut death = ConfirmedDeadPane::default();
-    let rollout_path = wait_for_latest_rollout_for_cwd(
-        cwd,
-        modified_since,
-        &sessions_dir,
-        cancel_token.as_deref(),
-        &mut || !death.observe(is_alive().into(), None),
-        options.wait_for_rollout,
-    )?;
-    let rollout_session_id =
-        super::rollout_index::read_rollout_session_meta(&rollout_path).and_then(|meta| meta.id);
-    persist_codex_tui_rollout_marker(
-        options.tmux_session_name.as_deref(),
-        &rollout_path,
-        rollout_session_id.as_deref(),
-        Some(0),
-    );
-    tail_rollout_file_until_assistant_response_with_pane_busy_probe(
-        &rollout_path,
-        0,
-        None,
-        &sender,
-        cancel_token,
-        is_alive,
-        options,
-    )
-    .map(|(read_result, outcome)| CodexTuiTailResult {
-        read_result,
-        rollout_path: outcome.rollout_path,
-        final_offset: outcome.final_offset,
-        session_id: outcome.session_id,
-    })
 }
 
 // #3034: test-only — pins the from-offset replay contract; production replays
@@ -652,129 +499,6 @@ fn persist_codex_tui_rollout_marker(
             error,
             "failed to persist Codex TUI rollout marker after transcript discovery"
         );
-    }
-}
-
-/// Find a codex rollout transcript by its session UUID alone, scanning the
-/// configured codex sessions directory. Used by recovery / restore paths after
-/// a dcserver restart: the inflight row carries `session_id` but its stored
-/// `output_path` may point at the AgentDesk-side relay JSONL that does not
-/// exist for codex_tui (codex writes directly to `~/.codex/sessions/...`).
-/// Returns the first matching `rollout-*-<session_id>.jsonl` whose filename
-/// ends with the session UUID — codex assigns one rollout per session id.
-pub fn find_rollout_by_session_id(session_id: &str) -> Option<PathBuf> {
-    let sessions_dir = default_codex_sessions_dir()?;
-    find_rollout_by_session_id_under(&sessions_dir, session_id)
-}
-
-pub(crate) fn find_rollout_by_session_id_under(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> Option<PathBuf> {
-    let trimmed = session_id.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let suffix = format!("-{trimmed}.jsonl");
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for path in rollout_files_under(sessions_dir) {
-        let matches = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(&suffix));
-        if !matches {
-            continue;
-        }
-        let modified = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        if best
-            .as_ref()
-            .is_none_or(|(best_modified, _)| modified >= *best_modified)
-        {
-            best = Some((modified, path));
-        }
-    }
-    best.map(|(_, path)| path)
-}
-
-fn latest_rollout_for_cwd_and_session_since(
-    cwd: &Path,
-    session_id: &str,
-    modified_since: SystemTime,
-    sessions_dir: &Path,
-) -> Option<PathBuf> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for path in rollout_files_under(sessions_dir) {
-        let Some(modified) = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .ok()
-        else {
-            continue;
-        };
-        if modified < modified_since {
-            continue;
-        }
-        if !rollout_session_meta_matches(&path, &canonical_cwd, Some(session_id)) {
-            continue;
-        }
-        if best
-            .as_ref()
-            .is_none_or(|(best_modified, _)| modified > *best_modified)
-        {
-            best = Some((modified, path));
-        }
-    }
-    best.map(|(_, path)| path)
-}
-
-fn rollout_session_cwd_matches(path: &Path, cwd: &Path) -> bool {
-    rollout_session_meta_matches(path, cwd, None)
-}
-
-fn rollout_session_meta_matches(path: &Path, cwd: &Path, session_id: Option<&str>) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let reader = std::io::BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok).take(20) {
-        let Ok(json) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if json.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
-        }
-        let Some(payload) = json.get("payload") else {
-            continue;
-        };
-        if let Some(expected_session_id) = session_id {
-            let Some(actual_session_id) = payload.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if actual_session_id != expected_session_id {
-                continue;
-            }
-        }
-        let Some(raw_cwd) = payload.get("cwd").and_then(Value::as_str) else {
-            continue;
-        };
-        let session_cwd = std::fs::canonicalize(raw_cwd).unwrap_or_else(|_| PathBuf::from(raw_cwd));
-        return session_cwd == cwd;
-    }
-    false
-}
-
-fn rollout_file_len(path: &Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|metadata| metadata.len())
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    let canonical_left = std::fs::canonicalize(left).ok();
-    let canonical_right = std::fs::canonicalize(right).ok();
-    match (canonical_left, canonical_right) {
-        (Some(left), Some(right)) => left == right,
-        _ => left == right,
     }
 }
 

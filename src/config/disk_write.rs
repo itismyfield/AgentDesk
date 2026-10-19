@@ -132,7 +132,6 @@ fn differing_section(expected: &Config, actual: &Config) -> &'static str {
         placeholder,
         runtime,
         routines,
-        escalation,
         onboarding,
         memory,
         mcp,

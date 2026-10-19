@@ -25,9 +25,6 @@ mod invariant_test_capture;
 mod model;
 #[cfg(test)]
 pub(crate) mod read_only_owner_snapshot;
-#[cfg(test)]
-#[path = "inflight/restart_mark_fence_tests.rs"]
-mod restart_mark_fence_tests;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // Re-export the domain model at its existing visibility for root and sibling callers.
 #[cfg(test)]
@@ -129,10 +126,7 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
-use self::removal::{
-    load_inflight_probe_from_root_excluding, load_inflight_states_from_root,
-    load_inflight_states_from_root_excluding,
-};
+use self::removal::{load_inflight_probe_from_root_excluding, load_inflight_states_from_root};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
@@ -536,7 +530,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     if !path.exists() {
         return Outcome::Missing;
     }
-    let _lock = match store::try_lock_unfenced_inflight_state_path(path) {
+    let _lock = match store::try_lock_inflight_state_path_typed(path) {
         Ok(lock) => lock,
         Err(store::TryLockRefusal::Failed(error)) => return Outcome::Io(error),
         Err(_) => return Outcome::Busy,
@@ -857,39 +851,6 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
         return Vec::new();
     };
     load_inflight_states_from_root(&root, provider)
-}
-
-pub(super) fn load_inflight_states_excluding(
-    provider: &ProviderKind,
-    exclude_channel: impl Fn(u64) -> bool,
-) -> Vec<InflightTurnState> {
-    let Some(root) = inflight_runtime_root() else {
-        return Vec::new();
-    };
-    load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {
-    let providers = [
-        ProviderKind::Claude,
-        ProviderKind::Codex,
-        ProviderKind::Gemini,
-        ProviderKind::Qwen,
-        ProviderKind::Grok,
-        ProviderKind::Antigravity,
-    ];
-
-    providers
-        .iter()
-        .flat_map(load_inflight_states)
-        .filter(|state| state.channel_id == channel_id)
-        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
-        .map(|state| state.request_owner_user_id)
 }
 
 /// #2448: explicit completion signal published from the turn_bridge

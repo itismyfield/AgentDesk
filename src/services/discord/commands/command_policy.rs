@@ -101,7 +101,6 @@ pub(super) enum TextCommandId {
     AllowAll,
     AddUser,
     RemoveUser,
-    Escalation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,45 +109,109 @@ pub(super) enum TextCommandSurface {
     Unavailable,
 }
 
+/// Text command registration: name, dispatch ID and `!help` line. Unavailable
+/// names have no help line.
+pub(super) const TEXT_COMMANDS: &[(&str, TextCommandId, &str)] = {
+    use TextCommandId::*;
+    &[
+        ("!help", Help, "`!help` — Show this help"),
+        ("!pwd", Pwd, "`!pwd` — Show current working directory"),
+        ("!health", Health, "`!health` — Show runtime health summary"),
+        (
+            "!status",
+            Status,
+            "`!status` — Show this channel session status",
+        ),
+        (
+            "!inflight",
+            Inflight,
+            "`!inflight` — Show saved inflight turn state",
+        ),
+        ("!queue", Queue, "`!queue [all]` — Show pending queue"),
+        ("!metrics", Metrics, "`!metrics [date]` — Show turn metrics"),
+        (
+            "!allowedtools",
+            AllowedTools,
+            "`!allowedtools` — Show currently allowed tools",
+        ),
+        ("!sessions", Sessions, ""),
+        ("!receipt", Receipt, ""),
+        ("!usage", Usage, ""),
+        (
+            "!start",
+            Start,
+            "`!start <path>` — Start session at directory",
+        ),
+        ("!down", Down, "`!down <file>` — Download file from server"),
+        ("!cc", Cc, "`!cc <skill>` — Legacy alias for `!skill`"),
+        ("!skill", Skill, "`!skill <skill>` — Run a provider skill"),
+        (
+            "!meeting",
+            Meeting,
+            "`!meeting [start] <agenda>|stop|status` — Run a round-table meeting",
+        ),
+        ("!model", Model, ""),
+        ("!fast", Fast, ""),
+        ("!goals", Goals, ""),
+        ("!clear", Clear, "`!clear` — Clear AI conversation history"),
+        ("!deletesession", DeleteSession, ""),
+        ("!stop", Stop, "`!stop` — Stop current AI request"),
+        ("!restart", Restart, ""),
+        ("!debug", Debug, "`!debug` — Toggle debug logging"),
+        (
+            "!vc",
+            Vc,
+            "`!vc join|leave` — Join or leave your voice channel",
+        ),
+        (
+            "!shell",
+            Shell,
+            "`!shell <command>` — Run shell command directly",
+        ),
+        (
+            "!allowed",
+            Allowed,
+            "`!allowed +name|-name` — Add or remove a tool (e.g. `!allowed +Bash`)",
+        ),
+        (
+            "!deadlock-recover",
+            DeadlockRecover,
+            "`!deadlock-recover [env]` — Restart the local dcserver and reap orphans",
+        ),
+        (
+            "!machine-flip",
+            MachineFlip,
+            "`!machine-flip <peer>` — Redeploy locally, then deploy the peer",
+        ),
+        (
+            "!stuck-pr-rebase",
+            StuckPrRebase,
+            "`!stuck-pr-rebase [label]` — Rebuild and push open PRs with the label",
+        ),
+        (
+            "!allowall",
+            AllowAll,
+            "`!allowall on|off|status` — Allow everyone or restrict to authorized users",
+        ),
+        (
+            "!adduser",
+            AddUser,
+            "`!adduser <user_id>` — Allow a user to use the bot",
+        ),
+        (
+            "!removeuser",
+            RemoveUser,
+            "`!removeuser <user_id>` — Remove a user's access",
+        ),
+    ]
+};
+
 impl TextCommandId {
     pub(super) fn from_str(name: &str) -> Option<Self> {
-        Some(match name {
-            "!help" => Self::Help,
-            "!pwd" => Self::Pwd,
-            "!health" => Self::Health,
-            "!status" => Self::Status,
-            "!inflight" => Self::Inflight,
-            "!queue" => Self::Queue,
-            "!metrics" => Self::Metrics,
-            "!allowedtools" => Self::AllowedTools,
-            "!sessions" => Self::Sessions,
-            "!receipt" => Self::Receipt,
-            "!usage" => Self::Usage,
-            "!start" => Self::Start,
-            "!down" => Self::Down,
-            "!cc" => Self::Cc,
-            "!skill" => Self::Skill,
-            "!meeting" => Self::Meeting,
-            "!model" => Self::Model,
-            "!fast" => Self::Fast,
-            "!goals" => Self::Goals,
-            "!clear" => Self::Clear,
-            "!deletesession" => Self::DeleteSession,
-            "!stop" => Self::Stop,
-            "!restart" => Self::Restart,
-            "!debug" => Self::Debug,
-            "!vc" => Self::Vc,
-            "!shell" => Self::Shell,
-            "!allowed" => Self::Allowed,
-            "!deadlock-recover" => Self::DeadlockRecover,
-            "!machine-flip" => Self::MachineFlip,
-            "!stuck-pr-rebase" => Self::StuckPrRebase,
-            "!allowall" => Self::AllowAll,
-            "!adduser" => Self::AddUser,
-            "!removeuser" => Self::RemoveUser,
-            "!escalation" => Self::Escalation,
-            _ => return None,
-        })
+        TEXT_COMMANDS
+            .iter()
+            .find(|(registered, ..)| *registered == name)
+            .map(|(_, id, _)| *id)
     }
 
     pub(super) fn risk(self) -> CommandRisk {
@@ -161,7 +224,7 @@ impl TextCommandId {
             Shell | Allowed | DeadlockRecover | MachineFlip | StuckPrRebase => {
                 CommandRisk::ShellOrToolGrant
             }
-            AllowAll | AddUser | RemoveUser | Escalation => CommandRisk::CredentialSystem,
+            AllowAll | AddUser | RemoveUser => CommandRisk::CredentialSystem,
         }
     }
 
@@ -173,8 +236,9 @@ impl TextCommandId {
             }
             Help | Pwd | Health | Status | Inflight | Queue | Metrics | AllowedTools | Start
             | Down | Cc | Skill | Meeting | Clear | Stop | Debug | Vc | Shell | Allowed
-            | DeadlockRecover | MachineFlip | StuckPrRebase | AllowAll | AddUser | RemoveUser
-            | Escalation => TextCommandSurface::Implemented,
+            | DeadlockRecover | MachineFlip | StuckPrRebase | AllowAll | AddUser | RemoveUser => {
+                TextCommandSurface::Implemented
+            }
         }
     }
 }
@@ -277,123 +341,139 @@ pub(in crate::services::discord) fn high_risk_enabled_via_env() -> bool {
         .unwrap_or(false)
 }
 
+/// Risk tier of every registered slash command, mirroring the text tiers; the
+/// recovery commands run launchctl/ssh/git pipelines, so they are opt-in.
+pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
+    use CommandRisk::*;
+    &[
+        ("/help", ReadOnly),
+        ("/pwd", ReadOnly),
+        ("/health", ReadOnly),
+        ("/status", ReadOnly),
+        ("/inflight", ReadOnly),
+        ("/queue", ReadOnly),
+        ("/metrics", ReadOnly),
+        ("/allowedtools", ReadOnly),
+        ("/sessions", ReadOnly),
+        ("/receipt", ReadOnly),
+        ("/usage", ReadOnly),
+        ("/adk", ReadOnly),
+        ("/cost", ReadOnly),
+        ("/context", ReadOnly),
+        ("/start", Mutating),
+        ("/resume", Mutating),
+        ("/down", Mutating),
+        ("/cc", Mutating),
+        ("/skill", Mutating),
+        ("/meeting", Mutating),
+        ("/model", Mutating),
+        ("/node", Mutating),
+        ("/fast", Mutating),
+        ("/goals", Mutating),
+        ("/effort", Mutating),
+        ("/compact", Mutating),
+        ("/clear", Mutating),
+        ("/deletesession", Mutating),
+        ("/stop", Mutating),
+        ("/cancel-queued", Mutating),
+        ("/restart", Mutating),
+        ("/debug", Mutating),
+        ("/sidecar", Mutating),
+        ("/voice", Mutating),
+        ("/vc_join", Mutating),
+        ("/vc_leave", Mutating),
+        ("/adk-phase", Mutating),
+        ("/shell", ShellOrToolGrant),
+        ("/allowed", ShellOrToolGrant),
+        ("/deadlock-recover", ShellOrToolGrant),
+        ("/machine-flip", ShellOrToolGrant),
+        ("/stuck-pr-rebase", ShellOrToolGrant),
+        ("/allowall", CredentialSystem),
+        ("/adduser", CredentialSystem),
+        ("/removeuser", CredentialSystem),
+    ]
+};
+
 /// Look up the risk tier for a slash command (e.g. `/shell`, `/clear`).
-///
-/// Maps the slash form to the same tier as the matching text command so the
-/// owner guard applies uniformly across both surfaces. Slash variants that do
-/// not exist as text commands are mapped to their nearest text equivalent.
-///
-/// `arg1` is preserved for symmetry with [`command_risk`] but is not yet
-/// consulted; both `/allowed +X` and `/allowed -X` already classify as
-/// `ShellOrToolGrant` because the slash command itself implies a grant.
+/// Names outside [`SLASH_COMMAND_RISKS`] get the conservative `Mutating` tier.
 pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> CommandRisk {
-    match slash_cmd {
-        // Inspection only.
-        "/help" | "/pwd" | "/health" | "/status" | "/inflight" | "/queue" | "/metrics"
-        | "/allowedtools" | "/sessions" | "/receipt" | "/usage" | "/adk" | "/cost" | "/context" => {
-            CommandRisk::ReadOnly
-        }
-
-        // Per-channel session shaping (mirrors text-command tiers).
-        "/start" | "/resume" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/node"
-        | "/fast" | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
-        | "/cancel-queued" | "/restart" | "/debug" => CommandRisk::Mutating,
-
-        // RCE-equivalent surface.
-        // `/deadlock-recover`, `/machine-flip`, and `/stuck-pr-rebase` (issue
-        // #2653) run launchctl/ssh/git pipelines — owner-only + opt-in.
-        "/shell" | "/allowed" | "/deadlock-recover" | "/machine-flip" | "/stuck-pr-rebase" => {
-            CommandRisk::ShellOrToolGrant
-        }
-
-        // Credential / user-management surface.
-        "/allowall" | "/adduser" | "/removeuser" | "/escalation" => CommandRisk::CredentialSystem,
-
-        // Conservative default.
-        _ => CommandRisk::Mutating,
-    }
+    SLASH_COMMAND_RISKS
+        .iter()
+        .find(|(name, _)| *name == slash_cmd)
+        .map_or(CommandRisk::Mutating, |(_, risk)| *risk)
 }
 
-/// Short multi-line block suitable for `!help`. Documents each tier and its
-/// current enable state.
+/// Short multi-line block for `!help` and `/help`, listing each tier's slash
+/// commands from [`SLASH_COMMAND_RISKS`] and the high-risk enable state.
 pub(in crate::services::discord) fn risk_tier_summary_for_help(high_risk_enabled: bool) -> String {
     let shell_state = if high_risk_enabled {
         "owner-only, ENABLED"
     } else {
         "owner-only, DISABLED (set AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1)"
     };
-    format!(
-        "**Command Risk Tiers** (issue #1005)\n\
-         `read-only` — help/status/usage/receipt/metrics/allowedtools: any authorized user\n\
-         `mutating` — start/down/skill(/cc)/meeting/model/node/fast/goals/effort/compact/clear/deletesession/stop/restart/debug: any authorized user\n\
-         `read-only (Claude native)` — cost/context: any authorized user\n\
-         `shell/tool-grant` — shell/allowed: {shell_state}\n\
-         `credential/system` — allowall/adduser/removeuser/escalation: owner-only"
-    )
+    let tiers = [
+        (CommandRisk::ReadOnly, "read-only", "any authorized user"),
+        (CommandRisk::Mutating, "mutating", "any authorized user"),
+        (
+            CommandRisk::ShellOrToolGrant,
+            "shell/tool-grant",
+            shell_state,
+        ),
+        (
+            CommandRisk::CredentialSystem,
+            "credential/system",
+            "owner-only",
+        ),
+    ];
+    let mut lines = vec![
+        "**Command Risk Tiers** (a `!` text command shares the tier of its `/` name)".to_string(),
+    ];
+    for (risk, label, access) in tiers {
+        let names = SLASH_COMMAND_RISKS
+            .iter()
+            .filter(|(_, tier)| *tier == risk)
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("`{label}` ({access}): {names}"));
+    }
+    lines.join("\n")
 }
 
-/// Pure help formatting; the handler still owns provider/env reads and message delivery.
-pub(super) fn text_command_help(
-    provider_name: &str,
-    claude_tui_settings: &str,
-    risk_block: &str,
-) -> String {
-    format!(
-        "\
-**AgentDesk Discord Bot**
-Manage server files & chat with {p}.
-Each channel gets its own independent {p} session.
-
-**Session**
-`!start <path>` — Start session at directory
-`!pwd` — Show current working directory
-`!health` — Show runtime health summary
-`!status` — Show this channel session status
-`!inflight` — Show saved inflight turn state
-`!clear` — Clear AI conversation history
-`!stop` — Stop current AI request
-
-**File Transfer**
-`!down <file>` — Download file from server
-Send a file/photo — Upload to session directory
-
-**Shell**
-`!shell <command>` — Run shell command directly
-
-**AI Chat**
-Any other message is sent to {p}.
-
-**Tool Management**
-`!allowedtools` — Show currently allowed tools
-`!allowed +name` — Add tool (e.g. `!allowed +Bash`)
-`!allowed -name` — Remove tool
-
-**Skills**
-`!skill <skill>` — Run a provider skill
-`!cc <skill>` — Legacy alias for `!skill`
-
-**Settings**
-`/model` — Open the interactive model picker
-{claude_tui_settings}
-`!debug` — Toggle debug logging
-`!metrics [date]` — Show turn metrics
-`!queue [all]` — Show pending queue
-`!escalation status` — Show escalation routing mode
-
-**User Management** (owner only)
-`!allowall on|off|status` — Allow everyone or restrict to authorized users
-`!adduser <user_id>` — Allow a user to use the bot
-`!removeuser <user_id>` — Remove a user's access
-`!escalation pm|user|scheduled` — Change escalation routing mode
-`!escalation schedule <HH:MM-HH:MM>` — Set PM hours and switch to scheduled mode
-`!escalation timezone <IANA>` — Set scheduled timezone
-`!escalation owner <user_id>` — Override fallback owner user id
-`!escalation pm-channel <channel_id>` — Override PM channel
-`!help` — Show this help
-
-{risk_block}",
-        p = provider_name,
-    )
+/// `!help` body generated from [`TEXT_COMMANDS`], grouped by risk tier.
+/// The handler still owns provider/env reads and message delivery.
+pub(super) fn text_command_help(provider_name: &str, risk_block: &str) -> String {
+    let mut lines = vec![
+        "**AgentDesk Discord Bot**".to_string(),
+        format!("Manage server files & chat with {provider_name}."),
+        format!("Each channel gets its own independent {provider_name} session."),
+        format!("Any other message is sent to {provider_name}; send a file/photo to upload it."),
+        "Slash commands are listed by `/help`.".to_string(),
+    ];
+    let sections = [
+        (CommandRisk::ReadOnly, "**Inspect**"),
+        (CommandRisk::Mutating, "**Session**"),
+        (
+            CommandRisk::ShellOrToolGrant,
+            "**Shell & Tools** (owner only, opt-in)",
+        ),
+        (
+            CommandRisk::CredentialSystem,
+            "**User Management** (owner only)",
+        ),
+    ];
+    for (risk, title) in sections {
+        lines.push(String::new());
+        lines.push(title.to_string());
+        for (_, id, help) in TEXT_COMMANDS {
+            if id.risk() == risk && id.text_surface() == TextCommandSurface::Implemented {
+                lines.push((*help).to_string());
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push(risk_block.to_string());
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -434,7 +514,7 @@ mod command_policy_tests {
             (
                 CredentialSystem,
                 Implemented,
-                "!allowall !adduser !removeuser !escalation",
+                "!allowall !adduser !removeuser",
             ),
         ]
     }
@@ -474,7 +554,7 @@ mod command_policy_tests {
                 }
             }
         }
-        assert_eq!(ids.len(), 34);
+        assert_eq!(ids.len(), 33);
         assert_eq!(unavailable, 8);
     }
 
@@ -497,8 +577,8 @@ mod command_policy_tests {
         let mut compared = 0;
         for (risk, _, names) in registered_cases() {
             for name in names.split_whitespace() {
-                // Voice uses separate slash names; escalation has no slash registration.
-                if matches!(name, "!vc" | "!escalation") {
+                // Voice uses separate slash names.
+                if name == "!vc" {
                     continue;
                 }
                 assert_eq!(slash_command_risk(&format!("/{}", &name[1..])), risk);
@@ -509,10 +589,34 @@ mod command_policy_tests {
     }
 
     #[test]
-    fn help_formatter_preserves_provider_settings_and_risk_placeholders() {
-        let help = text_command_help("fixture-provider", "fixture-settings", "fixture-risk");
+    fn help_formatter_preserves_provider_and_risk_placeholders() {
+        let help = text_command_help("fixture-provider", "fixture-risk");
         assert_eq!(help.matches("fixture-provider").count(), 3);
-        assert_eq!(help.matches("fixture-settings").count(), 1);
         assert!(help.ends_with("fixture-risk"));
+    }
+
+    /// Every implemented text command, and nothing else, has a `!help` line;
+    /// unavailable names stay out of the help.
+    #[test]
+    fn text_registration_and_help_name_the_same_commands() {
+        let help = text_command_help("fixture-provider", "");
+        let listed: std::collections::BTreeSet<&str> = help
+            .lines()
+            .filter_map(|line| line.strip_prefix('`'))
+            .filter(|rest| rest.starts_with('!'))
+            .map(|rest| &rest[..rest.find([' ', '`']).unwrap_or(rest.len())])
+            .collect();
+        let mut implemented = std::collections::BTreeSet::new();
+        for (name, id, line) in TEXT_COMMANDS {
+            assert_eq!(TextCommandId::from_str(name), Some(*id), "{name}");
+            let available = id.text_surface() == TextCommandSurface::Implemented;
+            assert_eq!(!line.is_empty(), available, "{name} help line");
+            if available {
+                assert!(line.starts_with(&format!("`{name}")), "{name}: {line}");
+                implemented.insert(*name);
+            }
+        }
+        assert_eq!(listed, implemented);
+        assert_eq!(implemented.len(), 25);
     }
 }

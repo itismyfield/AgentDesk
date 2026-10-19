@@ -190,6 +190,7 @@ async fn legacy_hop_retry_readable_history_without_a_matching_hop_does_not_block
             2,
             BindingRecord::Rejected {
                 detail: "no hop".into(),
+                closes: None,
             },
             Utc::now(),
         )

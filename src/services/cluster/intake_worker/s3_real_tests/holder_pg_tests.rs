@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::harness::*;
-use super::route_pg::{lock_home_row, owner, replies, replies_tagged, routed, tick};
+use super::route_pg::{lock_home_row, owner, replies, replies_tagged, routed, stored, tick};
 use crate::db::o_channel_homes::{self, HomeState};
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home_drain::Owed;
@@ -1007,6 +1007,76 @@ pub(super) async fn adopt_target_node(env: &Env) {
     node.stop().await;
 }
 
+/// T-H6 standby target: MINI, restoring the channel itself, adopts the released row unrestored;
+/// while it restores, intake is closed and a routed row waits, then it opens and the row runs.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_released_target_standby_adopts_closed_then_opens_pg() {
+    let scene = Scene::new().await;
+    let (channel, provider) = (C.to_string(), provider_name(scene.provider));
+    let delegated = o_channel_homes::delegate(&scene.pool, &channel, provider, GW, MINI).await;
+    let delegated = applied(delegated);
+    let released =
+        o_channel_homes::finish_release(&scene.pool, &channel, GW, delegated.epoch).await;
+    let epoch = applied(released).epoch;
+    put(scene.dir(), "epoch", epoch);
+    let id = seed(&scene.pool, "5001", Some(epoch)).await;
+    let mut target = Node::spawn(&scene, "th6_adopt_standby", MINI);
+    target.wait_signal("closed", WITHIN).await;
+    let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
+    assert_eq!(home(&scene).await, held, "adopted before its restore");
+    assert_eq!(scene.row().await.expect("the home row").target, None);
+    let pending = ("pending".to_string(), None, false);
+    assert_eq!(stored(&scene.pool, id).await, pending, "the row waits");
+    signal(scene.dir(), "restore");
+    target.finish(Duration::from_secs(180)).await;
+    let done = ("done".to_string(), Some("o-mini-s3".to_string()), true);
+    assert_eq!(stored(&scene.pool, id).await, done);
+    scene.drop_db().await;
+}
+
+pub(super) async fn adopt_standby_node(env: &Env) {
+    use crate::services::cluster::channel_home::{HomeIntake, intake_hold};
+    use crate::services::cluster::channel_home_boot::ChannelRestore;
+    use std::sync::Arc;
+    let epoch = epoch_of(env);
+    let dir = env.dir.clone();
+    let run: ChannelRestore = Arc::new(move || {
+        let dir = dir.clone();
+        Box::pin(async move {
+            signal(&dir, "restoring");
+            wait_signal(&dir, "restore", WITHIN).await;
+            true
+        })
+    });
+    let node = Booted::boot_restoring(env, run).await;
+    assert_eq!(node.gates.len(), 1, "the released row names this node");
+    let shared = owner().await;
+    let (_hook, recorder) = replies(&node);
+    until("the restore runs once held", WITHIN, || {
+        signalled(&env.dir, "restoring")
+    })
+    .await;
+    let ownership = node.gate().map(|gate| gate.ownership());
+    let closed = matches!(ownership, Some(HomeOwnership::Owned { home_epoch, intake: HomeIntake::Closed, .. }) if home_epoch == epoch);
+    assert!(
+        closed,
+        "held with intake closed while it restores: {ownership:?}"
+    );
+    assert!(intake_hold(&C.to_string(), Some(epoch)).is_some());
+    assert_eq!(tick(&node, &shared, MINI).await, TickOutcome::QueueEmpty);
+    assert_eq!(recorder.channels(), Vec::<u64>::new(), "no turn ran");
+    signal(&env.dir, "closed");
+    until("the restore opens intake", WITHIN, || {
+        node.gate().is_some_and(|gate| gate.intake_open())
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    assert_eq!(tick(&node, &shared, MINI).await, TickOutcome::Processed);
+    assert_eq!(recorder.channels(), [C]);
+    node.until_posts(&["reply-1"]).await;
+    node.stop().await;
+}
+
 /// T-H6 adopt against unregister: the target's gate unregisters while its adopt UPDATE waits on a
 /// row lock; the adopt lands once, no lease runs, and the next boot holds and renews the row.
 #[tokio::test(flavor = "current_thread")]
@@ -1041,20 +1111,15 @@ async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
             writers: None,
         })
     };
-    let lock = lock_home_row(&scene.pool).await;
+    let mut lock = lock_home_row(&scene.pool).await;
+    let locker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     let gates = channel_home_boot::start(Some(true), boot).await;
     assert_eq!(gates.len(), 1, "the released row names MINI");
-    // The watch's only query that holds a connection across two samples is the blocked adopt.
-    let in_use = || pool.size() as usize > pool.num_idle();
-    let mut held = 0;
-    for _ in 0..400 {
-        held = if in_use() { held + 1 } else { 0 };
-        if held >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    assert!(held >= 3, "the adopt never waited on the row lock");
+    // Of the watch's statements only the adopt UPDATE can queue on the row lock.
+    queued_behind(&scene.pool, locker).await;
     assert!(channel_home::unregister(&channel).is_some());
     lock.commit().await.unwrap();
 
@@ -1092,4 +1157,23 @@ async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
     channel_home::unregister(&channel);
     pool.close().await;
     scene.drop_db().await;
+}
+
+/// Waits until PG reports a backend queued on a lock that backend `holder` keeps.
+async fn queued_behind(pool: &sqlx::PgPool, holder: i32) {
+    for _ in 0..400 {
+        let queued: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if queued {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the adopt never waited on the row lock");
 }

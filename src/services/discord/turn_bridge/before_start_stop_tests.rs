@@ -1,3 +1,4 @@
+use super::consume_once as consume;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::discord;
@@ -838,11 +839,10 @@ impl Close {
     }
 }
 
-#[path = "before_start_stop_disk_gate_tests.rs"]
-mod disk_gate;
-
 #[path = "before_start_stop_clear_order_tests.rs"]
 mod clear_order;
+#[path = "before_start_stop_disk_gate_tests.rs"]
+mod disk_gate;
 
 #[path = "before_start_stop_policy_tests.rs"]
 mod policy;
@@ -850,9 +850,10 @@ mod policy;
 #[path = "before_start_stop_reconcile_tests.rs"]
 mod reconcile;
 
+#[path = "before_start_stop_retry_tests.rs"]
+mod retry;
 #[path = "before_start_stop_tail_tests.rs"]
 mod tail;
-
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,
@@ -863,7 +864,6 @@ async fn recorded(
 
 /// A change applied to a row.
 type Shape = fn(&mut InflightTurnState);
-
 /// Nothing is shown or released before the receipt is durable: a failed write keeps the turn held
 /// and its row as it was; the notice runs with the receipt on disk and no inflight lock held.
 #[tokio::test(flavor = "current_thread")]
@@ -1030,11 +1030,11 @@ const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midwa
 
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
-    use crate::services::turn_orchestrator::policy_close::{PolicyClear, test_hooks};
+    use crate::services::turn_orchestrator::policy_close::PolicyClear;
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
     let clear = |row: &InflightTurnState, generation| {
         let receipt = row.clone().into_policy_receipt(generation);
-        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
+        receipt.try_clear()
     };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;

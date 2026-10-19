@@ -6,6 +6,7 @@ pub const LOG_TARGET: &str = "agentdesk::api_caller_observability";
 pub enum AuthStrength {
     None,
     Loopback,
+    TailnetPeer,
     ServerAdmin,
 }
 
@@ -14,6 +15,7 @@ impl AuthStrength {
         match self {
             Self::None => "None",
             Self::Loopback => "Loopback",
+            Self::TailnetPeer => "TailnetPeer",
             Self::ServerAdmin => "ServerAdmin",
         }
     }
@@ -170,6 +172,11 @@ mod tests {
 
         let none = RequestPrincipal::from_headers(&headers, AuthStrength::None);
         assert_eq!(none.auth_strength, AuthStrength::None);
+
+        let tailnet = RequestPrincipal::from_headers(&headers, AuthStrength::TailnetPeer);
+        assert_eq!(tailnet.auth_strength.as_str(), "TailnetPeer");
+        assert_eq!(tailnet.claimed_agent_id.as_deref(), Some("codex"));
+        assert_eq!(tailnet.claimed_channel_id.as_deref(), Some("channel-1"));
     }
 
     #[test]

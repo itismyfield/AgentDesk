@@ -54,8 +54,12 @@ pub enum BindingRecord {
     },
     /// Names the file of the `Pending` bind at `resolves_seq`.
     Resolved { resolves_seq: u64, source: SourceId },
-    /// A refused late bind, kept for audit; it changes no binding.
-    Rejected { detail: String },
+    /// A refused bind may close one Pending without binding a source.
+    Rejected {
+        detail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closes: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +155,10 @@ fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, Stri
         p5::BindingTarget::Source(_) | p5::BindingTarget::Resolved { .. } if !source_allowed => {
             BindingRecord::Rejected {
                 detail: "Codex source proof or delivery permission held".into(),
+                closes: match &event.new {
+                    p5::BindingTarget::Resolved { pending_seq, .. } => Some(*pending_seq),
+                    _ => None,
+                },
             }
         }
         p5::BindingTarget::Source(source) => bound(&event, reclaims, BindingTarget::Source(source)),
@@ -172,7 +180,15 @@ fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, Stri
             resolves_seq: pending_seq,
             source,
         },
-        p5::BindingTarget::Rejected { reason, .. } => BindingRecord::Rejected { detail: reason },
+        p5::BindingTarget::Rejected { reason, .. } => BindingRecord::Rejected {
+            detail: reason,
+            closes: if provider == ShadowProvider::Codex {
+                p5::codex::terminal_pending_at_seq(event.channel_id, event.seq)
+                    .map_err(|error| error.to_string())?
+            } else {
+                None
+            },
+        },
     };
     Ok(BindingEvent {
         seq: event.seq,
@@ -184,6 +200,10 @@ fn from_p5(event: p5::BindingEvent, reclaims: bool) -> Result<BindingEvent, Stri
         committed_at: event.committed_at,
     })
 }
+
+#[cfg(all(test, unix))]
+#[path = "binding/terminal_tests.rs"]
+pub(crate) mod terminal_tests;
 
 fn bound(event: &p5::BindingEvent, reclaims: bool, new: BindingTarget) -> BindingRecord {
     let cause = match event.cause {

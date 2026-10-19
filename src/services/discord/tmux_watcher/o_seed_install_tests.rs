@@ -1,11 +1,10 @@
 //! Isolated real watcher entry cases, retaining raw observations through task completion.
 use super::*;
-use crate::services::discord::health::legacy_supervision::test_support::{
+use crate::services::discord::health::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
 };
-use crate::services::discord::health::legacy_supervision::{RetiredForTest, is_retired};
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
-use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
+use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::{spawn_observed_tmux_watcher, watcher_completion};
 use crate::services::discord::tmux::InstallFixture;
 use std::io::Write;
@@ -101,44 +100,6 @@ pub(super) fn observe(fixture: &InstallFixture) -> Guard {
     observed
 }
 
-pub(super) fn assert_zero_loaders(snapshot: &Snapshot) {
-    assert_eq!(snapshot.writable_inflight_load_calls, 0, "{snapshot:?}");
-    assert_eq!(snapshot.readonly_inflight_load_calls, 0, "{snapshot:?}");
-    assert_eq!(snapshot.compatibility_backfill_attempts, 0, "{snapshot:?}");
-    assert_eq!(snapshot.legacy_prefix_restore_calls, 0, "{snapshot:?}");
-    assert_eq!(
-        snapshot.event_count("stream_progress_call"),
-        0,
-        "{snapshot:?}"
-    );
-}
-
-pub(super) fn assert_rowless(observed: &Guard) {
-    let key = observed.snapshot();
-    let raw = observed.raw_process_snapshot();
-    assert_zero_loaders(&key);
-    assert_zero_loaders(&raw);
-    assert!(key.watcher_initialization_observed, "{key:?}");
-    assert!(key.stream_decoder_initialization_observed, "{key:?}");
-    assert!(key.event_count("outer_eof") > 0, "{key:?}");
-    assert!(key.decoded_source_chunks > 0, "{key:?}");
-    assert!(key.event_count("checkpoint") > 0, "{key:?}");
-    assert!(key.event_count("post_stream_exit") > 0, "{key:?}");
-    assert!(raw.event_count("post_stream_exit") > 0, "{raw:?}");
-    assert_eq!(key.event_count("legacy_row_seed_adopted"), 0, "{key:?}");
-    assert_eq!(raw.event_count("legacy_row_seed_adopted"), 0, "{raw:?}");
-    assert_eq!(key.event_count("capsule_legacy_adopted"), 0, "{key:?}");
-    assert!(!key.parser_responses.is_empty(), "{key:?}");
-    assert!(
-        key.parser_responses
-            .iter()
-            .all(|response| !response.contains("legacy restored body")
-                && !response.contains("predecessor Legacy body")),
-        "{key:?}"
-    );
-    eprintln!("N4D_NONTERMINAL_KEY={key:?}\nN4D_NONTERMINAL_RAW={raw:?}");
-}
-
 pub(super) async fn assert_joined(scope: &Scope, observed: &Guard, expected: usize) {
     let joined = scope.join_all().await;
     assert_eq!(scope.submissions(), expected, "raw submissions: {joined:?}");
@@ -218,343 +179,9 @@ pub(super) async fn cancel_join(handle: &crate::services::discord::TmuxWatcherHa
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t6_a_installer_eof_then_nonterminal_decode_is_rowless_through_join() {
-    if !child("t6_a_installer_eof_then_nonterminal_decode_is_rowless_through_join") {
-        return;
-    }
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let (fixture, discord) = fixture(632_511_001).await;
-    let old = format!(
-        "{}{}{}",
-        user("old prompt"),
-        said("legacy source body"),
-        stop()
-    );
-    append(&fixture, old.as_bytes());
-    seed(&fixture, old.len() as u64);
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-    let before = tree_fingerprint(&root);
-    let observed = observe(&fixture);
-    let submitted = Scope::new(&fixture.shared);
-    fixture.spawn_watcher().await;
-    until(&observed, "actual initial EOF", |s| {
-        s.event_count("outer_eof") > 0
-    })
-    .await;
-    let fresh = said("fresh rowless response");
-    append(&fixture, fresh.as_bytes());
-    until(&observed, "actual nonterminal chunk", |s| {
-        s.decoded_chunks.concat() == fresh
-    })
-    .await;
-    fixture.cancel_and_join().await;
-    assert_joined(&submitted, &observed, 1).await;
-    assert_rowless(&observed);
-    assert!(
-        observed
-            .snapshot()
-            .parser_responses
-            .iter()
-            .any(|r| r == "fresh rowless response")
-    );
-    assert_eq!(tree_fingerprint(&root), before);
-    assert!(fixture.shared.core.lock().await.sessions.is_empty());
-    eprintln!(
-        "N4D_NONTERMINAL_HTTP={:?}",
-        discord.requests_for(fixture.channel.get())
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effects() {
-    let test = "t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effects";
-    if !isolated_in(
-        "o_seed_install_tests",
-        test,
-        &[
-            ("AGENTDESK_STATUS_INTERVAL_SECS", "1"),
-            ("AGENTDESK_SINGLE_MESSAGE_PANEL", "0"),
-            (
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            ),
-        ],
-    ) {
-        return;
-    }
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let (mut fixture, discord) = fixture(632_511_003).await;
-    fixture.registry.provider_entries_guard().await.clear();
-    let ui = &mut Arc::get_mut(&mut fixture.shared).unwrap().ui;
-    ui.status_panel_v2_enabled = true;
-    ui.two_message_panel_enabled = true;
-    fixture
-        .registry
-        .register("claude".into(), fixture.shared.clone())
-        .await;
-    // An undelivered old row keeps its offset compatible with an accidental write.
-    let mut old_row = row(&fixture, 0);
-    old_row.response_sent_offset = 0;
-    let path = seed_backfill_row(&old_row);
-    drop(crate::services::discord::inflight::lock_inflight_state_path(&path).unwrap());
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-    let before = tree_fingerprint(&root);
-    let observed = observe(&fixture);
-    let submitted = Scope::new(&fixture.shared);
-    fixture.spawn_watcher().await;
-    assert!(crate::services::tui_o::cutover::writer_enabled());
-    assert_eq!(
-        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&fixture.session),
-        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-    );
-    assert_eq!(
-        crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-            fixture.channel.get(),
-            Some(&fixture.session)
-        ),
-        Ok(false),
-        "actual runtime-kind ownership permits Legacy before the RetiredO mode fence"
-    );
-    until(&observed, "initial EOF before timed stream", |s| {
-        s.event_count("outer_eof") > 0
-    })
-    .await;
-    let body = "timed rowless response ".repeat(300);
-    assert!(body.len() > 2_000);
-    let fresh = said(&body);
-    let appended_at = tokio::time::Instant::now();
-    append(&fixture, fresh.as_bytes());
-    until(&observed, "actual expired streaming interval", |s| {
-        s.decoded_chunks.concat() == fresh && s.event_count("streaming_tick") > 0
-    })
-    .await;
-    assert!(appended_at.elapsed() >= Duration::from_secs(1));
-    fixture.cancel_and_join().await;
-    assert_joined(&submitted, &observed, 1).await;
-    assert_rowless(&observed);
-    let snapshot = observed.snapshot();
-    assert!(snapshot.event_count("inner_eof") > 0, "{snapshot:?}");
-    assert!(snapshot.parser_responses.iter().any(|r| r == &body));
-    assert_eq!(tree_fingerprint(&root), before);
-    let requests = discord.requests_for(fixture.channel.get());
-    assert!(
-        requests
-            .iter()
-            .all(|request| !request.starts_with("POST ") && !request.starts_with("PATCH ")),
-        "RetiredO cannot publish a Legacy streaming body: {requests:?}"
-    );
-    eprintln!(
-        "N4D_NONTERMINAL_HTTP={:?}",
-        discord.requests_for(fixture.channel.get())
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
-    if !child("t6_d_real_legacy_predecessor_capsule_is_retained_unadopted") {
-        return;
-    }
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let (fixture, _discord) = fixture(632_511_004).await;
-    let old_row = seed(&fixture, 0);
-    let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
-    let predecessor_observed = observe(&fixture);
-    let predecessor_submitted = Scope::new(&fixture.shared);
-    let predecessor = spawn_legacy(&fixture, 0, Some(restored));
-    until(&predecessor_observed, "Legacy predecessor EOF", |s| {
-        s.event_count("outer_eof") > 0
-    })
-    .await;
-    let old = said("predecessor Legacy body");
-    append(&fixture, old.as_bytes());
-    until(&predecessor_observed, "Legacy predecessor decode", |s| {
-        s.decoded_chunks.concat() == old
-    })
-    .await;
-    cancel_join(&predecessor).await;
-    assert_joined(&predecessor_submitted, &predecessor_observed, 1).await;
-    assert!(
-        predecessor_observed
-            .snapshot()
-            .event_count("legacy_row_seed_adopted")
-            > 0
-    );
-    assert!(
-        predecessor_observed
-            .raw_process_snapshot()
-            .event_count("legacy_row_seed_adopted")
-            > 0
-    );
-    drop(predecessor_submitted);
-    drop(predecessor_observed);
-    let retained =
-        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
-    let legacy = retained
-        .iter()
-        .filter(|p| p.origin.is_legacy())
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(legacy.len(), 1, "{retained:?}");
-    assert!(
-        legacy[0].body.contains("predecessor Legacy body"),
-        "{legacy:?}"
-    );
-    assert!(
-        legacy[0].has_identity && legacy[0].has_startup_snapshot,
-        "{legacy:?}"
-    );
-    assert_eq!(
-        legacy[0].identity,
-        Some(crate::services::discord::inflight::InflightTurnIdentity::from_state(&old_row))
-    );
-    assert_eq!(legacy[0].restored_response_seed, old_row.full_response);
-    assert_eq!(legacy[0].nonce.as_deref(), Some("old-seed-nonce"));
-    assert_ne!(legacy[0].authority.generation_mtime_ns, 0);
-    assert_eq!(legacy[0].opened_source, legacy[0].authority.source_file);
-    seed(&fixture, std::fs::metadata(&fixture.output).unwrap().len());
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-    let before = tree_fingerprint(&root);
-    let observed = observe(&fixture);
-    let submitted = Scope::new(&fixture.shared);
-    fixture.spawn_watcher().await;
-    until(
-        &observed,
-        "successor EOF after rejecting Legacy capsule",
-        |s| s.event_count("outer_eof") > 0,
-    )
-    .await;
-    let fresh = said("successor O body");
-    append(&fixture, fresh.as_bytes());
-    until(&observed, "successor fresh decode", |s| {
-        s.decoded_chunks.concat() == fresh
-    })
-    .await;
-    fixture.cancel_and_join().await;
-    assert_joined(&submitted, &observed, 1).await;
-    let remaining =
-        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
-    assert_eq!(
-        remaining
-            .into_iter()
-            .filter(|p| p.origin.is_legacy())
-            .collect::<Vec<_>>(),
-        legacy,
-        "retirement must neither adopt nor remove Legacy custody"
-    );
-    assert_rowless(&observed);
-    assert!(
-        observed
-            .snapshot()
-            .parser_responses
-            .iter()
-            .any(|r| r == "successor O body")
-    );
-    assert_eq!(tree_fingerprint(&root), before);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
-    if !child("t6_e_installed_successor_resumes_real_o_partial_utf8_capsule") {
-        return;
-    }
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let (fixture, _discord) = fixture(632_511_005).await;
-    seed(&fixture, 0);
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-    let before = tree_fingerprint(&root);
-    let observed = observe(&fixture);
-    let submitted = Scope::new(&fixture.shared);
-    fixture.spawn_watcher().await;
-    until(&observed, "predecessor initial EOF", |s| {
-        s.event_count("outer_eof") > 0
-    })
-    .await;
-    let fresh = said("안녕 O successor");
-    let split = fresh.find('안').unwrap() + 1;
-    append(&fixture, &fresh.as_bytes()[..split]);
-    until(&observed, "predecessor partial UTF8 read", |s| {
-        s.decoded_source_chunks > 0
-    })
-    .await;
-    fixture.cancel_and_join().await;
-    assert_joined(&submitted, &observed, 1).await;
-    let retained =
-        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
-    assert_eq!(retained.len(), 1, "{retained:?}");
-    let capsule = &retained[0];
-    assert!(
-        !capsule.origin.is_legacy() && capsule.has_utf8_carry,
-        "{retained:?}"
-    );
-    assert_eq!(capsule.offset, split as u64);
-    assert!(
-        !capsule.has_identity
-            && capsule.nonce.is_none()
-            && !capsule.has_startup_snapshot
-            && !capsule.has_restored_seed,
-        "{retained:?}"
-    );
-    assert!(
-        capsule.identity.is_none()
-            && capsule.startup_snapshot.is_none()
-            && capsule.restored_response_seed.is_empty(),
-        "{retained:?}"
-    );
-    assert_ne!(capsule.authority.generation_mtime_ns, 0);
-    assert_eq!(capsule.opened_source, capsule.authority.source_file);
-    fixture.spawn_watcher().await;
-    until(&observed, "real O custody adoption", |s| {
-        s.event_count("capsule_o_adopted") == 1
-    })
-    .await;
-    append(&fixture, &fresh.as_bytes()[split..]);
-    until(&observed, "successor completes carried scalar", |s| {
-        s.decoded_chunks.concat() == fresh
-    })
-    .await;
-    fixture.cancel_and_join().await;
-    assert_joined(&submitted, &observed, 2).await;
-    assert_rowless(&observed);
-    let snapshot = observed.snapshot();
-    assert_eq!(snapshot.event_count("capsule_o_adopted"), 1);
-    assert!(
-        snapshot
-            .parser_responses
-            .iter()
-            .any(|r| r == "안녕 O successor"),
-        "{snapshot:?}"
-    );
-    let final_capsules =
-        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
-    assert_eq!(final_capsules.len(), 1, "{final_capsules:?}");
-    let final_capsule = &final_capsules[0];
-    assert_eq!(final_capsule.body, "안녕 O successor", "{final_capsules:?}");
-    assert!(!final_capsule.origin.is_legacy(), "{final_capsules:?}");
-    assert!(
-        !final_capsule.has_identity
-            && final_capsule.identity.is_none()
-            && final_capsule.nonce.is_none(),
-        "checkpoint startup fallback imported identity/nonce: {final_capsules:?}"
-    );
-    assert!(
-        !final_capsule.has_startup_snapshot
-            && final_capsule.startup_snapshot.is_none()
-            && !final_capsule.has_turn_identity_for_panel
-            && final_capsule.restored_response_seed.is_empty(),
-        "O checkpoint must sanitize continuation fields: {final_capsules:?}"
-    );
-    assert_eq!(tree_fingerprint(&root), before);
-}
-
 async fn legacy_control(channel: u64, n1_only: bool) {
     let (fixture, _discord) = fixture(channel).await;
     let _n1 = n1_only.then(|| crate::services::tui_o::turn_mode::TestConfirmation::new(channel));
-    assert!(!is_retired("claude", channel));
     let old_row = seed(&fixture, 0);
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
@@ -613,7 +240,7 @@ async fn legacy_control(channel: u64, n1_only: bool) {
         "Legacy compatibility backfill must remain enabled"
     );
     assert_eq!(key.event_count("capsule_o_adopted"), 0);
-    eprintln!("N4D_LEGACY_CONTROL_N1={n1_only} KEY={key:?} RAW={raw:?}");
+    eprintln!("LEGACY_CONTROL_N1={n1_only} KEY={key:?} RAW={raw:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -641,7 +268,6 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
     use crate::services::tui_prompt_dedupe::{TuiRuntimeBinding, register_tmux_runtime_binding};
     let (fixture, _discord) = fixture_for(ProviderKind::Codex, channel).await;
     let _n1 = n1_only.then(|| crate::services::tui_o::turn_mode::TestConfirmation::new(channel));
-    assert!(!is_retired("codex", channel));
     let prefix = format!(
         "{}\n{}",
         serde_json::json!({"type":"session_meta", "payload": {
@@ -709,7 +335,7 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
         "{raw:?}"
     );
     assert_ne!(tree_fingerprint(&root), before);
-    eprintln!("N4D_NATIVE_LEGACY_CONTROL_N1={n1_only} KEY={key:?} RAW={raw:?}");
+    eprintln!("NATIVE_LEGACY_CONTROL_N1={n1_only} KEY={key:?} RAW={raw:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -723,16 +349,14 @@ async fn t6_g_native_legacy_and_n1_only_actual_watchers_restore_source_prefix() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retired_shared_loaders_preserve_independent_read_and_backfill_contracts() {
-    let test = "retired_shared_loaders_preserve_independent_read_and_backfill_contracts";
+async fn legacy_shared_loaders_preserve_independent_read_and_backfill_contracts() {
+    let test = "legacy_shared_loaders_preserve_independent_read_and_backfill_contracts";
     if !child(test) {
         return;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (fixture, _discord) = fixture(632_511_011).await;
     let expected = seed(&fixture, 0);
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    assert!(is_retired("claude", fixture.channel.get()));
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     // This independent loader contract runs outside the installer's rowless watcher observation.
@@ -742,7 +366,7 @@ async fn retired_shared_loaders_preserve_independent_read_and_backfill_contracts
         fixture.channel.get(),
     )
     .unwrap()
-    .expect("retirement cannot hide a readable independent row");
+    .expect("independent row remains readable");
     assert_eq!(read_only.full_response, expected.full_response);
     assert_eq!(read_only.turn_nonce, expected.turn_nonce);
     assert_eq!(tree_fingerprint(&root), before);
@@ -755,7 +379,7 @@ async fn retired_shared_loaders_preserve_independent_read_and_backfill_contracts
         &fixture.provider,
         fixture.channel.get(),
     )
-    .expect("retirement cannot reject the independent writable loader");
+    .expect("independent writable loader backfills the row");
     assert_eq!(writable.full_response, expected.full_response);
     assert_eq!(writable.turn_nonce, expected.turn_nonce);
     assert_ne!(writable.finalizer_turn_id, 0);
@@ -788,12 +412,12 @@ async fn retired_shared_loaders_preserve_independent_read_and_backfill_contracts
     assert_eq!(tree_fingerprint(&root), backfilled);
     let raw = observed.raw_process_snapshot();
     let key = observed.snapshot();
-    assert_eq!(raw, key, "raw entry calls cannot be filtered by retirement");
+    assert_eq!(raw, key, "raw entry calls match the channel observation");
     assert_eq!(raw.readonly_inflight_load_calls, 2, "{raw:?}");
     assert_eq!(raw.writable_inflight_load_calls, 1, "{raw:?}");
     assert_eq!(raw.compatibility_backfill_attempts, 1, "{raw:?}");
     assert_eq!(raw.legacy_prefix_restore_calls, 0, "{raw:?}");
     assert!(!raw.watcher_initialization_observed);
     assert!(!raw.stream_decoder_initialization_observed);
-    eprintln!("RETIRED_INDEPENDENT_LOADER_KEY={key:?}\nRETIRED_INDEPENDENT_LOADER_RAW={raw:?}");
+    eprintln!("LEGACY_INDEPENDENT_LOADER_KEY={key:?}\nLEGACY_INDEPENDENT_LOADER_RAW={raw:?}");
 }

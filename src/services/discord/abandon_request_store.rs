@@ -48,7 +48,6 @@ use super::formatting::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
 };
 use super::placeholder_sweeper::{PlaceholderProbe, probe_placeholder_state};
-use crate::services::discord::health::transcript_turn::Presence;
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
@@ -372,19 +371,6 @@ fn remove_record(
     remove_record_in_root(&root, provider, token_hash, channel_id, record);
 }
 
-/// This bot's queued abandon requests for one channel; a corrupt file still counts as residue.
-pub(in crate::services::discord) fn channel_presence(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-) -> Presence {
-    let path = runtime_store::discord_abandon_requests_root()
-        .map(|root| channel_file_path_in_root(&root, provider, token_hash, channel_id));
-    Presence::of_file(path, |raw| {
-        serde_json::from_str::<Vec<AbandonRecord>>(raw).map_or(1, |records| records.len())
-    })
-}
-
 /// Render the requested terminal card for a record (no inflight row).
 fn build_terminal_card(record: &AbandonRecord) -> String {
     let started_at_unix = super::inflight::parse_started_at_unix(&record.started_at)
@@ -505,14 +491,6 @@ pub(in crate::services::discord) async fn drain(
     let pending = load_pending(provider, token_hash);
     let mut cleared = 0usize;
     for (channel_id, record) in pending {
-        // Ahead of the writing ownership loader and any record consumption.
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "abandon_request_drain",
-        ) {
-            continue;
-        }
         // Re-validate the exact episode record: a same-message replacement must
         // not let this stale snapshot pass the queue fence.
         if !is_record_queued(provider, token_hash, channel_id, &record) {
@@ -532,14 +510,6 @@ pub(in crate::services::discord) async fn drain(
             }
         }
         let probe = probe_placeholder_state(http, channel_id, record.msg_id).await;
-        // The probe awaited Discord; re-judge before consuming or editing.
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "abandon_request_drain_after_probe",
-        ) {
-            continue;
-        }
         match probe {
             PlaceholderProbe::StillPlaceholder => {
                 // Close the probe→edit ownership window. The probe establishes

@@ -24,13 +24,6 @@ mod final_ready_tests;
 #[cfg(test)]
 mod timeout_draft_tests;
 
-pub(crate) fn submit_native_clear(
-    target: &host_input::InputTarget,
-    gate: &dyn host_input::MutationGate,
-    deadline: tokio::time::Instant,
-) -> host_input::NativeClearSubmission {
-    host_input::submit_native_clear_tmux(target, gate, deadline)
-}
 use crate::services::provider::{CancelToken, cancel_requested};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
@@ -1358,19 +1351,18 @@ fn wait_for_prompt_ready_inner(
 // caller. Retained as the canonical pinned implementation of the wake ordering.
 #[allow(dead_code)]
 fn wait_for_prompt_ready_event(notify: Arc<Notify>, budget: Duration) -> HookFastPathOutcome {
-    let fut = async move {
-        let notified = notify.notified();
-        tokio::pin!(notified);
+    drive_fast_path_future(async move {
+        let mut notified = std::pin::pin!(notify.notified());
         // Register the waker before the first `.await` so any concurrent
         // `notify_waiters()` is guaranteed to wake this specific permit.
         notified.as_mut().enable();
+        #[cfg(test)]
+        tests::prompt_ready_setup::notify_after_registration();
         tokio::select! {
             _ = &mut notified => HookFastPathOutcome::Ready,
             _ = tokio::time::sleep(budget) => HookFastPathOutcome::Pending,
         }
-    };
-
-    drive_fast_path_future(fut)
+    })
 }
 
 /// Subscribe-before-snapshot fast path: register a permit on the global
@@ -2232,6 +2224,9 @@ fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[path = "prompt_ready_setup_tests.rs"]
+    pub(super) mod prompt_ready_setup;
 
     #[test]
     fn followup_timeout_falls_back_to_default_without_live_config() {
@@ -3569,35 +3564,6 @@ line 37";
             "enabled Notified should resolve immediately; took {:?}",
             start.elapsed()
         );
-    }
-
-    // #2445 regression — the production wait_for_prompt_ready_event wrapper
-    // builds the Notified-with-enable() future. After the wrapper returns the
-    // outer future starts polling, so a notify_waiters fired *just before*
-    // the select is polled (but after enable() ran) must still wake the
-    // waiter within the test's tight latency budget.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn wait_for_prompt_ready_event_observes_notify_fired_during_setup() {
-        let notify = Arc::new(Notify::new());
-        let trigger = notify.clone();
-
-        // Race the trigger against the spawn_blocking worker. With `enable()`
-        // wired into the future body the worker registers BEFORE awaiting,
-        // so even if the notify_waiters call lands very close to the select
-        // we still observe it. Generous budget so the test is robust even
-        // on slow CI runners.
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            trigger.notify_waiters();
-        });
-
-        let outcome = tokio::task::spawn_blocking(move || {
-            wait_for_prompt_ready_event(notify, Duration::from_secs(2))
-        })
-        .await
-        .expect("blocking task panicked");
-
-        assert_eq!(outcome, HookFastPathOutcome::Ready);
     }
 
     // #2445 regression — even if `notify_waiters` is invoked BEFORE the

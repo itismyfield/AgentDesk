@@ -329,6 +329,51 @@ class WiringTests(unittest.TestCase):
         self.assertIn('sys.platform == "win32"', source)
 
 
+class DeployLockTimeoutTests(unittest.TestCase):
+    def test_timeout_validation_matches_build_token_before_lock(self) -> None:
+        deploy = (SCRIPTS / "deploy-release.sh").read_text()
+        start = deploy.index('DEPLOY_LOCK_FILE=')
+        end = deploy.index('DEPLOY_MKDIR_LOCK_DIR=', start)
+        self.assertLess(end, deploy.index('\n_acquire_release_deploy_lock "$@"'))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            locked = root / "lock-entered"
+            script = root / "timeout.sh"
+            script.write_text('set -euo pipefail\nSCRIPT_DIR="$1"\nADK_REL="$2"\n' + deploy[start:end]
+                              + 'printf "%s" "$DEPLOY_LOCK_TIMEOUT_SECS" > "$2/lock-entered"\n')
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith("AGENTDESK_DEPLOY_")}
+            env[bt.WAIT_TIMEOUT_ENV] = "5"
+            cases = (("0", None), ("-1", None), ("abc", None), ("nan", None), ("inf", None),
+                     ("1.5", 1.5), ("1800", 1800.0), ("1e9999", None), ("1e-9999", None),
+                     (" 1.5 ", 1.5), ("1_800", 1800.0), ("1e2", 100.0), ("+1", 1.0))
+            for raw, expected in cases:
+                with self.subTest(raw=raw):
+                    result = subprocess.run(["/bin/bash", str(script), str(SCRIPTS), str(root)],
+                                            env=dict(env, AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS=raw),
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(bt.wait_timeout_secs({bt.WAIT_TIMEOUT_ENV: raw}),
+                                     expected if expected is not None else bt.DEFAULT_WAIT_TIMEOUT_SECS)
+                    if expected is None:
+                        self.assertEqual(result.returncode, bt.EXIT_USAGE, result.stdout + result.stderr)
+                        self.assertIn("AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS", result.stderr)
+                        self.assertIn("finite number greater than 0", result.stderr)
+                        self.assertFalse(locked.exists(), "invalid timeout reached deploy lock")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual(locked.read_text(), raw)
+                    locked.unlink(missing_ok=True)
+            for raw in (None, ""):
+                with self.subTest(default=raw):
+                    default_env = dict(env)
+                    if raw is not None:
+                        default_env["AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS"] = raw
+                    result = subprocess.run(["/bin/bash", str(script), str(SCRIPTS), str(root)],
+                                            env=default_env, capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(locked.read_text(), "1800")
+
+
 class DeployPreflightTokenTests(unittest.TestCase):
     def test_source_build_queues_but_artifact_and_host_pressure_refuse(self) -> None:
         # Execute the actual preflight/build branches, never the full deployment.
@@ -345,6 +390,7 @@ class DeployPreflightTokenTests(unittest.TestCase):
 assert sys.argv[2] == "scripts/build_token.py"
 assert sys.argv[3] == "--"
 assert sys.argv[4:6] == ["bash", "-c"]
+open(sys.argv[-1] + ".waiter", "w").write(str(os.getpid()))
 command = sys.argv[4:-1]
 idx = command.index("cargo")
 assert command[idx:idx + 2] == ["cargo", "build"]
@@ -390,7 +436,7 @@ ps() {
             for key in list(env):
                 if key.startswith("AGENTDESK_DEPLOY_") or key == bt.LEASE_ENV:
                     env.pop(key)
-            command = ["bash", str(script), str(SCRIPTS), str(driver), str(token), str(marker)]
+            command = ["/bin/bash", str(script), str(SCRIPTS), str(driver), str(token), str(marker)]
             for profile in ("release", "dev"):
                 with self.subTest(profile=profile), token.open("a+") as holder:
                     fcntl.flock(holder, fcntl.LOCK_EX)
@@ -424,19 +470,26 @@ ps() {
                     self.assertNotIn("build token: waiting", result.stderr)
                     self.assertFalse(marker.exists())
 
-            # #5855: the deploy lock is held across the token wait above, so a
-            # wait longer than the deadline a queued peer agreed to wait starves
-            # that peer -- including an artifact deploy that never needs the
-            # token. Without an operator override the wait must be derived from
-            # DEPLOY_LOCK_TIMEOUT_SECS, not build_token's four-hour default.
+            # Inspect the first notice so a missing bound fails before a long wait.
+            # Stop the waiter while the token is held; its shell reaps it before unlock.
             bounded = dict(env, TEST_LOCK_TIMEOUT="1")
             bounded.pop(bt.WAIT_TIMEOUT_ENV, None)
-            with self.subTest(bound="deploy lock deadline"), token.open("a+") as holder:
+            with self.subTest(bound="token wait duration"), token.open("a+") as holder:
                 fcntl.flock(holder, fcntl.LOCK_EX)
-                result = subprocess.run(command + ["release", str(root)], env=bounded,
-                                        capture_output=True, text=True, timeout=30)
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn("still held after 1s", result.stderr)
+                with subprocess.Popen(command + ["release", str(root)], env=bounded,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as child:
+                    try:
+                        notice = child.stderr.readline()
+                        self.assertIn("build token: waiting for", notice)
+                        self.assertIn("of 1s;", notice)
+                        out, err = child.communicate(timeout=5)
+                        self.assertEqual(child.returncode, bt.EXIT_TOKEN_TIMEOUT, out + err)
+                        self.assertIn("still held after 1s", err)
+                    finally:
+                        if child.poll() is None:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.kill(int(Path(str(marker) + ".waiter").read_text()), signal.SIGTERM)
+                        child.communicate(timeout=5)
                 self.assertFalse(marker.exists(), "the build must not start without the token")
 
 

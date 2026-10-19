@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::{self as discord, health::legacy_supervision::RetiredForTest};
+use crate::services::discord;
 use crate::services::provider::{CancelToken, ProviderKind};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::sync::atomic::Ordering;
@@ -29,7 +29,7 @@ impl Drop for InstalledBarrier {
     }
 }
 
-async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pending_start: bool) {
+async fn check_reclaim(site: &'static str, channel_id: u64, pending_start: bool) {
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -101,9 +101,9 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
     if site == "leaked_row_after_runtime" {
-        discord::health::legacy_supervision::test_support::seed_backfill_row(&row);
+        discord::health::test_support::seed_backfill_row(&row);
     }
-    let before = discord::health::legacy_supervision::test_support::fingerprint(&path);
+    let before = discord::health::test_support::fingerprint(&path);
     let record = TuiDirectPendingStart {
         provider: "claude".to_string(),
         channel_id,
@@ -141,11 +141,9 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
     };
     let controller = async {
         barrier.entered.notified().await;
-        let retired = retire.then(|| RetiredForTest::new("claude", channel_id));
         barrier.resume.notify_one();
-        retired
     };
-    let (applied, _retired) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         tokio::join!(operation, controller)
     })
     .await
@@ -155,64 +153,45 @@ async fn check_reclaim(site: &'static str, channel_id: u64, retire: bool, pendin
         assert!(!applied);
         assert!(!token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
-        let after = discord::health::legacy_supervision::test_support::fingerprint(&path);
-        if retire {
-            assert_eq!(after, before, "retirement must stop the writing loader");
-        } else {
-            assert_ne!(after, before, "the Legacy loader must persist its backfill");
-            let mut written: discord::inflight::InflightTurnState =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            assert_eq!(written.finalizer_turn_id, user_msg);
-            assert!(written.save_generation > row.save_generation);
-            assert_ne!(written.updated_at, row.updated_at);
-            // Model expiry of the backfill's renewed grace period without a wall-clock wait.
-            written.updated_at = row.updated_at.clone();
-            std::fs::write(&path, serde_json::to_vec_pretty(&written).unwrap()).unwrap();
-            drop(_installed);
-            assert_eq!(
-                discord::relay_recovery::leaked_row_sweep::sweep_leaked_inflight_rows(
-                    &registry, &provider,
-                )
-                .await,
-                1,
-            );
-            assert!(!path.exists());
-            assert!(token.cancelled.load(Ordering::Relaxed));
-            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-            assert!(
-                discord::mailbox_snapshot(&shared, channel)
-                    .await
-                    .cancel_token
-                    .is_none()
-            );
-        }
+        let after = discord::health::test_support::fingerprint(&path);
+        assert_ne!(after, before, "the Legacy loader must persist its backfill");
+        let mut written: discord::inflight::InflightTurnState =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written.finalizer_turn_id, user_msg);
+        assert!(written.save_generation > row.save_generation);
+        assert_ne!(written.updated_at, row.updated_at);
+        // Model expiry of the backfill's renewed grace period without a wall-clock wait.
+        written.updated_at = row.updated_at.clone();
+        std::fs::write(&path, serde_json::to_vec_pretty(&written).unwrap()).unwrap();
+        drop(_installed);
+        assert_eq!(
+            discord::relay_recovery::leaked_row_sweep::sweep_leaked_inflight_rows(
+                &registry, &provider,
+            )
+            .await,
+            1,
+        );
+        assert!(!path.exists());
+        assert!(token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(
+            discord::mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
         return;
     }
-    let should_apply = !retire || pending_start;
-    assert_eq!(
-        applied, should_apply,
-        "{site}, retire={retire}, pending={pending_start}"
-    );
-    assert_eq!(token.cancelled.load(Ordering::Relaxed), should_apply);
-    assert_eq!(
-        shared.restart.global_active.load(Ordering::Relaxed),
-        usize::from(!should_apply)
-    );
-    assert_eq!(
+    assert!(applied, "{site}, pending={pending_start}");
+    assert!(token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    assert!(
         discord::mailbox_snapshot(&shared, channel)
             .await
             .cancel_token
-            .is_none(),
-        should_apply
+            .is_none()
     );
-    if should_apply {
-        assert!(!path.exists(), "actual finalizer must reclaim the row");
-    } else {
-        assert_eq!(
-            discord::health::legacy_supervision::test_support::fingerprint(&path),
-            before
-        );
-    }
+    assert!(!path.exists(), "actual finalizer must reclaim the row");
 }
 
 fn run_matrix(site: &'static str, channel: u64, pending_control: bool) {
@@ -222,25 +201,24 @@ fn run_matrix(site: &'static str, channel: u64, pending_control: bool) {
         .build()
         .unwrap()
         .block_on(async {
-            check_reclaim(site, channel, true, false).await;
-            check_reclaim(site, channel + 1, false, false).await;
+            check_reclaim(site, channel + 1, false).await;
             if pending_control {
-                check_reclaim(site, channel + 2, true, true).await;
+                check_reclaim(site, channel + 2, true).await;
             }
         });
 }
 
 #[test]
-fn retirement_after_runtime_lookup_preserves_writing_loader() {
+fn legacy_runtime_lookup_keeps_backfill_then_reclaims_after_grace() {
     run_matrix("leaked_row_after_runtime", 6_325_512_001, false);
 }
 
 #[test]
-fn retirement_after_cancel_mailbox_preserves_real_reclaim_and_pending_start() {
+fn legacy_cancel_mailbox_reclaims_for_sweep_and_pending_start() {
     run_matrix("leaked_row_cancel_after_mailbox", 6_325_512_011, true);
 }
 
 #[test]
-fn retirement_after_complete_mailbox_preserves_real_reclaim_and_pending_start() {
+fn legacy_complete_mailbox_reclaims_for_sweep_and_pending_start() {
     run_matrix("leaked_row_complete_after_mailbox", 6_325_512_021, true);
 }

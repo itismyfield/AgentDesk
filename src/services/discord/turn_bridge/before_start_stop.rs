@@ -1,6 +1,5 @@
-//! In-process policy close of a sealed before-start proof: a durable receipt first, then the stop
-//! notice and its ack, then one policy submission whose mailbox step clears the receipt and
-//! releases the turn. A crash after the receipt leaves restart to finish the close.
+//! Settles a sealed before-start stop: persist a receipt, retry its notice and ACK, then submit
+//! one policy close. Unconfirmed work stays held for restart.
 use crate::services::discord::SharedData;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
@@ -16,6 +15,10 @@ use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::policy_close::{PolicyCloseRequest, PolicyRetain};
 use poise::serenity_prelude::{ChannelId, MessageId};
 use std::sync::Arc;
+use std::time::Duration;
+
+// Brief transport outages can recover while this channel keeps its existing active slot.
+const NOTICE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
 // The restart module is Unix only; elsewhere the same text keeps the bridge building, though
 // settlement there is never available, so no policy close reaches it.
@@ -55,32 +58,77 @@ async fn run_policy_close(
     proof: &BeforeStartProof,
 ) -> bool {
     let channel = ChannelId::new(row.channel_id);
-    let notice =
-        gateway.replace_message_with_outcome(channel, current_msg_id, ADMITTED_ABORT_NOTICE);
-    let fin = &shared.turn_finalizer;
-    let settled = consume(shared, fin, actor, row, (proof, current_msg_id), notice).await;
+    let mut attempts = 0;
+    let mut last_failure = None;
+    let mut previous_sent = None;
+    let settled = if let Some(mailbox) = shared.mailbox_peek(channel) {
+        loop {
+            attempts += 1;
+            let outcome = consume(
+                shared,
+                (&shared.turn_finalizer, &mailbox),
+                actor,
+                row,
+                (proof, current_msg_id),
+                &mut previous_sent,
+                || {
+                    gateway.replace_message_with_outcome(
+                        channel,
+                        current_msg_id,
+                        ADMITTED_ABORT_NOTICE,
+                    )
+                },
+            )
+            .await;
+            match outcome {
+                CloseAttempt::Settled => break true,
+                CloseAttempt::Held => break false,
+                CloseAttempt::Retry(stage) => last_failure = Some(stage),
+            }
+            let Some(delay) = NOTICE_RETRY_DELAYS.get(attempts - 1) else {
+                break false;
+            };
+            #[cfg(test)]
+            test_hooks::boundary("before_notice_retry", row);
+            tokio::time::sleep(*delay).await;
+        }
+    } else {
+        false
+    };
     tracing::info!(
         event = "herdr_turn_policy_close",
         channel_id = row.channel_id,
         logical = proof.owner.logical_key,
         turn_nonce = proof.turn_nonce,
         runtime_generation = proof.generation,
+        attempts,
+        last_failure = last_failure.unwrap_or("none"),
         settled,
         "Herdr turn closed before its input started"
     );
     settled
 }
 
-async fn consume(
+enum CloseAttempt {
+    Settled,
+    Held,
+    Retry(&'static str),
+}
+
+async fn consume<F>(
     shared: &Arc<SharedData>,
-    fin: &TurnFinalizer,
+    (fin, mailbox): (&TurnFinalizer, &ChannelMailboxHandle),
     actor: &Arc<CancelToken>,
     row: &InflightTurnState,
     (proof, anchor): (&BeforeStartProof, MessageId),
-    notice: impl std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
-) -> bool {
+    previous_sent: &mut Option<ReplaceLongMessageOutcome>,
+    notice: impl FnOnce() -> F,
+) -> CloseAttempt
+where
+    F: std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
+{
     let Some(state) = actor.herdr_interrupt_state() else {
-        return false;
+        return CloseAttempt::Held;
     };
     if proof.owner != state.owner
         || proof.owner.discord_token_hash != shared.token_hash
@@ -92,20 +140,10 @@ async fn consume(
         || actor.claude_interrupt_generation() != proof.generation
         || state.closed_probe() != Some(true)
     {
-        return false;
+        return CloseAttempt::Held;
     }
-    let channel = ChannelId::new(row.channel_id);
-    let Some(mailbox) = shared.mailbox_peek(channel) else {
-        return false;
-    };
-    if !mailbox
-        .snapshot()
-        .await
-        .cancel_token
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, actor))
-    {
-        return false;
+    if !mailbox_owns(mailbox, actor).await {
+        return CloseAttempt::Held;
     }
     #[cfg(test)]
     test_hooks::boundary("before_receipt", row);
@@ -115,7 +153,7 @@ async fn consume(
         .admit_before_start_receipt(&proof.turn_nonce, proof.basis, generation)
         .await
     else {
-        return false;
+        return CloseAttempt::Held;
     };
     #[cfg(test)]
     test_hooks::boundary("after_receipt", &admitted);
@@ -127,7 +165,10 @@ async fn consume(
         )
         .unwrap_or(true)
     {
-        return false;
+        return CloseAttempt::Held;
+    }
+    if !mailbox_owns(mailbox, actor).await {
+        return CloseAttempt::Held;
     }
     // A re-entry whose notice is already durably delivered submits without showing it again.
     let acked = if admitted
@@ -137,16 +178,31 @@ async fn consume(
     {
         admitted.clone()
     } else {
-        let sent = notice.await;
+        // A successful send remains evidence for this anchor's ACK, never a substitute for it.
+        let sent = match previous_sent.as_ref() {
+            Some(sent) => Ok(sent.clone()),
+            None => notice().await,
+        };
+        if let Ok(
+            sent @ (ReplaceLongMessageOutcome::EditedOriginal
+            | ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. }),
+        ) = &sent
+        {
+            *previous_sent = Some(sent.clone());
+        }
         let Some(acked) = admitted.ack_before_start_notice(&sent).await else {
-            return false;
+            return CloseAttempt::Retry(if previous_sent.is_some() {
+                "ack"
+            } else {
+                "notice"
+            });
         };
         acked
     };
     #[cfg(test)]
     test_hooks::boundary("after_notice_ack", &admitted);
-    let Some(intent) = policy_intent(shared, actor, row, proof, mailbox, acked) else {
-        return false;
+    let Some(intent) = policy_intent(shared, actor, row, proof, mailbox.clone(), acked) else {
+        return CloseAttempt::Held;
     };
     #[cfg(test)]
     test_hooks::boundary("before_submit", &admitted);
@@ -156,10 +212,11 @@ async fn consume(
     #[cfg(test)]
     test_hooks::boundary("after_submit", &admitted);
     let reason: &dyn std::fmt::Debug = match &outcome {
-        PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed => return true,
-        PolicyCloseOutcome::Superseded => return false,
+        PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed => {
+            return CloseAttempt::Settled;
+        }
+        PolicyCloseOutcome::Superseded => return CloseAttempt::Held,
         PolicyCloseOutcome::Retained(PolicyRetain::Clear(clear)) => clear,
-        PolicyCloseOutcome::Retained(PolicyRetain::InputFence(failure)) => failure,
         PolicyCloseOutcome::Retained(retain) => retain,
         PolicyCloseOutcome::Unconfirmed(stage) => stage,
     };
@@ -169,7 +226,43 @@ async fn consume(
         ?reason,
         "before-start policy close left its turn held"
     );
-    false
+    CloseAttempt::Held
+}
+
+async fn mailbox_owns(mailbox: &ChannelMailboxHandle, actor: &Arc<CancelToken>) -> bool {
+    mailbox
+        .snapshot()
+        .await
+        .cancel_token
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, actor))
+}
+
+#[cfg(all(test, unix))]
+async fn consume_once(
+    shared: &Arc<SharedData>,
+    fin: &TurnFinalizer,
+    actor: &Arc<CancelToken>,
+    row: &InflightTurnState,
+    proof: (&BeforeStartProof, MessageId),
+    notice: impl std::future::Future<Output = Result<ReplaceLongMessageOutcome, String>>,
+) -> bool {
+    let Some(mailbox) = shared.mailbox_peek(ChannelId::new(row.channel_id)) else {
+        return false;
+    };
+    matches!(
+        consume(
+            shared,
+            (fin, &mailbox),
+            actor,
+            row,
+            proof,
+            &mut None,
+            || notice
+        )
+        .await,
+        CloseAttempt::Settled
+    )
 }
 
 /// The typed close of the row the notice ACK returned. The captured actor's own step clears its

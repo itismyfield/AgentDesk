@@ -2,33 +2,14 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
+use crate::db::auto_queue::run_owner_guard::RUN_OWNERS_FOR_DISPATCH;
+
 /// Cancel reasons that represent an explicit operator stop, not a system
 /// retry or supersession (#815). When we see one of these reasons we
 /// preserve the user's intent by moving the linked auto-queue entry to a
 /// non-dispatchable terminal status instead of resetting it back to
 /// `pending`, which would let the next tick re-dispatch the same work.
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
-
-const RUN_OWNERS_FOR_DISPATCH: &str = r#"
-    SELECT e.run_id
-    FROM auto_queue_entries e
-    WHERE e.dispatch_id = td.id
-      AND e.status IN ('pending', 'dispatched', 'user_cancelled')
-    UNION ALL
-    SELECT pg.run_id
-    FROM auto_queue_phase_gates pg
-    WHERE pg.dispatch_id = td.id
-    UNION ALL
-    SELECT parsed.context_json #>> '{phase_gate,run_id}'
-    FROM LATERAL (
-        SELECT CASE
-            WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL::jsonb
-            WHEN pg_input_is_valid(BTRIM(td.context), 'jsonb') THEN BTRIM(td.context)::jsonb
-            ELSE NULL::jsonb
-        END AS context_json
-    ) parsed
-    WHERE parsed.context_json #>> '{phase_gate,run_id}' IS NOT NULL
-"#;
 
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
@@ -279,10 +260,13 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
 ) -> Result<CancelOutcome, String> {
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
+    // Lock the row before reading its status so a claim that commits mid-cancel is
+    // re-read here instead of silently failing the status CAS below.
     let current = sqlx::query(
         "SELECT status, kanban_card_id, to_agent_id, dispatch_type, thread_id
          FROM task_dispatches
-         WHERE id = $1",
+         WHERE id = $1
+         FOR UPDATE",
     )
     .bind(dispatch_id)
     .fetch_optional(&mut **tx)
@@ -675,27 +659,31 @@ mod pg_observability_tests {
         pg_db.drop().await;
     }
 
-    /// A legacy `task_dispatches.context` value may be truncated after a
-    /// partial write. The owner lookup is a read-side guard and must ignore
-    /// malformed context instead of aborting the whole cancellation query.
+    /// A legacy `task_dispatches.context` value may be blank, a scalar, an array or
+    /// truncated JSON. The owner lookup must ignore it instead of aborting the query.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_run_lookup_ignores_malformed_legacy_context() {
         let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_malformed").await;
         let pool = pg_db.connect_and_migrate().await;
 
-        let dispatch_id = "dispatch-cancel-malformed-context";
-        crate::dispatch::test_support::seed_pg_dispatch(
-            &pool,
-            dispatch_id,
-            "Malformed context cancel test",
-        )
-        .await;
-        sqlx::query("UPDATE task_dispatches SET context = $1 WHERE id = $2")
-            .bind("{")
-            .bind(dispatch_id)
-            .execute(&pool)
-            .await
-            .expect("store malformed legacy context fixture");
+        let contexts = ["{", "{\"phase_gate\":", "", "   ", "null", "123", "[1]"];
+        let mut dispatch_ids = Vec::new();
+        for (index, context) in contexts.iter().enumerate() {
+            let dispatch_id = format!("dispatch-cancel-malformed-context-{index}");
+            crate::dispatch::test_support::seed_pg_dispatch(
+                &pool,
+                &dispatch_id,
+                "Malformed context cancel test",
+            )
+            .await;
+            sqlx::query("UPDATE task_dispatches SET context = $1 WHERE id = $2")
+                .bind(context)
+                .bind(&dispatch_id)
+                .execute(&pool)
+                .await
+                .expect("store malformed legacy context fixture");
+            dispatch_ids.push(dispatch_id);
+        }
 
         let mut tx = pool.begin().await.expect("begin cancellation transaction");
         let run_ids = vec!["run-not-present".to_string()];
@@ -712,12 +700,15 @@ mod pg_observability_tests {
             .await
             .expect("commit no-op cancellation transaction");
 
-        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
-            .bind(dispatch_id)
-            .fetch_one(&pool)
-            .await
-            .expect("load malformed context dispatch status");
-        assert_eq!(status, "pending");
+        for dispatch_id in &dispatch_ids {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+                    .bind(dispatch_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("load malformed context dispatch status");
+            assert_eq!(status, "pending", "{dispatch_id}");
+        }
 
         pool.close().await;
         pg_db.drop().await;

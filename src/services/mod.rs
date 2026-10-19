@@ -40,7 +40,6 @@ pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dispatches_followup;
-pub mod escalation_settings;
 pub mod explicit_auth_route;
 pub mod gemini;
 pub mod git;
@@ -162,7 +161,6 @@ pub(crate) mod tui_o {
     pub(crate) mod ownership;
     pub(crate) mod repost;
     pub(crate) mod shadow;
-    pub(crate) mod shadow_host;
     pub(crate) mod store;
     pub(crate) mod topology;
     pub(crate) mod turn_mode;

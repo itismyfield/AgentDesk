@@ -36,7 +36,7 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-PG_SHARD_COUNT = 2
+PG_SHARD_COUNT = 4
 PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
 PG_INCLUDE_DERIVATION = tuple('''\
@@ -1067,7 +1067,8 @@ def _cargo_commands(
 _ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
 _ARTIFACT_RUN = ["python3", "scripts/ci/lib-test-artifact.py", "run", "--"]
 # The run_test_lane.py options CI passes, each with the argparse value it accepts.
-_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
+_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*",
+                          "--expected-ids": r"scripts/ci/[\w.-]+\.txt"}
 
 
 def _prefix_template(words: list[str]) -> bool:

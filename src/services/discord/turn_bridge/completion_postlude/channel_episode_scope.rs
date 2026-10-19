@@ -459,9 +459,11 @@ mod tests {
                 "services/discord/live_bridge/guard_tests.rs",
                 "services/discord/recovery_engine/restore_inflight.rs",
                 "services/discord/router/message_handler/headless_turn.rs",
+                "services/discord/router/message_handler/headless_turn/process_mailbox/bridge_tests.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
+                "services/discord/turn_bridge/entry_abort_cold_error_tests/provider_failure_tests.rs",
                 "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
@@ -493,7 +495,12 @@ mod tests {
         // is now the only TUI-direct bridge entry, and it still pins the
         // captured synthetic mailbox actor.
         assert_eq!(tui_direct.matches(&pinned).count(), 1);
-        assert!(intake.contains("cancel_token.clone(),\n            request_owner"));
+        assert!(
+            intake
+                .split_whitespace()
+                .collect::<String>()
+                .contains("cancel_token.clone(),request_owner")
+        );
         // The headless start bridges the token its shared claim helper registered with the mailbox.
         let headless_claim = include_str!("../../router/turn_start.rs");
         assert!(headless.contains(
@@ -505,6 +512,34 @@ mod tests {
             )
         );
         assert!(headless_claim.contains("Ok((transition, cancel_token))"));
+        let process_fixture: String =
+            include_str!("../../router/message_handler/headless_turn/process_mailbox/tests.rs")
+                .split_whitespace()
+                .collect();
+        assert!(process_fixture.contains("lettoken=Arc::new(CancelToken::new());"));
+        assert!(process_fixture.contains("letmailbox=shared.mailbox(channel);"));
+        assert!(process_fixture.contains(concat!(
+            "mailbox.try_start_turn(token.clone(),",
+            "UserId::new(7),MessageId::new(user_message_id))"
+        )));
+        assert!(
+            process_fixture
+                .contains("letlease=capture((&shared,channel),&token,Some(&process_metadata()))")
+        );
+        assert!(process_fixture.contains("Self{shared,channel,token,mailbox,}"));
+        let process_bridge = include_str!(
+            "../../router/message_handler/headless_turn/process_mailbox/bridge_tests.rs"
+        );
+        assert_eq!(process_bridge.matches(&spawn).count(), 1);
+        let process_bridge: String = process_bridge.split_whitespace().collect();
+        assert!(
+            process_bridge
+                .contains("Fixture::with_user_message(ProviderKind::Codex,USER_MESSAGE).await;")
+        );
+        assert!(process_bridge.contains(concat!(
+            "spawn_turn_bridge(fixture.shared.clone(),",
+            "fixture.token.clone(),rx,context);"
+        )));
         let recovery_tokens: String = recovery.split_whitespace().collect();
         assert_eq!(
             recovery_tokens.matches("mailbox_recovery_kickoff(").count(),

@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 
 #[path = "lifecycle/activity.rs"]
 mod activity;
@@ -94,18 +93,22 @@ pub(in crate::services::discord) use self::claims::{
 };
 
 #[cfg(test)]
-pub(in crate::services::discord) use n4d2_entry_support::InstallFixture;
+pub(in crate::services::discord) use watcher_install_fixture::InstallFixture;
 
 #[cfg(all(test, unix))]
 #[path = "lifecycle/restore_legacy_tests.rs"]
 mod restore_legacy_tests;
 
+#[cfg(all(test, unix))]
+#[path = "lifecycle/resume_companion_restore_tests.rs"]
+mod resume_companion_restore_tests;
+
 #[cfg(test)]
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;
 #[cfg(test)]
-#[path = "lifecycle/n4d2_entry_test.rs"]
-pub(in crate::services::discord) mod n4d2_entry_support;
+#[path = "lifecycle/watcher_install_fixture.rs"]
+pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]
 mod restore;

@@ -682,6 +682,13 @@ fn derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest() {
         deriver.derive(&row("msg_1", "changed")).as_slice(),
         [Derived::Blocked { .. }]
     ));
+    // Same pieces and UTF-16 lengths: only the piece digest can tell this change apart.
+    assert!(matches!(
+        deriver
+            .derive(&row("msg_1", &long.replacen("word", "ward", 1)))
+            .as_slice(),
+        [Derived::Blocked { .. }]
+    ));
     let result = serde_json::json!({"type": "user", "message": {"content": [
         {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}});
     let line = serde_json::to_vec(&result).unwrap();
@@ -912,6 +919,9 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
 
 #[path = "local_retry_tests.rs"]
 mod local_retry_tests;
+
+#[path = "tool_result_tests.rs"]
+mod tool_result_tests;
 
 #[path = "actor_tests.rs"]
 mod actor;

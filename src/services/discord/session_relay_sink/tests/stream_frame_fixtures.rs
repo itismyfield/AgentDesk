@@ -18,6 +18,7 @@ pub(super) fn frame(binding: &MatchedChannel, payload: &str, sequence: u64) -> S
         relay_generation_mtime_ns: None,
         relay_source_stamp: None,
         source_span: None,
+        read_source: None,
     }
 }
 

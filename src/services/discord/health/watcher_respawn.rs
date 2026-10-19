@@ -49,7 +49,6 @@ use poise::serenity_prelude::ChannelId;
 
 use super::HealthRegistry;
 use super::snapshot::WatcherStateSnapshot;
-use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 
@@ -310,13 +309,6 @@ pub(super) async fn observe_watcher_absence_for_unwatched_work(
     for (channel_id, shared) in
         unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
     {
-        if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-            continue;
-        }
-        // Like boot, absence observation leaves a protected channel to its move or handback.
-        if boot_skip(BootTarget::Channel(provider, channel_id.get())) {
-            continue;
-        }
         let Some(snapshot) = registry
             .snapshot_watcher_state_for_shared(provider, shared, channel_id.get())
             .await
@@ -561,9 +553,6 @@ pub(super) fn detect_and_escalate_watcher_absence(
     watcher_present: bool,
     now_unix_secs: i64,
 ) -> bool {
-    if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-        return false;
-    }
     if discord::live_bridge::is_live(provider, channel_id.get()) {
         return false;
     }
@@ -792,14 +781,9 @@ async fn retry_pending_watcher_respawn_admitted(
     // `WatcherReattach` arm clears the canonical row and re-mints a synthetic
     // one; pinned, the same arm adopts it, and a row that changed underneath us
     // fails the rebind instead of being overwritten.
-    // The read can backfill an old-format row, so an admitted retry runs it on the input worker.
-    let expected_episode = live_bridge_guard::row_io({
-        let (provider, channel_id) = (provider.clone(), channel_id.get());
-        move || discord::inflight::load_inflight_state(&provider, channel_id)
-    })
-    .await
-    .as_ref()
-    .map(discord::inflight::InflightEpisodePin::from_state);
+    let expected_episode = discord::inflight::load_inflight_state(provider, channel_id.get())
+        .as_ref()
+        .map(discord::inflight::InflightEpisodePin::from_state);
     if let Some(pin) = expected_episode.as_ref() {
         reclaim_watcherless_session_bound_relay(registry, provider, channel_id, pin).await;
     }
@@ -861,15 +845,12 @@ pub(in crate::services::discord) async fn reclaim_watcherless_session_bound_rela
             None => return,
         },
     };
-    let outcome = live_bridge_guard::row_io({
-        let (provider, channel_id, pin) = (provider.clone(), channel_id.get(), pin.clone());
-        move || {
-            discord::inflight::reclaim_watcherless_session_bound_relay_owner(
-                &shared, &provider, channel_id, &pin,
-            )
-        }
-    })
-    .await;
+    let outcome = discord::inflight::reclaim_watcherless_session_bound_relay_owner(
+        &shared,
+        provider,
+        channel_id.get(),
+        pin,
+    );
     if outcome == discord::inflight::OrphanRelayReclaimOutcome::Downgraded {
         tracing::warn!(
             channel_id = channel_id.get(),
@@ -925,10 +906,9 @@ fn record_failed_respawn_attempt(
 }
 
 pub(super) fn gc_watcher_absence_state(now_unix_secs: i64) {
-    WATCHER_ABSENCE.retain(|key, state| {
-        super::legacy_supervision::is_retired(&key.provider, key.channel_id)
-            || saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
-                <= WATCHER_ABSENCE_STATE_TTL_SECS
+    WATCHER_ABSENCE.retain(|_, state| {
+        saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
+            <= WATCHER_ABSENCE_STATE_TTL_SECS
     });
 }
 
@@ -2519,42 +2499,6 @@ mod tests {
             "the absence must be armed before the queue is drained, or recovery \
              waits a whole extra tick"
         );
-    }
-
-    /// Like boot, both absence observers leave an input-protected channel to its move or
-    /// handback: neither arms it for respawn while its tmux is live and work is owed.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn absence_observers_leave_an_input_protected_channel_unarmed() {
-        use crate::services::discord::input_runtime::fence::{Gate, test_health};
-        let _absence = lock_watcher_absence_for_test().await;
-        let provider = ProviderKind::Codex;
-        let (protected, routable) = (ChannelId::new(6_325_579_001), ChannelId::new(6_325_579_002));
-        clear_watcher_absence(&provider, protected);
-        clear_watcher_absence(&provider, routable);
-        let _tmux = FakeTmux::answering_alive(true);
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        engage_mailbox_bound_to_tmux(&shared, protected, 6_325_579_101, "AgentDesk-codex-c2b2a")
-            .await;
-        let gates = [protected, routable].map(|channel| {
-            let gate = Gate::protect(provider.clone(), channel.get()).unwrap();
-            test_health::Clear::new(&gate)
-        });
-        let registry = HealthRegistry::new();
-        let now = chrono::Utc::now().timestamp();
-        let none = std::collections::HashSet::new();
-        let runtimes = [shared];
-        let absent =
-            observe_watcher_absence_for_unwatched_work(&registry, &provider, &runtimes, &none, now);
-        assert_eq!(absent.await, 0);
-        assert!(!observe_routable_unwatched_session(
-            &provider,
-            &candidate(routable),
-            now
-        ));
-        let pending = pending_absent_channels(&provider);
-        assert!(!pending.contains(&protected) && !pending.contains(&routable));
-        drop(gates);
     }
 }
 

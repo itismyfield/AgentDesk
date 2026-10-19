@@ -23,22 +23,6 @@ use crate::services::tui_o::writer::{
 #[derive(Default)]
 struct FakePort {
     history: Arc<Mutex<Vec<SeenMessage>>>,
-    held: Mutex<Option<Arc<PendingPost>>>,
-}
-
-pub(super) struct PendingPost {
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-impl PendingPost {
-    pub(super) async fn entered(&self) {
-        self.entered.notified().await;
-    }
-
-    pub(super) fn release(&self) {
-        self.release.notify_one();
-    }
 }
 
 impl DiscordPort for FakePort {
@@ -48,12 +32,7 @@ impl DiscordPort for FakePort {
 
     fn post(&self, _: u64, content: String) -> impl Future<Output = PostOutcome> + Send + 'static {
         let history = Arc::clone(&self.history);
-        let held = self.held.lock().unwrap().take();
         async move {
-            if let Some(held) = held {
-                held.entered.notify_one();
-                held.release.notified().await;
-            }
             let mut history = history.lock().unwrap();
             let receipt = SeenMessage {
                 id: 101 + history.len() as u64,
@@ -212,15 +191,6 @@ impl WriterFixture {
     pub(super) fn posts(&self) -> Vec<String> {
         let history = self.port.history.lock().unwrap();
         history.iter().map(|m| m.content.clone()).collect()
-    }
-
-    pub(super) fn hold_next_post(&self) -> Arc<PendingPost> {
-        let held = Arc::new(PendingPost {
-            entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        });
-        *self.port.held.lock().unwrap() = Some(held.clone());
-        held
     }
 
     pub(super) fn channel(&self) -> ChannelStore {

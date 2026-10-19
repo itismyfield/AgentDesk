@@ -1,6 +1,5 @@
 //! Dormant input adapter: replay O's parent transcript facts without storing turn state.
 
-use chrono::Utc;
 use serde_json::Value;
 
 use crate::services::codex_tui::rollout_index::strict_parent_session;
@@ -295,7 +294,7 @@ impl InputFacts {
                         });
                     }
                 }
-                let event = self.tracker.observe(&fact, row.as_ref(), range, Utc::now());
+                let event = self.tracker.observe(&fact, row.as_ref());
                 let (next, closed) = match event {
                     TurnEvent::Opened(id) => (
                         Some(TurnState::Open {
@@ -303,7 +302,7 @@ impl InputFacts {
                         }),
                         None,
                     ),
-                    TurnEvent::Closed(turn) => (Some(TurnState::Idle), turn.native_turn_id),
+                    TurnEvent::Closed(id) => (Some(TurnState::Idle), Some(id)),
                     TurnEvent::StrayIdle | TurnEvent::EdgeTurn => (Some(TurnState::Idle), None),
                     TurnEvent::None => {
                         if let RecordFact::Blocked(reason) = &fact {

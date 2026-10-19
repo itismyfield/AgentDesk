@@ -20,7 +20,6 @@ use crate::services::session_backend::{
 };
 use crate::services::tmux_diagnostics::{
     build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
-    tmux_exit_reason_is_normal_completion,
 };
 
 use super::formatting::{
@@ -45,6 +44,36 @@ use super::tmux_restart_handoff::{
 use super::{
     SharedData, TmuxWatcherHandle, TmuxWatcherRegistry, lock_tmux_watcher_registry, rate_limit_wait,
 };
+#[path = "tmux/relay_decisions.rs"]
+mod relay_decisions;
+#[path = "tmux/turn_lifecycle.rs"]
+mod turn_lifecycle;
+
+pub(in crate::services::discord) use self::relay_decisions::sniff_background_agent_pending_for_completion;
+#[cfg(test)]
+use self::relay_decisions::watcher_should_yield_to_inflight_state;
+pub(super) use self::relay_decisions::{
+    WatcherLineOutcome, WatcherTerminalKind, should_gate_completion_for_tui_quiescence,
+};
+use self::relay_decisions::{
+    advance_buffer_start_offset, is_terminal_finalize_stop_candidate, merge_task_notification_kind,
+    record_watcher_invariant, should_suppress_relay_before_emit, stream_line_state_token_usage,
+    terminal_relay_decision, tmux_death_is_normal_completion,
+    watcher_ready_for_input_turn_completed, watcher_should_yield_to_active_bridge_turn,
+    watcher_stop_decision_after_terminal_finalize,
+};
+pub(in crate::services::discord) use self::turn_lifecycle::build_monitor_triggered_inflight_state;
+use self::turn_lifecycle::{
+    MonitorAutoTurnStart, WatcherStreamSeed, enqueue_monitor_auto_turn_deferred_notification,
+    finish_monitor_auto_turn_if_claimed, next_monitor_auto_turn_ledger_generation,
+    normalize_response_sent_offset, restored_seed_reassigned_to_different_turn,
+    should_discard_restored_seed_for_idle_direct_prompt, watcher_stream_seed,
+};
+pub(super) use self::turn_lifecycle::{
+    RestoredWatcherTurn, consume_monitor_auto_turn_preamble_once,
+    restored_watcher_turn_from_inflight,
+};
+
 // #5071 T3-A0: `.spawn_nonce` read model, registered here so it sits beside the
 // `tmux_session_files` reader it reuses and inherits this file's unix gate.
 // T3-A1 made `tmux_watcher_registry` its consumer, and that module is NOT
@@ -72,7 +101,7 @@ pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
-pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
+pub(in crate::services::discord) use watcher_lifecycle::watcher_install_fixture;
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;
@@ -105,7 +134,6 @@ const SOFT_TERMINAL_DEBOUNCE: Duration = Duration::from_millis(1500);
 pub(super) const WATCHER_ACTIVITY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const READY_FOR_INPUT_STUCK_LABEL: &str = "stuck_at_ready";
 const READY_FOR_INPUT_STUCK_REASON: &str = "agent ended at Ready for input without commit/push";
-const BACKGROUND_AGENT_PENDING_SNIFF_TIMEOUT: Duration = Duration::from_secs(2);
 #[path = "tmux_kill_policy.rs"]
 mod tmux_kill_policy;
 #[allow(unused_imports)]
@@ -116,294 +144,6 @@ pub(super) use self::tmux_kill_policy::{
     recent_turn_stop_for_watcher_range, record_recent_turn_stop, tmux_output_offset,
 };
 
-pub(in crate::services::discord) async fn sniff_background_agent_pending_for_completion(
-    tmux_session_name: Option<&str>,
-) -> bool {
-    let Some(tmux_session_name) = tmux_session_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    else {
-        // No live tmux-session context exists for this completion producer.
-        return false;
-    };
-    let tmux_session_name = tmux_session_name.to_string();
-    tokio::time::timeout(
-        BACKGROUND_AGENT_PENDING_SNIFF_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            crate::services::tmux_common::sniff_background_agent_pending(&tmux_session_name)
-        }),
-    )
-    .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false)
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct WatcherLineOutcome {
-    pub found_result: bool,
-    pub terminal_kind: Option<WatcherTerminalKind>,
-    pub terminal_evidence_offset: Option<u64>,
-    pub pre_turn_bytes_skipped: usize,
-    pub soft_terminal_candidate: bool,
-    pub is_prompt_too_long: bool,
-    pub stale_resume_detected: bool,
-    pub auto_compacted: bool,
-    pub task_notification_kind: Option<TaskNotificationKind>,
-    pub task_notification_context:
-        Option<super::task_notification_delivery::TaskNotificationContext>,
-    pub assistant_text_seen: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WatcherTerminalKind {
-    HardResult,
-    SoftStopHookSummary,
-    SoftUserBoundary,
-}
-
-impl WatcherTerminalKind {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::HardResult => "hard_result",
-            Self::SoftStopHookSummary => "soft_stop_hook_summary",
-            Self::SoftUserBoundary => "soft_user_boundary",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RestoredWatcherTurn {
-    current_msg_id: MessageId,
-    status_message_id: Option<MessageId>,
-    response_sent_offset: usize,
-    full_response: String,
-    last_edit_text: String,
-    task_notification_kind: Option<TaskNotificationKind>,
-    finish_mailbox_on_completion: bool,
-    /// #3107 codex re-review (P2#3): the #3099 hourglass anchor from the
-    /// restored inflight, carried so a watcher-owned re-acquire (after the row
-    /// is cleared mid-turn) can re-pin it instead of orphaning the `⏳`.
-    pub(super) injected_prompt_message_id: Option<u64>,
-    /// Identity of the inflight row that seeded this restore. A long-lived watcher
-    /// may consume the seed only after a later direct-input turn starts; compare
-    /// this to the current row before carrying response text forward.
-    turn_identity: Option<super::inflight::InflightTurnIdentity>,
-    /// #3871: frozen streamed rollover-prefix message ids restored from the
-    /// persisted row so a terminal full-body fallback in a later iteration / after
-    /// a restart still deletes every accumulated prefix (no residual duplicate).
-    streaming_rollover_frozen_msg_ids: Vec<MessageId>,
-    /// Same-process retry seed produced by watcher send-failure rewind. Unlike a
-    /// restart-restored seed, this is the current turn and must not be discarded by
-    /// idle direct-prompt stale-seed cleanup.
-    same_turn_rewind: bool,
-    /// Immutable source identity captured with the restored clone at watcher
-    /// handoff. The clone can predate the bridge's terminal commit, so this is
-    /// only a lookup key: seed consumption must re-read the durable receipt.
-    /// Missing legacy components preserve the seed.
-    delivery_source: Option<super::outbound::delivery_record::ExactJsonlSourceIdentity>,
-}
-
-#[derive(Debug)]
-struct WatcherStreamSeed {
-    placeholder_msg_id: Option<MessageId>,
-    status_panel_msg_id: Option<MessageId>,
-    response_sent_offset: usize,
-    full_response: String,
-    last_edit_text: String,
-    task_notification_kind: Option<TaskNotificationKind>,
-    finish_mailbox_on_completion: bool,
-    /// #3871: see [`RestoredWatcherTurn::streaming_rollover_frozen_msg_ids`].
-    streaming_rollover_frozen_msg_ids: Vec<MessageId>,
-}
-
-fn normalize_response_sent_offset(full_response: &str, response_sent_offset: usize) -> usize {
-    let mut offset = response_sent_offset.min(full_response.len());
-    while offset > 0 && !full_response.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
-fn record_watcher_invariant(
-    condition: bool,
-    provider: Option<&ProviderKind>,
-    channel_id: ChannelId,
-    invariant: &'static str,
-    code_location: &'static str,
-    message: &'static str,
-    details: serde_json::Value,
-) -> bool {
-    crate::services::observability::record_invariant_check(
-        condition,
-        crate::services::observability::InvariantViolation {
-            provider: provider.map(ProviderKind::as_str),
-            channel_id: Some(channel_id.get()),
-            dispatch_id: None,
-            session_key: None,
-            turn_id: None,
-            invariant,
-            code_location,
-            message,
-            details,
-        },
-    )
-}
-
-pub(super) fn restored_watcher_turn_from_inflight(
-    state: &super::inflight::InflightTurnState,
-    tmux_session_name: &str,
-    finish_mailbox_on_completion: bool,
-) -> Option<RestoredWatcherTurn> {
-    if state.rebind_origin
-        || state
-            .tmux_session_name
-            .as_deref()
-            .is_some_and(|name| name != tmux_session_name)
-    {
-        return None;
-    }
-
-    let provider = state.provider_kind()?;
-    let current_msg_id = super::inflight::opt_message_id(state.current_msg_id)?;
-    let response_sent_offset =
-        normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
-    let delivery_channel_id = super::inflight::opt_channel_id(state.channel_id).map(ChannelId::get);
-    let offset_authority_channel_id = match state.watcher_owner_channel_id {
-        Some(raw) => super::inflight::opt_channel_id(raw).map(ChannelId::get),
-        None => delivery_channel_id,
-    };
-    let delivery_source = state
-        .turn_start_offset
-        .zip(state.turn_nonce.as_deref())
-        .filter(|(start, nonce)| state.last_offset > *start && !nonce.is_empty())
-        .and_then(|(start, nonce)| {
-            let delivery_channel_id = delivery_channel_id?;
-            let offset_authority_channel_id = offset_authority_channel_id?;
-            let generation_mtime_ns =
-                super::outbound::delivery_record::current_generation_mtime_ns(tmux_session_name);
-            (generation_mtime_ns != 0).then(|| {
-                super::outbound::delivery_record::ExactJsonlSourceIdentity {
-                    provider: provider.as_str().to_string(),
-                    tmux_session_name: tmux_session_name.to_string(),
-                    turn_nonce: nonce.to_string(),
-                    range: (start, state.last_offset),
-                    generation_mtime_ns,
-                    offset_authority_channel_id,
-                    delivery_channel_id,
-                }
-            })
-        });
-    Some(RestoredWatcherTurn {
-        current_msg_id,
-        status_message_id: state
-            .status_message_id
-            .and_then(super::inflight::opt_message_id),
-        response_sent_offset,
-        full_response: state.full_response.clone(),
-        last_edit_text: reconstructed_inflight_placeholder_body(state, &provider),
-        task_notification_kind: state.task_notification_kind,
-        finish_mailbox_on_completion,
-        injected_prompt_message_id: state.injected_prompt_message_id,
-        turn_identity: Some(super::inflight::InflightTurnIdentity::from_state(state)),
-        streaming_rollover_frozen_msg_ids: state
-            .streaming_rollover_frozen_msg_ids
-            .iter()
-            .copied()
-            .filter_map(super::inflight::opt_message_id)
-            .collect(),
-        same_turn_rewind: false,
-        delivery_source,
-    })
-}
-
-fn watcher_stream_seed(restored_turn: Option<RestoredWatcherTurn>) -> WatcherStreamSeed {
-    match restored_turn {
-        Some(restored) => WatcherStreamSeed {
-            placeholder_msg_id: Some(restored.current_msg_id),
-            status_panel_msg_id: restored.status_message_id,
-            response_sent_offset: restored.response_sent_offset,
-            full_response: restored.full_response,
-            last_edit_text: restored.last_edit_text,
-            task_notification_kind: restored.task_notification_kind,
-            finish_mailbox_on_completion: restored.finish_mailbox_on_completion,
-            streaming_rollover_frozen_msg_ids: restored.streaming_rollover_frozen_msg_ids,
-        },
-        None => WatcherStreamSeed {
-            placeholder_msg_id: None,
-            status_panel_msg_id: None,
-            response_sent_offset: 0,
-            full_response: String::new(),
-            last_edit_text: String::new(),
-            task_notification_kind: None,
-            finish_mailbox_on_completion: false,
-            streaming_rollover_frozen_msg_ids: Vec::new(),
-        },
-    }
-}
-
-fn should_discard_restored_seed_for_idle_direct_prompt(
-    restored_turn_present: bool,
-    prompt_anchor_present: bool,
-    seed_has_undelivered_body: bool,
-    same_turn_rewind_seed: bool,
-    seed_reassigned_to_different_turn: bool,
-) -> bool {
-    restored_turn_present
-        && !same_turn_rewind_seed
-        && ((prompt_anchor_present && !seed_has_undelivered_body)
-            || seed_reassigned_to_different_turn)
-}
-
-fn restored_seed_reassigned_to_different_turn(
-    restored_turn: Option<&RestoredWatcherTurn>,
-    current_turn_identity: Option<&super::inflight::InflightTurnIdentity>,
-    prompt_anchor_message_id: Option<u64>,
-) -> bool {
-    let Some(restored) = restored_turn else {
-        return false;
-    };
-    if restored.same_turn_rewind {
-        return false;
-    }
-    // The restored clone may have been taken before the bridge committed and
-    // cleared its inflight row. Re-read the receipt now, at seed consumption;
-    // only an exact session+generation+nonce+range+owner+destination proof can
-    // turn that stale clone into a discard. Body fingerprints are intentionally
-    // absent from this authority decision.
-    if restored.delivery_source.as_ref().is_some_and(|source| {
-        let Some(provider) = ProviderKind::from_str(&source.provider) else {
-            return false;
-        };
-        let Some(delivery_channel) = super::inflight::opt_channel_id(source.delivery_channel_id)
-        else {
-            return false;
-        };
-        if super::inflight::opt_channel_id(source.offset_authority_channel_id).is_none() {
-            return false;
-        }
-        super::outbound::delivery_record::confirmed_delivery_receipt_exists(
-            &provider,
-            delivery_channel,
-            restored.current_msg_id.get(),
-            source,
-        )
-    }) {
-        return true;
-    }
-    if let (Some(seed_anchor), Some(current_anchor)) = (
-        restored.injected_prompt_message_id,
-        prompt_anchor_message_id,
-    ) && seed_anchor != current_anchor
-    {
-        return true;
-    }
-    if let (Some(seed_identity), Some(current_identity)) =
-        (restored.turn_identity.as_ref(), current_turn_identity)
-    {
-        return seed_identity != current_identity;
-    }
-    false
-}
 #[cfg(test)]
 mod restored_seed_discard_tests {
     use super::{
@@ -800,24 +540,6 @@ mod restored_seed_discard_tests {
     }
 }
 
-fn tmux_death_is_normal_completion(reason: Option<&str>, _diagnostic: Option<&str>) -> bool {
-    reason.is_some_and(tmux_exit_reason_is_normal_completion)
-}
-
-fn stream_line_state_token_usage(state: &StreamLineState) -> Option<TurnTokenUsage> {
-    let usage = TurnTokenUsage {
-        input_tokens: state.accum_input_tokens,
-        cache_create_tokens: state.accum_cache_create_tokens,
-        cache_read_tokens: state.accum_cache_read_tokens,
-        output_tokens: state.accum_output_tokens,
-    };
-    (usage.input_tokens > 0
-        || usage.cache_create_tokens > 0
-        || usage.cache_read_tokens > 0
-        || usage.output_tokens > 0)
-        .then_some(usage)
-}
-
 async fn emit_context_compacted_lifecycle_from_watcher(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -867,38 +589,6 @@ async fn emit_context_compacted_lifecycle_from_watcher(
     true
 }
 
-fn watcher_ready_for_input_turn_completed(
-    tracker: &mut crate::services::provider::ReadyForInputIdleTracker,
-    data_start_offset: u64,
-    current_offset: u64,
-    ready_for_input: bool,
-    post_work_observed: bool,
-    now: std::time::Instant,
-) -> crate::services::provider::ReadyForInputIdleState {
-    tracker.observe_idle_state(
-        current_offset > data_start_offset,
-        ready_for_input,
-        post_work_observed,
-        now,
-    )
-}
-
-fn merge_task_notification_kind(
-    current: Option<TaskNotificationKind>,
-    new_kind: TaskNotificationKind,
-) -> Option<TaskNotificationKind> {
-    let priority = |kind: TaskNotificationKind| match kind {
-        TaskNotificationKind::Subagent => 0,
-        TaskNotificationKind::Background => 1,
-        TaskNotificationKind::MonitorAutoTurn => 2,
-    };
-
-    match current {
-        Some(existing) if priority(existing) >= priority(new_kind) => Some(existing),
-        _ => Some(new_kind),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalRelayDecision {
     should_direct_send: bool,
@@ -907,108 +597,13 @@ struct TerminalRelayDecision {
     suppressed: bool,
 }
 
-fn terminal_relay_decision(
-    has_assistant_response: bool,
-    task_notification_kind: Option<TaskNotificationKind>,
-    assistant_text_seen: bool,
-) -> TerminalRelayDecision {
-    let is_task_notification = task_notification_kind.is_some();
-    let has_user_visible_assistant_text = if is_task_notification {
-        // Task-notification routing is source-neutral: monitor/background/
-        // subagent events all relay only when the session buffer/inflight
-        // state has user-visible assistant text. The kind remains available
-        // for audit/format decoration, not for deciding relay lifetime.
-        has_assistant_response && assistant_text_seen
-    } else {
-        has_assistant_response
-    };
-
-    TerminalRelayDecision {
-        should_direct_send: has_user_visible_assistant_text,
-        should_tag_monitor_origin: matches!(
-            task_notification_kind,
-            Some(TaskNotificationKind::MonitorAutoTurn)
-        ) && has_user_visible_assistant_text,
-        should_enqueue_notify_outbox: false,
-        suppressed: is_task_notification && !has_user_visible_assistant_text,
-    }
-}
-
 /// #1009: System-level hint injected once per monitor auto-turn entry so the
 /// agent produces a 1-line summary + next action before terminating. Returned
 /// verbatim at the claim sites; callers log it and record the one-shot flag.
 pub(super) const MONITOR_AUTO_TURN_PREAMBLE_HINT: &str = "[system] 모니터 자동 턴 종료 전, 이번 턴에서 확인한 상태 1줄 요약과 다음 액션을 반드시 남겨주세요.";
 
-/// #1009: One-shot guard for `MONITOR_AUTO_TURN_PREAMBLE_HINT` injection.
-/// Returns `Some(hint)` on first call per turn and flips `injected` to true;
-/// subsequent calls return `None` so the hint is never repeated within a
-/// single monitor auto-turn frame.
-pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Option<&'static str> {
-    if *injected {
-        None
-    } else {
-        *injected = true;
-        Some(MONITOR_AUTO_TURN_PREAMBLE_HINT)
-    }
-}
-
-fn enqueue_monitor_auto_turn_deferred_notification(
-    pg_pool: Option<&sqlx::PgPool>,
-    channel_id: ChannelId,
-    data_start_offset: u64,
-) -> bool {
-    let target = format!("channel:{}", channel_id.get());
-    let session_key = format!(
-        "monitor_auto_turn_deferred:ch:{}:off:{}",
-        channel_id.get(),
-        data_start_offset
-    );
-    enqueue_lifecycle_notification_best_effort(
-        pg_pool,
-        target.as_str(),
-        Some(session_key.as_str()),
-        MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
-        "🔔 Monitor 트리거 유예 (유저 턴 종료 후 처리)",
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MonitorAutoTurnStart {
-    acquired: bool,
-    deferred: bool,
-    /// The synthetic mailbox message id this monitor turn started under
-    /// (`data_start_offset.max(1)`), `Some` only when `acquired`. #3016 P1:
-    /// the finalizer keys its ledger on this so SEQUENTIAL monitor turns in the
-    /// same channel within `FINALIZED_TTL` are DISTINCT entries — a finalized
-    /// monitor turn must not make the next one resolve to `AlreadyFinalized`
-    /// (which would strand its mailbox token + counter).
-    synthetic_message_id: Option<MessageId>,
-    /// #3016 P1 (codex r3): a PROCESS-MONOTONIC ledger generation for this
-    /// monitor turn, `Some` only when `acquired`. The synthetic mailbox message
-    /// id is derived from the JSONL byte offset, which REPEATS after a wrapper
-    /// respawn / JSONL truncation while `current_generation` stays the same — so
-    /// two monitor turns at the same offset within `FINALIZED_TTL` would share a
-    /// finalizer ledger key and the second would resolve to `AlreadyFinalized`,
-    /// stranding its mailbox token + counter. Keying the ledger generation on
-    /// this never-repeating counter makes every monitor turn a DISTINCT entry.
-    /// (It is used ONLY for ledger keying; `do_finalize`'s identity-guarded
-    /// mailbox finish matches on `channel_id` + `synthetic_message_id`, not the
-    /// generation, so this does not affect which mailbox token is released.)
-    ledger_generation: Option<u64>,
-}
-
 const MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
-
-/// Process-monotonic counter for monitor-auto-turn finalizer ledger
-/// generations (#3016 P1). Starts high to avoid colliding with the
-/// `current_generation` (dcserver restart) namespace used by ordinary turns.
-static MONITOR_AUTO_TURN_LEDGER_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1 << 48);
-
-fn next_monitor_auto_turn_ledger_generation() -> u64 {
-    MONITOR_AUTO_TURN_LEDGER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
 
 async fn start_monitor_auto_turn_when_available(
     // #3016 phase-5a: `&Arc<SharedData>` (not `&SharedData`) so `register_start`
@@ -1111,86 +706,6 @@ async fn start_monitor_auto_turn_when_available(
         let signal = shared.mailboxes.turn_finished(channel_id);
         let _ = tokio::time::timeout(MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK, signal.wait()).await;
     }
-}
-
-async fn finish_monitor_auto_turn(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    synthetic_message_id: Option<MessageId>,
-    ledger_generation: Option<u64>,
-) {
-    // #3016 phase 4: route the monitor-auto-turn terminal through the
-    // single-authority finalizer instead of calling mailbox_finish_turn +
-    // counter + kickoff inline. The monitor turn was `register_start`'d under
-    // its synthetic message id keyed by a PROCESS-MONOTONIC ledger generation,
-    // so we finalize under THAT exact key — keeping sequential monitor turns in
-    // the same channel within `FINALIZED_TTL` as DISTINCT ledger entries even
-    // when the byte-offset-derived synthetic id repeats after a wrapper respawn
-    // (codex P1: a colliding key would make the second monitor turn resolve to
-    // `AlreadyFinalized` and strand its mailbox token + counter). `do_finalize`
-    // takes the identity-guarded `mailbox_finish_turn_if_matches` path for the
-    // real id (generation is ledger-keying only). The ledger phase gate makes a
-    // racing watcher/bridge terminal exactly-once safe. `FinalizeContext::monitor`
-    // reproduces the inline side-effect set: no inflight clear, no
-    // completion-cleanup, no voice drain, but kick off any queued backlog.
-    let user_msg_id = synthetic_message_id.map(|id| id.get()).unwrap_or(0);
-    let generation = ledger_generation.unwrap_or(shared.restart.current_generation);
-    let _ = shared
-        .turn_finalizer
-        .submit_terminal(
-            super::turn_finalizer::TurnKey::new(channel_id, user_msg_id, generation),
-            provider.clone(),
-            super::turn_finalizer::TerminalEvent::Complete,
-            super::turn_finalizer::FinalizeContext::monitor(),
-            shared.clone(),
-        )
-        .await;
-    shared.turn_start_times.remove(&channel_id);
-    if let Ok(mut last) = shared.last_turn_at.lock() {
-        *last = Some(chrono::Local::now().to_rfc3339());
-    }
-}
-
-async fn finish_monitor_auto_turn_if_claimed(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    claimed: &mut bool,
-    finished: &mut bool,
-    synthetic_message_id: &mut Option<MessageId>,
-    ledger_generation: &mut Option<u64>,
-) {
-    if *claimed {
-        finish_monitor_auto_turn(
-            shared,
-            provider,
-            channel_id,
-            *synthetic_message_id,
-            *ledger_generation,
-        )
-        .await;
-        *claimed = false;
-        *finished = true;
-        *synthetic_message_id = None;
-        *ledger_generation = None;
-    }
-}
-
-fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: usize) -> u64 {
-    start_offset.saturating_add(before_len.saturating_sub(after_len) as u64)
-}
-
-pub(in crate::services::discord) fn build_monitor_triggered_inflight_state(
-    mut state: super::inflight::InflightTurnState,
-) -> super::inflight::InflightTurnState {
-    state.request_owner_user_id = 0;
-    state.user_msg_id = 0;
-    state.current_msg_id = 0;
-    state.rebind_origin = true;
-    state.turn_source = super::inflight::TurnSource::MonitorTriggered;
-    state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-    state
 }
 
 /// Monotonic-CAS advance of the channel's `confirmed_end_offset` watermark to
@@ -1388,88 +903,6 @@ async fn drain_missing_inflight_dead_tmux_tail_to_eof(
             current_offset
         }
     }
-}
-
-#[inline]
-fn should_suppress_relay_before_emit(
-    paused: bool,
-    epoch_changed: bool,
-    turn_delivered: bool,
-    deferred_monitor_ready: bool,
-) -> bool {
-    (paused || epoch_changed || turn_delivered) && !deferred_monitor_ready
-}
-
-#[inline]
-fn is_terminal_finalize_stop_candidate(
-    terminal_output_committed: bool,
-    dispatch_ok: bool,
-    watcher_handled_mailbox_finish: bool,
-) -> bool {
-    terminal_output_committed && dispatch_ok && watcher_handled_mailbox_finish
-}
-
-/// #2161/#4047 TUI completion observation — decide whether the terminal path
-/// should record pane liveness and strict completion-signal telemetry before
-/// emitting `✅ 응답 완료` / `✅ 백그라운드 완료`.
-///
-/// The CLI provider session can write a terminal `result` JSONL event before
-/// the interactive TUI has finished rendering tool output, plan presentations,
-/// or trailing assistant text into its tmux pane. S2-b makes the JSONL
-/// terminator the sole finalize truth source, so this path no longer waits for
-/// or suppresses completion based on quiescence.
-///
-/// We currently only gate `RuntimeHandoffKind::ClaudeTui`. `LegacyTmuxWrapper`
-/// drives a non-interactive wrapper script whose `result` event coincides with
-/// the script exiting, so no extra observation is needed.
-///
-/// `task_notification_kind` is accepted but intentionally does NOT skip the
-/// observation — a Background or MonitorAutoTurn that runs inside ClaudeTui
-/// still emits a visible status transition (`✅ 백그라운드 완료`).
-#[inline]
-pub(super) fn should_gate_completion_for_tui_quiescence(
-    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
-    rebind_origin: bool,
-    _task_notification_kind: Option<crate::services::agent_protocol::TaskNotificationKind>,
-) -> bool {
-    // rebind_origin inflights describe an externally-launched tmux session
-    // that AgentDesk did not start — the operator (not the Discord turn)
-    // owns input cadence. Don't attach AgentDesk's pane observation to it.
-    if rebind_origin {
-        return false;
-    }
-    matches!(
-        runtime_kind,
-        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-    )
-}
-
-#[inline]
-fn watcher_stop_decision_after_terminal_finalize(
-    terminal_output_committed: bool,
-    dispatch_ok: bool,
-    watcher_handled_mailbox_finish: bool,
-    tmux_alive: bool,
-    confirmed_end: u64,
-    tmux_tail_offset: u64,
-    idle_duration: Option<std::time::Duration>,
-) -> WatcherStopDecision {
-    if !is_terminal_finalize_stop_candidate(
-        terminal_output_committed,
-        dispatch_ok,
-        watcher_handled_mailbox_finish,
-    ) {
-        return WatcherStopDecision::Continue;
-    }
-
-    watcher_stop_decision_after_terminal_success(WatcherStopInput {
-        terminal_success_seen: terminal_output_committed,
-        tmux_alive,
-        confirmed_end,
-        tmux_tail_offset,
-        idle_duration,
-        idle_threshold: WATCHER_POST_TERMINAL_IDLE_WINDOW,
-    })
 }
 
 #[cfg(test)]
@@ -1828,77 +1261,6 @@ mod lifecycle_stage_pause_matrix_tests {
             assert!(!lifecycle_stage_paused(outcome), "{outcome:?}");
         }
     }
-}
-
-fn watcher_should_yield_to_active_bridge_turn(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    data_start_offset: u64,
-    current_offset: u64,
-) -> bool {
-    let state = super::inflight::load_inflight_state(provider, channel_id.get());
-    watcher_should_yield_to_inflight_state(
-        state.as_ref(),
-        tmux_session_name,
-        data_start_offset,
-        current_offset,
-    )
-}
-
-fn watcher_should_yield_to_inflight_state(
-    state: Option<&super::inflight::InflightTurnState>,
-    tmux_session_name: &str,
-    data_start_offset: u64,
-    current_offset: u64,
-) -> bool {
-    let Some(state) = state else {
-        return false;
-    };
-
-    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
-        return false;
-    }
-    match state.effective_relay_owner_kind() {
-        super::inflight::RelayOwnerKind::Watcher => return false,
-        super::inflight::RelayOwnerKind::StandbyRelay => {
-            return current_offset > data_start_offset;
-        }
-        super::inflight::RelayOwnerKind::SessionBoundRelay => {
-            return current_offset > data_start_offset;
-        }
-        super::inflight::RelayOwnerKind::Unknown => {
-            return current_offset > data_start_offset;
-        }
-        super::inflight::RelayOwnerKind::None => {}
-    }
-
-    let turn_start_offset = state.turn_start_offset.unwrap_or(state.last_offset);
-    let range_intersects_turn =
-        data_start_offset <= turn_start_offset && turn_start_offset < current_offset;
-    if !range_intersects_turn {
-        return false;
-    }
-
-    // #4380: a CRASH restart (no graceful drain → no `restart_report`, so
-    // `restart_mode == None`) re-adopts a still-live bridge turn whose bridge died
-    // mid-stream WITHOUT a Watcher handoff, so the row keeps `relay_owner_kind ==
-    // None`. The recovery path stamps `readopted_from_inflight` before spawning the
-    // recovery watcher — honour it exactly like the planned-restart hatch below,
-    // otherwise the recovered watcher yields to the DEAD bridge and black-holes
-    // 100% of the turn's remaining output (the recurring `.stuck-manual-*` wedge).
-    if super::recovery_engine::crash_readopt_live_relay_resume_required(state) {
-        return false;
-    }
-
-    // After a planned dcserver restart the old bridge owner is gone. If the
-    // terminal body has not been durably committed, yielding here black-holes the
-    // recovered watcher output instead of preventing a duplicate.
-    if state.restart_mode.is_some() && !state.terminal_delivery_committed {
-        return false;
-    }
-
-    true
 }
 
 #[cfg(test)]
@@ -2344,7 +1706,6 @@ async fn finish_restored_watcher_active_turn_with_ctx(
 #[path = "tmux_watcher.rs"]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) mod tmux_watcher;
-use self::tmux_watcher::completion_producer::release_restored_watcher_active_turn_before_panel_edit;
 #[cfg(test)]
 pub(in crate::services::discord) use self::tmux_watcher::pinned_delivery_lease_key_for_test;
 pub(super) use self::tmux_watcher::{

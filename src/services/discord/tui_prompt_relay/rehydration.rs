@@ -193,16 +193,10 @@ thread_local! {
     /// Live sessions a test pins for the Codex periodic pass on this thread.
     static CODEX_PASS_TMUX_VIEW: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
-    /// A test pins the Codex pass's tmux listing as unreadable on this thread.
-    static CODEX_PASS_TMUX_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(unix)]
 fn codex_pass_tmux_session_names() -> Result<Vec<String>, String> {
-    #[cfg(test)]
-    if CODEX_PASS_TMUX_UNREADABLE.get() {
-        return Err("pinned unreadable".into());
-    }
     #[cfg(test)]
     if let Some(sessions) = CODEX_PASS_TMUX_VIEW.with_borrow(Clone::clone) {
         return Ok(sessions);
@@ -273,11 +267,9 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
         }
     }
     // Herdr panes are not tmux sessions; their rows name them. No local endpoint reads nothing.
-    // A Claude pass keeps no adoption evidence, so its sources are not used.
-    let _ = super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
+    super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
         shared.pg_pool.as_ref(),
         &ProviderKind::Claude,
-        None,
     );
 }
 
@@ -446,25 +438,20 @@ fn rehydrate_claude_tui_pane(shared: &Arc<SharedData>, tmux_session_name: &str) 
     }
 }
 
-/// One Codex discovery pass and the live sources it read, bound only for an installed `observer`.
+/// One Codex discovery pass: Herdr reconnect, then owner repair and binding of live tmux panes.
 #[cfg(unix)]
-pub(super) fn rehydrate_existing_codex_tui_bindings(
-    shared: &Arc<SharedData>,
-    observer: Option<super::super::codex_adoption_runtime::ObservationRuntimeId>,
-) -> super::super::codex_adoption_runtime::boot::DiscoveryPass {
+pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
     evict_dead_orphaned_codex_tui_mirrors(shared);
     // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
-    let herdr = super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
+    super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_panes(
         shared.pg_pool.as_ref(),
         &ProviderKind::Codex,
-        observer,
     );
-    let observe = observer.is_some();
     let mut sessions = match codex_pass_tmux_session_names() {
         Ok(sessions) => sessions,
         Err(error) => {
             tracing::debug!(error = %error, "Codex TUI binding rehydrate skipped; tmux sessions unavailable");
-            return Err(format!("tmux sessions: {error}"));
+            return;
         }
     };
     sessions.sort_by(|left, right| {
@@ -475,7 +462,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
 
     let rehydrate_plan = codex_tui_rehydrate_plan(&sessions);
     let mut claimed_rollout_paths = claimed_codex_tui_rollout_paths();
-    let mut live = Vec::new();
 
     for tmux_session_name in sessions {
         if !tmux_session_is_codex_tui(&tmux_session_name) {
@@ -493,10 +479,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
         let Some(channel_id) = authoritative_channel.or_else(|| {
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
         }) else {
-            live.extend(codex_marker::unplaced_live_source(
-                tmux_session_name,
-                observe,
-            ));
             continue;
         };
 
@@ -527,14 +509,12 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
             continue;
         }
 
-        let source = |tmux: &str| codex_marker::live_source(shared, tmux, channel_id, observe);
         if let Some(authoritative_channel) = authoritative_channel {
             let Some(repaired) = codex_marker::restore_codex_owner_channel(
                 shared,
                 &tmux_session_name,
                 authoritative_channel,
             ) else {
-                live.push(source(&tmux_session_name));
                 continue;
             };
             if repaired {
@@ -559,7 +539,6 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
                 .contains(&tmux_session_name),
             || {},
         ) else {
-            live.push(source(&tmux_session_name));
             continue;
         };
         tracing::info!(
@@ -570,12 +549,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(
             "rehydrated Codex TUI direct relay binding from live rollout"
         );
         claimed_rollout_paths.insert(canonical_rollout_claim_path(Path::new(&fresh.output_path)));
-        live.push(source(&tmux_session_name));
     }
-    herdr.map(|mut sources| {
-        sources.extend(live);
-        sources
-    })
 }
 
 #[cfg(unix)]
@@ -1317,7 +1291,7 @@ mod tests {
             let pass = shared.clone();
             tokio::task::spawn_blocking(move || {
                 rehydrate_existing_claude_tui_bindings(&pass);
-                let _ = rehydrate_existing_codex_tui_bindings(&pass, None);
+                rehydrate_existing_codex_tui_bindings(&pass);
             })
             .await
             .expect("rehydrate pass");

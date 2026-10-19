@@ -47,15 +47,17 @@ pub(super) struct StreamingTurn<'a> {
 }
 
 #[cfg(test)]
-pub(super) struct InputEffectProbe {
+pub(in crate::services::discord) struct InputEffectProbe {
     pub channel: u64,
-    pub entered: tokio::sync::oneshot::Sender<(bool, bool)>,
+    /// Receives the thread the provider ran on, so a caller can tell it left the async task.
+    pub entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
     pub release: std::sync::mpsc::Receiver<()>,
     pub terminal_before_release: bool,
 }
 #[cfg(test)]
-pub(super) static INPUT_EFFECT_PROBE: std::sync::Mutex<Option<InputEffectProbe>> =
-    std::sync::Mutex::new(None);
+pub(in crate::services::discord) static INPUT_EFFECT_PROBE: std::sync::Mutex<
+    Option<InputEffectProbe>,
+> = std::sync::Mutex::new(None);
 #[cfg(test)]
 pub(super) struct SubmittedPrompt {
     pub prompt: String,
@@ -82,10 +84,7 @@ fn input_effect_probe(
             None
         }
     }?;
-    use crate::services::discord::input_runtime::fence;
-    let named = fence::effect::current()
-        .is_some_and(|permit| permit.validate(turn.provider, turn.channel_id).is_ok());
-    let _ = probe.entered.send((named, fence::require_worker().is_ok()));
+    let _ = probe.entered.send(std::thread::current().id());
     let terminal = || {
         sender
             .send(StreamMessage::Done {
@@ -105,34 +104,14 @@ fn input_effect_probe(
     }
 }
 
-#[cfg(test)]
-pub(super) static INPUT_EFFECT_COMPLETION_PROBE: std::sync::Mutex<
-    Option<(u64, tokio::sync::oneshot::Sender<()>)>,
-> = std::sync::Mutex::new(None);
-#[cfg(test)]
-pub(super) fn observe_input_effect_completion(channel: u64, task: tokio::task::JoinHandle<()>) {
-    let probe = {
-        let mut slot = INPUT_EFFECT_COMPLETION_PROBE.lock().unwrap();
-        if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
-            slot.take()
-        } else {
-            None
-        }
-    };
-    if let Some((_, completed)) = probe {
-        tokio::spawn(async move {
-            task.await.unwrap();
-            let _ = completed.send(());
-        });
-    }
-}
-
 /// Stands in for the Claude driver inside the submission scope, on the real provider thread.
 #[cfg(test)]
-pub(super) type ClaudeLegacyProbe = Box<dyn FnOnce() -> Result<(), String> + Send>;
+pub(in crate::services::discord) type ClaudeLegacyProbe =
+    Box<dyn FnOnce() -> Result<(), String> + Send>;
 #[cfg(test)]
-pub(super) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<Option<(u64, ClaudeLegacyProbe)>> =
-    std::sync::Mutex::new(None);
+pub(in crate::services::discord) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<
+    Option<(u64, ClaudeLegacyProbe)>,
+> = std::sync::Mutex::new(None);
 #[cfg(test)]
 fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
     let mut slot = CLAUDE_LEGACY_PROBE.lock().unwrap();

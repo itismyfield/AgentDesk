@@ -326,7 +326,8 @@ fn every_slot_holding_runtime_registers_one_sigterm_handler() {
         1,
         "standby"
     );
-    let gateway = "record_role(adoption.as_ref(), BootRole::Gateway);";
+    // The lease match's last arm closes it; everything after belongs to the gateway branch.
+    let gateway = "GatewayLeaseOutcome::Failed => {";
     assert_eq!(
         branch(gateway, "run_bot_start_gateway_runtime("),
         1,
@@ -566,5 +567,101 @@ fn committed_restart_child() {
         tokio::time::sleep(Duration::from_secs(90)).await;
         drop(roots);
         panic!("the committed restart never exited");
+    });
+}
+
+const SIGTERM_CHILD: &str = "ADK_S3C_SIGTERM_CHILD";
+const SIGTERM_READY: &str = "ADK_S3C_SIGTERM_READY";
+
+/// An OS SIGTERM, not the test source, reaches the production handler: the process exits 0 through
+/// its barrier only after the runtime's writer was joined and its claim released.
+#[cfg(unix)]
+#[test]
+fn an_os_sigterm_joins_the_writer_before_exit() {
+    let root = tempfile::tempdir().unwrap();
+    let (ready, evidence) = (root.path().join("ready"), root.path().join("evidence"));
+    let name = concat!(
+        "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::",
+        "os_sigterm_child"
+    );
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+    child.args([
+        "--exact",
+        name,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    child
+        .env(SIGTERM_CHILD, "1")
+        .env("AGENTDESK_ROOT_DIR", root.path());
+    child
+        .env(CHILD_EVIDENCE, &evidence)
+        .env(SIGTERM_READY, &ready);
+    let mut child = child.stdout(std::process::Stdio::null()).spawn().unwrap();
+    let wait = |child: &mut std::process::Child,
+                done: &dyn Fn(&mut std::process::Child) -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !done(child) {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("the SIGTERM child timed out");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait(&mut child, &|child| {
+        assert!(child.try_wait().unwrap().is_none(), "exited before SIGTERM");
+        ready.exists()
+    });
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: signals only the child this test spawned and still holds.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    wait(&mut child, &|child| child.try_wait().unwrap().is_some());
+    let status = child.wait().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the handler's exit, not the signal's: {status:?}"
+    );
+    let seen = std::fs::read_to_string(&evidence).unwrap_or_default();
+    assert_eq!(seen, "claude None false", "at exit");
+}
+
+/// The child: a Claude runtime's running writer and its production SIGTERM handler over the OS
+/// signal, as the last runtime in the shutdown barrier.
+#[cfg(unix)]
+#[test]
+#[ignore = "run in its own process by an_os_sigterm_joins_the_writer_before_exit"]
+fn os_sigterm_child() {
+    if std::env::var(SIGTERM_CHILD).is_err() {
+        return;
+    }
+    const CLAUDE: u64 = 9_300_000_000_000_111;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _candidates = test_override::force_candidates(&[(CLAUDE, ClaudeTui)]);
+        let provider = ProviderKind::Claude;
+        let hosted = hosted(&[CLAUDE], &[]);
+        let homes = super::super::o_writer_host::home_writers(&provider, false);
+        homes.arm(None, hosted.handles);
+        assert!(eventually(10, || running(&homes, CLAUDE)).await);
+        let evidence = PathBuf::from(std::env::var(CHILD_EVIDENCE).unwrap());
+        let recorded = vec![("claude".to_owned(), homes, CLAUDE, hosted.ready)];
+        assert!(AT_EXIT.set((evidence, recorded)).is_ok());
+        // SAFETY: registers a plain `extern "C"` callback that only reads a set static.
+        assert_eq!(unsafe { libc::atexit(record_at_exit) }, 0);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+        let _handler = run_bot_spawn_sigterm_handler(&shared, provider);
+        // The handler task installs its OS listener on its first poll.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(std::env::var(SIGTERM_READY).unwrap(), b"").unwrap();
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        drop(hosted.root);
+        panic!("the SIGTERM never ended the process");
     });
 }

@@ -1,4 +1,4 @@
-//! Explicit operator termination of one Herdr execution; the operator route is its only entry.
+//! Explicit termination of one Herdr execution, by the operator route or a user clear.
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
@@ -151,7 +151,26 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
     .await
     .map_err(|e| TerminationResult::Indeterminate(e.to_string()))?
 }
-async fn retire_confirmed(
+/// What a fresh read of a stored execution shows; nothing is closed or written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecutionEnd {
+    /// The pane is gone or back at its own shell, and the provider process is gone.
+    Ended,
+    /// The pane no longer runs it, but the provider process lives.
+    ProviderAlive,
+    /// The pane still runs it, or a read failed.
+    Unconfirmed,
+}
+
+/// `read_end` for a caller that sent no close.
+pub(super) async fn execution_end(target: HerdrTarget, record: HostedExecution) -> ExecutionEnd {
+    match read_end(target, record).await {
+        Ok(()) => ExecutionEnd::Ended,
+        Err(TerminationResult::ProviderSurvivedClose) => ExecutionEnd::ProviderAlive,
+        Err(_) => ExecutionEnd::Unconfirmed,
+    }
+}
+pub(super) async fn retire_confirmed(
     pool: &PgPool,
     row: &HostedObservation,
     record: &HostedExecution,
@@ -295,7 +314,7 @@ async fn confirm_captured_released(
         _ => Err("captured mailbox replaced"),
     }
 }
-/// Its only production caller is [`terminate_registered_herdr`].
+/// Production callers: [`terminate_registered_herdr`] and a user clear of a Herdr channel.
 pub(crate) async fn terminate_explicit_herdr(
     request: OperatorTerminate,
     shared: Arc<SharedData>,

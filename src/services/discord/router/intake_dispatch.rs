@@ -1,4 +1,3 @@
-use super::intake_gate::ledger::legacy_allowed;
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::cluster::intake_router_hook::{
@@ -275,10 +274,18 @@ pub(crate) async fn admit_text_intake(
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
-    // A delegated channel's home row decides first, in the router; without Postgres it holds here.
-    let home_first = deps.shared.pg_pool.is_some()
-        && crate::services::cluster::channel_home::registered(&destination.get().to_string())
-            .is_some();
+    // A channel with a home row, or a local gate, is decided by the router's home read; an
+    // unreadable row goes there too and is refused. Without Postgres it holds here.
+    let home_first = match deps.shared.pg_pool.as_ref() {
+        None => false,
+        Some(_) if crate::services::cluster::channel_home::registered(&channel_id).is_some() => {
+            true
+        }
+        Some(pool) => !matches!(
+            crate::db::o_channel_homes::read_home(pool, &channel_id).await,
+            Ok(None)
+        ),
+    };
     if !home_first
         && let IntakeRoute::Hold(detail) =
             intake_route::route_for_placement(provider, destination.get())
@@ -543,13 +550,6 @@ pub(crate) async fn dispatch_text_intake(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
-    legacy_allowed(
-        deps.shared,
-        deps.http,
-        &submission.provider,
-        submission.request.channel_id,
-    )
-    .await?;
     let admission = admit_text_intake(deps, &submission).await;
     finish_text_intake_admission(deps, admission, submission).await
 }
@@ -577,21 +577,7 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     checkpoint: impl FnOnce() + Send + 'a,
 ) -> BoxedIntake<'a> {
     Box::pin(async move {
-        legacy_allowed(
-            deps.shared,
-            deps.http,
-            &submission.provider,
-            submission.request.channel_id,
-        )
-        .await?;
         let admission = admit_text_intake(deps, &submission).await;
-        legacy_allowed(
-            deps.shared,
-            deps.http,
-            &submission.provider,
-            submission.request.channel_id,
-        )
-        .await?;
         if !matches!(
             admission,
             IntakeAdmission::ReplayDeferred(_) | IntakeAdmission::DeferredTurnMode(_)
@@ -599,10 +585,43 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
         }
-        finish_text_intake_admission(deps, admission, submission).await?;
-        checkpoint();
-        Ok(())
+        finish_deferred(deps, admission, submission, checkpoint).await
     })
+}
+
+/// An attachment the gateway did not admit locally. Only a turn-mode deferral moves the checkpoint,
+/// once the queue holds it; every other outcome leaves the checkpoint where it was.
+pub(crate) async fn finish_nonlocal_attachment_admission(
+    deps: &IntakeDeps<'_>,
+    admission: IntakeAdmission,
+    submission: IntakeSubmission,
+) -> Result<(), super::super::Error> {
+    if !matches!(admission, IntakeAdmission::DeferredTurnMode(_)) {
+        return finish_text_intake_admission(deps, admission, submission).await;
+    }
+    let (provider, request) = (submission.provider.clone(), &submission.request);
+    let (channel_id, message_id) = (request.channel_id, request.user_msg_id);
+    let checkpoint = move || {
+        super::super::advance_last_message_checkpoint(
+            deps.shared,
+            &provider,
+            channel_id,
+            message_id,
+        );
+    };
+    finish_deferred(deps, admission, submission, checkpoint).await
+}
+
+/// A deferred input advances its checkpoint only after the queue durably holds it.
+async fn finish_deferred(
+    deps: &IntakeDeps<'_>,
+    admission: IntakeAdmission,
+    submission: IntakeSubmission,
+    checkpoint: impl FnOnce(),
+) -> Result<(), super::super::Error> {
+    finish_text_intake_admission(deps, admission, submission).await?;
+    checkpoint();
+    Ok(())
 }
 
 pub(crate) async fn finish_text_intake_admission(
@@ -610,13 +629,6 @@ pub(crate) async fn finish_text_intake_admission(
     admission: IntakeAdmission,
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
-    legacy_allowed(
-        deps.shared,
-        deps.http,
-        &submission.provider,
-        submission.request.channel_id,
-    )
-    .await?;
     match admission {
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
@@ -670,13 +682,6 @@ pub(crate) async fn finish_admitted_local(
     permit: LocalAdmissionPermit,
     submission: IntakeSubmission,
 ) -> Result<super::IntakeExecution, super::super::Error> {
-    legacy_allowed(
-        deps.shared,
-        deps.http,
-        &submission.provider,
-        submission.request.channel_id,
-    )
-    .await?;
     if !permit.permits_submission(&submission) {
         tracing::error!(
             admitted_channel_id = permit.channel_id.get(),

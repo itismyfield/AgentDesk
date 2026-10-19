@@ -3,6 +3,7 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row};
 
 use crate::db::agents::{resolve_agent_channel_for_provider_pg, resolve_agent_dispatch_channel_pg};
+use crate::db::auto_queue::run_owner_guard as owner_guard;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_channel::{
@@ -1211,6 +1212,10 @@ pub(crate) async fn apply_dispatch_attached_intents_pg(
         .map_err(|error| anyhow::anyhow!("begin postgres dispatch {dispatch_id}: {error}"))?;
 
     let result = async {
+        // The context owner's run token is the first lock, before any dispatch row.
+        owner_guard::guard_context_owner_publication_on_pg_tx(&mut tx, Some(context_str), None)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         if dispatch_type == "review-decision" {
             let cancelled = cancel_stale_review_decisions_pg_tx(&mut tx, card_id).await?;
             if cancelled > 0 {
@@ -1322,26 +1327,21 @@ pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
     }
     let required_capabilities = dispatch_required_capabilities(context_str, dispatch_type);
 
-    if let Err(error) = sqlx::query(
-        "INSERT INTO task_dispatches (
-            id, kanban_card_id, to_agent_id, dispatch_type, status, title, context,
-            parent_dispatch_id, chain_depth, required_capabilities, created_at, updated_at
-        ) VALUES (
-            $1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, NOW(), NOW()
-        )",
-    )
-    .bind(dispatch_id)
-    .bind(card_id)
-    .bind(to_agent_id)
-    .bind(dispatch_type)
-    .bind(title)
-    .bind(context_str)
-    .bind(parent_dispatch_id)
-    .bind(chain_depth)
-    .bind(required_capabilities.as_ref())
-    .execute(&mut **tx)
-    .await
-    {
+    let row = owner_guard::NewDispatchRow {
+        id: dispatch_id,
+        kanban_card_id: card_id,
+        to_agent_id,
+        dispatch_type,
+        title,
+        context: context_str,
+        parent_dispatch_id,
+        chain_depth,
+        required_capabilities: required_capabilities.as_ref(),
+    };
+    if let Err(error) = owner_guard::insert_dispatch_row_on_pg_tx(tx, &row).await {
+        let error = error
+            .into_db()
+            .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
         if matches!(dispatch_type, "review" | "review-decision" | "create-pr")
             && is_single_active_dispatch_violation_pg(&error)
         {

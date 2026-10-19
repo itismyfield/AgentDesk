@@ -466,7 +466,7 @@ pub(super) fn tui_busy_followup_diagnostic(
     }
     let tmux_session_name = tmux_session_name?;
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(tmux_session_name)
     {
         return Some(ClaudeTuiBusyFollowupDiagnostic {
             tmux_session_name: tmux_session_name.to_owned(),
@@ -655,30 +655,14 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
     HostedTuiPromoteBusyHookResetForTests
 }
 
-/// #4270 A — pre-teardown hosted-TUI readiness probe for the two queued-turn
-/// promote entrypoints (`kickoff_idle_queue_channel` pre-dequeue and
-/// `DiscordGateway::dispatch_queued_turn` pre-drain). Returns `true` when the
-/// channel's hosted TUI is verifiably busy per the SAME diagnostic the
-/// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
-/// can defer the promotion BEFORE any user-visible teardown (turn-view
-/// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). Off Herdr channels, a host-kept session (Herdr, unknown or conflicting host, or with no
-/// name or entry and no legacy row) also defers. Everything else — no tmux pane, remote profile,
-/// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
-/// dispatch path, whose existing post-claim busy branch owns the defer UX
-/// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
-/// for message preservation; it only avoids churn.
-///
-/// Root cause it closes (#4270): the promote path used to dequeue + flip the
-/// head's turn-view to started/⏳ + drain 📬 + claim the mailbox, and only THEN
-/// discover the hosted TUI was busy — re-queue + re-attach + release + fast
-/// re-kick, every ~2s, forever. Probing the same verdict before teardown
-/// short-circuits the whole cycle with zero visible state change.
+/// Probe hosted readiness before teardown; host-kept sessions, verified Codex holds and busy panes defer.
+/// The normal post-claim path retains responsibility for message preservation and defer UX.
 pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
+    let park = &shared.queue_park_ledger;
     #[cfg(test)]
     if let Some(busy) = *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
         .lock()
@@ -688,6 +672,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     }
     // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
     if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+        park.clear_promote_hold(channel_id, "codex_verified");
         return false;
     }
 
@@ -718,10 +703,12 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     // Verified incarnations wait for source and permission before queue teardown.
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(&tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(&tmux_session_name)
     {
+        park.note_codex_verified_hold(channel_id, &tmux_session_name);
         return true;
     }
+    park.clear_promote_hold(channel_id, "codex_verified");
     // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
     #[cfg(test)]
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
@@ -778,6 +765,8 @@ async fn nameless_promote_blocked(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
+    let park = &shared.queue_park_ledger;
+    park.clear_promote_hold(channel_id, "codex_verified");
     let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
     nameless(shared, provider, channel_id.get()).await
 }

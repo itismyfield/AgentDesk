@@ -783,7 +783,14 @@ async fn transition_apply_holds_a_source_whose_inputs_changed_after_its_probes()
             "proven" => bindings.commit(resumed(3, &pane, &new)),
             "checkpoint" => {
                 let detail = "regression".to_string();
-                bindings.commit(event(3, BindingRecord::Rejected { detail }, Utc::now()));
+                bindings.commit(event(
+                    3,
+                    BindingRecord::Rejected {
+                        detail,
+                        closes: None,
+                    },
+                    Utc::now(),
+                ));
             }
             "execution" => {
                 let later = Utc::now() + TimeDelta::seconds(1);

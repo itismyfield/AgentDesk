@@ -5,16 +5,32 @@ use std::time::{Duration, Instant};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
-use super::active_source_dedup::strip_source_message_id_from_intervention;
+use super::active_source_dedup::{
+    purge_sources_from_queue, strip_source_message_id_from_intervention,
+};
 use super::pending_queue_persistence::{
-    load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
-    load_channel_pending_queue_checked, remove_channel_pending_dispatch_marker,
+    load_channel_pending_dispatch_marker, load_channel_pending_queue_checked,
+    pending_queue_file_path, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
     QueuePersistenceContext, RequeueInterventionResult, TakeNextSoftResult,
     persist_queue_or_restore,
 };
+
+pub(super) mod held_settle;
+
+/// Marks an error that came from reading or parsing a channel's pending queue file.
+const QUEUE_UNREAD: &str = "pending queue unread: ";
+
+pub(super) fn queue_unread(error: String) -> String {
+    format!("{QUEUE_UNREAD}{error}")
+}
+
+/// Whether `error` is a pending queue file that could not be read or parsed.
+pub(crate) fn is_queue_unread(error: &str) -> bool {
+    error.starts_with(QUEUE_UNREAD)
+}
 
 pub(crate) const PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER: Duration = Duration::from_secs(10);
 pub(crate) const VALVE_CLEARED_DISPATCH_MARKER_GRACE: Duration = Duration::from_secs(600);
@@ -34,7 +50,23 @@ pub(super) fn set_pending_user_dispatch(
     state.pending_user_dispatch_since = Some(Instant::now());
     state.pending_user_dispatch_yield_count = 0;
     state.pending_user_dispatch_lease = Some(Arc::clone(&lease));
+    // Only reached after this head's marker was written, so the marker file is this actor's own.
+    if let Some(persistence) = &state.last_persistence {
+        let namespace = super::remint_fence::namespace(persistence);
+        state.remint_fence.trust_marker(&namespace);
+    }
     lease
+}
+
+fn queue_trusted(state: &ChannelMailboxState, persistence: &QueuePersistenceContext) -> bool {
+    let namespace = super::remint_fence::namespace(persistence);
+    state.remint_fence.trusts_queue(&namespace)
+}
+
+/// A marker a clear could not remove is never read back as live input.
+fn marker_trusted(state: &ChannelMailboxState, persistence: &QueuePersistenceContext) -> bool {
+    let namespace = super::remint_fence::namespace(persistence);
+    state.remint_fence.trusts_marker(&namespace)
 }
 
 pub(super) fn clear_pending_user_dispatch(state: &mut ChannelMailboxState) -> Option<MessageId> {
@@ -141,68 +173,6 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
     }
 }
 
-/// A clear's first step: the marker's input goes back into the queue file in place of its
-/// reservation before the marker is removed, so a later failure still leaves one durable copy.
-pub(super) fn reclaim_pending_dispatch_marker(
-    state: &mut ChannelMailboxState,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
-    let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
-    let marker = load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)?;
-    let Some((mut marker, _)) = marker else {
-        return Ok(());
-    };
-    let marker_id = marker.message_id;
-    let ids = intervention_dedup_ids(&marker);
-    let held: Vec<MessageId> = (ids.iter().copied())
-        .filter(|id| {
-            queued_intervention_contains_message_id(&state.intervention_queue, *id)
-                || state.active_user_message_id == Some(*id)
-        })
-        .collect();
-    if held.len() < ids.len() {
-        for id in held {
-            strip_source_message_id_from_intervention(&mut marker, id);
-        }
-        let previous_queue = state.intervention_queue.clone();
-        let at = super::queued_head::protected_len(state, channel_id, persistence);
-        state.intervention_queue.insert(at, marker);
-        let operation = "clear_reclaim_marker";
-        persist_queue_or_restore(state, channel_id, persistence, previous_queue, operation)?;
-    }
-    clear_pending_user_dispatch_if_matches(state, marker_id);
-    #[cfg(test)]
-    let fault = marker_remove_fault::take(channel_id);
-    #[cfg(test)]
-    if fault == Some(false) {
-        return Err("injected dispatch marker removal failure".to_string());
-    }
-    remove_channel_pending_dispatch_marker(provider, token_hash, channel_id)?;
-    #[cfg(test)]
-    if fault == Some(true) {
-        return Err("injected failure after dispatch marker removal".to_string());
-    }
-    Ok(())
-}
-
-/// Test-only: fail a channel's next clear marker removal once, before it (`false`) or after it.
-#[cfg(test)]
-pub(super) mod marker_remove_fault {
-    use super::ChannelId;
-    static ARMED: std::sync::Mutex<Vec<(ChannelId, bool)>> = std::sync::Mutex::new(Vec::new());
-
-    pub(crate) fn fail_next(channel: ChannelId, after_removal: bool) {
-        ARMED.lock().unwrap().push((channel, after_removal));
-    }
-
-    pub(super) fn take(channel: ChannelId) -> Option<bool> {
-        let mut armed = ARMED.lock().unwrap();
-        let index = armed.iter().position(|(armed, _)| *armed == channel)?;
-        Some(armed.remove(index).1)
-    }
-}
-
 pub(super) fn consume_pending_dispatch_marker_if_matches(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -305,6 +275,11 @@ pub(super) fn hydrate_pending_queue_into_state(
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
+    // Items read from a file a clear could not rewrite were discarded by that clear.
+    let disk_items = match queue_trusted(state, &persistence) {
+        true => disk_items,
+        false => Vec::new(),
+    };
     let previous_queue = state.intervention_queue.clone();
     let mut existing_ids: HashSet<MessageId> = state
         .intervention_queue
@@ -369,6 +344,14 @@ pub(super) fn merge_pending_dispatch_marker_into_state(
     operation: &'static str,
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
+    if !marker_trusted(state, &persistence) {
+        return HydratePendingQueueResult {
+            absorbed: 0,
+            queue_len_after: state.intervention_queue.len(),
+            restored_override,
+            persistence_error: None,
+        };
+    }
     let marker_id = marker.message_id;
     let marker_ids = intervention_dedup_ids(&marker);
     let marker_already_present = marker_ids.iter().all(|id| {
@@ -423,9 +406,8 @@ pub(super) fn absorb_disk_queue(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
-    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
     let loaded = super::queued_head::adopt(state, channel_id, persistence)
-        .and_then(|()| load_channel_pending_queue_checked(provider, token_hash, channel_id));
+        .and_then(|()| load_trusted_queue(state, channel_id, persistence));
     let (items, over) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -442,6 +424,45 @@ pub(super) fn absorb_disk_queue(
     persistence.dispatch_role_override =
         persistence.dispatch_role_override.or(over.map(|c| c.get()));
     hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
+}
+
+/// Merges boot-restored items, keeping only the sources the queue file holds in this actor step;
+/// an unreadable file merges nothing and reports its error, so the file stays for a later read.
+pub(super) fn merge_restored_queue_items(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    mut items: Vec<Intervention>,
+    persistence: QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let loaded = super::queued_head::adopt(state, channel_id, &persistence)
+        .and_then(|()| load_trusted_queue(state, channel_id, &persistence));
+    let held: HashSet<MessageId> = match loaded {
+        Ok((disk, _)) => disk.iter().flat_map(intervention_dedup_ids).collect(),
+        Err(error) => {
+            return HydratePendingQueueResult {
+                queue_len_after: state.intervention_queue.len(),
+                persistence_error: Some(error),
+                ..Default::default()
+            };
+        }
+    };
+    let _ = purge_sources_from_queue(&mut items, |_, id| !held.contains(&id));
+    hydrate_pending_queue_into_state(state, channel_id, items, persistence, None)
+}
+
+/// The disk queue, or an empty one when a clear could not rewrite the file.
+fn load_trusted_queue(
+    state: &ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<(Vec<Intervention>, Option<ChannelId>), String> {
+    if !queue_trusted(state, persistence) {
+        return Ok((Vec::new(), None));
+    }
+    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let rooted = pending_queue_file_path(provider, token_hash, channel_id).is_some();
+    load_channel_pending_queue_checked(provider, token_hash, channel_id)
+        .map_err(|error| if rooted { queue_unread(error) } else { error })
 }
 
 /// `absorb_disk_queue` for arms that only need its read error to stop before their write.
@@ -470,9 +491,8 @@ pub(super) fn hydrate_pending_queue_from_disk_if_present(
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> HydratePendingQueueResult {
-    let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
     let loaded = super::queued_head::adopt(state, channel_id, persistence)
-        .and_then(|()| load_channel_pending_queue_checked(provider, token_hash, channel_id));
+        .and_then(|()| load_trusted_queue(state, channel_id, persistence));
     let (disk_items, mut restored_override) = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -509,11 +529,14 @@ pub(super) fn hydrate_pending_queue_from_disk_if_present(
         return result;
     }
     restored_override = result.restored_override;
-    let Some((marker, marker_override)) = load_channel_pending_dispatch_marker(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-    ) else {
+    let marker = marker_trusted(state, persistence).then(|| {
+        load_channel_pending_dispatch_marker(
+            &persistence.provider,
+            &persistence.token_hash,
+            channel_id,
+        )
+    });
+    let Some((marker, marker_override)) = marker.flatten() else {
         return result;
     };
     if restored_override.is_none() {
@@ -561,11 +584,14 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
         });
     }
 
-    let Some((mut marker, marker_override)) = load_channel_pending_dispatch_marker(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-    ) else {
+    let marker = marker_trusted(state, persistence).then(|| {
+        load_channel_pending_dispatch_marker(
+            &persistence.provider,
+            &persistence.token_hash,
+            channel_id,
+        )
+    });
+    let Some((mut marker, marker_override)) = marker.flatten() else {
         return None;
     };
     let marker_id = marker.message_id;
@@ -907,4 +933,5 @@ mod tests {
     }
 
     mod hydrate_corrupt_queue_tests;
+    mod restored_merge_tests;
 }

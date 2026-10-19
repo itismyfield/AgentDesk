@@ -581,7 +581,7 @@ fn entry_pass_recoveries(shared: &Arc<SharedData>) -> usize {
         .finish();
     crate::logging::test_capture::pin_callsite_interest();
     tracing::subscriber::with_default(subscriber, || {
-        let _ = rehydrate_existing_codex_tui_bindings(shared, None);
+        rehydrate_existing_codex_tui_bindings(shared);
     });
     String::from_utf8(sink.0.lock().unwrap().clone())
         .unwrap()

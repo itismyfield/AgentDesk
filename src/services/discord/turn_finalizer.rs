@@ -710,15 +710,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         event,
                         ctx,
                         evidence,
-                        input_permit,
                         shared,
                         ack,
                     } => {
                         cached_shared = Some(Arc::downgrade(&shared));
-                        // Move the serial actor state, not its authority, through worker cleanup.
-                        let mut owned_ledger = std::mem::take(&mut ledger);
-                        let mut owned_pending = std::mem::take(&mut pending_admission);
-                        let work = async move {
                         // #3866: the actor is a single, never-respawned task that
                         // owns finalize for the whole process. The crate unwinds
                         // (not `panic = "abort"`), so without this guard ONE panic
@@ -731,8 +726,8 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // does not hang, and the loop survives to finalize the next
                         // turn.
                         let outcome = match AssertUnwindSafe(handle_terminal(
-                            &mut owned_ledger,
-                            &mut owned_pending,
+                            &mut ledger,
+                            &mut pending_admission,
                             key,
                             provider,
                             event,
@@ -753,17 +748,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 FinalizeOutcome::AlreadyFinalized
                             }
                         };
-                            (owned_ledger, owned_pending, outcome)
-                        };
-                        let (next_ledger, next_pending, outcome) =
-                            super::input_runtime::fence::effect::run(input_permit, work).await;
-                        ledger = next_ledger;
-                        pending_admission = next_pending;
                         let _ = ack.send(outcome);
                     }
                     FinalizeMsg::PolicyClose {
                         intent,
-                        input_permit,
                         shared,
                         ack,
                     } => {
@@ -779,17 +767,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             }
                         }
                         cached_shared = Some(Arc::downgrade(&shared));
-                        let mut owned_ledger = std::mem::take(&mut ledger);
-                        let work = async move {
-                            let outcome =
-                                handle_policy_close(&mut owned_ledger, *intent, &shared).await;
-                            (owned_ledger, outcome)
-                        };
+                        let work = handle_policy_close(&mut ledger, *intent, &shared);
                         #[cfg(test)]
                         let work = trace.settled(work);
-                        let (next_ledger, outcome) =
-                            super::input_runtime::fence::effect::run(input_permit, work).await;
-                        ledger = next_ledger;
+                        let outcome = work.await;
                         // Test seam: the committed close's ACK alone is lost.
                         #[cfg(test)]
                         if trace.lost(crate::services::turn_orchestrator::policy_close::test_hooks::Loss::Ack) {

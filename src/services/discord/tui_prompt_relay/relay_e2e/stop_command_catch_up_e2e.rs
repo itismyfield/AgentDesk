@@ -192,10 +192,10 @@ async fn a_stop_keeps_earlier_dropped_input_recoverable() {
     );
 }
 
-/// A command that fails after live intake took it is still consumed: its text
-/// never becomes a prompt, and the question after it still recovers.
+/// A command whose writes fail after live intake took it is still consumed: its text never
+/// becomes a prompt, and the question after it still recovers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_clear_that_fails_is_not_replayed_by_catch_up() {
+async fn a_clear_whose_writes_fail_is_not_replayed_by_catch_up() {
     let harness = RelayE2eHarness::start().await;
     harness.register_channel_in_role_map();
     let base = recent_snowflake_base();
@@ -209,15 +209,16 @@ async fn a_clear_that_fails_is_not_replayed_by_catch_up() {
     harness
         .deliver_user_message(clear, "!clear")
         .await
-        .expect("a failed clear is answered in the channel, not returned to the event handler");
-    let failure = "postgres pool is required to persist a channel clear boundary";
-    let answered_failure = harness
+        .expect("the clear is answered in the channel");
+    // Without PostgreSQL the transcript boundary is not written: the clear commits and warns.
+    let warning = "일부 저장을 한 번 재시도했지만 완료하지 못했어요";
+    let answered_warning = harness
         .messages()
         .iter()
-        .any(|(reply_to, text)| *reply_to == Some(clear) && text.contains(failure));
+        .any(|(reply_to, text)| *reply_to == Some(clear) && text.contains(warning));
     assert!(
-        answered_failure,
-        "without PostgreSQL the clear fails and says so: {:?}",
+        answered_warning,
+        "the clear answers its notice with the warning: {:?}",
         harness.messages()
     );
 

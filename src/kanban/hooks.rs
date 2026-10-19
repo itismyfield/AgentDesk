@@ -175,7 +175,7 @@ pub fn fire_state_hooks_with_backends(engine: &PolicyEngine, card_id: &str, from
 
 /// Fire only the on_enter hooks for a specific state, without requiring a transition.
 ///
-/// Used when re-entering the same state (e.g., restarting review from awaiting_dod)
+/// Used when re-entering the same state (e.g., a dispute reopening review)
 /// where `fire_state_hooks` would no-op because from == to.
 pub fn fire_enter_hooks_with_backends(engine: &PolicyEngine, card_id: &str, state: &str) {
     let effective = resolve_effective_pipeline_for_hooks(engine.pg_pool(), card_id);

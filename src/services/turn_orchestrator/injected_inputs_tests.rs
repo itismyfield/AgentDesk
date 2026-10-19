@@ -1,7 +1,6 @@
 //! The injection order reservation at the actor API: what it withholds, how it settles, and how
 //! it ends when its owner or its result goes missing.
 use super::*;
-use crate::services::discord::input_runtime::fence::Gate;
 use crate::services::turn_orchestrator::test_support::{
     fail_queue_saves, injection_abandons, queue_save_faults,
 };
@@ -695,32 +694,4 @@ async fn a_busy_slot_keeps_its_turn_when_an_injected_message_is_claimed() {
         .is_some_and(|token| Arc::ptr_eq(token, &running));
     let observed = (started, kept, snapshot.active_user_message_id);
     assert_eq!(observed, (false, true, Some(holder)));
-}
-
-/// A cancel that removed the last input's file but failed the parent fsync is not reported;
-/// memory keeps the input, so the reservation still sees backlog with disk and marker empty.
-#[tokio::test(flavor = "current_thread")]
-async fn a_cancel_that_removed_the_file_but_failed_its_fsync_still_holds_the_reservation() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let channel = ChannelId::new(6_845_291);
-    let gate = Gate::protect(ProviderKind::Claude, channel.get()).expect("gate");
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-    let handle = ChannelMailboxRegistry::default().handle(channel);
-    assert!(handle.enqueue(item(6_845_292), context()).await.enqueued);
-    super::super::pending_queue_persistence::fsync_fault::fail_next(channel);
-    let cancel = handle.cancel_queued_primary_message(MessageId::new(6_845_292), context());
-    let cancelled = cancel.await;
-    let (provider, hash) = (ProviderKind::Claude, "inject-order-test");
-    let disk = load_channel_pending_queue(&provider, hash, channel).0.len();
-    let marker = super::super::load_channel_pending_dispatch_marker(&provider, hash, channel);
-    let reserve = handle.reserve_injection(None, None, context()).await;
-    let observed = format!(
-        "removed={} error={} memory={:?} disk={disk} marker={} reserve={reserve:?}",
-        cancelled.removed.is_some(),
-        cancelled.persistence_error.is_some(),
-        queued(&handle).await,
-        marker.is_some(),
-    );
-    let expected = "removed=false error=true memory=[6845292] disk=0 marker=false reserve=Backlog";
-    assert_eq!(observed, expected);
 }

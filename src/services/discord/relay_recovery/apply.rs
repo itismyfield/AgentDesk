@@ -116,27 +116,6 @@ async fn apply_relay_recovery_decision_admitted(
             }
             #[cfg(test)]
             retirement_tests::host_barrier(channel).await;
-            // Automatic cleanup can lose ownership while the host check awaits.
-            if matches!(
-                source,
-                RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog
-            ) && super::super::health::legacy_supervision::legacy_retired(
-                provider.as_str(),
-                channel.get(),
-                "orphan_token_before_finish",
-            ) {
-                return RelayRecoveryApplyResult {
-                    status: "legacy_retired",
-                    removed_thread_proofs: 0,
-                    removed_mailbox_token: false,
-                    post_mailbox_has_cancel_token: None,
-                    post_mailbox_queue_depth: None,
-                    reattach_watcher_spawned: None,
-                    reattach_watcher_replaced: None,
-                    reattach_initial_offset: None,
-                    reattach_error: None,
-                };
-            }
             // Finish only the snapshot's exact episode and keep the queue: a
             // successor admitted after the snapshot fails the nonce/start guard.
             let finish = match (

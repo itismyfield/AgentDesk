@@ -135,7 +135,7 @@ enum Logged {
 
 /// Claude logs each pasted frame as `logged` when its Enter arrives, as it records a queued prompt.
 fn claude_logs(rig: &HerdrRig, pane: &InjectPane, logged: Logged) {
-    let transcript = pane.path("transcript.jsonl");
+    let transcript = pane.path(InjectPane::TRANSCRIPT);
     let mut pasted = String::new();
     rig.on_send(move |params| {
         if let Some(text) = params["text"].as_str() {

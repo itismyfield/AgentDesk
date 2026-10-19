@@ -255,14 +255,6 @@ async fn reclaim_frozen_panels(
         let Some(finalized_text) = reclaim_finalize_text(&msg.content, provider) else {
             continue;
         };
-        // The message read awaited Discord; re-judge right before the edit.
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "startup_reclaim_frozen_panel_edit",
-        ) {
-            return (finalized, markers);
-        }
         if edit_outbound_message(
             http.clone(),
             shared.clone(),
@@ -337,13 +329,6 @@ async fn reclaim_orphan_placeholders(
             );
             continue;
         }
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "startup_reclaim_orphan_placeholder_delete",
-        ) {
-            return deleted;
-        }
         attempted += 1;
         let result = channel.delete_message(http, msg.id).await;
         crate::services::observability::emit_relay_delete_result(
@@ -417,12 +402,7 @@ async fn run_startup_reclaim_plan(
     let mut report = ReclaimReport::default();
     let now_unix_secs = chrono::Utc::now().timestamp();
     for &channel_id in candidate_channels {
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "startup_reclaim_channel",
-        ) || !claim_channel_once(pass, provider, channel_id)
-        {
+        if !claim_channel_once(pass, provider, channel_id) {
             continue;
         }
         report.channels_scanned += 1;
@@ -886,14 +866,9 @@ mod tests {
     }
 
     /// Answers the bot identity and one page per channel holding an old frozen panel and an
-    /// old exact placeholder; reading a page of a channel in `retire_on_read` retires it.
-    fn reclaim_answer(
-        retire_on_read: Vec<(
-            u64,
-            super::super::health::legacy_supervision::test_support::RetireLater,
-        )>,
-    ) -> super::super::health::legacy_supervision::test_support::Answer {
-        use super::super::health::legacy_supervision::test_support::message_json;
+    /// old exact placeholder.
+    fn reclaim_answer() -> super::super::health::test_support::Answer {
+        use super::super::health::test_support::message_json;
         Arc::new(move |method: &axum::http::Method, path: &str| {
             if method != axum::http::Method::GET {
                 return None;
@@ -908,11 +883,6 @@ mod tests {
                 .next()?
                 .parse()
                 .ok()?;
-            for (race, retire) in &retire_on_read {
-                if *race == channel {
-                    retire.retire("codex", channel);
-                }
-            }
             let old = "2026-01-01T00:00:00+00:00";
             let page = serde_json::json!([
                 message_json(channel * 10 + 1, channel, BOT, FROZEN, old),
@@ -922,12 +892,10 @@ mod tests {
         })
     }
 
-    /// Both startup passes skip a retired channel before claiming it, and re-judge after the
-    /// message read so a channel retired during that await is neither edited nor deleted.
+    /// Both startup passes claim a Legacy channel and finalize its frozen panel and placeholder.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn startup_passes_skip_retired_channels_before_claim_and_after_read() {
-        use super::super::health::legacy_supervision::RetiredForTest;
-        use super::super::health::legacy_supervision::test_support::{MockDiscord, RetireLater};
+    async fn startup_passes_claim_and_reclaim_legacy_channels() {
+        use super::super::health::test_support::MockDiscord;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -935,21 +903,11 @@ mod tests {
             temp.path(),
         );
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let (retired, legacy, race_frozen, race_orphan) = (
-            6_325_413_001u64,
-            6_325_413_002u64,
-            6_325_413_003u64,
-            6_325_413_004u64,
-        );
-        let discord = MockDiscord::start_with(reclaim_answer(vec![
-            (race_frozen, RetireLater::default()),
-            (race_orphan, RetireLater::default()),
-        ]))
-        .await;
-        let _retired = RetiredForTest::new("codex", retired);
+        let legacy = 6_325_413_002u64;
+        let discord = MockDiscord::start_with(reclaim_answer()).await;
         let plan = ReclaimScanPlan {
-            frozen_panel_channels: vec![retired, legacy, race_frozen],
-            orphan_placeholder_channels: vec![retired, legacy, race_orphan],
+            frozen_panel_channels: vec![legacy],
+            orphan_placeholder_channels: vec![legacy],
             ..Default::default()
         };
         let boot = chrono::Utc::now().timestamp();
@@ -966,15 +924,8 @@ mod tests {
         }
 
         for pass in [ReclaimPass::FrozenPanels, ReclaimPass::OrphanPlaceholders] {
-            assert!(
-                !claimed(pass, retired),
-                "a retired channel is never claimed"
-            );
+            assert!(claimed(pass, legacy));
         }
-        assert!(discord.calls_for(retired).is_empty());
-        let read = |c: u64| format!("GET /api/v10/channels/{c}/messages");
-        assert_eq!(discord.calls_for(race_frozen), vec![read(race_frozen)]);
-        assert_eq!(discord.calls_for(race_orphan), vec![read(race_orphan)]);
         let legacy_calls = discord.calls_for(legacy);
         assert!(
             legacy_calls.iter().any(|c| c.starts_with("PATCH")),
@@ -987,9 +938,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_outer_sweep_builds_durable_plan_and_preserves_retired_channels() {
-        use super::super::health::legacy_supervision::RetiredForTest;
-        use super::super::health::legacy_supervision::test_support::{
+    async fn startup_outer_sweep_builds_durable_plan_and_keeps_linked_placeholders() {
+        use super::super::health::test_support::{
             MockDiscord, fingerprint, message_json, seed_backfill_row,
         };
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -998,10 +948,10 @@ mod tests {
             "AGENTDESK_ROOT_DIR",
             temp.path(),
         );
-        let (retired, legacy) = (6_325_513_001u64, 6_325_513_002u64);
+        let legacy = 6_325_513_002u64;
         let config_path = crate::runtime_layout::config_file_path(temp.path());
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        let agents: Vec<_> = [retired, legacy].into_iter().map(|channel| serde_json::json!({
+        let agents: Vec<_> = [legacy].into_iter().map(|channel| serde_json::json!({
             "id": format!("startup-{channel}"), "name": "startup test", "provider": "codex",
             "channels": {"codex": {"id": channel.to_string(), "name": format!("test-{channel}")}}
         })).collect();
@@ -1015,17 +965,11 @@ mod tests {
         .unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let boot = chrono::Utc::now().timestamp();
-        let paths: Vec<_> = [retired, legacy]
-            .into_iter()
-            .map(|channel| {
-                let (mut row, _) =
-                    row_with(channel, channel * 10 + 3, None, boot - 600, false, false);
-                row.provider = "codex".into();
-                seed_backfill_row(&row)
-            })
-            .collect();
-        let before: Vec<_> = paths.iter().map(|path| fingerprint(path)).collect();
-        let answer = reclaim_answer(Vec::new());
+        let (mut row, _) = row_with(legacy, legacy * 10 + 3, None, boot - 600, false, false);
+        row.provider = "codex".into();
+        let path = seed_backfill_row(&row);
+        let before = fingerprint(&path);
+        let answer = reclaim_answer();
         let discord = MockDiscord::start_with(Arc::new(move |method, path| {
             let (status, mut body) = answer(method, path)?;
             if let Some(page) = body.as_array_mut() {
@@ -1045,7 +989,6 @@ mod tests {
             Some((status, body))
         }))
         .await;
-        let _retired = RetiredForTest::new("codex", retired);
         for pass in [ReclaimPass::FrozenPanels, ReclaimPass::OrphanPlaceholders] {
             let report =
                 run_startup_reclaim_sweep(&discord.http, &shared, &ProviderKind::Codex, boot, pass)
@@ -1057,7 +1000,6 @@ mod tests {
                     assert_eq!(report.orphan_placeholders_deleted, 1)
                 }
             }
-            assert!(!claimed(pass, retired));
             assert!(claimed(pass, legacy));
             assert_eq!(
                 run_startup_reclaim_sweep(&discord.http, &shared, &ProviderKind::Codex, boot, pass)
@@ -1066,14 +1008,7 @@ mod tests {
                 "each pass retains its own one-shot claim"
             );
         }
-        assert!(discord.calls_for(retired).is_empty());
-        assert_eq!(
-            paths
-                .iter()
-                .map(|path| fingerprint(path))
-                .collect::<Vec<_>>(),
-            before
-        );
+        assert_eq!(fingerprint(&path), before);
         let calls = discord.calls_for(legacy);
         assert!(
             calls.iter().any(|call| call

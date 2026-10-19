@@ -1293,7 +1293,9 @@ async fn actual_partial_watcher_restore(root: PathBuf, marker: bool) {
         settings.allowed_channel_ids = vec![fx.codex.channel.get()];
     }
     let submitted =
-        crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(&fx.shared);
+        crate::services::discord::task_supervisor::watcher_spawn_observation::Scope::new(
+            &fx.shared,
+        );
     crate::services::discord::restore_tmux_watchers(&fx.http, &fx.shared).await;
     assert_eq!(
         submitted.submissions(),
@@ -1301,7 +1303,9 @@ async fn actual_partial_watcher_restore(root: PathBuf, marker: bool) {
         "actual restore must claim and spawn a watcher"
     );
     assert_eq!(
-        crate::services::discord::tmux::n4d2_entry_support::reader_start(fx.codex.channel.get()),
+        crate::services::discord::tmux::watcher_install_fixture::reader_start(
+            fx.codex.channel.get()
+        ),
         Some(boundary),
         "actual native constructor must start before the unsealed suffix"
     );

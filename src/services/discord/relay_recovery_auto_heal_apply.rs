@@ -48,35 +48,20 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    mut decision: RelayRecoveryDecision,
+    decision: RelayRecoveryDecision,
     now_ms: i64,
     source: RelayRecoveryApplySource,
     alert_enqueue: &dyn circuit_breaker::CircuitAlertEnqueue,
     apply_boundary: &dyn ReservedEpisodeApplyBoundary,
 ) -> RelayRecoveryResponse {
-    use crate::services::discord::input_runtime::fence;
-    let permit = match fence::effect::admit(provider, decision.channel_id) {
-        Ok(permit) => permit,
-        Err(failure) => {
-            if decision.auto_heal.eligible {
-                fence::record_failure(provider, decision.channel_id, &[], failure);
-                decision.auto_heal.eligible = false;
-                decision.auto_heal.skipped_reason = Some("input_fenced");
-            }
-            None
-        }
-    };
-    fence::effect::scope(
-        permit,
-        Box::pin(apply_admitted_relay_recovery_plan(
-            (registry, shared, provider),
-            decision,
-            now_ms,
-            source,
-            alert_enqueue,
-            apply_boundary,
-        )),
-    )
+    Box::pin(apply_admitted_relay_recovery_plan(
+        (registry, shared, provider),
+        decision,
+        now_ms,
+        source,
+        alert_enqueue,
+        apply_boundary,
+    ))
     .await
 }
 
@@ -268,7 +253,6 @@ async fn apply_admitted_relay_recovery_plan(
     let skipped_reason = match apply_result.status {
         "reattach_episode_changed" => Some("durable_reattach_confirmation_episode_changed"),
         "host_deferred" => Some("host_not_legacy_tmux"),
-        "legacy_retired" => Some("legacy_retired"),
         _ => None,
     };
     let skipped = skipped_reason.is_some();
@@ -334,7 +318,7 @@ fn settle_auto_heal_confirmation(
             // clears `consecutive_refunds` and the pending retry window, so
             // committing a repeating no-op reset the failure backoff on every
             // pass and the reattach loop could neither converge nor give up.
-            if matches!(apply_result.status, "host_deferred" | "legacy_retired") {
+            if apply_result.status == "host_deferred" {
                 // Nothing ran: the reservation goes back and the failure backoff stays as is.
                 cancel_unapplied_auto_heal_attempt(key);
             } else if matches!(
@@ -364,6 +348,8 @@ mod tests {
     };
     use super::*;
     use crate::services::provider::CancelToken;
+    use crate::services::session_host::test_support::InjectedLivenessGuard;
+    use crate::services::session_host::{HostLiveness, HostSessionRef};
 
     /// What `apply_rebind` reports when it reused a live same-session incumbent:
     /// nothing spawned, nothing replaced, no error.
@@ -472,30 +458,6 @@ mod tests {
             counters.consecutive_refunds, 1,
             "a no-transition reuse must register exactly one refund"
         );
-    }
-
-    #[tokio::test]
-    async fn retirement_returns_unapplied_reservation_without_resetting_refund_streak() {
-        let _guard = auto_heal_test_lock().lock().await;
-        clear_auto_heal_attempts_for_tests();
-        let key = auto_heal_key(
-            "codex",
-            6_325_420_300,
-            RelayRecoveryActionKind::ClearOrphanPendingToken,
-            RelayRecoveryApplySource::ProbeAutoHeal,
-        );
-        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 3), Ok(2));
-        refund_auto_heal_attempt(&key, 1_000);
-        assert_eq!(reserve_auto_heal_attempt(&key, 2_000, 3), Ok(2));
-        let mut result = reused_live_watcher_apply_result();
-        result.status = "legacy_retired";
-
-        settle_auto_heal_confirmation(&mut result, ReattachConfirmation::NotRequired, &key, 2_000);
-
-        assert!(!relay_recovery_status_counts_as_applied(result.status));
-        let counters = auto_heal_attempt_counters_for_tests(&key).expect("budget window");
-        assert_eq!(counters.attempts, 0);
-        assert_eq!(counters.consecutive_refunds, 1);
     }
 
     /// The other side of #5021: a reattach that really spawned a watcher still
@@ -1002,8 +964,8 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        // Match the established suite-wide lock order: auto-heal budget first,
-        // shared environment second. The inverse order deadlocks parallel tests.
+        // Take the auto-heal budget lock before the shared environment lock;
+        // the inverse order deadlocks parallel tests.
         let _guard = runtime.block_on(auto_heal_test_lock().lock());
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
@@ -1016,17 +978,13 @@ mod tests {
                 .register(provider.as_str().to_string(), shared.clone())
                 .await;
             let channel = ChannelId::new(4_423_301);
-            if !crate::services::platform::tmux::is_available() {
-                eprintln!("skipping manual apply after probe exhaustion: tmux unavailable");
-                return;
-            }
-
+            let tmux = format!("plain-shell-4423301-dead-{}", std::process::id());
+            // State producer death explicitly; a cold tmux socket is a probe failure.
+            let _dead =
+                InjectedLivenessGuard::set(HostSessionRef::tmux(&tmux), HostLiveness::DeadOrAbsent);
             start_turn(&shared, channel, 4_423_311)
                 .await
-                .bind_unmanaged_session_name(&format!(
-                    "plain-shell-4423301-dead-{}",
-                    std::process::id()
-                ));
+                .bind_unmanaged_session_name(&tmux);
             shared
                 .mailboxes
                 .handle(channel)
@@ -1067,9 +1025,10 @@ mod tests {
             )
             .await
             .expect("manual apply after probe exhaustion");
+            assert_eq!(manual.decision.evidence.tmux_alive, Some(false));
             assert!(
                 manual.applied,
-                "internal probe budget must never lock an operator"
+                "internal probe budget must never lock an operator: {manual:?}"
             );
         });
     }
