@@ -15,7 +15,7 @@ import re
 from typing import Any, Sequence
 
 from .tool_cards import is_tool_card, tool_card_body
-
+from .turn_summary import TURN_SUMMARY_PATTERN, is_turn_summary, turn_summary_body
 # Discord author ids:
 #   - Our driver uses the "명령봇" account to push prompts via /api/discord/send.
 #     We must exclude this id from the relay window so prompts are not counted
@@ -120,7 +120,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"진행 중"),
     _IDLE_RECAP_COMPLETION_PATTERN,
     _SESSION_PANEL_CHROME_PATTERN,
-    _COMPLETION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
     re.compile(r"세션 초기화"),
     re.compile(r"\[Stopped\]"),
 )
@@ -128,7 +128,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
     _IDLE_RECAP_COMPLETION_PATTERN,
-    _COMPLETION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
 )
 
 _SUPPRESSED_LABEL_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -208,7 +208,7 @@ def relay_body(message: dict[str, Any]) -> str | None:
             return None
         content = remainder[2:]
     body = _strip_relay_body_chrome(content)
-    return None if is_tool_card(body) else body
+    return None if is_tool_card(body) or is_turn_summary(body) else body
 
 
 def _is_completion_footer_head(line: str) -> bool:
@@ -875,7 +875,7 @@ def no_resume_prompt_chrome(window: Window) -> None:
     for message in _raw_assertion_messages(window):
         if not (message.get("author") or {}).get("bot"):
             continue
-        body = relay_body(message) or tool_card_body(message) or ""
+        body = relay_body(message) or tool_card_body(message) or turn_summary_body(message) or ""
         for chrome in _RESUME_PROMPT_CHROME:
             if chrome in body:
                 raise AssertionError(

@@ -21,6 +21,9 @@ pub mod round_trip;
 pub mod switch;
 mod tool_cards;
 mod tool_results;
+pub(crate) mod turn_summary;
+#[cfg(test)]
+mod turn_summary_tests;
 
 #[cfg(test)]
 mod tool_card_tests;

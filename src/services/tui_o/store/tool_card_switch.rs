@@ -111,7 +111,17 @@ impl ToolCardSwitch {
         channel: u64,
         global: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Arc<dyn Fn() -> bool + Send + Sync> {
-        let value = sender(root, channel).subscribe();
+        let preference = sender(root, channel);
+        let unreadable = preference.borrow().is_err();
+        if unreadable {
+            // Serialize recovery with writes so a reread cannot replace a newer toggle.
+            let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+            let still_unreadable = preference.borrow().is_err();
+            if still_unreadable {
+                let _ = preference.send_replace(read(root, channel));
+            }
+        }
+        let value = preference.subscribe();
         Arc::new(move || effective(global(), &value.borrow()))
     }
 }
@@ -143,3 +153,7 @@ pub(crate) fn set(root: &Path, channel: u64, enabled: bool, by: u64) -> Result<P
 #[cfg(test)]
 #[path = "tool_card_switch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tool_card_switch_recovery_tests.rs"]
+mod recovery_tests;

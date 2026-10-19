@@ -3,6 +3,8 @@
 
 pub use super::tool_cards::ToolCardInputs;
 use super::tool_cards::{ToolCardRun, ToolMeta};
+pub use super::turn_summary::SummaryInputs;
+use super::turn_summary::TurnSummaryRun;
 use crate::services::discord::formatting::split_for_shadow;
 use crate::services::tui_o::shadow::identity::{RecordFact, UnitContent, classify};
 use crate::services::tui_o::shadow::seal::{SealOutcome, SealRegistry};
@@ -51,6 +53,7 @@ pub struct UnitDeriver {
     provider: ShadowProvider,
     seals: SealRegistry,
     cards: Option<ToolCardRun>,
+    summary: Option<TurnSummaryRun>,
 }
 
 impl UnitDeriver {
@@ -61,12 +64,18 @@ impl UnitDeriver {
             provider,
             seals,
             cards: None,
+            summary: None,
         }
     }
 
     /// Delivery actors opt in; identity and fork-boundary scratch derivation stays unchanged.
     pub fn with_tool_cards(mut self, inputs: ToolCardInputs) -> Self {
         self.cards = Some(ToolCardRun::new(inputs));
+        self
+    }
+
+    pub fn with_turn_summary(mut self, inputs: SummaryInputs) -> Self {
+        self.summary = Some(TurnSummaryRun::new(self.provider, inputs));
         self
     }
 
@@ -83,6 +92,9 @@ impl UnitDeriver {
                 }];
             }
         };
+        if let Some(summary) = &mut self.summary {
+            summary.observe(&value);
+        }
         let mut tools = if let Some(cards) = &mut self.cards {
             cards.observe(&value);
             cards.tools(self.provider, &value).into_iter()
@@ -102,13 +114,12 @@ impl UnitDeriver {
                     };
                     let meta = (kind == UnitKind::Tool).then(|| tools.next()).flatten();
                     let failed = match self.provider {
-                        ShadowProvider::Claude => matches!(content, UnitContent::Payload(_)),
-                        ShadowProvider::Codex => {
-                            value
-                                .pointer("/payload/is_error")
-                                .or_else(|| value.pointer("/payload/isError"))
-                                == Some(&serde_json::Value::Bool(true))
-                        }
+                        ShadowProvider::Claude => Some(matches!(content, UnitContent::Payload(_))),
+                        ShadowProvider::Codex => value
+                            .pointer("/payload/is_error")
+                            .or_else(|| value.pointer("/payload/isError"))
+                            .and_then(serde_json::Value::as_bool)
+                            .filter(|failed| *failed),
                     };
                     out.extend(self.unit(unit_key, content, meta, failed));
                 }
@@ -122,12 +133,28 @@ impl UnitDeriver {
                         kind,
                     });
                 }
-                RecordFact::Prompt(..) | RecordFact::TurnStart(..) | RecordFact::Idle(..) => {
+                boundary @ (RecordFact::Prompt(..)
+                | RecordFact::TurnStart(..)
+                | RecordFact::Idle(..)) => {
                     if let Some(cards) = &mut self.cards {
                         out.extend(cards.close());
                     }
+                    if let Some(summary) = &mut self.summary {
+                        match boundary {
+                            RecordFact::Prompt(true, _) => summary.prompt(&value),
+                            RecordFact::TurnStart(id) => summary.start(&value, id),
+                            RecordFact::Idle(id) => {
+                                out.extend(summary.close(&value, id.as_deref()))
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                RecordFact::Assistant => {}
+                RecordFact::Assistant => {
+                    if let Some(summary) = &mut self.summary {
+                        summary.assistant(&value);
+                    }
+                }
             }
         }
         out
@@ -165,7 +192,7 @@ impl UnitDeriver {
         unit_key: UnitKey,
         content: UnitContent,
         meta: Option<ToolMeta>,
-        failed: bool,
+        failed: Option<bool>,
     ) -> Vec<Derived> {
         if self.cards.is_some()
             && unit_key.kind == UnitKind::Tool
@@ -187,25 +214,34 @@ impl UnitDeriver {
                 return vec![Derived::Blocked { reason }];
             }
         }
+        let mut out = self
+            .summary
+            .as_mut()
+            .map(|summary| summary.first(&unit_key))
+            .unwrap_or_default();
         // Card actors record membership now; identity-only derivation keeps panel dispositions.
         if unit_key.kind == UnitKind::Tool {
             if let (Some(cards), Some(meta)) = (&mut self.cards, meta) {
-                return cards.tool(unit_key, meta);
+                out.extend(cards.tool(unit_key, meta));
+                return out;
             }
             let reason = TOOL_CALL_PANEL.into();
-            return vec![Derived::Excluded { unit_key, reason }];
+            out.push(Derived::Excluded { unit_key, reason });
+            return out;
         }
         // Keep the native identity and original seal above for replay and fork comparisons.
         if unit_key.kind == UnitKind::ToolResult {
             let reason = TOOL_RESULT_INTERNAL.into();
             let id = unit_key.native_key.clone();
-            let mut out = vec![Derived::Excluded { unit_key, reason }];
+            out.push(Derived::Excluded { unit_key, reason });
             if let Some(cards) = &mut self.cards {
-                out.extend(cards.result(&id, failed));
+                out.extend(match failed {
+                    Some(failed) => cards.result(&id, failed),
+                    None => cards.result_unknown(&id),
+                });
             }
             return out;
         }
-        let mut out = Vec::new();
         if matches!(planned, UnitPlan::Pieces(_))
             && let Some(cards) = &mut self.cards
         {

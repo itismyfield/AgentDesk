@@ -95,7 +95,7 @@ async fn codex_body_and_idle_cards_flow_through_real_owed_origin_and_exact_permi
         assert_eq!(piece.unit_key.provider, ShadowProvider::Codex);
         assert_eq!(piece.unit_key.kind, UnitKind::Tool);
         assert!(piece.payload.starts_with("-# ▸ "));
-        assert!(piece.payload.ends_with('✓'));
+        assert!(piece.payload.ends_with('·'));
         assert!(!piece.payload.contains("PRIVATE_CODEX_RESULT"));
         assert_eq!(queued.source, verified.a);
         assert!(queued.range.start >= span.start && queued.range.end <= span.end.unwrap());

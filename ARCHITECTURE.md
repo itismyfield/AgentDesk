@@ -2839,6 +2839,7 @@ src/
 │   │   │   ├── spool.rs
 │   │   │   ├── spool_transition_tests.rs
 │   │   │   ├── tool_card_switch.rs
+│   │   │   ├── tool_card_switch_recovery_tests.rs
 │   │   │   └── tool_card_switch_tests.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
@@ -2961,7 +2962,9 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_card_actor_replay_tests.rs
 │   │   │   ├── tool_card_actor_tests.rs
+│   │   │   ├── tool_card_codex_result_tests.rs
 │   │   │   ├── tool_card_codex_tests.rs
 │   │   │   ├── tool_card_fork_tests.rs
 │   │   │   ├── tool_card_known_tests.rs
@@ -2984,6 +2987,11 @@ src/
 │   │   │   ├── transition_route_tests.rs
 │   │   │   ├── transition_scope.rs
 │   │   │   ├── transition_scope_tests.rs
+│   │   │   ├── turn_summary.rs
+│   │   │   ├── turn_summary_actor_tests.rs
+│   │   │   ├── turn_summary_codex_verified_tests.rs
+│   │   │   ├── turn_summary_replay_tests.rs
+│   │   │   ├── turn_summary_tests.rs
 │   │   │   ├── unpinned_past_tests.rs
 │   │   │   ├── verified_delivery_tests.rs
 │   │   │   └── writer_tests.rs
@@ -3232,6 +3240,8 @@ src/
 │   ├── turn_host_tests.rs
 │   ├── turn_lifecycle.rs
 │   ├── turn_orchestrator.rs
+│   ├── turn_summary_line.rs
+│   ├── turn_summary_line_tests.rs
 │   ├── voice_conductor.rs
 │   └── writer_protocol.rs
 ├── supervisor/

@@ -1,6 +1,10 @@
 use super::*;
 use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
+#[path = "tool_card_actor_replay_tests.rs"]
+mod replay;
+#[path = "turn_summary_actor_tests.rs"]
+mod summaries;
 
 fn native(value: serde_json::Value) -> Vec<u8> {
     format!("{value}\n").into_bytes()
@@ -38,7 +42,7 @@ fn native_records(provider: ShadowProvider) -> (Vec<Vec<u8>>, &'static str) {
                 }})),
                 native(serde_json::json!({"type":"response_item", "payload":{
                     "type":"function_call_output", "call_id":"tool-call",
-                    "is_error":false, "output":"PRIVATE_TOOL_RESULT",
+                    "output":"PRIVATE_TOOL_RESULT",
                 }})),
                 native(serde_json::json!({"type":"response_item", "payload":{
                     "type":"message", "role":"assistant", "id":"m-body",
@@ -90,21 +94,36 @@ async fn default_actor_posts_card_before_body(provider: ShadowProvider, channel:
     for record in records {
         append(&path, &record);
     }
+    let expected = if provider == ShadowProvider::Codex {
+        3
+    } else {
+        2
+    };
     for _ in 0..10 {
         polls(1).await;
-        if harness.port.posts().len() >= 2 || task.is_finished() {
+        if harness.port.posts().len() >= expected || task.is_finished() {
             break;
         }
     }
     let posts = harness.port.posts();
     assert_eq!(
         posts.len(),
-        2,
+        expected,
         "{provider:?}: {posts:?}; {:?}",
         harness.alarms.taken()
     );
-    assert_eq!(posts[0], "-# ▸ Bash  cargo check  ✓");
+    assert_eq!(
+        posts[0],
+        if provider == ShadowProvider::Codex {
+            "-# ▸ Bash  cargo check  ·"
+        } else {
+            "-# ▸ Bash  cargo check  ✓"
+        }
+    );
     assert_eq!(posts[1], "answer");
+    if provider == ShadowProvider::Codex {
+        assert_eq!(posts[2], "-# ✅ 완료");
+    }
     assert!(
         !posts
             .iter()
@@ -112,7 +131,7 @@ async fn default_actor_posts_card_before_body(provider: ShadowProvider, channel:
     );
     assert_eq!(
         *harness.port.prepared_before_post.lock().unwrap(),
-        [true, true]
+        vec![true; expected]
     );
     halt(stop, task).await;
     let store = harness.channel();
@@ -131,7 +150,7 @@ async fn default_actor_posts_card_before_body(provider: ShadowProvider, channel:
         ..native_tool
     };
     let ledger = store.ledger();
-    assert_eq!(ledger.next_serial(), 2);
+    assert_eq!(ledger.next_serial(), expected as u64);
     assert_eq!(ledger.piece(0).unwrap().unit_key, card_key);
     assert_eq!(ledger.piece(0).unwrap().payload, posts[0]);
     assert!(matches!(

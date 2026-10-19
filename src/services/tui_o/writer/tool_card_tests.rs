@@ -263,7 +263,7 @@ fn codex_native_call_id_results_and_error_alias_are_supported() {
     let posted = pieces(&closed);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].0, "s#card");
-    assert!(posted[0].1.contains("Bash  cargo test  ✓"));
+    assert!(posted[0].1.contains("Bash  cargo test  ·"));
     assert!(
         posted[0].1.contains("Edit  src/a.rs (+1 −0)  ✗"),
         "{}",

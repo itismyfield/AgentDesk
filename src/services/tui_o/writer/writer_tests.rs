@@ -929,6 +929,8 @@ pub(crate) mod codex_herdr_drive;
 mod operator_resume;
 #[path = "tool_result_tests.rs"]
 mod tool_result_tests;
+#[path = "turn_summary_replay_tests.rs"]
+mod turn_summary_replay;
 
 #[path = "deliver_home_tests.rs"]
 mod deliver_home;

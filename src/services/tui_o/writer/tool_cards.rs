@@ -122,8 +122,16 @@ impl ToolCardRun {
     }
 
     pub(super) fn result(&mut self, id: &str, failed: bool) -> Vec<Derived> {
+        self.resolve(id, if failed { '✗' } else { '✓' })
+    }
+
+    pub(super) fn result_unknown(&mut self, id: &str) -> Vec<Derived> {
+        self.resolve(id, '·')
+    }
+
+    fn resolve(&mut self, id: &str, status: char) -> Vec<Derived> {
         if let Some(row) = self.rows.iter_mut().find(|row| row.meta.id == id) {
-            row.status = if failed { '✗' } else { '✓' };
+            row.status = status;
         }
         if self.rows.len() >= 8 && self.rows.iter().all(|row| row.status != '?') {
             self.close()
@@ -164,10 +172,10 @@ fn render<'a>(rows: impl Iterator<Item = &'a Row>, summaries: bool) -> String {
     let mut at = 0;
     while let Some(row) = rows.get(at) {
         let mut count = 1;
-        if row.status == '✓' {
+        if matches!(row.status, '✓' | '·') {
             while rows
                 .get(at + count)
-                .is_some_and(|next| next.status == '✓' && next.meta.label == row.meta.label)
+                .is_some_and(|next| next.status == row.status && next.meta.label == row.meta.label)
             {
                 count += 1;
             }
@@ -195,3 +203,7 @@ fn render<'a>(rows: impl Iterator<Item = &'a Row>, summaries: bool) -> String {
 #[cfg(test)]
 #[path = "tool_card_known_tests.rs"]
 mod known_tests;
+
+#[cfg(test)]
+#[path = "tool_card_codex_result_tests.rs"]
+mod codex_result_tests;

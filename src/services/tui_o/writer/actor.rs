@@ -262,7 +262,15 @@ where
             channel,
         ),
     };
-    let deriver = UnitDeriver::new(channel, provider).with_tool_cards(inputs);
+    let summary = super::pieces::SummaryInputs {
+        turn_marks: ledger.summary_turn_marks(),
+        disposed: ledger.disposed_unit_hashes(),
+        context_window: (provider == ShadowProvider::Claude)
+            .then(|| crate::services::provider::ProviderKind::Claude.resolve_context_window(None)),
+    };
+    let deriver = UnitDeriver::new(channel, provider)
+        .with_tool_cards(inputs)
+        .with_turn_summary(summary);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);

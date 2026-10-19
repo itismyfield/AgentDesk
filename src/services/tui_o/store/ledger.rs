@@ -222,6 +222,28 @@ impl LedgerState {
             .collect()
     }
 
+    pub fn summary_turn_marks(&self) -> std::collections::BTreeSet<String> {
+        self.excluded
+            .iter()
+            .filter(|(_, reason)| reason.as_str() == "turn_summary_open")
+            .map(|(key, _)| key.native_key.clone())
+            .collect()
+    }
+
+    pub fn disposed_unit_hashes(&self) -> std::collections::BTreeSet<u64> {
+        self.excluded
+            .keys()
+            .chain(self.latest.keys().map(|(key, _)| key))
+            .filter(|key| {
+                matches!(
+                    key.kind,
+                    super::super::shadow::UnitKind::Body | super::super::shadow::UnitKind::Tool
+                )
+            })
+            .map(crate::services::tui_o::writer::turn_summary::unit_hash)
+            .collect()
+    }
+
     pub fn approval(&self, rejected_serial: u64) -> Option<&ResumeApproval> {
         self.approvals.get(&rejected_serial)
     }

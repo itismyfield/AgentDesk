@@ -4,6 +4,8 @@
 mod tool_card_provenance;
 #[path = "tool_card_codex_tests.rs"]
 mod tool_cards;
+#[path = "turn_summary_codex_verified_tests.rs"]
+mod turn_summaries;
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
