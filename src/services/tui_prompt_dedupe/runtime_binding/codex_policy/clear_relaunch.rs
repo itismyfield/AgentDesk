@@ -150,7 +150,8 @@ pub(crate) fn launch_blocked_observed(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
 ) -> bool {
-    absent_capture(tmux, observation).is_none() && launch_blocked(tmux)
+    tc::with_tmux_source_authority(tmux, absence_custody_pending_under)
+        || (absent_capture(tmux, observation).is_none() && launch_blocked(tmux))
 }
 
 pub(crate) fn absent_capture(
@@ -167,7 +168,21 @@ pub(crate) fn absent_matches(
     observation: &crate::services::discord::codex_absence::InflightObs,
     captured: &Captured,
 ) -> bool {
-    absent_capture(tmux, observation).as_ref() == Some(captured)
+    tc::with_tmux_source_authority(tmux, |authority| {
+        absent_matches_under(authority, observation, captured)
+    })
+}
+
+pub(crate) fn absent_matches_under(
+    authority: &TmuxSourceAuthority<'_>,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+    captured: &Captured,
+) -> bool {
+    absent_open::capture_under(authority, observation).as_ref() == Some(captured)
+}
+
+pub(super) fn absence_custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool {
+    !open_under(authority) && absent_open::custody_pending_under(authority)
 }
 
 pub(super) fn successor_unproved_under(

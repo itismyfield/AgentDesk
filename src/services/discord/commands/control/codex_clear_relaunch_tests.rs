@@ -36,7 +36,7 @@ const AFTER_CLEAR: &str = "first instruction after clear";
 pub(in crate::services::discord) const NEW_NATIVE_ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 const TEST_BOT: &str = "e51-isolated-test-bot";
 
-mod absent_launch_tests;
+pub(in crate::services::discord) mod absent_launch_tests;
 
 struct SourceMode(Option<CodexSourceMode>);
 

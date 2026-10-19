@@ -319,6 +319,80 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) mod custody_test_adapter {
+    use super::*;
+
+    pub(in crate::services::discord) async fn retain(
+        local: &InflightTurnState,
+        admitted: &CodexRange,
+    ) -> Result<String, String> {
+        let provider = local.provider_kind().ok_or("custody provider")?;
+        let notice = admitted
+            .result
+            .trim()
+            .is_empty()
+            .then(|| empty_response_recovery::empty_response_guidance(false));
+        match preserve_or_publish(Handoff {
+            provider: &provider,
+            local,
+            admitted: Some(admitted),
+            content: &admitted.result,
+            delivery_body: None,
+            empty_recovery_notice: notice,
+            response_sent_offset: 0,
+            channel_id: ChannelId::new(local.channel_id),
+            old_anchor: MessageId::new(local.current_msg_id),
+            watcher_owner_channel_id: ChannelId::new(local.delivery_record_owner_channel_id()),
+            tmux_last_offset: Some(admitted.complete_record_end()),
+            cancelled: false,
+            cancel_source: String::new(),
+            children: &[],
+            dispatch_id: None,
+            adk_cwd: None,
+            should_complete: false,
+            should_fail: false,
+            resume_failure: false,
+            recovery_retry: false,
+        })
+        .await
+        {
+            Outcome::Deferred { key } => Ok(key),
+            Outcome::Unresolved { error } => Err(error),
+        }
+    }
+
+    pub(in crate::services::discord) async fn resume(
+        shared: &Arc<SharedData>,
+        http: &Arc<serenity::Http>,
+    ) -> Result<usize, String> {
+        crate::services::discord::terminal_delivery_custody::drain_for_test(
+            |mut payload, checkpoint| {
+                let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                    http.clone(),
+                    shared.clone(),
+                    ProviderKind::Codex,
+                    None,
+                );
+                async move {
+                    let result =
+                        resume_payload_with_gateway(shared, &gateway, &mut payload, &checkpoint)
+                            .await;
+                    (payload, result)
+                }
+            },
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreadable_retained_custody_keeps_restored_head_pg() {
+        crate::services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::unreadable_retained_custody_case(
+            concat!(module_path!(), "::unreadable_retained_custody_keeps_restored_head_pg"),
+        ).await;
+    }
+}
+
 pub(in crate::services::discord) async fn resume(
     registry: &crate::services::discord::health::HealthRegistry,
     payload: &mut serde_json::Value,

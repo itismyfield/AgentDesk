@@ -204,13 +204,6 @@ pub(super) fn execute_observed(
         }
     }
 
-    if captured.as_ref().is_some_and(|captured| {
-        !observation.is_some_and(|observed| {
-            clear_relaunch::absent_matches(tmux_session_name, observed, captured)
-        })
-    }) {
-        return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
-    }
     tui_session_launch::tui_preflight_with_policy(
         tmux_session_name,
         report_channel_id,
@@ -229,13 +222,32 @@ pub(super) fn execute_observed(
         );
     }
 
-    #[cfg(test)]
-    actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "session_temp");
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
-    #[cfg(test)]
-    actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "codex_session_files");
-    crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
-        .cleanup_best_effort();
+    let cleaned =
+        crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+            if captured.as_ref().is_some_and(|captured| {
+                !observation.is_some_and(|observed| {
+                    clear_relaunch::absent_matches_under(authority, observed, captured)
+                })
+            }) {
+                return false;
+            }
+            #[cfg(test)]
+            actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "session_temp");
+            crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(
+                authority,
+                tmux_session_name,
+            );
+            #[cfg(test)]
+            actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "codex_session_files");
+            crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(
+                tmux_session_name,
+            )
+            .cleanup_best_effort();
+            true
+        });
+    if !cleaned {
+        return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
+    }
 
     let prepared = match prepared {
         Some(prepared) => prepared,

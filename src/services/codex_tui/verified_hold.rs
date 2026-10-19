@@ -34,6 +34,7 @@ pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> 
     }
     tracing::info!(
         tmux_session = tmux,
+        reason = dedupe::codex_verified_hold_detail(tmux),
         "Codex verified turn is waiting for admission; preserving its source and pane"
     );
     while !cancel_requested(cancel.map(Arc::as_ref)) {

@@ -15,11 +15,25 @@ pub(super) fn capture_under(
     authority: &TmuxSourceAuthority<'_>,
     observation: &InflightObs,
 ) -> Option<Captured> {
+    let captured = candidate_under(authority)?;
+    (observation.recheck(CANARY_CHANNEL, authority.session())
+        && crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(
+            &captured,
+        ))
+    .then_some(captured)
+}
+
+pub(super) fn custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool {
+    candidate_under(authority).is_some_and(|captured| {
+        !crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(&captured)
+    })
+}
+
+fn candidate_under(authority: &TmuxSourceAuthority<'_>) -> Option<Captured> {
     let captured = capture_pin(authority).ok()??;
     let tmux = authority.session();
     if !local_context(&captured.context, tmux)
         || crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(CANARY_CHANNEL))
-        || !observation.recheck(CANARY_CHANNEL, tmux)
         || !runtime_markers_match(tmux)
         || !target_absent(tmux)
     {

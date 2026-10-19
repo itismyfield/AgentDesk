@@ -987,11 +987,10 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     resume_pin_tests::observe_bridge_completion(probe_channel, _bridge_task);
 }
 
-#[cfg(test)]
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
-
+#[cfg(test)]
+pub(in crate::services::discord) use terminal_outcome_delivery::custody_test_adapter;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod resume_pin_tests;
-
 pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_terminal_custody;

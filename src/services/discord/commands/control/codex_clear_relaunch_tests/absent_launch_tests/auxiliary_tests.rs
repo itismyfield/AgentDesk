@@ -63,7 +63,7 @@ pub(super) async fn restore_instructions(
     identities
 }
 
-async fn queue_identities(fixture: &CanaryFixture) -> Vec<QueueIdentity> {
+pub(super) async fn queue_identities(fixture: &CanaryFixture) -> Vec<QueueIdentity> {
     fixture
         .shared
         .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
@@ -186,7 +186,7 @@ pub(super) async fn kickoff(
     .started
 }
 
-async fn wait_context_after(fixture: &CanaryFixture, previous: &str) -> BindingContext {
+pub(super) async fn wait_context_after(fixture: &CanaryFixture, previous: &str) -> BindingContext {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Ok(path) = fs::read_to_string(fixture.root.path().join("fresh-context")) {
@@ -206,7 +206,7 @@ async fn wait_context_after(fixture: &CanaryFixture, previous: &str) -> BindingC
     .expect("the actual CLI did not publish a different launch nonce")
 }
 
-fn publish_named_source(
+pub(super) fn publish_named_source(
     fixture: &CanaryFixture,
     context: &BindingContext,
     native: &str,
@@ -250,7 +250,7 @@ fn publish_named(fixture: &CanaryFixture, context: &BindingContext, native: &str
     terminal(&path, "new-clear-turn", "clear relaunch completed");
 }
 
-fn terminal(path: &std::path::Path, turn: &str, text: &str) {
+pub(super) fn terminal(path: &std::path::Path, turn: &str, text: &str) {
     let mut output = fs::OpenOptions::new().append(true).open(path).unwrap();
     for row in [
         json!({"type":"response_item","payload":{"type":"message","role":"assistant",
@@ -268,7 +268,7 @@ fn terminal(path: &std::path::Path, turn: &str, text: &str) {
     );
 }
 
-async fn wait_completion(token: &Arc<CancelToken>) {
+pub(super) async fn wait_completion(token: &Arc<CancelToken>) {
     let complete = tokio::time::timeout(Duration::from_secs(15), async {
         while !token.is_completion_cleanup() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -363,7 +363,7 @@ fn warm_draft(prompt: &str) -> String {
     pane
 }
 
-fn warm_probe(
+pub(super) fn warm_probe(
     context: &BindingContext,
     accepted: Arc<Mutex<Vec<String>>>,
     calls: Arc<Mutex<Vec<String>>>,
@@ -711,12 +711,218 @@ async fn full_fifo(recover: Option<bool>) {
     }
 }
 
+async fn recovery_diagnostic(
+    fixture: &CanaryFixture,
+    n2: &BindingContext,
+    boot: bool,
+    stage: &str,
+    readiness: Option<bool>,
+) {
+    let channel = serenity::ChannelId::new(CANARY_CHANNEL);
+    let snapshot = fixture.shared.mailbox(channel).snapshot().await;
+    let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+        &ProviderKind::Codex,
+        CANARY_CHANNEL,
+    )
+    .map(|row| {
+        row.map(|row| {
+            json!({
+                "provider":row.provider, "channel":row.channel_id, "tmux":row.tmux_session_name,
+                "session":row.session_id, "nonce":row.turn_nonce,
+                "message":row.user_msg_id, "owner":row.request_owner_user_id,
+                "runtime":format!("{:?}", row.runtime_kind),
+            })
+        })
+    });
+    let durable_pending =
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            channel,
+        )
+        .map(|marker| {
+            marker.map(|(item, override_channel)| (QueueIdentity::of(&item), override_channel))
+        });
+    let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+        &ProviderKind::Codex,
+        &fixture.shared.token_hash,
+        channel,
+    )
+    .map(|(items, _)| items.iter().map(QueueIdentity::of).collect::<Vec<_>>());
+    let turn_state = snapshot.cancel_token.as_ref().map(|cancel| {
+        (
+            cancel.cancelled.load(Ordering::SeqCst),
+            cancel.is_completion_cleanup(),
+            cancel.cancel_source(),
+        )
+    });
+    let activity = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let unbound =
+        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
+            .await;
+    let observation =
+        crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX);
+    let observed_capture = observation
+        .as_ref()
+        .and_then(|observation| dedupe::clear_relaunch::absent_capture(CANARY_TMUX, observation))
+        .map(|captured| (captured.seq, captured.nonce));
+    let capture = dedupe::clear_relaunch::capture(CANARY_TMUX)
+        .map(|captured| captured.map(|captured| (captured.seq, captured.nonce)));
+    let context = dedupe::binding_context::execution_context("codex", &n2.execution_nonce)
+        .map(|context| json!({
+            "provider":context.provider, "channel":context.channel_id, "tmux":context.tmux_session,
+            "nonce":context.execution_nonce, "host":context.host, "runtime":context.owner_runtime_root,
+            "policy":context.source_policy, "expected_native":context.expected_native_session_id,
+            "launch_mode":context.launch_mode,
+        }));
+    let binding = dedupe::runtime_binding_for_tmux_session(CANARY_TMUX).map(|binding| {
+        (
+            binding.runtime_kind,
+            binding.session_id,
+            binding.output_path,
+            binding.last_offset,
+        )
+    });
+    let core = fixture
+        .shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get(&channel)
+        .map(|session| {
+            (
+                session.current_path.clone(),
+                session.session_id.clone(),
+                session.channel_name.clone(),
+            )
+        });
+    let marker =
+        fs::read(crate::services::tmux_common::session_temp_path(
+            CANARY_TMUX,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        ))
+        .map(|bytes| {
+            serde_json::from_slice::<serde_json::Value>(&bytes).map(|marker| json!({
+        "session":marker["session_id"], "path":marker["rollout_path"],
+        "nonce":marker["codex_ownership"]["execution_nonce"],
+        "proof_seq":marker["codex_ownership"]["proof_seq"],
+        "dev":marker["codex_ownership"]["dev"], "ino":marker["codex_ownership"]["ino"],
+    })).map_err(|error| error.to_string())
+        })
+        .map_err(|error| error.to_string());
+    let fold = p5::codex::read_ownership(n2)
+        .map(|fold| {
+            (
+                fold.verified.map(|proof| {
+                    (
+                        proof.seq,
+                        proof.source.session_id,
+                        proof.source.dev,
+                        proof.source.ino,
+                    )
+                }),
+                fold.pending.len(),
+                fold.conflicted,
+            )
+        })
+        .map_err(|error| error.to_string());
+    let host_deferred = crate::services::discord::host_defer_gate::channel_session_deferred(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        CANARY_CHANNEL,
+        CANARY_TMUX,
+    )
+    .await;
+    let park = fixture.shared.queue_park_ledger.project(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        &snapshot,
+    );
+    eprintln!(
+        "B1_Q3_CUSTODY boot={boot} stage={stage} turn_state={turn_state:?} active=({:?},{:?},{:?}) pending={:?} pending_sources={:?} lease_caller={} pending_since={:?} recovery={:?} queue={:?} durable_pending={durable_pending:?} disk={disk:?} row={row:?}",
+        snapshot.active_turn_nonce,
+        snapshot.active_request_owner,
+        snapshot.active_user_message_id,
+        snapshot.pending_user_dispatch,
+        snapshot.pending_user_dispatch_source_ids,
+        snapshot.pending_user_dispatch_lease_held_by_caller,
+        snapshot.pending_user_dispatch_since,
+        snapshot.recovery_started_at,
+        snapshot
+            .intervention_queue
+            .iter()
+            .map(QueueIdentity::of)
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "B1_Q3_GATES boot={boot} stage={stage} readiness={readiness:?} activity={activity:?} unbound={unbound:?} observation={} observed_capture={observed_capture:?} capture={capture:?} nonce={:?} marker={marker:?} fold={fold:?} core={core:?} binding={binding:?} host_deferred={host_deferred} hold_detail={} park={park:?} presence={:?} pane={:?} process_pid={:?} context={context:?}",
+        observation.is_some(),
+        dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
+        dedupe::codex_verified_hold_detail(CANARY_TMUX),
+        crate::services::platform::tmux::session_presence(CANARY_TMUX),
+        crate::services::platform::tmux::pane_liveness(CANARY_TMUX),
+        crate::services::session_backend::process_session_pid(CANARY_TMUX)
+    );
+}
+
+async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingContext, boot: bool) {
+    recovery_diagnostic(fixture, n2, boot, "before_settle", None).await;
+    let channel = serenity::ChannelId::new(CANARY_CHANNEL);
+    let settled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = fixture.shared.mailbox(channel).snapshot().await;
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+            );
+            let pending =
+                crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+                    &ProviderKind::Codex,
+                    &fixture.shared.token_hash,
+                    channel,
+                );
+            if snapshot.cancel_token.is_none()
+                && snapshot.active_turn_nonce.is_none()
+                && snapshot.pending_user_dispatch.is_none()
+                && !snapshot.pending_user_dispatch_lease_held_by_caller
+                && snapshot.recovery_started_at.is_none()
+                && matches!(row, Ok(None))
+                && matches!(pending, Ok(None))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    recovery_diagnostic(
+        fixture,
+        n2,
+        boot,
+        if settled {
+            "after_settle"
+        } else {
+            "settle_timeout"
+        },
+        None,
+    )
+    .await;
+    assert!(
+        settled,
+        "warm Q2 custody must settle naturally before restoring Q3; no custody was removed"
+    );
+}
+
 async fn recover_actual_n2(
     fixture: &mut CanaryFixture,
     api: &crate::services::discord::admin_host_guard::tests::Recorder,
     n2: &BindingContext,
     boot: bool,
 ) {
+    wait_recovery_custody_settled(fixture, n2, boot).await;
     fixture
         .shared
         .tmux_watchers
@@ -754,13 +960,22 @@ async fn recover_actual_n2(
         restore_instructions(fixture, vec![instruction(CANARY_CHANNEL + 103, Q3)]).await;
     fixture.fake.take_calls();
     crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
+    let readiness = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        serenity::ChannelId::new(CANARY_CHANNEL),
+    )
+    .await;
+    recovery_diagnostic(
+        fixture,
+        n2,
+        boot,
+        "q3_before_readiness_assert",
+        Some(readiness),
+    )
+    .await;
     assert!(
-        !crate::services::discord::router::hosted_tui_promote_readiness_blocked(
-            &fixture.shared,
-            &ProviderKind::Codex,
-            serenity::ChannelId::new(CANARY_CHANNEL),
-        )
-        .await,
+        !readiness,
         "boot={boot}: a restored Q3 must pass the real readiness boundary without another clear"
     );
     let (hold_tx, hold_rx) = mpsc::channel();
@@ -768,11 +983,11 @@ async fn recover_actual_n2(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = Some(hold_tx);
     let _hold_reset = HoldHookReset;
-    assert!(
-        kickoff(fixture, api).await,
-        "boot={boot}; source={:?}",
-        identities[0]
-    );
+    let started = kickoff(fixture, api).await;
+    if !started {
+        recovery_diagnostic(fixture, n2, boot, "q3_kickoff_no_start", Some(readiness)).await;
+    }
+    assert!(started, "boot={boot}; source={:?}", identities[0]);
     let third = fixture.turn_failure_guard().await;
     let held = async {
         loop {
