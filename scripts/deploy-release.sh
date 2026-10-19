@@ -136,6 +136,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+. "$SCRIPT_DIR/_deploy_policy_generation.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
@@ -1167,7 +1168,7 @@ print("|".join(ids))
     echo "▸ Pre-existing reader-count alarms (non-blocking after deploy): ${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-none}"
 }
 
-# #3858: restore the last-known-good release binary and restart the service.
+# Restore the last-known-good release binary and its policies, then restart.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
 # promotion, not only the explicit health-check branch (an unguarded
@@ -1200,7 +1201,7 @@ _rollback_release_binary() {
         echo "   turning a one-node deploy failure into a cluster-wide outage."
         echo ""
         echo "   FAIL-FORWARD: leaving the NEW binary live (it is what is currently running under"
-        echo "   launchd). The rollback backup at $rel_backup is preserved for manual use."
+        echo "   launchd). The rollback backups $rel_backup and ${ADK_REL:-}/policies.prev are kept for manual use."
         echo ""
         echo "   MANUAL INTERVENTION REQUIRED:"
         echo "     1. Check whether the new binary is actually serving:"
@@ -1253,6 +1254,7 @@ _rollback_release_binary() {
         echo "✗ Rollback stop was not confirmed — backup preserved; manual intervention required" >&2
         return 0
     fi
+    _restore_policy_generation "$ADK_REL"
     # The bad binary is never locked (uchg is deferred to the success path), so
     # nouchg here is defensive. mv is an atomic same-dir rename: the backup
     # replaces the bad binary in one step — at no instant are both copies gone.
@@ -3320,6 +3322,7 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
+_arm_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 if [ -f "$REL_BINARY_BACKUP" ]; then
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
     # .prev means a PRIOR deploy failed before its success-path cleanup, so it
@@ -3399,11 +3402,8 @@ rm -rf "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
 
-rm -rf "$ADK_REL/policies.old"
-[ -d "$ADK_REL/policies" ] && mv "$ADK_REL/policies" "$ADK_REL/policies.old"
-mv "$POLICIES_STAGED" "$ADK_REL/policies"
+_swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
 POLICIES_STAGED=""
-rm -rf "$ADK_REL/policies.old"
 
 # #3288: self-heal policies.dir config drift. The release runtime must load
 # policies from the deployed snapshot ($ADK_REL/policies, staged above from the
@@ -3640,9 +3640,9 @@ fi
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
-# #3858 (re-review finding 1): also drop any stray atomic-backup temp so an
-# interrupted prior backup copy never lingers in bin/.
+# Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
+_drop_policy_generation_backup "$ADK_REL"
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"
