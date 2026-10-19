@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-10-19T08:39:50Z",
+  "refreshed_at": "2026-10-19T09:16:44Z",
   "ratchets": {
-    "closed_deadline_entries": 72,
+    "closed_deadline_entries": 69,
     "transition_list_entries": 74
   },
   "issues": [
@@ -167,6 +167,19 @@
       ],
       "files": [
         "src/services/discord/commands/text_commands.rs"
+      ]
+    },
+    {
+      "number": 7160,
+      "state": "open",
+      "title": "decompose: discord/mod.rs·headless_turn.rs·discord_config_audit.rs giant owner (#4712 승계)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/mod.rs",
+        "src/services/discord/router/message_handler/headless_turn.rs",
+        "src/services/discord_config_audit.rs"
       ]
     }
   ]

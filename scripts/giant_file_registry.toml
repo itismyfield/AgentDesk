@@ -467,21 +467,21 @@ file = "src/services/discord/mod.rs"
 decision = "shrink"
 owner = "discord-relay"
 deadline = "2027-01-31"
-decompose_issue = "#4712"
+decompose_issue = "#7160"
 
 [[entry]]
 file = "src/services/discord/router/message_handler/headless_turn.rs"
 decision = "shrink"
 owner = "discord-relay"
 deadline = "2027-01-31"
-decompose_issue = "#4712"
+decompose_issue = "#7160"
 
 [[entry]]
 file = "src/services/discord_config_audit.rs"
 decision = "shrink"
 owner = "discord-relay"
 deadline = "2027-01-31"
-decompose_issue = "#4712"
+decompose_issue = "#7160"
 
 [[entry]]
 file = "src/services/dispatched_sessions.rs"
