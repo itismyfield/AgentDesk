@@ -782,7 +782,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(5_464_341);
     let user_msg_id = 5_464_342;
-    let panel_msg_id = MessageId::new(9_100_000_000_000_000_341);
+    let panel_msg_id = MessageId::new(5_464_346);
     let successor = Arc::new(CancelToken::new());
     assert!(
         crate::services::discord::mailbox_try_start_turn_kinded(
@@ -860,7 +860,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             permitted_channel,
             MessageId::new(user_msg_id),
             Some(MessageId::new(user_msg_id)),
-            None,
+            Some(panel_msg_id),
             &provider,
             1_700_000_000,
             &mut permitted_text,
@@ -877,15 +877,10 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
         .await
     );
     assert!(!permitted_text.is_empty());
-    assert_eq!(
-        permitted_gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .len(),
-        1,
-        "the permits=true control must exercise the same two-message effect arm"
-    );
+    let sends = permitted_gateway.sent_messages.lock().unwrap();
+    let edits = permitted_gateway.edited_message_ids.lock().unwrap();
+    assert!(sends.is_empty(), "retired completion creates no panel");
+    assert_eq!(*edits, [panel_msg_id], "the owned existing panel is edited");
 }
 
 #[tokio::test]
