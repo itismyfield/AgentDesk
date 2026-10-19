@@ -1703,8 +1703,29 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
     .unwrap();
     let nonce_path = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&nonce_path).parent().unwrap()).unwrap();
-    std::fs::write(nonce_path, &prepared.context.execution_nonce).unwrap();
+    std::fs::write(&nonce_path, &prepared.context.execution_nonce).unwrap();
     dedupe::register_tmux_channel(&tmux, channel.get());
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let logs = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = logs.clone();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _capture = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || LogWriter(writer.clone()))
+            .finish(),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1749,7 +1770,27 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
             .await;
         let before = crate::services::discord::mailbox_snapshot(&shared, channel).await;
         assert!(hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await);
+        assert!(hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await);
+        let captured = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            captured.matches("queued promotion held").count(),
+            1,
+            "{captured}"
+        );
+        assert!(captured.contains("channel_id=584531"), "{captured}");
+        assert!(
+            captured.contains("hold_reason=\"ownership_unreadable\""),
+            "{captured}"
+        );
         let after = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+        let projection = shared
+            .queue_park_ledger
+            .project(&shared, &provider, channel, &after);
+        assert_eq!(
+            projection.reason.as_deref(),
+            Some("codex_verified_held:ownership_unreadable")
+        );
+        assert_eq!(projection.owner, Some("codex_verified"));
         assert_eq!(after.intervention_queue.len(), 1);
         assert_eq!(
             after.intervention_queue[0].message_id,
@@ -1758,6 +1799,23 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
         assert_eq!(
             after.intervention_queue[0].text,
             before.intervention_queue[0].text
+        );
+        dedupe::reset_state_for_tests();
+        std::fs::remove_file(&nonce_path).unwrap();
+        assert!(!hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await);
+        let cleared = shared
+            .queue_park_ledger
+            .project(&shared, &provider, channel, &after);
+        assert_eq!(cleared.reason.as_deref(), Some("idle_no_start"));
+        assert_eq!(cleared.owner, Some("none"));
+        std::fs::write(&nonce_path, &prepared.context.execution_nonce).unwrap();
+        dedupe::register_tmux_channel(&tmux, channel.get());
+        assert!(hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await);
+        let captured = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            captured.matches("queued promotion held").count(),
+            2,
+            "{captured}"
         );
     });
     dedupe::reset_state_for_tests();

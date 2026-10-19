@@ -702,32 +702,8 @@ async fn release_and_persist_slots_for_task_pg(
     Ok((merged, newly_released))
 }
 
-/// True when the slot now belongs to a run outside this task.
-///
-/// Without this guard a late replay would clear the slot threads of whichever
-/// run picked the slot up in the meantime — the A-B-A hazard that
-/// `clear_slot_threads_for_slot_pg` cannot see, because it keys on
-/// `(agent_id, slot_index)` and carries no run identity.
-///
-/// ## Residual TOCTOU window (#5142 D-7) — sized honestly
-///
-/// This check and the clear it guards are separate statements, so a run that
-/// takes the slot *between* them is still cleared. That window is not "one
-/// database round-trip": the caller's path from here to the write is
-/// `slot_taken_by_foreign_run_pg` → `slot_has_active_dispatch_excluding_pg` →
-/// `build_slot_clear_target_pg` → `filter_safe_slot_thread_reset_targets` →
-/// `archive_slot_threads` → `clear_slot_sessions_pg`, and `archive_slot_threads`
-/// makes **Discord HTTP calls**, so a full round of provider API latency sits
-/// inside the window. Order the seconds, not the milliseconds.
-///
-/// That sequence is base code; this module only added the ownership probe in
-/// front of it. The damage stays P3 because
-/// `filter_safe_slot_thread_reset_targets` already excludes threads with a live
-/// dispatch, so the worst outcome is that a freshly-arrived run loses provider
-/// session continuity and re-establishes it on its next turn. Closing it
-/// properly means moving the ownership predicate into the clearing statement
-/// itself (or fencing on a slot generation counter), which is a change to the
-/// base slot-clearing path and belongs in its own issue rather than here.
+/// Skip known foreign owners early; the session UPDATE also checks ownership
+/// so reassignment after this probe cannot clear the successor's sessions.
 async fn slot_taken_by_foreign_run_pg(
     pool: &PgPool,
     run_ids: &[String],
@@ -963,9 +939,8 @@ pub(crate) async fn drain_run_cleanup_task_pg(
 
     // Step 4 — slot-thread clear, guarded against the A-B-A hazard above.
     //
-    // Retry safety: `clear_slot_threads_for_slot_pg` resets sessions bound to the
-    // slot's threads and is naturally repeatable, but only while the slot still
-    // belongs to this task's runs.
+    // Retry safety: resets are repeatable while the slot is released or still
+    // belongs to this task's runs; the UPDATE checks that ownership.
     let mut cleared_slot_sessions = cleared_dispatch_sessions;
     let mut all_slots_handled = true;
     for slot in &released_slots {
@@ -986,11 +961,12 @@ pub(crate) async fn drain_run_cleanup_task_pg(
                 continue;
             }
         }
-        match super::runtime::clear_slot_threads_for_slot_pg(
+        match super::runtime::clear_slot_threads_for_runs_pg(
             health_registry.clone(),
             pool,
             &slot.agent_id,
             slot.slot_index,
+            &task.run_ids,
         )
         .await
         {
@@ -1486,3 +1462,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cleanup_tasks_pg_tests.rs"]
 mod cleanup_tasks_pg_tests;
+
+#[cfg(test)]
+#[path = "cleanup_tasks_ownership_pg_tests.rs"]
+mod ownership_pg_tests;

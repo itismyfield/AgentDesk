@@ -89,8 +89,6 @@ var _createPhaseGateDispatches = _autoQueuePhaseGateLib.createPhaseGateDispatche
 
 // ── lifecycle helpers ───────────────────────────────────────────────
 var loadRunInfo = _autoQueueLifecycleLib.loadRunInfo;
-var remainingRunnableEntryCount = _autoQueueLifecycleLib.remainingRunnableEntryCount;
-var runHasUserCancelledEntry = _autoQueueLifecycleLib.runHasUserCancelledEntry;
 var finalizeRunWithoutPhaseGate = _autoQueueLifecycleLib.finalizeRunWithoutPhaseGate;
 var completeRunAndNotify = _autoQueueLifecycleLib.completeRunAndNotify;
 var continueRunAfterEntry = _autoQueueLifecycleLib.continueRunAfterEntry;

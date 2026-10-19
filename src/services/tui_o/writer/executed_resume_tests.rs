@@ -462,3 +462,180 @@ async fn actual_resume_spawn_failure_writes_no_explicit_proof() {
 async fn actual_resume_metadata_failure_never_recovers_explicit_proof() {
     cold_resume_case(Mode::MetadataFailure).await;
 }
+
+#[derive(Clone, Default)]
+struct CompanionAlarms(Arc<Mutex<Vec<WriterAlarm>>>);
+
+impl AlarmSink for CompanionAlarms {
+    fn raise(&self, _: u64, alarm: WriterAlarm) {
+        self.0.lock().unwrap().push(alarm);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost() {
+    let mut f = Fixture::new(true);
+    f.context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+    f.context.launch_mode = "resume".into();
+    f.context.expected_native_session_id = Some(ID.into());
+    PreparedIncarnation::create(f.context.clone()).unwrap();
+    fs::write(
+        tc::session_temp_path(&f.context.tmux_session, "spawn_nonce"),
+        &f.context.execution_nonce,
+    )
+    .unwrap();
+    f.header_at(ID, f.context.created_at - Duration::days(4));
+    let channel = f.context.channel_id.unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, f.root.path())
+        .unwrap()
+        .unwrap();
+    store
+        .begin_era(&[channel], Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: Vec::new(),
+                initial_anchor: 100,
+                build_digest: "resume-companions".into(),
+                at: Utc::now(),
+            })
+        })
+        .unwrap();
+    let mut opened = f.reopened(&store);
+    opened.set_binding_checkpoint(0).unwrap();
+    let alarms = CompanionAlarms::default();
+    let port = Arc::new(owed::tests::Port::default());
+    let gate = Arc::new(crate::services::tui_o::ownership::OwnershipGate::default());
+    gate.acquired();
+    let spawn = |opened, stopped| {
+        let writer = super::super::deliver::ChannelWriter::new(
+            opened,
+            Arc::clone(&gate),
+            Arc::clone(&port),
+            owed::tests::Lease,
+            alarms.clone(),
+        );
+        let (_commands, receiver) = actor::codex_submission::Port::new(1);
+        actor::codex_submission::spawning(receiver, || {
+            actor::spawn_projecting(
+                &WriterConfig { enabled: true },
+                None,
+                writer,
+                ShadowProvider::Codex,
+                Arc::new(f.log()),
+                (
+                    stopped,
+                    watch::channel(false).0,
+                    watch::channel(None).0,
+                    actor::Owing::default(),
+                ),
+            )
+        })
+        .unwrap()
+    };
+    let (stop, stopped) = watch::channel(false);
+    let task = spawn(opened, stopped);
+    polls().await;
+    assert!(
+        !task.is_finished(),
+        "the era actor is running before either hook"
+    );
+    assert_eq!(f.reopened(&store).binding_checkpoint().unwrap(), Some(0));
+    assert!(f.log().binding_events_since(channel, 0).unwrap().is_empty());
+
+    assert_eq!(
+        resume_hook(&f.path(ID), &f.context),
+        IngressOutcome::Durable(DurableKind::Pending)
+    );
+    let envelope = HookBindingEnvelope {
+        context: CapturedContext::Captured(f.context.clone()),
+        observed: ObservedHookProcess::default(),
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+    let payload = json!({"session_id":ID,"transcript_path":f.path(ID),"prompt":PROMPT});
+    assert!(
+        payload.get("source").is_none(),
+        "the operational UPS omits source"
+    );
+    assert_eq!(
+        observe_binding_hook(
+            "codex",
+            "user-prompt-submit",
+            Some(ID),
+            Some(ID),
+            &payload,
+            &headers
+        ),
+        IngressOutcome::Durable(DurableKind::Pending)
+    );
+    let early = f.fold();
+    assert_eq!(early.pending.len(), 2);
+    assert!(early.verified.is_none());
+    dedupe::codex_verified::resolve_registered_claims();
+    let fold = f.fold();
+    let proof = fold
+        .verified
+        .as_ref()
+        .expect("actual resolver publishes the resume proof");
+    assert!(fold.pending.is_empty() && !fold.conflicted);
+    let events = f.log().binding_events_since(channel, 0).unwrap();
+    assert_eq!(
+        events.len(),
+        4,
+        "two observations and two exact terminal rows"
+    );
+    let closes: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.record {
+            super::super::binding::BindingRecord::Rejected { closes, .. } => *closes,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closes, [early.pending[1].seq]);
+    assert_eq!(proof.ownership.pending_seq, Some(early.pending[0].seq));
+    response(&f.path(ID), "resume-companion", "companion settled answer");
+    polls().await;
+    let channel_store = f.reopened(&store);
+    assert_eq!(
+        channel_store.binding_checkpoint().unwrap(),
+        Some(events.last().unwrap().seq)
+    );
+    let cursor = channel_store
+        .cursor(&proof.source)
+        .expect("the resolved source is attached");
+    assert_eq!(
+        cursor.captured_through,
+        fs::metadata(f.path(ID)).unwrap().len()
+    );
+    assert_eq!(port.posts(), ["companion settled answer"]);
+    assert_eq!(posted(&channel_store), 1);
+    assert!(
+        alarms
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|alarm| !matches!(alarm, WriterAlarm::BindingPending { .. }))
+    );
+    stop.send(true).unwrap();
+    assert!(task.await.unwrap().is_none());
+
+    binding_events::forget_channel_for_tests(channel);
+    let before = f.log_bytes();
+    let (stop, stopped) = watch::channel(false);
+    let task = spawn(f.reopened(&store), stopped);
+    polls().await;
+    assert_eq!(f.log_bytes(), before, "restart does not append terminals");
+    assert_eq!(
+        port.posts(),
+        ["companion settled answer"],
+        "restart posts no duplicate"
+    );
+    assert_eq!(posted(&f.reopened(&store)), 1);
+    assert_eq!(
+        f.reopened(&store).binding_checkpoint().unwrap(),
+        Some(events.last().unwrap().seq)
+    );
+    stop.send(true).unwrap();
+    assert!(task.await.unwrap().is_none());
+}

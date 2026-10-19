@@ -10,6 +10,11 @@ use super::{ClearReport, ManagedSessionClearBehavior, managed_session_clear_beha
 use crate::db::session_transcripts;
 use crate::services::provider::ProviderKind;
 
+#[cfg(unix)]
+mod clear_end_record;
+#[cfg(all(test, unix))]
+mod clear_end_record_tests;
+
 /// Advances the channel's transcript clear boundary, retried once; it also supersedes any
 /// unresolved native clear boundary, so no older clear holds the next input.
 pub(super) async fn write_boundary(
@@ -17,6 +22,8 @@ pub(super) async fn write_boundary(
     channel_id: serenity::ChannelId,
     report: &mut ClearReport,
 ) {
+    #[cfg(unix)]
+    super::super::super::queue_dispatch::codex_clear_compat::reset(shared, channel_id);
     let Some(pool) = shared.pg_pool.as_ref() else {
         report.fail("pg_boundary", "postgres pool unavailable");
         return;
@@ -64,11 +71,53 @@ pub(super) async fn end_session(
     #[cfg(not(unix))]
     let _ = (shared, channel_id, session_key, &mut transition);
     let managed = managed_session_clear_behavior(provider);
-    if let (ManagedSessionClearBehavior::ResetManagedProcess, Some(name)) = (managed, tmux)
-        && super::managed_reset::end_managed_process_session(name).tmux_unconfirmed
+    if let (ManagedSessionClearBehavior::ResetManagedProcess, Some(name)) = (managed, tmux) {
+        use crate::services::tui_prompt_dedupe::clear_relaunch;
+        let captured = if matches!(provider, ProviderKind::Codex)
+            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+        {
+            match clear_relaunch::capture(name) {
+                Ok(captured) => captured,
+                Err(error) => {
+                    report.fail("codex_retirement_capture", &error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let clear_end =
+            clear_end_record::capture_for(provider, channel_id.get(), name, &transition);
+        let ended = super::managed_reset::end_managed_process_session(name);
+        if ended.tmux_unconfirmed {
+            tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
+            report.end_unconfirmed = true;
+        } else if let Some(captured) = captured
+            && let Err(error) = clear_relaunch::commit(&captured, "explicit_clear")
+        {
+            report.fail("codex_retirement_commit", &error);
+        }
+        #[cfg(unix)]
+        clear_end_record::commit_confirmed(clear_end, (ended.reset, ended.tmux_unconfirmed)).await;
+    } else if tmux.is_none()
+        && matches!(provider, ProviderKind::Codex)
+        && channel_id.get() == crate::services::codex_tui::canary::CANARY_CHANNEL
+        && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+        && !shared.core.lock().await.sessions.contains_key(&channel_id)
     {
-        tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
-        report.end_unconfirmed = true;
+        use crate::services::tui_prompt_dedupe::clear_relaunch;
+        let name = crate::services::codex_tui::canary::CANARY_TMUX;
+        match clear_relaunch::capture(name) {
+            Ok(Some(captured)) => {
+                // No core target grants an end effect; commit rechecks the dead incarnation's vacancy.
+                if let Err(error) = clear_relaunch::commit(&captured, "explicit_clear") {
+                    report.fail("codex_retirement_commit", &error);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => report.fail("codex_retirement_capture", &error),
+        }
     }
     drop(transition);
 }

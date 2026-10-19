@@ -48,9 +48,20 @@ Tailscale·신뢰 Wi-Fi 환경에서 같은 바인드와 opt-in을 유지했음�
 Bearer 검사가 있다.
 
 [`/ws`](../src/server/ws.rs)는 토큰 미설정 시 토큰 검사 없이 연결을 허용한다.
-토큰을 사용하는 설치에서는 현재 `?token=` 쿼리 매개변수로 검사하므로 URL이
-로그·프록시에 남을 때 토큰이 노출될 수 있다. 전달 방식 변경은 #5721의 별도
-P3 항목이며, 이 결정 기록이 해결한 것으로 간주하지 않는다.
+토큰을 설정한 설치의 브라우저는 `POST /api/auth/ws-ticket`으로 발급한 1회용
+`?ticket=` 값을 쓸 수 있다. 티켓은 Origin·Host에 묶이고 15초 후 만료된다.
+네이티브 클라이언트는 Bearer 토큰을 보낼 수 있다. 티켓이 없고 토큰도 미설정이면
+WebSocket 인증은 통과하므로 출처 필터 설정도 함께 확인해야 한다.
+
+실제 노출 경로는 [`/api/docs`](../src/server/routes/docs/inventory/endpoints/public_surfaces.rs)
+인벤토리에 정리돼 있다. `/tui/send`, `/tui/wait`, `/hooks/{provider}/{event}`는
+loopback 피어나 설정된 유효한 Bearer 토큰만 허용하며, 토큰 미설정이면 loopback만
+허용한다. `/ws`는 위 티켓/Bearer 규칙과 peer filter 설정을 따른다.
+
+`server.allow_insecure_nonloopback_bind: true`가 무토큰 비loopback 바인드를 허용하면
+dcserver는 이 선택과 문서 경로를 시작 로그의 INFO 항목으로 남긴다. `agentdesk doctor`도
+`API bind exposure` 항목을 INFO로 표시한다. INFO는 사용자가 명시한 신뢰 경계 결정을
+기록하며, 외부 네트워크 노출을 안전하다고 판정하지 않는다.
 
 ## 감수한 위험과 재검토 조건
 
@@ -67,17 +78,12 @@ P3 항목이며, 이 결정 기록이 해결한 것으로 간주하지 않는다
 #5721의 결정에 따라 이 신뢰 경계를 벗어나는 배포에서는 `server.auth_token`
 설정이 필수다. 접근 범위를 바꾸기 전에 바인드와 네트워크 통제도 함께 재검토한다.
 
-다만 [#5750](https://github.com/itismyfield/AgentDesk/issues/5750)에서 추적하는 현재
-결함으로, 정상적인 [Discord 설정 저장](../src/services/discord/settings/write.rs)이
-전체 `Config`를 YAML로 재직렬화하면 [`skip_serializing`](../src/config.rs)으로
-지정된 `server.auth_token`이 저장 파일에서 소실될 수 있다. [`/ws`](../src/server/ws.rs)는
-[API 인증 미들웨어 밖에 등록](../src/server/mod.rs)되어 연결 요청마다 `load_graceful()`로
-파일을 다시 읽으므로, 토큰이 빠진 유효한 YAML을 읽으면 `None`으로 판단하여 재시작
-전에도 토큰 검사 없이 연결을 허용한다. #5750이 해결되기 전에는 `auth_token` 설정만을
-이 신뢰 경계 밖 배포의 보호 근거로 삼지 말고, 독립적인 호스트·네트워크 접근 통제를 유지한다.
+`/ws`와 일반 API 인증은 서버 시작 시 읽은 동일한 `server.auth_token` 스냅샷을
+사용한다. 실행 중 설정 파일이 바뀌어도 인증 상태는 즉시 바뀌지 않으며, 토큰 변경은
+서버 재시작 후 적용된다. 재시작은 기존 WebSocket 연결과 발급된 ticket도 무효화한다.
 
 `/api/*` 요청 제한(rate limit)은 #5721에서 구현 대상에서 제외하고 기록만 남긴
 항목이다. 이 결정은 요청 폭주에 대한 방어를 보장하지 않는다.
 
-이 문서는 결정과 현재 코드의 의미를 기록한다. #5721의 나머지 작업인 부팅 로그의
-문서 링크, `doctor` 표시 변경, `/api/docs` 인벤토리 등재의 완료를 뜻하지 않는다.
+`agentdesk doctor`와 부팅 로그는 현재 설정을 요약한다. 운영 중 실제 접근 가능한
+인터페이스나 네트워크 장치의 신뢰 상태를 측정하지는 않는다.

@@ -346,6 +346,35 @@ mod tests {
         assert!(crate::services::discord::http::discord_content_or_zwsp(&wire).is_ok());
     }
 
+    #[test]
+    fn final_wire_bounds_backtick_escaped_darwin_path_warning_5350() {
+        use crate::services::discord::{DISCORD_MSG_LIMIT, formatting::discord_message_units};
+
+        let mut workspace = std::path::PathBuf::from("/");
+        for _ in 0..4 {
+            workspace.push("`".repeat(235));
+        }
+        // Darwin PATH_MAX 1024 / NAME_MAX 255.
+        assert!(workspace.as_os_str().len() < 1024);
+        let warning = warning_for_workspace(workspace);
+        assert!(discord_message_units(&warning.replace("\\`", "`")) <= DISCORD_MSG_LIMIT);
+        assert!(
+            discord_message_units(&warning) > DISCORD_MSG_LIMIT,
+            "fixture must overflow through backtick escaping"
+        );
+
+        let merged = merge_bounded_turn_end_wip_warning("panel".to_string(), &warning);
+        assert!(discord_message_units(&merged) <= DISCORD_MSG_LIMIT);
+        let wire = crate::services::discord::single_message_panel::compose_completion_footer_text(
+            "terminal body",
+            Some(&merged),
+        );
+
+        assert!(wire.contains(WIP_WARNING_MARKER));
+        assert!(discord_message_units(&wire) <= DISCORD_MSG_LIMIT);
+        assert!(crate::services::discord::http::discord_content_or_zwsp(&wire).is_ok());
+    }
+
     struct RuntimeRootGuard {
         previous: Option<std::ffi::OsString>,
         _root: TempDir,

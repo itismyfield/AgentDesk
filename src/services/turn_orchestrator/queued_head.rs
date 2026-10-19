@@ -1,6 +1,7 @@
 //! A queued head reserved for a busy Claude TUI: its durable phase, the sources already submitted,
 //! and the check every queue write runs while a head is reserved. Nothing here submits input.
 use super::active_source_dedup::strip_source_message_id_from_intervention;
+use super::dispatch_reservation::queue_unread;
 use std::path::Path;
 
 use super::pending_queue_persistence::{
@@ -184,10 +185,10 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("read {}: {error}", path.display())),
+        Err(error) => return Err(queue_unread(format!("read {}: {error}", path.display()))),
     };
-    let (_, meta) =
-        parse_snapshot(&content).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let (_, meta) = parse_snapshot(&content)
+        .map_err(|e| queue_unread(format!("parse {}: {e}", path.display())))?;
     Ok(meta.filter(SnapshotMeta::is_set))
 }
 

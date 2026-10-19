@@ -48,25 +48,6 @@ module.exports = function attachReviewTimeouts(timeouts, helpers) {
       }
     };
 
-  timeouts._section_D = function() {
-      // ─── [D] DoD 대기 타임아웃 (15분) ──────────────────────
-      var dCfg = agentdesk.pipeline.getConfig();
-      var dInitial = agentdesk.pipeline.kickoffState(dCfg);
-      var dInProgress = agentdesk.pipeline.nextGatedTarget(dInitial, dCfg);
-      var dReview = agentdesk.pipeline.nextGatedTarget(dInProgress, dCfg);
-      var stuckDod = agentdesk.db.query(
-        "SELECT id FROM kanban_cards " +
-        "WHERE status = ? AND review_status = 'awaiting_dod' " +
-        "AND awaiting_dod_at IS NOT NULL AND awaiting_dod_at < datetime('now', '-15 minutes')",
-        [dReview]
-      );
-      for (var d = 0; d < stuckDod.length; d++) {
-        var dodReason = "DoD 대기 15분 초과";
-        escalateToManualIntervention(stuckDod[d].id, dodReason, { review: true });
-        agentdesk.log.warn("[timeout] DoD await timeout → dilemma_pending: card " + stuckDod[d].id);
-      }
-    };
-
   timeouts._section_N = function() {
       var nCfg = agentdesk.pipeline.getConfig();
       var nInitial = agentdesk.pipeline.kickoffState(nCfg);

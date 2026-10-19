@@ -16,4 +16,6 @@ Export `M1_ORACLE_REPO="$PWD"`, extract the decoded archive with `tar -xzf "$M1_
 
 Generation may vary original path/device/inode and ledger observation times. The tests rebind SourceId path/device/inode and corresponding filenames, and reserialize init/cursor/header metadata for isolated files. Raw source/frame bytes, UnitKeys, piece indices, payloads, capture offsets/hashes and Posted outcomes stay frozen. They compare replay/delivery under the current identity version, check already-delivered reposts are zero, and prove the nonempty v2 segment stays byte-identical from its rebound baseline across rollover interruptions.
 
-These output-identity checks do not claim equivalence of intentional v3 turn-state or v4 multi-block row changes or a live provider/Discord measurement.
+Current replay applies the internal-tool-result policy over the frozen expected tuples: each ToolResult key becomes one durable exclusion, including results v2 would have posted. Body tuples and existing Posted receipts still match the oracle exactly; previously unprepared tool results must never gain a send attempt. The fixtures and their v2 payload bytes remain unchanged.
+
+These output-identity checks do not claim equivalence of intentional v3 turn-state or v4 multi-block row changes, the newer tool-result body policy, or a live provider/Discord measurement.

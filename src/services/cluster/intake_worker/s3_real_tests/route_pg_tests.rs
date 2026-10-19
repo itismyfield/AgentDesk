@@ -25,7 +25,7 @@ fn epoch_of(env: &Env) -> i64 {
 }
 
 /// Status, claim owner and whether it was accepted, of row `id`.
-async fn stored(pool: &PgPool, id: i64) -> (String, Option<String>, bool) {
+pub(super) async fn stored(pool: &PgPool, id: i64) -> (String, Option<String>, bool) {
     sqlx::query_as(
         "SELECT status::TEXT, claim_owner, accepted_at IS NOT NULL FROM intake_outbox WHERE id = $1",
     )

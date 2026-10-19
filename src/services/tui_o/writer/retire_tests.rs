@@ -5,6 +5,9 @@ use crate::services::tui_o::store::rotation::{
 };
 use crate::services::tui_o::store::spool::source_key;
 
+#[cfg(unix)]
+#[path = "clear_end_proof_tests.rs"]
+mod clear_end_proof_tests;
 #[path = "legacy_hop_retry_tests.rs"]
 mod legacy_hop_retry_tests;
 #[path = "transition_actor_tests.rs"]
@@ -285,6 +288,7 @@ async fn a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names() {
     let unnamed = legacy_rotation(|_, _| {
         let refused = BindingRecord::Rejected {
             detail: "regression".into(),
+            closes: None,
         };
         event(2, refused, Utc::now())
     });

@@ -82,6 +82,13 @@ async fn kickoff_queue_channel_inner(
         return IdleQueueKickoffChannelOutcome::default();
     }
 
+    #[cfg(unix)]
+    if !queue_dispatch::codex_clear_compat::admit(shared, provider, channel_id, &fresh_snapshot)
+        .await
+    {
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+
     // #4270 A — pre-dequeue hosted-TUI readiness gate. A verifiably busy hosted
     // TUI defers the promotion BEFORE `take_next_soft` and BEFORE the queued-view
     // teardown below (turn-view started/⏳ flip + 📬 marker drain + merged-card

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::{
     HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name, herdr,
-    live_tui_session, observe, row_key,
+    live_tui_session, observe, row_key, turn_mode_tmux,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
@@ -43,7 +43,9 @@ pub(super) async fn queued_target_matches(
             row.as_ref(),
             named,
         ) == Some((target.session.clone(), target.transcript.clone()))
-        && (!before_effect || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
+        && (!before_effect
+            || (target.herdr.is_none() && turn_mode_tmux(request.channel_id.get()))
+            || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
         && same_herdr_execution(shared, request, target).await
 }
 

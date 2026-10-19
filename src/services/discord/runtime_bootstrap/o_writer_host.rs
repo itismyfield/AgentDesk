@@ -7,7 +7,7 @@ use super::*;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::services::cluster::channel_home_boot::ChannelWriters;
+use crate::services::cluster::channel_home_boot::{self, ChannelWriters, StartWriter};
 use crate::services::cluster::home_supervisor::HomeLifecycle;
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
@@ -335,6 +335,10 @@ pub(super) fn spawn(
     pg_gateway: bool,
 ) {
     let Some(shadow) = shadow_of(provider) else {
+        // Its boot starts no writer, so its homes' watches need not wait on one to leave.
+        if let Some(writers) = with_writers(|writers| writers.get(provider.as_str()).cloned()) {
+            writers.arm(None, Vec::new());
+        }
         return;
     };
     // Nothing below runs unless this bot may adopt a channel, so an off or empty writer takes no lock.
@@ -401,28 +405,47 @@ pub(super) fn lifecycles(provider: Option<&ProviderKind>) -> Vec<Arc<dyn HomeLif
 }
 
 /// Starts, off the gateway, a writer supervised for shutdown for each delegated channel registered
-/// here whose Herdr endpoint runs on this node; returns their channels, none building nothing.
+/// here whose Herdr endpoint runs on this node, and arms its homes' watches to start one for a
+/// channel delegated here later; returns the channels it started.
 pub(super) fn spawn_delegated(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     config: Option<&TuiOConfig>,
 ) -> Vec<u64> {
+    use channel_home_boot::delegated_boot_ownership;
+    let homes = with_writers(|writers| writers.get(provider.as_str()).cloned());
     let Some(shadow) = shadow_of(provider) else {
+        homes.inspect(|homes| homes.arm(None, Vec::new()));
         return Vec::new();
     };
-    let delegated = crate::services::cluster::channel_home_boot::delegated_boot_ownership(
-        super::herdr_runs_here,
-    );
-    let started = host::start_managed(shadow, false, delegated, || {
+    let (shared, kind, config) = (Arc::clone(shared), provider.clone(), config.cloned());
+    let prepare = move || {
         let rest = shared.serenity_http_or_token_fallback();
-        parts(shared, provider, config, rest)
-    });
-    if started.is_empty() {
-        return Vec::new();
-    }
-    let channels = started.iter().map(host::ManagedWriterHandle::channel);
-    let channels = channels.collect();
-    home_writers(provider, true).arm(None, started);
+        parts(&shared, &kind, config.as_ref(), rest)
+    };
+    let delegated = delegated_boot_ownership(super::herdr_runs_here);
+    let started = host::start_managed(shadow, false, delegated, &prepare);
+    let channels = started
+        .iter()
+        .map(host::ManagedWriterHandle::channel)
+        .collect();
+    let homes = match homes {
+        Some(homes) => homes,
+        None if !started.is_empty() => home_writers(provider, true),
+        None => return channels,
+    };
+    let start = move |channel| {
+        let owned = delegated_boot_ownership(super::herdr_runs_here).into_iter();
+        let owned = owned.filter(|(owned, ..)| *owned == channel).collect();
+        host::start_managed(shadow, false, owned, &prepare).pop()
+    };
+    let start: StartWriter = Arc::new(start);
+    #[cfg(test)]
+    let start =
+        Some(start).filter(|_| !channel_home_boot::writer_mutant("delegated_start_unarmed"));
+    #[cfg(not(test))]
+    let start = Some(start);
+    homes.arm(start, started);
     channels
 }
 

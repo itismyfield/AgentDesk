@@ -177,7 +177,10 @@ impl<B: BindingEvents> Sources<B> {
                 }
             }
         }
-        Ok(())
+        // Clear ends published while the actor was down, and proofs boot put to sleep, apply now.
+        self.clear_due = !crate::services::tui_o::store::clear_end::mutant("resume_settle_off");
+        self.settle_cleared(writer)?;
+        self.wake_resumed_proofs(writer)
     }
 
     pub fn tend<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
@@ -572,7 +575,8 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let successor_captured = captured.contains(&source_key(&successor.source));
-            // Only a provider record shows the old source stopped; a drained quiet one stays read.
+            // Only a provider record or a confirmed clear end shows the old source stopped; a
+            // drained quiet one stays read.
             let proven = successor.proof.is_some();
             let drained = through == len && reader.pending.is_none();
             let grew = reader.quiet.is_some_and(|(held, _)| held != len);

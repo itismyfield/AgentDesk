@@ -21,8 +21,12 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ActiveTurnKind;
 
+#[path = "idle_inject_echo_e2e_tests.rs"]
+mod idle_echo;
 #[path = "busy_inject_thread_e2e_tests.rs"]
 mod thread;
+#[path = "busy_inject_turn_mode_e2e_tests.rs"]
+mod turn_mode;
 
 const WAIT: Duration = Duration::from_secs(10);
 const QUEUE_UNKNOWN: &str = "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.";

@@ -145,13 +145,6 @@ var reviewAutomation = {
     var entry = agentdesk.review.entryContext(card.id);
     if (!entry) return;
 
-    // #128: If card entered review with awaiting_dod (DoD incomplete),
-    // skip review dispatch — timeouts.js [D] will escalate to dilemma_pending after 15 min
-    if (card.review_status === "awaiting_dod") {
-      agentdesk.log.info("[review] Card " + card.id + " is awaiting_dod — skipping review dispatch");
-      return;
-    }
-
     // Check if review is enabled — if not, complete immediately
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
@@ -1462,7 +1455,7 @@ function processVerdict(cardId, verdict, result, options) {
     // #2051 Finding 12 (P2): the two state-syncs below execute in separate
     // bridge calls (each commits its own SQL transaction). A throw from one
     // used to leave the card with `review_status = NULL` but
-    // `card_review_state = reviewing`, which confused timeouts.js [D] /
+    // `card_review_state = reviewing`, which confused the timeouts.js
     // review auto-accept paths. Wrap each call so we (1) emit a structured
     // warning when only one half succeeds, and (2) attempt a best-effort
     // re-sync so subsequent ticks see a consistent state. A true 2-table

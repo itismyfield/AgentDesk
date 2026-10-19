@@ -363,6 +363,13 @@ if run_check guards "Intake-outbox done writer per-file call-site allowlist (#50
 "$PYTHON" -m unittest tests.test_rust_lex
 fi
 
+if run_check guards "Run-owner raw owner-write allowlist"; then
+# Flags raw owner writes outside the run-owner guard's write module; the PG
+# contention tests, not this lexical scan, prove the guard serializes with cancel.
+"$PYTHON" scripts/check_run_owner_raw_writer_call_sites.py
+"$PYTHON" -m unittest tests.test_check_run_owner_raw_writer_call_sites
+fi
+
 if run_check guards "Comment-only change checker self-tests"; then
 # scripts/check_comment_only_change.py decides whether a diff may skip human
 # review, so a false "comment-only" verdict ships unread code. These tests are
@@ -720,6 +727,7 @@ required_shell_suites=(
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
   tests/test_deploy_smoke_scope.sh
+  tests/test_deploy_smoke_runner_profile.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
   tests/test_deploy_smoke_turn_scenarios_6561.sh

@@ -106,6 +106,7 @@ TARGETS = {
 DEFER_RE = re.compile(r"DEFER_[A-Z0-9_]+")
 R_EVID = (
     "src/services/discord/outbound/delivery_record.rs",
+    "src/services/discord/outbound/delivery_record/",
     "src/services/discord/outbound/completed_turn_ledger.rs",
     "src/services/discord/catch_up.rs",
     "src/services/discord/catch_up/",
@@ -217,8 +218,8 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "turn_bridge/status_panel.rs": {".edit_message": 1, "TurnGateway::edit_message": 1, "edit_channel_message*": 2},
     "turn_bridge/status_panel/fallback.rs": {".send_message": 1, "send_channel_message*": 2},
     "turn_bridge/stream_loop/types.rs": {"replace_message_with_outcome": 1},
-    "turn_bridge/stream_tick.rs": {"TurnGateway::edit_message": 3, "TurnGateway::send_message": 1},
     "turn_bridge/stream_tick/o_panel.rs": {"TurnGateway::edit_message": 1},
+    "turn_bridge/stream_tick/output.rs": {"TurnGateway::edit_message": 3, "TurnGateway::send_message": 1},
     "turn_bridge/stream_tick/rollover_guard.rs": {"TurnGateway::edit_message": 2},
     "turn_bridge/terminal_controller_cutover.rs": {"deliver_turn_output*": 2},
     "turn_bridge/terminal_delivery.rs": {"send_long_message*": 1},
@@ -337,8 +338,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/status_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/status_panel/fallback.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/stream_loop/types.rs": ("W10e", "COV:W10"),
-    "turn_bridge/stream_tick.rs": ("W14", "CUT_D"),
     "turn_bridge/stream_tick/o_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
+    "turn_bridge/stream_tick/output.rs": ("W14", "CUT_D"),
     "turn_bridge/stream_tick/rollover_guard.rs": ("W14a", "COV:W14"),
     "turn_bridge/terminal_controller_cutover.rs": ("W10b-c", "COV:W10"),
     "turn_bridge/terminal_delivery.rs": ("W10d", "COV:W10"),
@@ -452,7 +453,9 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/turn_bridge/stream_tick.rs": (
         "run_bridge_stream_tick:peek",
-        "run_bridge_stream_tick:claim",
+    ),
+    "src/services/discord/turn_bridge/stream_tick/output.rs": (
+        "refresh_streaming_response:claim",
     ),
     "src/services/discord/turn_bridge/stream_tick/rollover_guard.rs": (
         "guarded_bridge_rollover_edit:claim",

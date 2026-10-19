@@ -256,16 +256,6 @@ pub(super) async fn get_config_entries() -> Result<Value, String> {
     request_json(Method::GET, "/api/settings/config").await
 }
 
-pub(super) async fn get_escalation_settings() -> Result<Value, String> {
-    request_json(Method::GET, "/api/settings/escalation").await
-}
-
-pub(super) async fn put_escalation_settings(
-    settings: crate::config::EscalationSettings,
-) -> Result<Value, String> {
-    request_body(Method::PUT, "/api/settings/escalation", &settings).await
-}
-
 pub(super) async fn fetch_dispatch(dispatch_id: &str) -> Result<Value, String> {
     request_json(Method::GET, &format!("/api/dispatches/{dispatch_id}")).await
 }

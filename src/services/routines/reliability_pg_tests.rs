@@ -325,3 +325,111 @@ async fn checkpoint_rejected_completion_counts_toward_the_failure_alert_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+async fn started_agent_run(
+    pool: &PgPool,
+    store: &RoutineStore,
+    name: &str,
+    strategy: &str,
+    turn: &str,
+) -> String {
+    let mut routine = new_routine(name, None, None);
+    routine.execution_strategy = strategy.to_string();
+    store.attach_routine(routine).await.unwrap();
+    let claimed = store
+        .claim_due_runs(1)
+        .await
+        .unwrap()
+        .pop()
+        .expect("due run");
+    assert!(
+        store
+            .mark_agent_turn_started(&claimed.run_id, turn, None, "agent", "primary")
+            .await
+            .unwrap()
+    );
+    // The turn started before any of its quality events.
+    sqlx::query("UPDATE routine_runs SET started_at = NOW() - INTERVAL '10 minutes' WHERE id = $1")
+        .bind(&claimed.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    claimed.run_id
+}
+
+async fn quality_event(pool: &PgPool, turn: &str, event_type: &str, outcome: &str, age_secs: i64) {
+    sqlx::query(
+        "INSERT INTO agent_quality_event (source_event_id, correlation_id, event_type, payload, created_at)
+         VALUES ($1, $1, $2::agent_quality_event_type,
+                 jsonb_build_object('details', jsonb_build_object('outcome', $3::text)),
+                 NOW() - ($4::bigint * INTERVAL '1 second'))",
+    )
+    .bind(turn)
+    .bind(event_type)
+    .bind(outcome)
+    .bind(age_secs)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let store = store(&pool);
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    let cancelled =
+        started_agent_run(&pool, &store, "fresh-cancelled", "fresh", "discord:7001:1").await;
+    quality_event(&pool, "discord:7001:1", "turn_error", "cancelled", 60).await;
+    let late = started_agent_run(&pool, &store, "fresh-late", "fresh", "discord:7002:1").await;
+    quality_event(&pool, "discord:7002:1", "turn_error", "transport_error", 0).await;
+    let persistent = started_agent_run(&pool, &store, "kept", "persistent", "discord:7003:1").await;
+    quality_event(&pool, "discord:7003:1", "turn_error", "cancelled", 60).await;
+    let retrying = started_agent_run(&pool, &store, "fresh-retry", "fresh", "discord:7004:1").await;
+    quality_event(&pool, "discord:7004:1", "turn_error", "recovery_retry", 60).await;
+    let ok = started_agent_run(&pool, &store, "fresh-ok", "fresh", "discord:7005:1").await;
+    quality_event(&pool, "discord:7005:1", "turn_complete", "completed", 60).await;
+
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(
+        (outcomes[0].run_id.as_str(), outcomes[0].status.as_str()),
+        (cancelled.as_str(), "failed")
+    );
+    assert!(
+        outcomes[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cancelled")),
+        "{outcomes:?}"
+    );
+    assert_eq!(run_row(&pool, &cancelled).await.0, "failed");
+    for run in [&late, &persistent, &retrying, &ok] {
+        assert_eq!(run_row(&pool, run).await.0, "running", "{run}");
+    }
+
+    // A transcript persisted after the error event still completes the run normally.
+    sqlx::query(
+        "INSERT INTO session_transcripts (turn_id, assistant_message)
+         VALUES ('discord:7002:1', 'partial briefing'), ('discord:7005:1', 'daily briefing')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    let mut done: Vec<_> = outcomes
+        .iter()
+        .map(|o| (o.run_id.clone(), o.status.clone()))
+        .collect();
+    done.sort();
+    let mut expected = vec![
+        (late.clone(), "succeeded".to_string()),
+        (ok.clone(), "succeeded".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(done, expected);
+
+    pool.close().await;
+    db.drop().await;
+}

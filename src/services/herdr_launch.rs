@@ -17,7 +17,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLocation, HostedLookup,
     HostedLookupKey, HostedObservation, HostedOwner, HostedRecord, HostedState, SourceRef,
     install_pending_pg, load_hosted_execution_pg, record_launch_evidence_pg,
-    record_pane_location_pg,
+    record_pane_location_pg, retire_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
@@ -180,9 +180,9 @@ pub(crate) enum HerdrLaunchError {
     Prepare(String),
     /// Pending did not commit; nothing was created.
     Pending(String),
-    /// Pending committed without its markers; nothing was created.
+    /// Pending committed without its markers; nothing was created, so its Pending is retired.
     Marker(String),
-    /// The create request never left; Pending stays for reconcile.
+    /// The create request never left, so no pane can exist and its Pending is retired.
     NotSent(String),
     /// The Pending pane still has no launch evidence; nothing was created, typed or removed.
     Evidence(EvidenceGap),
@@ -343,15 +343,21 @@ pub(crate) async fn launch_herdr_session(
     }
     // The new execution is held until a reconcile admits it; an earlier admission ends here.
     crate::services::tui_prompt_dedupe::install_herdr_execution(&owner.logical_key, &nonce);
-    record_herdr_host_marker(&owner.logical_key).map_err(HerdrLaunchError::Marker)?;
+    let markers = record_herdr_host_marker(&owner.logical_key).map_err(HerdrLaunchError::Marker);
     // Hooks and binding events name an execution by its spawn nonce marker, as on tmux.
     #[cfg(unix)]
-    crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
-        .map_err(|error| HerdrLaunchError::Marker(error.to_string()))?;
+    let markers = markers.and_then(|()| {
+        crate::services::discord::stamp_spawn_markers(&owner.logical_key, Some(&incarnation))
+            .map_err(|error| HerdrLaunchError::Marker(error.to_string()))
+    });
+    if let Err(error) = markers {
+        return Err(retire_unsent(pool, &owner, &nonce, error).await);
+    }
 
     // Read again right before create: the first reading may predate a reconnect or reload.
     let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
-        return Err(HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into()));
+        let error = HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into());
+        return Err(retire_unsent(pool, &owner, &nonce, error).await);
     };
     let witness = restore_off_witness.clone();
     let request = HerdrCreateRequest {
@@ -381,7 +387,10 @@ pub(crate) async fn launch_herdr_session(
         ) => {
             return Ok(indeterminate("create reply named no pane".into()));
         }
-        Some(HerdrCreateOutcome::NotSent(detail)) => return Err(HerdrLaunchError::NotSent(detail)),
+        Some(HerdrCreateOutcome::NotSent(detail)) => {
+            let error = HerdrLaunchError::NotSent(detail);
+            return Err(retire_unsent(pool, &owner, &nonce, error).await);
+        }
         Some(HerdrCreateOutcome::Indeterminate(detail)) => return Ok(indeterminate(detail)),
         None => return Ok(indeterminate("create call did not return".into())),
     };
@@ -426,6 +435,35 @@ pub(crate) async fn launch_herdr_session(
         location,
         evidence,
     })
+}
+
+/// Retires this launch's own Pending once no create left for it; a row that moved on or names a
+/// pane is kept. Returns `error`, the failure that proved nothing was sent.
+async fn retire_unsent(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    nonce: &str,
+    error: HerdrLaunchError,
+) -> HerdrLaunchError {
+    let retired = match load_row(pool, owner).await {
+        Ok(current) => match &current.record {
+            HostedRecord::Known(record)
+                if record.state == HostedState::Pending
+                    && record.location.is_none()
+                    && record.expected.is_none() =>
+            {
+                retire_pg(pool, &current, owner, nonce)
+                    .await
+                    .map_err(|e| format!("{e:?}"))
+            }
+            _ => Err("the row is no longer this launch's unplaced Pending".into()),
+        },
+        Err(row) => Err(format!("{row:?}")),
+    };
+    if retired != Ok(HostedCasOutcome::Written) {
+        tracing::warn!(nonce, ?retired, ?error, "herdr launch: unsent Pending kept");
+    }
+    error
 }
 
 /// The pane of a Pending that has one on this endpoint but no evidence: its provider was

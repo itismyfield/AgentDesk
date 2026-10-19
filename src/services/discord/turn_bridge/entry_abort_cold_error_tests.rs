@@ -638,3 +638,6 @@ async fn cold_error_does_not_clear_successor() {
         assert_eq!(kept, expected, "{successor:?}");
     }
 }
+
+#[path = "entry_abort_cold_error_tests/provider_failure_tests.rs"]
+mod provider_failure_tests;

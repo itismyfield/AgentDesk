@@ -7,7 +7,6 @@ pub mod identity;
 pub mod seal;
 pub mod unit_plan;
 
-// Retains the shared output-track settings and retired shadow keys.
 pub mod tap;
 
 use std::path::PathBuf;
@@ -17,14 +16,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 /// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
 pub const IDENTITY_VERSION: u32 = 4;
-
-/// `tui_o.shadow` settings; disabled unless explicitly enabled.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ShadowConfig {
-    pub enabled: bool,
-    pub channel_allowlist: Vec<u64>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

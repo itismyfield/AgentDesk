@@ -5638,7 +5638,7 @@ mod s2a1_frontier_tests {
             let frame = StreamFrame {
                 session_name: session.clone(), binding: MatchedChannel { channel_id: channel.get().to_string(), agent_id: "s2a1".into(), provider: provider.clone(), expected_session_name: session.clone(), expected_rollout_path: output.clone() },
                 payload: "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"idle answer\"}]}}\n{\"type\":\"result\",\"result\":\"idle answer\"}\n".into(),
-                sequence: 1, terminal_consumed_end: None, turn_user_msg_id: 0, turn_started_at: String::new(), turn_start_offset: None, relay_range: Some((128,256)), relay_generation_mtime_ns: Some(frame_generation), relay_source_stamp: None, source_span: None,
+                sequence: 1, terminal_consumed_end: None, turn_user_msg_id: 0, turn_started_at: String::new(), turn_start_offset: None, relay_range: Some((128,256)), relay_generation_mtime_ns: Some(frame_generation), relay_source_stamp: None, source_span: None, read_source: None,
             };
             SessionRelayParser::default()
                 .ingest_frame(&frame)

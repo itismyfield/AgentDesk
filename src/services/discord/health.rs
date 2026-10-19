@@ -21,7 +21,6 @@ use crate::services::provider::ProviderKind;
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
-pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 pub(crate) mod o_transition;
@@ -56,12 +55,16 @@ pub(crate) async fn run_orphan_token_auto_heal_pass_for_tests(
 pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
 mod relay_progress;
+mod routine_process;
+pub(crate) use routine_process::cancel_routine_process_turn;
 mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
 pub(in crate::services::discord) mod tail_evidence;
+#[cfg(test)]
+pub(in crate::services::discord) mod test_support;
 pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
@@ -72,9 +75,7 @@ pub(in crate::services::discord) mod watcher_respawn;
 pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
 pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 
-// `HeadlessAgentTurnReservation` has no external referent today (callers
-// destructure the reserve/start tuple); kept re-exported for the reserve→start
-// API surface, same convention as the recovery/snapshot blocks below.
+// Keep the reservation type re-exported for the reserve/start API surface.
 #[cfg(all(test, unix))]
 pub(crate) use super::turn_presence::activity::tests::{
     BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,
@@ -155,8 +156,8 @@ use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_sha
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
-    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
-    build_health_snapshot, build_public_health_snapshot,
+    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, build_health_snapshot,
+    build_public_health_snapshot,
 };
 
 /// Per-provider snapshot for the health response.
@@ -547,9 +548,7 @@ impl HealthRegistry {
     /// a `String` per provider; the registry list is a handful of entries.
     ///
     /// The cost is that a provider registered or removed mid-build is not
-    /// observed by that build. That was already the contract for
-    /// `active_request_owner_for_channel`, and a health snapshot is a sample,
-    /// not a transaction.
+    /// observed by that build; a health snapshot is a sample, not a transaction.
     pub(super) async fn provider_entries_snapshot(&self) -> Vec<ProviderEntry> {
         self.providers.lock().await.clone()
     }

@@ -18,13 +18,26 @@ fn write_rollout(h: &Fixture, path: &Path, id: &str, source: Value) {
 
 /// A real hook delivery; `path: None` omits the payload transcript path.
 fn hook(h: &Fixture, event: &str, id: &str, reason: &str, path: Option<&Path>) -> IngressOutcome {
+    hook_with_source(h, event, id, Some(reason), path)
+}
+
+fn hook_with_source(
+    h: &Fixture,
+    event: &str,
+    id: &str,
+    reason: Option<&str>,
+    path: Option<&Path>,
+) -> IngressOutcome {
     let envelope = HookBindingEnvelope {
         context: CapturedContext::Captured(h.context.clone()),
         observed: ObservedHookProcess::default(),
     };
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
-    let mut payload = json!({"session_id":id,"source":reason,"prompt":PROMPT});
+    let mut payload = json!({"session_id":id,"prompt":PROMPT});
+    if let Some(reason) = reason {
+        payload["source"] = json!(reason);
+    }
     if let Some(path) = path {
         payload["transcript_path"] = json!(path);
     }
@@ -246,15 +259,36 @@ fn executed_resume_pathless_ambiguous_uuid_stays_blocked() {
 }
 
 #[test]
-fn executed_resume_extra_pending_blocks_publication() {
-    let h = resume();
-    h.header(ID, false);
-    hook(&h, "session-start", ID, "resume", Some(&h.path(ID)));
-    hook(&h, "user-prompt-submit", ID, "startup", Some(&h.path(ID)));
-    let log = log_bytes(&h);
-    assert_eq!(h.fold().pending.len(), 2);
-    let result = record(&h, ID, &h.path(ID));
-    assert_blocked(&h, result, &log, 2);
+fn executed_resume_companion_ups_settles_before_initial_proof() {
+    for pathless in [false, true] {
+        for source in [None, Some("unknown"), Some("startup"), Some("resume")] {
+            for ups_first in [false, true] {
+                let h = resume();
+                h.header(ID, false);
+                let path = h.path(ID);
+                let hint = (!pathless).then_some(path.as_path());
+                let start = || hook(&h, "session-start", ID, "resume", hint);
+                let ups = || hook_with_source(&h, "user-prompt-submit", ID, source, hint);
+                let results = if ups_first {
+                    [ups(), start()]
+                } else {
+                    [start(), ups()]
+                };
+                assert_eq!(
+                    results,
+                    [
+                        IngressOutcome::Durable(DurableKind::Pending),
+                        IngressOutcome::Durable(DurableKind::Pending)
+                    ]
+                );
+                let pending = h.fold().pending;
+                assert_eq!(pending.len(), 2);
+                assert!(h.fold().verified.is_none());
+                assert!(record(&h, ID, &path).unwrap());
+                companions::assert_terminal_contract(&h, &pending);
+            }
+        }
+    }
 }
 
 #[test]
@@ -275,6 +309,9 @@ fn executed_resume_other_lifecycle_pending_stays_blocked() {
         assert_blocked(&h, result, &log, 1);
     }
 }
+
+#[path = "codex_verified_resume_companion_tests.rs"]
+mod companions;
 
 #[test]
 fn executed_resume_nonempty_old_is_invalid() {

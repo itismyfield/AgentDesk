@@ -642,7 +642,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/internal/escalation/emit",
             "internal",
-            "Emit a manual-decision escalation for a card through the configured user-thread or PM Discord route.",
+            "Emit a manual-decision escalation for a card as a Discord DM to `discord.owner_id`.",
         )
         .with_params([
             ("card_id", body_param("string", true, "Kanban card id to escalate")),

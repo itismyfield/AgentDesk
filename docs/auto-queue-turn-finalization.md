@@ -23,7 +23,7 @@ identity. Required gates should fail when a scenario declares `controlled` or
 | --- | --- | --- | --- |
 | `task_dispatches.status = completed` | `dispatch::finalize_dispatch`, `mark_dispatch_completed_pg_first`, review verdict routes, selected recovery fallbacks | policy hooks, GitHub sync, dashboard/API readers, auto-queue reconciliation | authoritative for dispatch completion, but not sufficient for run completion |
 | `auto_queue_entries.status` terminal states | `update_entry_status_on_pg`, queue dispatch failure handling, skip/reorder/cancel routes | `maybe_finalize_run_if_ready_pg`, auto-queue status surfaces, phase gate logic | authoritative for entry completion and run readiness |
-| `auto_queue_runs.status = completed` | `maybe_finalize_run_if_ready_pg`, terminal cleanup sweeps | auto-queue dashboard/API status, later phase dispatch gating | derived from entry and phase-gate readiness |
+| `auto_queue_runs.status = completed` | `finalize_run_if_ready_on_pg_tx` (derived), operator `end` force-completion, destructive reset | auto-queue dashboard/API status, later phase dispatch gating | derived from entry and phase-gate readiness |
 | `on_dispatch_completed` policy event | module-private `dispatch::complete_dispatch_inner_with_backends` after a successful status transition | policy engine hooks, review dispatch creation, card lifecycle side effects | derived side effect; must not be the primary truth |
 | terminal-card cleanup (`auto_cancelled_on_terminal_card`, `js_terminal_cleanup`) | GitHub sync and policy/card terminal cleanup paths | auto-queue run finalization fallback and cleanup | fallback/reconciliation signal |
 | watcher stream final hook | `tmux_watcher` after full response capture and dispatch evidence assembly | dispatch completion, follow-up queueing, Discord relay finalization | existing normal-completion path; intended future single canonical entry point |
@@ -55,7 +55,7 @@ identity. Required gates should fail when a scenario declares `controlled` or
 | Streaming turn completion | canonical streaming-final hook | One hook receives full response, dispatch id, provider/channel, token usage, and completion source. |
 | Dispatch completion | dispatch status transition helper | Called by the streaming-final hook and explicit fallback helpers only. |
 | Auto-queue entry terminal state | `update_entry_status_on_pg` / terminal-entry helper | Entry status drives run readiness; no policy hook is required to close the run. |
-| Auto-queue run completion | `maybe_finalize_run_if_ready_pg` | Pure derivation from entries and phase gates. |
+| Auto-queue run completion | `finalize_run_if_ready_on_pg_tx` | Pure derivation from entries and phase gates; see "Run Completion Writer". |
 | Discord mailbox cleanup | mailbox finish/stop helpers | Cleans runtime state after canonical completion/cancel has recorded durable state. |
 | Watchdog | detector/reconciler | Emits suspicion/timeout and invokes cancel/recovery; never marks work complete directly. |
 
@@ -78,7 +78,8 @@ identity. Required gates should fail when a scenario declares `controlled` or
 - After dispatch completion, update the matching auto-queue entry through the
   terminal-entry helper instead of relying on policy/card terminal side effects.
 - Preserve `user_cancelled` as resumable and non-run-finalizing.
-- Keep `maybe_finalize_run_if_ready_pg` as the only run completion writer.
+- Keep `finalize_run_if_ready_on_pg_tx` as the only derived run completion
+  writer (`maybe_finalize_run_if_ready_pg` is its boolean view).
 - Rollback point: disable the new entry update and leave existing policy/GitHub
   cleanup fallbacks in place.
 
@@ -90,6 +91,34 @@ identity. Required gates should fail when a scenario declares `controlled` or
 - Keep watchdog observability and prealert behavior intact.
 - Rollback point: restore the current watchdog stop path while retaining the
   canonical normal-completion finalizer.
+
+## Run Completion Writer
+
+Derived completion has exactly one writer, `finalize_run_if_ready_on_pg_tx`
+in `src/db/auto_queue/runs.rs`. Every caller (terminal-entry writers, GitHub
+sync, phase-gate reconciliation, the policy `completeRun` facade, the activate
+tail and the empty-run order/activate paths) reaches it directly or through
+`finalize_run_if_ready_pg`, which owns a transaction and takes the blocking run
+token first. The writer returns `Completed | Blocked(reason) | AlreadyTerminal`
+and never reports `Completed` for a zero-row update.
+
+Inside one transaction, after the `aq_run:<run_id>` token, it refuses when any
+of these hold, in this order: a pending/failed phase gate, an open
+`phase_gate_grace_until` window, a `user_cancelled` entry, or a
+`pending`/`dispatched` entry. Only then does it flip the run to `completed`,
+release the run's slots and queue the completion notification. The
+notification is queued only on the transition, so repeated calls are
+idempotent (`AlreadyTerminal`) and cannot duplicate it. A run that never held
+an entry completes silently.
+
+Force-completion is a separate operator command: `POST /api/queue/runs/{id}/end`
+(`end_run_with_pg` -> `terminalize_selected_runs_with_pg`, audit source
+`auto_queue_end`). It is the only completion path allowed to delete phase gates
+and skip live entries; the generic `PATCH /api/queue/runs/{id}` rejects
+`status: completed`. The destructive reset paths in
+`services/auto_queue/command.rs` remain separate admin owners. The
+`run_completion_contract_tests` module pins the set of files that may contain
+a `completed` status write.
 
 ## Verification Plan
 

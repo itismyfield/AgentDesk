@@ -656,15 +656,6 @@ deadline = "2026-10-31"
 decompose_issue = "#4712"
 
 [[entry]]
-# #4229 S4 follow-up: turn stream collection was moved out of the watcher root
-# as an irreducible review-verified slice; keep it tracked until a later
-# behavior-preserving split can bring it below the prod-giant threshold.
-file = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
 # verbatim `restore_inflight_turns` body remains a tracked giant until follow-up
 # slices can split the scan/session-retry internals without behavior changes.
@@ -693,19 +684,12 @@ decompose_issue = "#4712"
 [[entry]]
 # Crossed the threshold when #5071 T4-B6 wired the composed relay verdict
 # (RelayVerdictSource polarity switch) into the per-channel snapshot composer.
-file = "src/services/discord/health/snapshot.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-02-28"
-decompose_issue = "#5447"
 
-[[entry]]
-# #3721 first-batch promotion: health recovery surface combines stop/cancel,
-# rebind, stall-watchdog, queue drain, and leak-recovery behavior.
-file = "src/services/discord/health/recovery.rs"
+# 2026-09-04 giant retirement track ended (decision recorded on #5447): shrink -> keep, with size held by the zero-growth pin.
+file = "src/services/discord/health/snapshot.rs"
+decision = "keep"
 owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
+keep_reason = "Retain per-channel health snapshot composition and relay-verdict reporting as one maintained diagnostic surface after the decomposition campaign was retired; future additions remain subject to the giant-file zero-growth gate."
 
 # RETIRED 2026-07-24 (#4712): watchers/lifecycle.rs dropped below the production
 # giant threshold after the restore scan, liveness, dispatch failure,
@@ -713,65 +697,6 @@ decompose_issue = "#4712"
 # verbatim into `watchers/lifecycle/` child modules. Remove the [[entry]] and
 # frozen baseline path so future growth cannot be re-grandfathered.
 
-[[entry]]
-# #3721 first-batch promotion: residual tmux relay helper root remains giant
-# after earlier tmux.rs extraction rounds.
-file = "src/services/discord/tmux.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
-# #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
-# marker persistence, parser, tail loop, and completion heuristics.
-file = "src/services/codex_tui/rollout_tail.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
-# output-offset relay-dedup authority: the idle-JSONL relay loop now consults
-# `committed_relay_offset` (read-only) with generation-aware watermark resets to
-# de-duplicate inflight-less wake/background relays against the tmux watcher.
-# #5071 T0-S4 moved the terminal outcome fold and RelaySink::deliver to
-# session_relay_sink/terminal_handoff.rs; the root remains giant at 1498 prod
-# LoC as measured by scripts/generate_inventory_docs.py.
-# Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
-#
-# DEADLINE RESET 2026-08-31 -> 2026-10-31 on 2026-09-07 (#5742). The prior date
-# lapsed and broke the inventory gate for a week, so the new one is recorded
-# with its reasoning instead of a bare number:
-#   1. Blocked on cost, not on will. Decomposing this root is not a
-#      self-contained move -- three guards pin it by path and by call-site
-#      count, and every one has to be repinned in the same change:
-#      scripts/check_delivery_journal_raw_writer.py (root + `deliver_response`),
-#      scripts/check_durable_frontier_writer_call_sites.py (four path->count
-#      maps naming the root), and scripts/run_relay_authority_mutations.sh
-#      (SESSION_RELAY_SINK plus four delivery_orchestration_tests targets).
-#      That closure is wider than a reviewable PR, which is what the
-#      2026-08-31 date had assumed it would not be.
-#   2. The surface is still moving. The idle-relay loop reads
-#      `committed_relay_offset`, and the #5071 T5 relay-authority rollout
-#      (Legacy -> observe -> enforce) is rewriting exactly that authority.
-#      Splitting the loop before T5 settles means cutting the same code twice.
-#   3. 2026-10-31 is not a fresh guess: it is the date the other thirteen
-#      discord-relay #4712 entries already carry. Folding this path into that
-#      wave buys one decomposition round for the whole cohort and removes the
-#      lone private deadline that drifted unnoticed. If T5 has not settled by
-#      then, move this entry with the cohort rather than alone.
-#   Follow-up, recorded so the next pass does not rediscover it: the campaign
-#   decision of 2026-09-04 to end the giant retirement track lives outside this
-#   repo, and issues #5447 and #4229 are held on exactly this registry
-#   pointer/deadline cleanup. If that decision stands, the cohort's next pass is
-#   a shrink -> keep reclassification of all fourteen 2026-10-31 entries, not a
-#   decomposition round. Either disposition is a cohort-wide call; what this
-#   change fixes is that the path is no longer stranded on a private date.
-# No current selector admits shrink -> keep; it requires a separately authorized evaluator change.
-file = "src/services/discord/session_relay_sink.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 # TRANSITION-LIST CLEANUP 2026-09-07 (#5742): four paths were still listed in
 # scripts/giant_file_closed_issue_transition_list.txt after their decompositions
@@ -813,15 +738,6 @@ decompose_issue = "#4712"
 # Of the production decrease, -7 is blank-line compaction (imports 3 + spawn_turn_bridge body 4); the remainder is helper-move contribution.
 # registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #4259 while stream persistence gained
-# guarded durable-winner reconciliation and identity-aware exit handling.
-# Decomposition should lift guarded persistence/reconciliation orchestration
-# into the existing stream_tick child modules once the authority rollout lands.
-file = "src/services/discord/turn_bridge/stream_tick.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 # RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
 # 1370 to 882 production LoC after recovery fallback, post-commit epilogue, and
@@ -829,27 +745,6 @@ decompose_issue = "#4712"
 # the 1000-prod-LoC giant threshold, so its promoted registry entry is removed
 # and cannot remain as a ghost.
 
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery
-# record sidecar gained bounded content fingerprints for degenerate watcher
-# lease-key duplicate suppression. Decomposition should split the lease,
-# delivered-frontier, owner-context, and recent-content fingerprint stores into
-# narrower outbound/delivery_record siblings.
-file = "src/services/discord/outbound/delivery_record.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
-# claim/adoption and idle-tail cleanup now route releases through finalizer
-# authority with identity/session-key guards and preserve the global_active 1:1
-# mailbox-activation invariant. Decomposition would lift claim/adoption,
-# finalizer cleanup, and pending-start glue into narrower siblings.
-file = "src/services/discord/tui_prompt_relay/synthetic_start.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3924: the recovery-net
@@ -867,11 +762,3 @@ owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
-# admission semantics were aligned for #4107. Decomposition should split the
-# scan/admission commit paths from durable cleanup and checkpoint bookkeeping.
-file = "src/services/discord/catch_up.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
