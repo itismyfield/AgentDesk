@@ -1967,6 +1967,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::a_codex_terminal_left_without_its_newline_is_settled_once_by_its_own_reader_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::a_live_codex_turn_ends_once_only_after_its_provider_is_gone_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
@@ -1988,6 +1989,7 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::cold
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end::a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end::a_live_turn_the_pass_cannot_own_or_read_is_left_as_it_was_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end::a_terminal_flushed_as_the_provider_died_is_left_to_its_reader_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end::a_terminal_left_without_its_newline_is_settled_once_by_its_own_reader_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_chain_through_another_executions_pending_is_not_restored_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_naming_another_transcript_takes_no_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_taken_from_another_source_is_not_restored_pg
