@@ -570,7 +570,7 @@ pub(super) fn native_turn_eof(
 }
 
 /// One EOF of a Herdr turn's tail under settlement: `None` keeps the legacy judgement, `Some(None)`
-/// reads on, `Some(Some(_))` ends on the provider's record; `is_alive` is whether its writer lives.
+/// reads on, `Some(Some(_))` ends on the provider's record or, for a dead pane, unconfirmed.
 pub(super) fn herdr_eof(
     sender: &RelaySuppressionSender<'_>,
     (state, partial_line): (&mut RolloutParseState, &mut Vec<u8>),
@@ -606,8 +606,13 @@ pub(super) fn herdr_eof(
     if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, gone) {
         return Some(None);
     }
-    // No drain, deadline, idle wait or dead writer ends a Herdr turn.
-    if mutant("prb_codex_reader_liveness") && !is_alive() {
+    // No drain, deadline or idle wait ends a Herdr turn, nor a dead writer once its input went to an
+    // execution: the row pass settles that turn.
+    let submitted = actor.herdr_interrupt_state().is_some_and(|herdr| {
+        let input = herdr.submission.lock().unwrap_or_else(|e| e.into_inner());
+        input.execution.is_some()
+    });
+    if (!submitted || mutant("prb_codex_reader_liveness")) && !is_alive() {
         let offset = turn.0.saturating_add(state.bytes_read);
         return Some(Some(ReadOutputResult::SessionDied { offset }));
     }
