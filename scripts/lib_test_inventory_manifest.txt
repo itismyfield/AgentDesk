@@ -7297,8 +7297,10 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::native_output::native_terminal_fixture_has_a_postable_stable_unit_and_idle_boundary
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_clear_recovers_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_recovers_absence_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_same_actor_repeats_absence_fresh_provider_and_post_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_unproved_successor_holds_until_clear_then_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase::actual_gateway_restart_after_first_post_settles_without_duplicate_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase::actual_gateway_restart_after_fresh_context_before_proof_preserves_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase::actual_gateway_restart_immediately_after_fresh_proof_preserves_fifo_pg
@@ -12837,6 +12839,7 @@ services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::cu
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::physical_alias_is_rejected_before_any_retained_native_read
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::shadow_legacy_other_channel_and_herdr_do_not_gain_scope_admission
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::startup_pending_resolved_anchor_survives_later_same_nonce_warm_proof
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::obligations::durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_and_unretired_denied_sources_stay_untouched_while_fresh_work_posts
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_source_with_an_actual_owed_piece_cannot_enter_suspension
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::same_actor_scopes_two_fresh_incarnations_without_clear_or_restart

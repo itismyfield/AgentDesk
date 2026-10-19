@@ -34,14 +34,16 @@ fn hook(next: &BindingContext, id: &str, path: &Path, event: &str) {
     } else {
         payload["prompt"] = "warm proof input".into();
     }
-    let _ = crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook(
-        "codex",
-        event,
-        Some(id),
-        Some(id),
-        &payload,
-        &headers,
-    );
+    let ingress =
+        crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook(
+            "codex",
+            event,
+            Some(id),
+            Some(id),
+            &payload,
+            &headers,
+        );
+    assert!(!ingress.refused(), "{event}: {ingress:?}");
 }
 
 fn metadata(next: &BindingContext, id: &str, path: &Path, root: &Path) {
@@ -260,6 +262,18 @@ async fn exercise(case: Case) {
                         .link(&resolved.source)
                         .unwrap()
                         .seq;
+                    // A repeated available-source hook is idempotent; a real Pending retry
+                    // advances proof while retaining the exact native file and startup root.
+                    let native_bytes = std::fs::read(&path).unwrap();
+                    let parked = path.with_extension("warm-pending");
+                    std::fs::rename(&path, &parked).unwrap();
+                    hook(&next, &id, &path, "user_prompt_submit");
+                    let warm_pending = dedupe::binding_events::codex::read_ownership(&next);
+                    std::fs::rename(&parked, &path).unwrap();
+                    let warm_pending = warm_pending.unwrap();
+                    assert!(!warm_pending.conflicted);
+                    assert_eq!(warm_pending.pending.len(), 1);
+                    assert!(warm_pending.pending[0].seq > resolved.seq);
                     hook(&next, &id, &path, "user_prompt_submit");
                     let warm = dedupe::binding_events::codex::read_ownership(&next)
                         .unwrap()
@@ -269,6 +283,12 @@ async fn exercise(case: Case) {
                         warm.seq > resolved.seq,
                         "the actual warm claim must advance latest proof"
                     );
+                    assert_eq!(warm.source, resolved.source, "same path, session and inode");
+                    assert_eq!(
+                        warm.ownership.pending_seq,
+                        Some(warm_pending.pending[0].seq)
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), native_bytes);
                     answer(&warm.source, "same nonce warm answer");
                     polls(6).await;
                     let after_warm = harness
@@ -304,6 +324,9 @@ async fn exercise(case: Case) {
             if let Err(panic) = progressed {
                 std::panic::resume_unwind(panic);
             }
+            if matches!(case, Case::PendingWarm) {
+                restart_after_warm(&harness, &next, root_seq).await;
+            }
             assert!(
                 initial_empty,
                 "an exact current context/marker without proof installed a suspension"
@@ -326,6 +349,88 @@ async fn exercise(case: Case) {
     dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
     dedupe::binding_events::set_test_root(None);
     dedupe::reset_state_for_tests();
+}
+
+async fn restart_after_warm(harness: &Harness, context: &BindingContext, root_seq: u64) {
+    let warm = dedupe::binding_events::codex::read_ownership(context)
+        .unwrap()
+        .verified
+        .unwrap();
+    assert!(warm.seq > root_seq);
+    let writer = harness.writer();
+    let selection = writer.suspension.clone();
+    assert!(
+        selection.is_empty(),
+        "a restarted actor must rebuild its own selection"
+    );
+    let (stop, stopped) = watch::channel(false);
+    let (resumed, ready) = watch::channel(false);
+    let actor = tokio::spawn(run_channel(
+        writer,
+        ShadowProvider::Codex,
+        Arc::new(ChannelBindingLog::new(
+            CANARY_CHANNEL,
+            ShadowProvider::Codex,
+        )),
+        stopped,
+        resumed,
+    ));
+    let progressed = std::panic::AssertUnwindSafe(async {
+        polls(6).await;
+        assert!(
+            *ready.borrow(),
+            "the latest warm proof must restore the scoped actor"
+        );
+        assert_eq!(
+            selection.nonce().as_deref(),
+            Some(context.execution_nonce.as_str())
+        );
+        assert_eq!(
+            harness
+                .channel()
+                .rotation()
+                .unwrap()
+                .link(&warm.source)
+                .unwrap()
+                .seq,
+            root_seq,
+            "restart must retain the Startup Pending anchor rather than latest warm proof seq",
+        );
+        assert_eq!(
+            harness.port.posts(),
+            ["resolved first answer", "same nonce warm answer"],
+            "restart must not POST either settled current unit again",
+        );
+        answer(&warm.source, "current answer after warm restart");
+        polls(6).await;
+        assert_eq!(
+            harness.port.posts(),
+            [
+                "resolved first answer",
+                "same nonce warm answer",
+                "current answer after warm restart"
+            ],
+            "the restored warm proof must still admit new current output exactly once",
+        );
+        assert_eq!(
+            harness
+                .channel()
+                .rotation()
+                .unwrap()
+                .link(&warm.source)
+                .unwrap()
+                .seq,
+            root_seq,
+        );
+        assert!(harness.channel().ledger().unresolved().is_none());
+    })
+    .catch_unwind()
+    .await;
+    stop.send(true).unwrap();
+    assert_eq!(actor.await.unwrap(), None);
+    if let Err(panic) = progressed {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -72,11 +72,28 @@ pub(super) async fn restart(
         eventually(
             || {
                 let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
-                channel.ledger().unresolved().is_none() && channel.ledger().next_serial() >= 2
+                channel.ledger().unresolved().is_none()
+                    && channel.ledger().piece(0).is_some_and(|piece| {
+                        matches!(
+                            piece.outcome,
+                            Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                                _
+                            ))
+                        )
+                    })
             },
             "the actual first POST ledger to settle before restart",
         )
         .await;
+        assert_eq!(
+            store
+                .open_channel(&era, CANARY_CHANNEL)
+                .unwrap()
+                .unwrap()
+                .ledger()
+                .next_serial(),
+            1
+        );
         assert_eq!(
             output
                 .texts()

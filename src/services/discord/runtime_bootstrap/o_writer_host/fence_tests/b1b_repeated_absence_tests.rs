@@ -24,6 +24,82 @@ async fn actual_gateway_ordinary_full_resume_recovers_absence_in_place_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn actual_gateway_ordinary_full_resume_clear_recovers_in_place_pg() {
+    if test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::actual_gateway_ordinary_full_resume_clear_recovers_in_place_pg"
+    )) {
+        scenario(true, BeforeInput::InPlaceClear).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_gateway_unproved_successor_holds_until_clear_then_fresh_fifo_pg() {
+    if test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::actual_gateway_unproved_successor_holds_until_clear_then_fresh_fifo_pg"
+    )) {
+        scenario(true, BeforeInput::UnprovedThenClear).await;
+    }
+}
+
+pub(super) async fn unproved_successor_holds_actual_input(
+    fixture: &CanaryFixture,
+    api: &crate::services::discord::admin_host_guard::tests::Recorder,
+    output: &Discord,
+    readiness: &Arc<host::Readiness>,
+) {
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    assert!(readiness.is_hosted(CANARY_CHANNEL));
+    assert!(!readiness.is_ready(CANARY_CHANNEL));
+    assert!(!readiness.accepts(CANARY_CHANNEL));
+    let mut context = fixture.context.clone();
+    context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+    context.created_at = chrono::Utc::now() + chrono::Duration::seconds(2);
+    let prepared = PreparedIncarnation::create(context).unwrap();
+    crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+    assert!(dedupe::clear_relaunch::successor_unproved_for_channel(
+        CANARY_CHANNEL
+    ));
+    assert_eq!(
+        crate::services::platform::tmux::session_presence(CANARY_TMUX),
+        crate::services::platform::tmux::SessionPresence::Missing,
+    );
+    assert!(
+        dedupe::binding_events::codex::read_ownership(&prepared.context)
+            .unwrap()
+            .verified
+            .is_none()
+    );
+    fixture.fake.take_calls();
+    crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
+    let deps = IntakeDeps {
+        http: &api.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared: &fixture.shared,
+        token: "e51-isolated-test-bot",
+    };
+    let admission = admit_text_intake(&deps, &input()).await;
+    let decision = format!("{admission:?}");
+    assert!(
+        decision.starts_with("Blocked {") && decision.contains("successor_unproved"),
+        "actual D intake must hold the unproved successor: {decision}",
+    );
+    assert!(b1::queue_identities(fixture).await.is_empty());
+    assert!(output.texts().is_empty());
+    assert!(
+        crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX)
+            .is_empty()
+    );
+    assert!(!fixture.fake.take_calls().iter().any(|call| {
+        ["new-session", "kill-session", "send-keys", "paste-buffer"]
+            .iter()
+            .any(|effect| call.starts_with(effect))
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn actual_gateway_same_actor_repeats_absence_fresh_provider_and_post_pg() {
     if test_override::isolated_binding_case(concat!(
         module_path!(),

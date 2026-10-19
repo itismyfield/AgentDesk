@@ -5,6 +5,8 @@ use crate::services::tui_o::writer::binding::ChannelBindingLog;
 mod gc_waiting;
 #[path = "fresh_scope_negative_tests.rs"]
 mod negative;
+#[path = "fresh_obligation_tests.rs"]
+mod obligations;
 
 struct ScopeFixture {
     previous: crate::config::Config,
@@ -340,8 +342,8 @@ async fn held_work(retired: bool, unsealed: bool) {
         append(
             &n3.path,
             &output_line(
-                "response_item",
-                serde_json::json!({"type":"message","role":"assistant","id":"unsealed","content":[{"type":"output_text","text":"unfinished"}]}),
+                "event_msg",
+                serde_json::json!({"type":"item_completed","item":{"type":"AgentMessage","id":"unsealed"}}),
             ),
         );
     } else {

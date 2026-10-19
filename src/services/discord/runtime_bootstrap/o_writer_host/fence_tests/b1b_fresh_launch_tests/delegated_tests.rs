@@ -37,10 +37,15 @@ async fn renew(pool: &sqlx::PgPool, home: &HomeGate, epoch: i64) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
-        module_path!(),
-        "::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg"
-    )) {
+    if !crate::services::discord::admin_host_guard::tests::api_child(
+        concat!(
+            module_path!(),
+            "::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg"
+        )
+        .split_once("::")
+        .unwrap()
+        .1,
+    ) {
         return;
     }
     let mut fixture =
@@ -68,7 +73,7 @@ async fn delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg() 
         CANARY_CHANNEL
     ));
 
-    let pool = fixture.shared.pg_pool.as_ref().unwrap();
+    let pool: &sqlx::PgPool = fixture.shared.pg_pool.as_ref().unwrap();
     sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ('b1b-home', 'B1b home', 'codex', $1)")
         .bind(CANARY_CHANNEL.to_string()).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO worker_nodes (instance_id, status, role, effective_role, labels, capabilities, last_heartbeat_at, started_at, updated_at) VALUES ($1, 'online', 'worker', 'worker', '[]', $2, NOW(), NOW(), NOW())")

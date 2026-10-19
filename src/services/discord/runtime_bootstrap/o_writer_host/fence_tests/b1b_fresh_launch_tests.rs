@@ -43,6 +43,8 @@ enum BeforeInput {
     ExplicitClear,
     RepeatAbsent,
     InPlaceAbsent,
+    InPlaceClear,
+    UnprovedThenClear,
     RestartAfterContext,
     RestartAfterProof,
     RestartAfterFirstPost,
@@ -250,19 +252,24 @@ async fn scenario(retained: bool, before: BeforeInput) {
         api.port
     ));
     let _cli = fixture.cold_cli();
-    let set = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock;
-    let _routing = set("ADK_INTAKE_ROUTING_MODE", "disabled".as_ref());
-    let _writer = set(test_override::CHILD_ENV, "1".as_ref());
+    let _routing = fixture.scoped_test_env("ADK_INTAKE_ROUTING_MODE", "disabled".as_ref());
+    let _writer = fixture.scoped_test_env(test_override::CHILD_ENV, "1".as_ref());
     let channels = serde_json::to_string(&[(CANARY_CHANNEL, CodexTui)]).unwrap();
-    let _channels = set(test_override::CHANNELS_ENV, channels.as_ref());
+    let _channels = fixture.scoped_test_env(test_override::CHANNELS_ENV, channels.as_ref());
     let _selected = test_override::force_channels(&[(CANARY_CHANNEL, CodexTui)]);
-    if !matches!(before, BeforeInput::InPlaceAbsent) {
+    if !matches!(
+        before,
+        BeforeInput::InPlaceAbsent | BeforeInput::InPlaceClear
+    ) {
         b1::target_missing(&fixture, true);
     }
     crate::services::platform::tmux::invalidate_availability_cache();
     assert_eq!(
         dedupe::codex_verified_channel_delivery_allowed(CANARY_CHANNEL),
-        matches!(before, BeforeInput::InPlaceAbsent),
+        matches!(
+            before,
+            BeforeInput::InPlaceAbsent | BeforeInput::InPlaceClear
+        ),
         "the ordinary in-place case must begin with real current N2 permission"
     );
     if retained {
@@ -337,7 +344,11 @@ async fn scenario(retained: bool, before: BeforeInput) {
         "O2 must preserve actual retained spool bytes"
     );
     let output = Discord::start().await;
-    let mut old_io = (!matches!(before, BeforeInput::InPlaceAbsent)).then(|| {
+    let mut old_io = (!matches!(
+        before,
+        BeforeInput::InPlaceAbsent | BeforeInput::InPlaceClear
+    ))
+    .then(|| {
         crate::services::codex::actual_submit_tests::source_io::Watch::start(
             &fixture.old_source.path,
         )
@@ -395,7 +406,33 @@ async fn scenario(retained: bool, before: BeforeInput) {
                 assert_eq!(handles.len(), 1);
                 assert_ne!(handles[0].generation(), old_generation);
             }
-            BeforeInput::ExplicitClear => {
+            BeforeInput::ExplicitClear
+            | BeforeInput::InPlaceClear
+            | BeforeInput::UnprovedThenClear => {
+                let current_actor = readiness.submission(CANARY_CHANNEL).unwrap();
+                let current_generation = handles[0].generation();
+                if matches!(before, BeforeInput::UnprovedThenClear) {
+                    repeated_absence::unproved_successor_holds_actual_input(
+                        &fixture, &api, &output, &readiness,
+                    )
+                    .await;
+                }
+                if matches!(before, BeforeInput::InPlaceClear) {
+                    eventually(
+                        || readiness.is_ready(CANARY_CHANNEL) && readiness.accepts(CANARY_CHANNEL),
+                        "ordinary N2 full resume before explicit clear",
+                    )
+                    .await;
+                    assert!(dedupe::codex_verified_o_source_allowed(
+                        CANARY_CHANNEL,
+                        &fixture.old_source,
+                    ));
+                    assert!(
+                        output.texts().is_empty(),
+                        "the inherited prefix owes no POST"
+                    );
+                    assert!(b1::queue_identities(&fixture).await.is_empty());
+                }
                 let discarded = b1::restore_instructions(
                     &mut fixture,
                     vec![b1::instruction(
@@ -420,8 +457,15 @@ async fn scenario(retained: bool, before: BeforeInput) {
                     "explicit clear must discard its old queue"
                 );
                 assert!(dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+                assert_eq!(handles[0].generation(), current_generation);
+                assert!(current_actor.same_run(&readiness.submission(CANARY_CHANNEL).unwrap()));
             }
         }
+        eventually(
+            || readiness.submission(CANARY_CHANNEL).is_some(),
+            "the selected actual O actor after the pre-input stage",
+        )
+        .await;
         let generation = handles[0].generation();
         let actor = readiness.submission(CANARY_CHANNEL).unwrap();
         let fresh = run_fifo(
@@ -524,10 +568,24 @@ async fn scenario(retained: bool, before: BeforeInput) {
     );
     assert!(output.texts().iter().all(|text| !text.contains(OLD_REPLY)));
     assert!(recovered.ledger().unresolved().is_none());
-    assert!(
-        recovered.ledger().next_serial() >= 3,
-        "actual O ledger must settle both HTTP POSTs"
+    assert_eq!(
+        recovered.ledger().next_serial(),
+        if matches!(before, BeforeInput::RepeatAbsent) {
+            3
+        } else {
+            2
+        }
     );
+    for (serial, reply) in [(0, FIRST_REPLY), (1, SECOND_REPLY)] {
+        let piece = recovered.ledger().piece(serial).unwrap();
+        assert!(piece.payload.contains(reply));
+        assert!(matches!(
+            piece.outcome,
+            Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                _
+            ))
+        ));
+    }
 }
 
 async fn run_fifo(
@@ -562,7 +620,7 @@ async fn run_fifo(
                 fixture.context.execution_nonce.clone()
             )
         );
-    } else {
+    } else if !matches!(before, BeforeInput::InPlaceClear) {
         assert!(!readiness.is_ready(CANARY_CHANNEL));
         assert!(!readiness.accepts(CANARY_CHANNEL));
     }

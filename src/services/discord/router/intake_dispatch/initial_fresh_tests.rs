@@ -499,23 +499,18 @@ async fn admission_case(case: Case) {
             Refusal::WrongProvider => submission.provider = ProviderKind::Claude,
             Refusal::Lost => {
                 gate.lost();
-                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("ownership_not_owned"));
             }
             Refusal::Uncertain => {
                 gate.uncertain();
-                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("ownership_not_owned"));
             }
             Refusal::SubmissionMissing => {
                 readiness.drop_submission_for_tests(CANARY_CHANNEL);
-                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("writer_sources_unready"));
             }
             Refusal::Stopping => {
                 stop = Some(hosts.pop().unwrap().stop_and_join());
-                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("stopping"));
             }
             Refusal::HostMissing => {
                 hosts.pop().unwrap().stop_and_join().await.unwrap();
-                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("host_missing"));
             }
             Refusal::UnprovedSuccessor => {
                 let mut context = fixture.context.clone();
@@ -577,6 +572,7 @@ async fn admission_case(case: Case) {
         });
         (guard, sibling, external)
     });
+    let live_refusal = host::initial_fresh_refusal(CANARY_CHANNEL);
     let admission = admit_text_intake(&deps, &submission).await;
     if let Case::Worker(case) = case {
         worker_case(&fixture, case).await;
@@ -593,6 +589,16 @@ async fn admission_case(case: Case) {
             matches!(admission, IntakeAdmission::Blocked { .. }),
             "{refusal:?}: a false-resumed actor must hold actual input: {admission:?}"
         );
+        let expected = match refusal {
+            Refusal::Lost | Refusal::Uncertain => Some("ownership_not_owned"),
+            Refusal::SubmissionMissing => Some("writer_sources_unready"),
+            Refusal::Stopping => Some("stopping"),
+            Refusal::HostMissing => Some("host_missing"),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert_eq!(live_refusal, Some(expected), "{refusal:?}");
+        }
         let (identities, raw, payload) = preserved.unwrap();
         assert_eq!(
             auxiliary_tests::queue_identities(&fixture).await,
@@ -639,13 +645,13 @@ async fn admission_case(case: Case) {
     if let Some((_guard, sibling, external)) = progress {
         sibling.await.unwrap();
         let (probe_thread, advanced_before_release) = external.join().unwrap();
-        assert_ne!(
-            probe_thread, async_thread,
-            "the sync probe must leave the async task"
-        );
         assert!(
             advanced_before_release,
             "another task must progress before the external thread releases the sync probe"
+        );
+        assert_ne!(
+            probe_thread, async_thread,
+            "the sync probe must leave the async task"
         );
     }
     assert!(
@@ -784,7 +790,30 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         provider: "codex".into(),
         home_epoch: None,
     };
-    let id = insert_pending(pool, &payload, 2, None).await.unwrap();
+    let parent = insert_pending(pool, &payload, 1, None).await.unwrap();
+    let claimed = crate::db::intake_outbox::claim_pending_for_target(
+        pool,
+        "b1b-worker",
+        "codex",
+        "parent-fixture",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(claimed.id, parent);
+    assert!(
+        crate::db::intake_outbox::mark_failed_pre_accept(
+            pool,
+            parent,
+            "parent-fixture",
+            "retry fixture",
+        )
+        .await
+        .unwrap()
+    );
+    let id = insert_pending(pool, &payload, 2, Some(parent))
+        .await
+        .unwrap();
     let before: serde_json::Value = sqlx::query_scalar(
         "SELECT jsonb_build_object('text', user_text, 'sources', replay_source_message_ids,
          'message', user_msg_id, 'owner', request_owner_id, 'attempt', attempt_no,
@@ -794,6 +823,8 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
     .fetch_one(pool)
     .await
     .unwrap();
+    assert_eq!(before["attempt"], 2);
+    assert_eq!(before["parent"], parent);
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, releasing) = tokio::sync::oneshot::channel();
     let mut barrier = Some((entered, releasing));

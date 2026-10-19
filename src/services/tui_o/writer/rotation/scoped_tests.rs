@@ -64,10 +64,14 @@ fn rescope_reset_keeps_reader_policy_binding_port_and_suspension() {
     let path = dir.path().join("sealed.jsonl");
     std::fs::write(&path, b"{\"row\":1}\n").unwrap();
     let (source, mut capture) = capture(&path);
-    assert!(matches!(
-        capture.poll(MAX_READ_BYTES),
-        CaptureOutcome::Batch(_)
-    ));
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("the complete native row must produce a real pending batch")
+    };
+    let offsets = (
+        capture.read_through(),
+        capture.captured_through(),
+        capture.prefix_hash(),
+    );
     let bindings = Arc::new(EmptyLog);
     let suspension = super::super::super::suspension::Suspension::default();
     suspension.extend("new-incarnation".into(), [source.clone()]);
@@ -78,6 +82,110 @@ fn rescope_reset_keeps_reader_policy_binding_port_and_suspension() {
         .readers
         .push(Reader::new(source.clone(), Some(capture)));
     assert!(sources.quiescent_for_rescope());
+    let held = |sources: &Sources<EmptyLog>, axis: &str| {
+        assert!(
+            !sources.quiescent_for_rescope(),
+            "{axis} must forbid reader reset"
+        );
+        assert_eq!(
+            sources.readers.len(),
+            1,
+            "{axis} dropped the retained reader"
+        );
+        let reader = &sources.readers[0];
+        assert_eq!(reader.source, source, "{axis} changed the source identity");
+        let capture = reader
+            .capture
+            .as_ref()
+            .expect("the retained FD must stay open");
+        assert_eq!(
+            (
+                capture.read_through(),
+                capture.captured_through(),
+                capture.prefix_hash()
+            ),
+            offsets,
+            "{axis} changed native offsets/prefix"
+        );
+        assert!(sources.suspension.contains(&source));
+        assert_eq!(
+            sources.suspension.nonce().as_deref(),
+            Some("new-incarnation")
+        );
+    };
+    sources.readers[0].pending = Some(batch);
+    held(&sources, "unspooled capture batch");
+    assert!(sources.readers[0].pending.take().is_some());
+    assert!(sources.quiescent_for_rescope());
+
+    sources.readers[0].drain_to = Some(offsets.1 + 1);
+    held(&sources, "successor drain obligation");
+    sources.readers[0].drain_to = None;
+    assert!(sources.quiescent_for_rescope());
+
+    let (_worker, result) = mpsc::channel();
+    sources.validation = Some(Validation {
+        cursor: Cursor {
+            source: source.clone(),
+            captured_through: offsets.1,
+            prefix_hash: offsets.2.clone(),
+            retired: false,
+            transition_cleanup: None,
+        },
+        fingerprint: Fingerprint::path(&source).unwrap(),
+        observed_at: SystemTime::now(),
+        result,
+        ready: Arc::default(),
+    });
+    held(&sources, "pending descriptor validation");
+    sources.validation = None;
+    assert!(sources.quiescent_for_rescope());
+
+    sources.refined.push(source.clone());
+    held(&sources, "retained refinement work");
+    sources.refined.clear();
+    assert!(sources.quiescent_for_rescope());
+    sources.dirty = true;
+    held(&sources, "unflushed source boundary");
+    sources.dirty = false;
+    assert!(sources.quiescent_for_rescope());
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"row\":2}")
+        .unwrap();
+    let capture = sources.readers[0].capture.as_mut().unwrap();
+    assert!(matches!(
+        capture.poll(MAX_READ_BYTES),
+        CaptureOutcome::Batch(_)
+    ));
+    let partial_offsets = (capture.read_through(), capture.captured_through());
+    assert!(partial_offsets.0 > partial_offsets.1);
+    assert!(
+        !sources.quiescent_for_rescope(),
+        "partial bytes must forbid reset"
+    );
+    assert_eq!(sources.readers.len(), 1);
+    let capture = sources.readers[0].capture.as_ref().unwrap();
+    assert_eq!(
+        (capture.read_through(), capture.captured_through()),
+        partial_offsets
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let capture = sources.readers[0].capture.as_mut().unwrap();
+    let CaptureOutcome::Batch(completed) = capture.poll(MAX_READ_BYTES) else {
+        panic!("the incomplete row must become one complete capture")
+    };
+    assert_eq!(completed.records.len(), 1);
+    assert!(sources.quiescent_for_rescope());
+    // Only the positive, fully quiescent caller may drop and rebuild these readers.
     sources.reset_for_rescope();
     assert!(
         sources.readers.is_empty(),

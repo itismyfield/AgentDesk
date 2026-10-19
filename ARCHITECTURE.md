@@ -2976,6 +2976,7 @@ src/
 │   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
 │   │   │   ├── fresh_gc_waiting_tests.rs
+│   │   │   ├── fresh_obligation_tests.rs
 │   │   │   ├── fresh_resume_tests.rs
 │   │   │   ├── fresh_scope_negative_tests.rs
 │   │   │   ├── herdr_resume_tests.rs

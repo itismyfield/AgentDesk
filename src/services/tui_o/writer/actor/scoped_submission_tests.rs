@@ -86,7 +86,10 @@ async fn queued_submission_is_rejected_at_apply_after_scope_freezes() {
     let queued = receiver.next().await.unwrap();
     writer.suspension.extend("successor".into(), [source]);
     receiver.apply(&mut writer, queued);
-    assert_eq!(request.await.unwrap_err(), "suspended_sources");
+    assert_eq!(
+        request.await.unwrap_err(),
+        "Rejected(\"suspended_sources\")"
+    );
     assert_eq!(tree(&root.path().join(STORE_DIR_NAME)), before);
 }
 
@@ -104,7 +107,10 @@ async fn empty_selection_reports_invalid_canonical_capture_without_store_write()
     assert!(futures::poll!(&mut request).is_pending());
     let queued = receiver.next().await.unwrap();
     receiver.apply(&mut writer, queued);
-    assert_eq!(request.await.unwrap_err(), "canonical cursor unavailable");
+    assert_eq!(
+        request.await.unwrap_err(),
+        "Rejected(\"canonical cursor unavailable\")"
+    );
     assert_eq!(tree(&root.path().join(STORE_DIR_NAME)), before);
 }
 
