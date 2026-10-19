@@ -173,6 +173,9 @@ impl TurnSummaryRun {
             Outcome::Completed
         };
         let elapsed = turn.started.zip(timestamp(value)).and_then(|(start, end)| {
+            if end < start {
+                return None;
+            }
             u64::try_from(end.signed_duration_since(start).num_milliseconds()).ok()
         });
         let percent = turn

@@ -297,6 +297,7 @@ fn missing_invalid_or_negative_timestamps_never_use_duration_metadata() {
         (Some(START), None),
         (Some("not-a-timestamp"), Some(END)),
         (Some(END), Some(START)),
+        (Some(START), Some("2026-10-18T23:59:59.999999999Z")),
     ] {
         let mut derive = enabled(ShadowProvider::Claude, inputs(None));
         derive.derive(&prompt(start));
