@@ -6,6 +6,7 @@ src/cli/herdr_tests.rs
 src/db/auto_queue/entries.rs
 src/db/auto_queue/entries/dispatch_failure.rs
 src/db/auto_queue/phase_gates.rs
+src/db/auto_queue/run_admission_pg_tests.rs
 src/db/auto_queue/run_completion_pg_tests.rs
 src/db/auto_queue/run_owner_guard_pg_tests.rs
 src/db/auto_queue/tests.rs
@@ -67,6 +68,7 @@ src/server/multinode_regression.rs
 src/server/resource_locks.rs
 src/server/routes/agents_host_guard_tests.rs
 src/server/routes/agents_turn_deliver/pg_tests.rs
+src/server/routes/auto_queue_admission_pg_tests.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
 src/server/routes/campaigns.rs
 src/server/routes/dispatched_sessions_tests.rs
@@ -346,6 +348,7 @@ db::auto_queue::entries::dispatch_failure::tests
 db::auto_queue::entries::tests
 db::auto_queue::phase_gates::current_batch_phase_pg_tests
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
+db::auto_queue::run_admission_pg_tests
 db::auto_queue::run_completion_pg_tests
 db::auto_queue::run_owner_guard_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
@@ -409,6 +412,7 @@ server::routes::agents::host_guard_tests
 server::routes::agents_turn_deliver::pg_tests
 server::routes::agents_turn_deliver::pg_tests::s1a
 server::routes::agents_turn_deliver::pg_tests::s1a::s1b
+server::routes::auto_queue_admission_pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
 server::routes::campaigns::tests
@@ -767,6 +771,16 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_reports_orpha
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_with_concurrent_dispatch_update_without_deadlock
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
+db::auto_queue::run_admission_pg_tests::cancelled_run_still_admits_reopen_and_failed_gate_pg
+db::auto_queue::run_admission_pg_tests::completion_defers_behind_entry_reopen_holding_the_token_pg
+db::auto_queue::run_admission_pg_tests::completion_defers_behind_gate_save_holding_the_token_pg
+db::auto_queue::run_admission_pg_tests::entry_reopen_waits_for_uncommitted_completion_and_refuses_pg
+db::auto_queue::run_admission_pg_tests::entryless_gate_save_waits_for_uncommitted_completion_and_refuses_pg
+db::auto_queue::run_admission_pg_tests::gate_save_waiting_on_phase_key_holds_no_run_row_lock_pg
+db::auto_queue::run_admission_pg_tests::grace_writer_skips_run_completed_meanwhile_pg
+db::auto_queue::run_admission_pg_tests::new_cli_run_is_published_with_its_first_entry_pg
+db::auto_queue::run_admission_pg_tests::terminal_dispatch_gate_save_refuses_completed_run_pg
+db::auto_queue::run_admission_pg_tests::tx_entry_reopen_refuses_completed_run_pg
 db::auto_queue::run_completion_pg_tests::blocking_phase_gates_refuse_derived_completion_and_keep_rows_pg
 db::auto_queue::run_completion_pg_tests::completion_rolls_back_slot_release_when_notification_fails_pg
 db::auto_queue::run_completion_pg_tests::concurrent_completion_waits_for_token_and_sees_terminal_pg
@@ -1237,6 +1251,12 @@ server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui
 server::routes::agents_turn_deliver::pg_tests::the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_channel_pg
 server::routes::agents_turn_deliver::pg_tests::the_switch_off_keeps_every_route_answer_field_for_field_pg
+server::routes::auto_queue_admission_pg_tests::completion_defers_behind_order_callback_holding_the_token_pg
+server::routes::auto_queue_admission_pg_tests::empty_order_completes_run_and_records_rationale_pg
+server::routes::auto_queue_admission_pg_tests::manual_add_waits_for_uncommitted_completion_and_refuses_pg
+server::routes::auto_queue_admission_pg_tests::order_callback_rolls_back_every_entry_on_insert_failure_pg
+server::routes::auto_queue_admission_pg_tests::order_callback_waits_for_uncommitted_completion_and_refuses_pg
+server::routes::auto_queue_admission_pg_tests::patch_reopen_of_completed_run_entry_answers_conflict_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::dispatch_next_route_completes_drained_run_through_canonical_writer_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
