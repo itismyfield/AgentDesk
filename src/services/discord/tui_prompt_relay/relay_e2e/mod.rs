@@ -34,6 +34,10 @@ mod idle_phase_split;
 mod herdr_stop_activation_e2e;
 #[cfg(test)]
 #[cfg(unix)]
+#[path = "herdr_stop_activation_http_e2e_tests.rs"]
+mod herdr_stop_activation_http_e2e;
+#[cfg(test)]
+#[cfg(unix)]
 #[path = "herdr_terminate_e2e_tests.rs"]
 mod herdr_terminate_e2e;
 #[cfg(test)]

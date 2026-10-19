@@ -242,6 +242,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
@@ -607,6 +608,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_e2e
+services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_http_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation
@@ -2172,6 +2174,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_threa
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_e2e::an_activated_stop_settles_through_the_bridge_and_starts_the_queued_input_once_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_http_e2e::an_http_cancel_settles_through_the_bridge_and_starts_the_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg

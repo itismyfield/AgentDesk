@@ -97,8 +97,8 @@ fn cancelled_turn() -> (
     (fx, cancelled, live, result, frames, path)
 }
 
-// The cancel answers as the holder's pending stop with no completion; the turn keeps its token and
-// row, takes one Escape at its own start, settles on its own Aborted, and the next prompt is written once.
+// The cancel answers a pending stop with no completion; the turn keeps its token and row, takes one
+// Escape and ends on its own Aborted. Only the executor runs: the queued input is the relay e2e's.
 #[test]
 fn a_non_forced_http_cancel_settles_a_live_turn_on_its_own_abort_pg() {
     let (fx, cancelled, live, result, frames, path) = cancelled_turn();
@@ -148,6 +148,6 @@ fn a_non_forced_http_cancel_settles_a_live_turn_on_its_own_abort_pg() {
     assert_eq!(
         fx.rig.sends(),
         sent,
-        "one Escape, then the next prompt once"
+        "one Escape, then a later turn's prompt once"
     );
 }
