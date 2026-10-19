@@ -1,6 +1,7 @@
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
+#[path = "actual_submit_tests/source_io_tests.rs"]
 pub(crate) mod source_io;
 
 pub(crate) fn driver(

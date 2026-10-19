@@ -200,6 +200,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::custody_test_adapter
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests

@@ -836,7 +836,7 @@ src/
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
 │   │   ├── actual_submit_tests/
-│   │   │   └── source_io.rs
+│   │   │   └── source_io_tests.rs
 │   │   ├── tui_session_launch/
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
@@ -942,6 +942,7 @@ src/
 │   │   │   │   │   │   ├── auxiliary_tests/
 │   │   │   │   │   │   │   └── policy_tests.rs
 │   │   │   │   │   │   ├── auxiliary_tests.rs
+│   │   │   │   │   │   ├── custody_tests.rs
 │   │   │   │   │   │   ├── late_tests.rs
 │   │   │   │   │   │   ├── negative_tests.rs
 │   │   │   │   │   │   └── source_boundary_tests.rs

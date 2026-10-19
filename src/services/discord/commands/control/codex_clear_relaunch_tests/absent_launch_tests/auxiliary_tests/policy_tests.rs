@@ -103,10 +103,39 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
     let _cli = fixture.cold_cli();
     target_missing(&fixture, true);
     restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 121, Q1)]).await;
+    let (hold_tx, hold_rx) = mpsc::channel();
+    *crate::services::codex_tui::verified_hold::HOLD_ENTERED_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(hold_tx);
+    let _hold_reset = HoldHookReset;
     fixture.fake.take_calls();
     assert!(kickoff(&fixture, &api).await);
     let first = fixture.turn_failure_guard().await;
-    let n2 = wait_context_after(&fixture, &fixture.context.execution_nonce).await;
+    let n2 = tokio::select! {
+        context = wait_context_after(&fixture, &fixture.context.execution_nonce) => Some(context),
+        _ = async {
+            loop {
+                if hold_rx.try_recv().is_ok() { break; }
+                if fixture.shared.mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
+                    .snapshot().await.cancel_token.is_none() { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => None,
+    };
+    if n2.is_none() {
+        first.token.cancelled.store(true, Ordering::SeqCst);
+        wait_idle(&fixture).await;
+    }
+    let calls = fixture.fake.take_calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("new-session"))
+            .count(),
+        1,
+        "absence successor must launch before rollback policy is consumed; {calls:?}"
+    );
+    let n2 = n2.expect("an admission hold cannot satisfy a fresh successor");
     assert_eq!(
         n2.source_policy.as_deref(),
         Some("verified"),

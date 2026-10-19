@@ -69,8 +69,10 @@ mod codex_absence {
         };
         let local = &identity.local;
         if identity.version != 1
+            || local.provider_kind().is_none()
             || identity.provider != local.provider
             || identity.channel_id != local.channel_id
+            || identity.watcher_owner_channel_id != local.delivery_record_owner_channel_id()
             || identity.channel_id == 0
             || identity.watcher_owner_channel_id == 0
         {

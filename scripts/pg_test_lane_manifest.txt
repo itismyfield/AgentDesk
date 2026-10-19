@@ -142,6 +142,7 @@ src/services/discord/commands/control/codex_clear_relaunch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/late_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs
@@ -270,6 +271,7 @@ src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tes
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs
+src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
@@ -497,6 +499,7 @@ services::discord::commands::control::codex_clear_relaunch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::negative_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::source_boundary_tests
@@ -636,6 +639,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::custody_test_adapter
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
@@ -1648,6 +1652,11 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::synthetic_ordinary_verified_pin_does_not_receive_canary_launch_authority_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::unproved_foreign_inventory_never_kicks_restored_head_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::restored_q1_q2_use_actual_cold_then_verified_warm_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::admitted_custody_holds_until_real_resume_then_preserves_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::custody_appearing_after_readiness_holds_before_cleanup_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::custody_directory_io_error_keeps_restored_head_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::partially_conflicting_custody_keeps_captured_absence_held_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::unrelated_custody_does_not_close_captured_absence_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_cancellation_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_create_pg
@@ -2301,6 +2310,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::held_request_custody_never_settles_its_dispatch_pg
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::custody_test_adapter::unreadable_retained_custody_keeps_restored_head_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token

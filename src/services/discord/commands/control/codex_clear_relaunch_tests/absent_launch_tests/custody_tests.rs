@@ -113,8 +113,28 @@ async fn retain_after_successor(
     local: &InflightTurnState,
     range: &CodexRange,
 ) -> String {
+    let successor = install_successor(local);
+    let key = custody_test_adapter::retain(local, range)
+        .await
+        .expect("the production terminal serializer must durably retain the captured body");
+    clear_successor(&successor);
+    assert!(
+        fixture
+            .shared
+            .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    key
+}
+
+fn install_successor(local: &InflightTurnState) -> InflightTurnState {
     let mut successor = local.clone();
     successor.provider = "codex".into();
+    successor.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+    successor.channel_id = CANARY_CHANNEL;
     successor.user_msg_id += 10;
     successor.turn_nonce = Some(uuid::Uuid::new_v4().to_string());
     successor.turn_start_offset = Some(local.last_offset);
@@ -122,9 +142,10 @@ async fn retain_after_successor(
     successor.tui_terminal_source_file_identity = None;
     successor.tui_terminal_generation_mtime_ns = None;
     inflight::save_inflight_state(&successor).unwrap();
-    let key = custody_test_adapter::retain(local, range)
-        .await
-        .expect("the production terminal serializer must durably retain the captured body");
+    successor
+}
+
+fn clear_successor(successor: &InflightTurnState) {
     assert_eq!(
         inflight::clear_inflight_state_if_matches_identity_turn_nonce(
             &ProviderKind::Codex,
@@ -140,16 +161,6 @@ async fn retain_after_successor(
             .unwrap()
             .is_none()
     );
-    assert!(
-        fixture
-            .shared
-            .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
-            .snapshot()
-            .await
-            .cancel_token
-            .is_none()
-    );
-    key
 }
 
 fn custody_path(fixture: &CanaryFixture, key: &str) -> PathBuf {
@@ -411,6 +422,10 @@ pub(in crate::services::discord) async fn unreadable_retained_custody_case(test:
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
     let api = recorder(&mut fixture).await;
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://127.0.0.1:{}",
+        api.port
+    ));
     let _cli = fixture.cold_cli();
     let (local, range) = admitted_terminal(&fixture, false).await;
     let key = retain_after_successor(&fixture, &local, &range).await;
@@ -427,6 +442,51 @@ pub(in crate::services::discord) async fn unreadable_retained_custody_case(test:
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn custody_directory_io_error_keeps_restored_head_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::custody_directory_io_error_keeps_restored_head_pg"
+    )) {
+        return;
+    }
+    let mut fixture =
+        CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
+            .await;
+    let api = recorder(&mut fixture).await;
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://127.0.0.1:{}",
+        api.port
+    ));
+    let _cli = fixture.cold_cli();
+    target_missing(&fixture, false);
+    let identities =
+        restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 526, FIRST)]).await;
+    assert!(
+        !readiness(&fixture).await,
+        "known verified absence must be open before the store I/O fault"
+    );
+    let root = fixture
+        .root
+        .path()
+        .join("runtime/discord_terminal_delivery_custody");
+    assert!(
+        !root.exists(),
+        "the I/O fixture starts without custody records"
+    );
+    fs::write(&root, b"custody directory is unavailable").unwrap();
+    assert_eq!(
+        fs::read_dir(&root).unwrap_err().kind(),
+        std::io::ErrorKind::NotADirectory
+    );
+    let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
+        &fixture.old_source.path,
+    );
+    held_queue(&fixture, &api, &identities).await;
+    assert_eq!(old_io.stats(), Default::default());
+    assert_eq!(fs::read(root).unwrap(), b"custody directory is unavailable");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn unrelated_custody_does_not_close_captured_absence_pg() {
     if !isolated(concat!(
         module_path!(),
@@ -438,12 +498,18 @@ async fn unrelated_custody_does_not_close_captured_absence_pg() {
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
     let api = recorder(&mut fixture).await;
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://127.0.0.1:{}",
+        api.port
+    ));
     let _cli = fixture.cold_cli();
     let (local, range) = admitted_terminal(&fixture, false).await;
     let mut other = local.clone();
     other.provider = "claude".into();
+    other.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
     let mut other_range = range.clone();
     other_range.source.provider = "claude".into();
+    other_range.identity = InflightTurnIdentity::from_state(&other);
     let key = retain_after_successor(&fixture, &other, &other_range).await;
     let retained = fs::read(custody_path(&fixture, &key)).unwrap();
     target_missing(&fixture, false);
@@ -460,6 +526,7 @@ async fn unrelated_custody_does_not_close_captured_absence_pg() {
     other_channel.watcher_owner_channel_id = Some(other_channel.channel_id);
     other_channel.logical_channel_id = Some(other_channel.channel_id);
     let mut channel_range = range.clone();
+    channel_range.identity = InflightTurnIdentity::from_state(&other_channel);
     channel_range.source.offset_authority_channel_id = other_channel.channel_id;
     channel_range.source.delivery_channel_id = other_channel.channel_id;
     custody_test_adapter::retain(&other_channel, &channel_range)
@@ -472,10 +539,7 @@ async fn unrelated_custody_does_not_close_captured_absence_pg() {
     let mut other_tmux = local.clone();
     other_tmux.tmux_session_name = Some("custody-other-local-target".into());
     let mut tmux_range = range.clone();
-    tmux_range
-        .identity
-        .tmux_session_name
-        .clone_from(&other_tmux.tmux_session_name);
+    tmux_range.identity = InflightTurnIdentity::from_state(&other_tmux);
     tmux_range.source.tmux_session_name = "custody-other-local-target".into();
     custody_test_adapter::retain(&other_tmux, &tmux_range)
         .await
@@ -483,6 +547,42 @@ async fn unrelated_custody_does_not_close_captured_absence_pg() {
     assert!(
         !readiness(&fixture).await,
         "coherent other-tmux custody is irrelevant even when the native file is shared"
+    );
+    let other_path = fixture.root.path().join("other-native-custody.jsonl");
+    fs::write(&other_path, b"{\"type\":\"session_meta\",\"payload\":{}}\n").unwrap();
+    terminal(&other_path, "other-native-turn", BODY);
+    let other_path = other_path.canonicalize().unwrap();
+    let file = fs::metadata(&other_path).unwrap();
+    let mut other_native = local.clone();
+    other_native.output_path = Some(other_path.display().to_string());
+    other_native.session_id = Some("019e660d-4859-7522-9cee-8ba7c4e7c749".into());
+    other_native.last_offset = file.len();
+    other_native.tui_terminal_source_file_identity = Some((file.dev(), file.ino()));
+    other_native.tui_terminal_generation_mtime_ns = Some(range.source.generation_mtime_ns + 1);
+    let mut native_range = range.clone();
+    native_range.identity = InflightTurnIdentity::from_state(&other_native);
+    native_range.rollout_path = other_native.output_path.clone().unwrap();
+    native_range.session_id = other_native.session_id.clone().unwrap();
+    native_range.source_file_identity = other_native.tui_terminal_source_file_identity;
+    native_range.source.range.1 = other_native.last_offset;
+    native_range.source.generation_mtime_ns =
+        other_native.tui_terminal_generation_mtime_ns.unwrap();
+    assert_ne!(native_range.rollout_path, range.rollout_path);
+    assert_ne!(native_range.session_id, range.session_id);
+    assert_ne!(
+        native_range.source_file_identity,
+        range.source_file_identity
+    );
+    assert_ne!(
+        native_range.source.generation_mtime_ns,
+        range.source.generation_mtime_ns
+    );
+    custody_test_adapter::retain(&other_native, &native_range)
+        .await
+        .unwrap();
+    assert!(
+        !readiness(&fixture).await,
+        "a coherent independent native incarnation is irrelevant to the captured source"
     );
     assert_effects_absent(&fixture.fake.take_calls());
 }
@@ -495,24 +595,73 @@ async fn partially_conflicting_custody_keeps_captured_absence_held_pg() {
     )) {
         return;
     }
-    let mut fixture =
-        CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
-            .await;
-    let api = recorder(&mut fixture).await;
-    let _cli = fixture.cold_cli();
-    let (local, range) = admitted_terminal(&fixture, false).await;
-    let mut conflicting = range.clone();
-    conflicting.source_file_identity = Some((
-        range.source_file_identity.unwrap().0,
-        range.source_file_identity.unwrap().1 + 1,
-    ));
-    let key = retain_after_successor(&fixture, &local, &conflicting).await;
-    let retained = fs::read(custody_path(&fixture, &key)).unwrap();
-    target_missing(&fixture, false);
-    let identities =
-        restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 541, FIRST)]).await;
-    held_queue(&fixture, &api, &identities).await;
-    assert_eq!(fs::read(custody_path(&fixture, &key)).unwrap(), retained);
+    for case in ["native-file", "offset-owner"] {
+        let mut fixture = CanaryFixture::build_with_host(
+            0,
+            CodexSourceMode::Verified,
+            Some("b1-absent-test-host"),
+        )
+        .await;
+        let api = recorder(&mut fixture).await;
+        let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+            "http://127.0.0.1:{}",
+            api.port
+        ));
+        let _cli = fixture.cold_cli();
+        let (local, range) = admitted_terminal(&fixture, false).await;
+        let key = if case == "native-file" {
+            let mut conflicting = range.clone();
+            conflicting.source_file_identity = Some((
+                range.source_file_identity.unwrap().0,
+                range.source_file_identity.unwrap().1 + 1,
+            ));
+            retain_after_successor(&fixture, &local, &conflicting).await
+        } else {
+            clear_successor(&install_successor(&local));
+            let mut other = local.clone();
+            other.channel_id = CANARY_CHANNEL + 900;
+            other.watcher_owner_channel_id = Some(other.channel_id);
+            other.logical_channel_id = Some(other.channel_id);
+            let mut other_range = range.clone();
+            other_range.identity = InflightTurnIdentity::from_state(&other);
+            other_range.source.offset_authority_channel_id = other.channel_id;
+            other_range.source.delivery_channel_id = other.channel_id;
+            let key = custody_test_adapter::retain(&other, &other_range)
+                .await
+                .unwrap();
+            target_missing(&fixture, false);
+            assert!(
+                !readiness(&fixture).await,
+                "the coherent other-channel control must be irrelevant"
+            );
+            let record: serde_json::Value =
+                serde_json::from_slice(&fs::read(custody_path(&fixture, &key)).unwrap()).unwrap();
+            let mut payload = record["payload"].clone();
+            payload["local"]["watcher_owner_channel_id"] = json!(CANARY_CHANNEL + 901);
+            let mismatched: InflightTurnState =
+                serde_json::from_value(payload["local"].clone()).unwrap();
+            assert_ne!(
+                mismatched.delivery_record_owner_channel_id(),
+                payload["watcher_owner_channel_id"].as_u64().unwrap()
+            );
+            let conflict_key = format!("{key}:offset-owner-conflict");
+            crate::services::discord::terminal_delivery_custody::persist(&conflict_key, &payload)
+                .await
+                .unwrap();
+            conflict_key
+        };
+        let retained = fs::read(custody_path(&fixture, &key)).unwrap();
+        target_missing(&fixture, false);
+        let identities =
+            restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 541, FIRST)])
+                .await;
+        held_queue(&fixture, &api, &identities).await;
+        assert_eq!(
+            fs::read(custody_path(&fixture, &key)).unwrap(),
+            retained,
+            "{case}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

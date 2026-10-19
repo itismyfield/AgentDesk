@@ -3679,6 +3679,11 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::synthetic_ordinary_verified_pin_does_not_receive_canary_launch_authority_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::unproved_foreign_inventory_never_kicks_restored_head_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::restored_q1_q2_use_actual_cold_then_verified_warm_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::admitted_custody_holds_until_real_resume_then_preserves_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::custody_appearing_after_readiness_holds_before_cleanup_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::custody_directory_io_error_keeps_restored_head_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::partially_conflicting_custody_keeps_captured_absence_held_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::unrelated_custody_does_not_close_captured_absence_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_cancellation_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_create_pg
@@ -10107,6 +10112,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recove
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::the_stored_violation_carries_the_rows_dispatch_session_and_turn_keys
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests::busy_claude_followup_timeout_preserves_session_and_skips_output_recovery
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests::ordinary_empty_resume_still_uses_fresh_session_recovery
+services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::custody_test_adapter::unreadable_retained_custody_keeps_restored_head_pg
 services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance::tests::terminal_prompt_too_long_replace_delivers_actionable_folded_guidance
 services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence::tests::a_response_that_is_not_silenced_emits_nothing
 services::discord::turn_bridge::terminal_outcome_delivery::queue_retry_silence::tests::busy_readiness_timeout_keeps_notice_deliverable

@@ -840,8 +840,10 @@ async fn recovery_diagnostic(
         channel,
         &snapshot,
     );
+    let terminal_custody =
+        crate::services::discord::terminal_delivery_custody::retains_channel(CANARY_CHANNEL);
     eprintln!(
-        "B1_Q3_CUSTODY boot={boot} stage={stage} turn_state={turn_state:?} active=({:?},{:?},{:?}) pending={:?} pending_sources={:?} lease_caller={} pending_since={:?} recovery={:?} queue={:?} durable_pending={durable_pending:?} disk={disk:?} row={row:?}",
+        "B1_Q3_CUSTODY boot={boot} stage={stage} terminal_custody={terminal_custody:?} turn_state={turn_state:?} active=({:?},{:?},{:?}) pending={:?} pending_sources={:?} lease_caller={} pending_since={:?} recovery={:?} queue={:?} durable_pending={durable_pending:?} disk={disk:?} row={row:?}",
         snapshot.active_turn_nonce,
         snapshot.active_request_owner,
         snapshot.active_user_message_id,
@@ -883,6 +885,10 @@ async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingCont
                     &fixture.shared.token_hash,
                     channel,
                 );
+            let terminal_custody =
+                crate::services::discord::terminal_delivery_custody::retains_channel(
+                    CANARY_CHANNEL,
+                );
             if snapshot.cancel_token.is_none()
                 && snapshot.active_turn_nonce.is_none()
                 && snapshot.pending_user_dispatch.is_none()
@@ -890,6 +896,7 @@ async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingCont
                 && snapshot.recovery_started_at.is_none()
                 && matches!(row, Ok(None))
                 && matches!(pending, Ok(None))
+                && matches!(terminal_custody, Ok(false))
             {
                 break;
             }

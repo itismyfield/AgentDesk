@@ -301,6 +301,11 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
             guard.token.cancelled.store(true, Ordering::SeqCst);
             None
         }
+        _ = async {
+            while fixture.shared.mailbox(channel).snapshot().await.cancel_token.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => None,
     };
     tokio::time::timeout(Duration::from_secs(15), async {
         while fixture
