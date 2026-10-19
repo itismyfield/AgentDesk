@@ -22,9 +22,9 @@ pub(crate) struct ClearPersistence {
     pub(crate) retried: Vec<&'static str>,
     /// Writes that failed twice; a restart may restore what they would have removed.
     pub(crate) failed: Vec<&'static str>,
-    /// The mailbox did not answer, so what the clear discarded is unknown.
+    /// The mailbox did not answer or the dispatch marker was unreadable, so the count is unknown.
     pub(crate) count_unknown: bool,
-    /// The active turn's and a starting turn's ids: discarded, but not waiting in the queue.
+    /// The running turn's ids with its absorbed sources and a starting turn's: never waiting.
     pub(crate) not_waiting: Vec<MessageId>,
 }
 
@@ -61,18 +61,23 @@ pub(super) fn clear_channel_state(
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);
     let disk_trusted = state.remint_fence.trusts_queue(&namespace);
-    let marker = state
-        .remint_fence
-        .trusts_marker(&namespace)
+    let read = (state.remint_fence.trusts_marker(&namespace))
         .then(|| dequeued_input(state, channel_id, &persistence))
-        .flatten();
+        .transpose();
+    let marker_unreadable = read.is_err();
+    let marker = read.ok().flatten().flatten();
+    // Read before the release, which forgets the running turn's absorbed sources.
+    let not_waiting: Vec<MessageId> = (state.active_user_message_id.into_iter())
+        .chain(state.active_absorbed_source_ids.iter().copied())
+        .chain(state.pending_user_dispatch)
+        .chain(state.pending_user_dispatch_source_ids.iter().copied())
+        .collect();
     let mut discarded_message_ids: Vec<MessageId> =
         state.active_user_message_id.into_iter().collect();
     let removed_token = release_active_turn_anchor(state, channel_id, Some(&persistence.provider));
     // Liveness-blind: an orphaned reservation is discarded all the same.
     discarded_message_ids.extend(state.pending_user_dispatch);
     discarded_message_ids.extend(state.pending_user_dispatch_source_ids.iter().copied());
-    let not_waiting = discarded_message_ids.clone();
     let queue_exit_events: Vec<QueueExitEvent> = (marker.into_iter())
         .chain(state.intervention_queue.drain(..))
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
@@ -89,6 +94,7 @@ pub(super) fn clear_channel_state(
     state.remint_fence.begin_clear();
     let mut persistence = write_cleared_files(state, channel_id, &persistence, disk_trusted);
     persistence.not_waiting = not_waiting;
+    persistence.count_unknown = marker_unreadable;
     ClearChannelResult {
         removed_token,
         queue_exit_events,
@@ -98,16 +104,18 @@ pub(super) fn clear_channel_state(
 }
 
 /// The input a dispatch marker still holds beyond what the queue or the active turn holds, so the
-/// clear reports it discarded like the queue; an unreadable marker reports none.
+/// clear reports it discarded like the queue; an unreadable marker is an error.
 fn dequeued_input(
     state: &ChannelMailboxState,
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
-) -> Option<super::Intervention> {
+) -> Result<Option<super::Intervention>, String> {
     let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
     let marker = load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)
-        .inspect_err(|error| tracing::warn!(%error, "clear could not read the dispatch marker"));
-    let (mut marker, _) = marker.ok().flatten()?;
+        .inspect_err(|error| tracing::warn!(%error, "clear could not read the dispatch marker"))?;
+    let Some((mut marker, _)) = marker else {
+        return Ok(None);
+    };
     let held = |id: &MessageId| {
         state.active_user_message_id == Some(*id)
             || state
@@ -121,12 +129,12 @@ fn dequeued_input(
     }
     let held: Vec<MessageId> = ids.iter().copied().filter(held).collect();
     if held.len() == ids.len() {
-        return None;
+        return Ok(None);
     }
     for id in held {
         super::active_source_dedup::strip_source_message_id_from_intervention(&mut marker, id);
     }
-    Some(marker)
+    Ok(Some(marker))
 }
 
 /// Removes the queue file and dispatch marker and publishes the empty snapshot, each on its own, so

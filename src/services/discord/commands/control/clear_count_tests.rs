@@ -9,7 +9,8 @@ use super::super::{ClearReport, SoftClearNotifyMode, clear_channel_session_state
 use crate::services::discord::{SharedData, make_shared_data_for_tests};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{
-    Intervention, InterventionMode, QueuePersistenceContext, save_channel_pending_dispatch_marker,
+    ChannelMailboxRegistry, Intervention, InterventionMode, QueuePersistenceContext,
+    save_channel_pending_dispatch_marker,
 };
 
 const PROVIDER: ProviderKind = ProviderKind::Claude;
@@ -105,4 +106,109 @@ async fn clear_reply_says_the_count_is_unknown_when_the_mailbox_cannot_answer() 
         "{}",
         report.reply()
     );
+}
+
+/// Two merged inputs started as one turn whose claim left the dispatch marker on disk: the clear
+/// counts neither, and counts a later input that waits behind the turn.
+#[tokio::test]
+async fn clear_reply_never_counts_the_running_turns_absorbed_source() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = make_shared_data_for_tests();
+    for (n, waiting) in [(0u64, 0usize), (1, 1)] {
+        let channel = ChannelId::new(1_479_671_305_341_700_200 + n);
+        seed_session(&shared, channel).await;
+        let id = |k: u64| MessageId::new(channel.get() + 10 + k);
+        let mailbox = shared.mailbox(channel);
+        let persistence = QueuePersistenceContext::new(&PROVIDER, &shared.token_hash, None);
+        for k in [1, 2] {
+            let item = Intervention {
+                merge_consecutive: true,
+                ..input(id(k), &[id(k)])
+            };
+            let queued = mailbox.enqueue(item, persistence.clone()).await;
+            assert!(queued.enqueued, "{:?}", queued.refusal_reason);
+        }
+        let taken = mailbox.take_next_soft(persistence.clone()).await;
+        let merged = taken.intervention.expect("the merged input is dequeued");
+        let mut sources = merged.source_message_ids.clone();
+        sources.sort();
+        assert_eq!(sources, [id(1), id(2)], "the two inputs merged");
+        ChannelMailboxRegistry::fail_next_marker_settle(channel);
+        let token = Arc::new(CancelToken::new());
+        let owner = UserId::new(7);
+        let start = mailbox.try_start_turn_with_persistence(
+            token,
+            owner,
+            merged.message_id,
+            persistence.clone(),
+        );
+        assert!(start.await.started);
+        let live = mailbox.snapshot().await;
+        let absorbed = if merged.message_id == id(1) {
+            id(2)
+        } else {
+            id(1)
+        };
+        assert_eq!(live.active_user_message_id, Some(merged.message_id));
+        assert_eq!(live.active_absorbed_source_ids, [absorbed]);
+        assert_eq!(live.pending_user_dispatch, None);
+        assert!(live.intervention_queue.is_empty());
+        let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+        let marker = root.join(PROVIDER.as_str()).join(&shared.token_hash);
+        assert!(
+            marker.join(format!("{channel}.dispatch")).exists(),
+            "the claim left the marker"
+        );
+        if waiting == 1 {
+            let later = Intervention {
+                author_id: UserId::new(8),
+                ..input(id(3), &[id(3)])
+            };
+            let queued = mailbox.enqueue(later, persistence.clone()).await;
+            assert!(queued.enqueued, "{:?}", queued.refusal_reason);
+        }
+
+        let report = clear(&shared, channel).await;
+
+        let expected = format!("대기 메시지 {waiting}건을 비웠어요.");
+        assert_eq!(count_line(&report), expected, "waiting={waiting}");
+    }
+}
+
+/// A dispatch marker the clear cannot read or parse leaves the count unknown, never zero, and the
+/// clear still runs.
+#[tokio::test]
+async fn clear_reply_says_the_count_is_unknown_when_the_marker_is_unreadable() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = make_shared_data_for_tests();
+    for (n, directory) in [(0u64, false), (1, true)] {
+        let channel = ChannelId::new(1_479_671_305_341_700_300 + n);
+        seed_session(&shared, channel).await;
+        let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+        let dir = root.join(PROVIDER.as_str()).join(&shared.token_hash);
+        let marker = dir.join(format!("{channel}.dispatch"));
+        std::fs::create_dir_all(&dir).unwrap();
+        if directory {
+            std::fs::create_dir(&marker).unwrap();
+        } else {
+            std::fs::write(&marker, "{").unwrap();
+        }
+        let live = shared.mailbox(channel).snapshot().await;
+        assert!(live.intervention_queue.is_empty() && live.pending_user_dispatch.is_none());
+
+        let report = clear(&shared, channel).await;
+
+        let reply = report.reply();
+        assert!(reply.starts_with("세션을 초기화했어요.\n"), "{reply}");
+        let case = if directory {
+            "unreadable"
+        } else {
+            "unparsable"
+        };
+        assert_eq!(
+            count_line(&report),
+            "대기 메시지 수를 확인하지 못했어요.",
+            "{case}"
+        );
+    }
 }

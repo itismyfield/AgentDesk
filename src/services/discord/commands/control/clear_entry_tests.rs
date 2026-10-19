@@ -311,12 +311,12 @@ async fn run_matrix(entry: Entry) {
         let replies = rig.clear(entry, channel).await;
 
         // The queued input waits; the dequeued one is starting and an active turn's is running.
-        let waiting = if matches!(fault, Fault::StopRefused) {
-            2
-        } else {
-            1
+        let count = match fault {
+            Fault::CorruptMarker => "대기 메시지 수를 확인하지 못했어요.".to_string(),
+            Fault::StopRefused => "대기 메시지 2건을 비웠어요.".to_string(),
+            _ => "대기 메시지 1건을 비웠어요.".to_string(),
         };
-        let notice = format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 {waiting}건을 비웠어요.");
+        let notice = format!("{SESSION_CLEARED_RESPONSE}\n{count}");
         let expected = match fault.warning() {
             Some(warning) => format!("{notice}\n{warning}"),
             None => notice,

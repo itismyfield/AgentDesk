@@ -3642,7 +3642,9 @@ services::discord::commands::control::clear_persist_failure_tests::a_clear_whose
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
 services::discord::commands::control::clear_report::clear_count_tests::clear_reply_counts_each_waiting_source_once
+services::discord::commands::control::clear_report::clear_count_tests::clear_reply_never_counts_the_running_turns_absorbed_source
 services::discord::commands::control::clear_report::clear_count_tests::clear_reply_says_the_count_is_unknown_when_the_mailbox_cannot_answer
+services::discord::commands::control::clear_report::clear_count_tests::clear_reply_says_the_count_is_unknown_when_the_marker_is_unreadable
 services::discord::commands::control::clear_teardown::clear_end_record_tests::only_a_confirmed_claude_pane_end_is_recorded
 services::discord::commands::control::clear_wait_tests::a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head
 services::discord::commands::control::codex_clear_relaunch_tests::canary_clear_reopens_launch_without_releasing_old_source_pg
