@@ -55,6 +55,10 @@ for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stoppe
     fi
     eval "$body"
 done
+# The rollback also restores policies through the helper deploy-release.sh sources.
+POLICY_HELPER="$(dirname "$DEPLOY_SH")/_deploy_policy_generation.sh"
+# shellcheck source=/dev/null
+if [ -f "$POLICY_HELPER" ]; then . "$POLICY_HELPER"; fi
 
 # The migration guard has its own suite; here it always allows the rollback.
 _rollback_would_brick_on_migration() { return 1; }
