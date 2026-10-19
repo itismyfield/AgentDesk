@@ -480,13 +480,16 @@ fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
         .expect("create policy engine")
 }
 
-fn begin_grace(engine: &crate::engine::PolicyEngine) -> tokio::task::JoinHandle<String> {
+fn begin_grace(
+    engine: &crate::engine::PolicyEngine,
+    run_id: &'static str,
+) -> tokio::task::JoinHandle<String> {
     let engine = engine.clone();
     tokio::task::spawn_blocking(move || {
         engine
-            .eval_js::<String>(
-                r#"String(require("./lib/auto-queue-phase-gate").beginPhaseGateGraceWindow("run-1"))"#,
-            )
+            .eval_js::<String>(&format!(
+                r#"String(require("./lib/auto-queue-phase-gate").beginPhaseGateGraceWindow("{run_id}"))"#
+            ))
             .expect("run beginPhaseGateGraceWindow")
     })
 }
@@ -498,9 +501,16 @@ async fn grace_writer_skips_run_completed_meanwhile_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db, "active").await;
     seed_entry(&pool, "entry-done", "failed").await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+         VALUES ('run-2', 'repo-1', 'agent-1', 'active')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed live run");
     let engine = policy_engine(&pool);
     let completion = uncommitted_completion(&pool).await;
-    let writer = begin_grace(&engine);
+    let writer = begin_grace(&engine, "run-1");
     let waited = wait_for_lock_waiter(&pool, &writer).await;
     completion.commit().await.expect("commit completion");
     let opened = join(writer).await;
@@ -517,24 +527,16 @@ async fn grace_writer_skips_run_completed_meanwhile_pg() {
     assert_eq!(opened, "false");
     assert!(waited, "grace writer did not wait for the run row");
 
-    let pg_db_live = TestPostgresDb::create().await;
-    let live_pool = setup_pool(&pg_db_live, "active").await;
-    seed_entry(&live_pool, "entry-done", "failed").await;
-    let live_engine = policy_engine(&live_pool);
-    assert_eq!(join(begin_grace(&live_engine)).await, "true");
+    assert_eq!(join(begin_grace(&engine, "run-2")).await, "true");
     assert_eq!(
-        finalize_run_if_ready_pg(&live_pool, "run-1")
+        finalize_run_if_ready_pg(&pool, "run-2")
             .await
             .expect("completion inside grace"),
         RunCompletionOutcome::Blocked(RunCompletionBlockedReason::PhaseGateGraceWindow)
     );
-
+    // Like the other policy-engine PG tests, drop the database without closing the pool.
     drop(engine);
-    drop(live_engine);
-    pool.close().await;
-    live_pool.close().await;
     pg_db.drop().await;
-    pg_db_live.drop().await;
 }
 
 /// Contract: a CLI-created run becomes visible only together with its first entry, so an
