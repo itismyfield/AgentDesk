@@ -440,7 +440,8 @@ fi
 
 if run_check guards "Relay-authority fixed mutation gate (#5071)"; then
 "$PYTHON" scripts/check_relay_mutation_sources.py
-"$PYTHON" -m unittest tests.test_relay_authority_mutations
+"$PYTHON" -m unittest tests.test_relay_authority_mutations \
+  tests.test_relay_authority_mutation_coupling
 fi
 
 if run_check guards "Relay-authority mutation wiring digest (#5997)"; then
