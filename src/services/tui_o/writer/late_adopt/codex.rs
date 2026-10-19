@@ -25,6 +25,20 @@ use prefix::{Prefix, Verdict};
 struct Baseline {
     sends: (u64, u64),
     seq: u64,
+    order: u64,
+    turn_mark: bool,
+}
+
+impl Baseline {
+    fn detail(self) -> String {
+        format!(
+            "baseline={} order={} sends={:?} seq={}",
+            if self.turn_mark { "turn" } else { "host" },
+            self.order,
+            self.sends,
+            self.seq
+        )
+    }
 }
 
 /// Why a takeover attempt did not commit.
@@ -32,6 +46,8 @@ struct Baseline {
 enum Taken {
     /// The same rollout is judged again on the next wake.
     Retry(String),
+    /// An eligible marked prefix hit a transient commit blocker.
+    Soon(String),
     /// The rollout grew while still eligible; it is judged again at once.
     Again(String),
     /// Legacy may hold this rollout's output; only a later bind is taken.
@@ -44,6 +60,7 @@ impl Taken {
     fn detail(&self) -> &str {
         match self {
             Self::Retry(detail)
+            | Self::Soon(detail)
             | Self::Again(detail)
             | Self::Skip(detail)
             | Self::Final(detail) => detail,
@@ -81,30 +98,56 @@ pub(super) async fn activate<I: HostIo>(
         gate,
     };
     let (mut baseline, mut logged) = (None, None);
+    let (mut retry_order, mut short_retries) = (0, 0);
     loop {
         if candidate.peek() != Adoption::Deferred {
             return false;
         }
         if io.late_adopt_enabled() {
             until_owned(gate).await;
-            let outcome = match baseline {
-                Some(at) => takeover.attempt(at).await,
-                None => takeover.baseline().and_then(|at| {
+            let sampled = baseline.map_or_else(|| takeover.baseline(), Ok);
+            let mut used = None;
+            let outcome = match sampled {
+                Ok(at) => {
                     baseline = Some(at);
-                    Err(Taken::Retry("no rollout bound since the baseline".into()))
-                }),
+                    let at = takeover.newest(at);
+                    used = Some(at);
+                    if retry_order != at.order {
+                        (retry_order, short_retries) = (at.order, 0);
+                    }
+                    takeover.attempt(at).await
+                }
+                Err(taken) => Err(taken),
             };
             match outcome {
-                Ok(()) => return true,
+                Ok(()) => {
+                    let detail = used.expect("successful attempt has a baseline").detail();
+                    tracing::info!(channel, detail, "[tui_o] Codex takeover committed");
+                    return true;
+                }
                 Err(Taken::Final(detail)) => {
                     release(candidate, &alarms, channel, &detail);
                     return false;
                 }
                 Err(Taken::Again(_)) => continue,
                 Err(Taken::Skip(detail)) => {
+                    let detail = format!("{detail}; {}", used.expect("attempt baseline").detail());
                     tracing::info!(channel, detail, "[tui_o] Codex takeover skips this rollout");
                     baseline = None;
+                    #[cfg(test)]
+                    tokio::task::yield_now().await;
                     continue;
+                }
+                Err(Taken::Soon(detail)) => {
+                    if logged.as_ref() != Some(&detail) {
+                        tracing::info!(channel, detail, "[tui_o] Codex takeover waits");
+                        logged = Some(detail);
+                    }
+                    if short_retries < 8 {
+                        short_retries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        continue;
+                    }
                 }
                 Err(Taken::Retry(detail)) if logged.as_ref() != Some(&detail) => {
                     tracing::info!(channel, detail, "[tui_o] Codex takeover waits");
@@ -125,12 +168,29 @@ impl<I: HostIo> Takeover<'_, I> {
 
     /// Sends are read before the log, so a rollout bound in between counts as already there.
     fn baseline(&self) -> Result<Baseline, Taken> {
-        let sends = {
+        let (sends, order) = {
             let _adoption = self.candidate.lock();
-            self.candidate.sends()
+            self.candidate.baseline_sends()
         };
         let seq = self.events()?.last().map_or(0, |event| event.seq);
-        Ok(Baseline { sends, seq })
+        Ok(Baseline {
+            sends,
+            seq,
+            order,
+            turn_mark: false,
+        })
+    }
+
+    fn newest(&self, at: Baseline) -> Baseline {
+        match self.candidate.turn_mark() {
+            Some(mark) if mark.order > at.order => Baseline {
+                sends: mark.sends,
+                seq: mark.seq,
+                order: mark.order,
+                turn_mark: true,
+            },
+            _ => at,
+        }
     }
 
     async fn attempt(&self, at: Baseline) -> Result<(), Taken> {
@@ -143,7 +203,22 @@ impl<I: HostIo> Takeover<'_, I> {
             Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => Err(Taken::Retry(
                 "the takeover rollout has no first user prompt yet".into(),
             )),
-            Verdict::Eligible(prefix) => self.commit(at, &bound, &prefix).await,
+            Verdict::Eligible(prefix) => {
+                self.commit(at, &bound, &prefix)
+                    .await
+                    .map_err(|taken| match taken {
+                        Taken::Retry(detail)
+                            if at.turn_mark
+                                && self
+                                    .candidate
+                                    .turn_mark()
+                                    .is_some_and(|mark| mark.order == at.order) =>
+                        {
+                            Taken::Soon(detail)
+                        }
+                        other => other,
+                    })
+            }
             Verdict::Wait(detail) => Err(Taken::Retry(detail)),
             Verdict::Refuse(detail) => Err(Taken::Skip(detail)),
         }

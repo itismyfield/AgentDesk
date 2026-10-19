@@ -414,8 +414,7 @@ async fn clear_channel_session_state_body(
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }
-    report.retried = cleared.persistence.retried;
-    report.failed = cleared.persistence.failed;
+    report.absorb(&cleared);
     clear_teardown::write_boundary(shared, channel_id, &mut report).await;
 
     native::clear_session_memory(shared, channel_id).await;

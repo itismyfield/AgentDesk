@@ -1223,6 +1223,31 @@ fn discord_relayed_user_prompt_format_is_recognized_3527() {
     ));
 }
 
+/// A running turn's input opens with `[User:` yet is never a new turn's relay echo or a machine
+/// event, whatever its body quotes; a v1 new-turn header still is a relayed prompt.
+#[test]
+fn an_inject_header_is_neither_a_relayed_prompt_nor_a_machine_event() {
+    let inject = |body: &str| {
+        let frame = crate::services::tui_input::human_frame::inject;
+        frame(
+            "discord:1:2",
+            "343742347365974026",
+            "0hbujang",
+            "abcdef12",
+            body,
+        )
+    };
+    let quoting = inject("see [User: bob (ID: 5)] above");
+    assert!(!is_discord_relayed_user_prompt(&quoting));
+    assert!(is_discord_relayed_user_prompt(
+        &quoting.replace("mode=inject", "mode=new")
+    ));
+    let xml = "<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
+    assert!(!is_user_prefixed_subagent_notification_machine_event(
+        &inject(xml)
+    ));
+}
+
 #[test]
 fn observe_skips_discord_relayed_user_line_without_ledger_3527() {
     // #3527: a re-observed `[User:]` relay line WITHOUT a discord-originated

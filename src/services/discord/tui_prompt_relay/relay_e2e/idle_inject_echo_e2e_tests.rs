@@ -124,6 +124,7 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         transcript: &transcript,
         source: "discord",
         author: "200",
+        name: "ann",
         nonce: "f00d7108",
         text: "typed externally after refusal",
     };
@@ -134,7 +135,13 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         busy_inject::Outcome::NotSent(busy_inject::Veto::Draft)
     ));
     assert!(busy.pane.keys().is_empty());
-    let frame = busy_inject::frame(request.source, request.author, request.nonce, request.text);
+    let frame = busy_inject::frame(
+        request.source,
+        request.author,
+        request.name,
+        request.nonce,
+        request.text,
+    );
     submit_hook(&tx, &session, &frame);
     assert!(
         wait_until(WAIT, || {

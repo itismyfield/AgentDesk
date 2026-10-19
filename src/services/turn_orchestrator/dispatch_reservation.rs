@@ -157,6 +157,14 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
     channel_id: ChannelId,
     operation: &str,
 ) {
+    #[cfg(test)]
+    if take_marker_removal_fault(channel_id) {
+        tracing::warn!(
+            operation,
+            "injected pending dispatch marker removal failure"
+        );
+        return;
+    }
     if let Err(error) = remove_channel_pending_dispatch_marker(
         &persistence.provider,
         &persistence.token_hash,
@@ -170,6 +178,29 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
             error = %error,
             "failed to remove pending dispatch marker"
         );
+    }
+}
+
+#[cfg(test)]
+static MARKER_REMOVAL_FAULTS: std::sync::Mutex<Vec<ChannelId>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn take_marker_removal_fault(channel: ChannelId) -> bool {
+    let mut armed = MARKER_REMOVAL_FAULTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let index = armed.iter().position(|armed| *armed == channel);
+    index.map(|index| armed.remove(index)).is_some()
+}
+
+#[cfg(test)]
+impl super::ChannelMailboxRegistry {
+    /// Test-only: the channel's next settled-marker removal fails and leaves the marker on disk.
+    pub(crate) fn fail_next_marker_settle(channel: ChannelId) {
+        let mut armed = MARKER_REMOVAL_FAULTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        armed.push(channel);
     }
 }
 

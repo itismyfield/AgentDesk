@@ -6,6 +6,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/scripts/_defaults.sh"
+# shellcheck source=/dev/null
+. "$REPO_ROOT/scripts/_deploy_policy_generation.sh"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-preexisting-readers-gate.XXXXXX")
 cleanup() {

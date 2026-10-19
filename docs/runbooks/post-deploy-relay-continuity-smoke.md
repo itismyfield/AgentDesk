@@ -5,6 +5,11 @@ release deploy or restart boundary. A server-up check is not enough; the smoke
 must show that tmux survives, the restarted dcserver reattaches relay ownership,
 and post-restart output reaches Discord.
 
+This is an operator-invoked live procedure for `E-9,E-19`, not a CI run or the
+automatic deployment smoke. See the [scenario execution contract](../../tests/e2e/tui_relay/scenarios/README.md)
+for manual prerequisites and the conditional automatic post-deploy subset
+(`E-1`, `E-35`, `E-50`, `E-51`). Live YAML files alone do not establish CI coverage.
+
 ## Offline Checks
 
 These modes are CI-safe and do not require Discord credentials:

@@ -65,7 +65,8 @@ pub(super) fn run(
     turn_id: Option<String>,
     input: &Input,
 ) -> InjectAttempt {
-    let text = busy_inject::frame(&input.source, &input.author, &input.nonce, &input.text);
+    let (source, author, name) = (&input.source, &input.author, &input.name);
+    let text = busy_inject::frame(source, author, name, &input.nonce, &input.text);
     if input.text.trim().is_empty() || text.len() > busy_inject::MAX_INPUT_BYTES {
         return InjectAttempt::NotSent(veto_name(Veto::InvalidInput));
     }

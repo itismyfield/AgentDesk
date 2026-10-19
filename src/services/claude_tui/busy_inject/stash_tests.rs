@@ -46,7 +46,8 @@ mod environment_tests {
                 session: &session,
                 transcript: &tui.transcript,
                 source: "iMessage",
-                author: "ann",
+                author: "200",
+                name: "ann",
                 nonce: NONCE,
                 text: TEXT,
             };
@@ -232,7 +233,8 @@ struct Tui {
 }
 
 impl Tui {
-    /// A busy 60x50 pane whose composer holds `draft` (empty for none) and no stash.
+    /// A busy 160x50 pane, wide enough for the input header to render flat, whose composer holds
+    /// `draft` (empty for none) and no stash.
     fn new(draft: &str) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
         fs::create_dir_all(&root).unwrap();
@@ -251,7 +253,7 @@ impl Tui {
         for (name, value) in [
             ("attached", "0".to_string()),
             ("last", "100".to_string()),
-            ("width", "60".to_string()),
+            ("width", "160".to_string()),
             ("height", "50".to_string()),
             ("cursor_x", "0".to_string()),
             ("cursor_y", "0".to_string()),
@@ -303,7 +305,8 @@ impl Tui {
             session: &session,
             transcript: &self.transcript,
             source: "iMessage",
-            author: "ann",
+            author: "200",
+            name: "ann",
             nonce: NONCE,
             text,
         };
@@ -361,7 +364,7 @@ fn report(outcome: Outcome, draft: DraftState) -> Report {
 }
 
 fn framed() -> String {
-    frame("iMessage", "ann", NONCE, TEXT)
+    frame("iMessage", "200", "ann", NONCE, TEXT)
 }
 
 #[test]
@@ -410,7 +413,8 @@ fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
         session: &session,
         transcript: &tui.transcript,
         source: "iMessage",
-        author: "ann",
+        author: "200",
+        name: "ann",
         nonce: NONCE,
         text: TEXT,
     };
@@ -537,7 +541,7 @@ fn an_attached_direct_paste_beside_new_human_keys_is_unconfirmed_and_held() {
 fn an_attached_direct_paste_resize_is_not_misclassified_as_an_attach_change() {
     let tui = Tui::new("");
     tui.put("attached", "4");
-    tui.person_after_capture(1, "echo 61 > \"$d/width\"");
+    tui.person_after_capture(1, "echo 161 > \"$d/width\"");
     assert_eq!(
         tui.run(),
         report(

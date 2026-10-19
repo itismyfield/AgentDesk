@@ -15,6 +15,12 @@ pub(super) async fn queued_attempt(
     if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
         return mended;
     }
+    // Named before the session transition is held, which nothing then waits on.
+    let primary = expected.primary;
+    let name = match author_name(shared, request.channel_id, primary, request.author_id).await {
+        Ok(name) => name,
+        Err(veto) => return InjectAttempt::NotSent(veto),
+    };
     let target = match resolve(shared, request, true).await {
         Ok(target) => target,
         Err(veto) => return InjectAttempt::NotSent(veto),
@@ -63,11 +69,17 @@ pub(super) async fn queued_attempt(
             provider: request.provider.as_str().to_string(),
             source: turn_id.clone().unwrap(),
             author: item.author_id.to_string(),
+            name,
             text: item.text.clone(),
             nonce: busy_inject::fresh_nonce(),
         });
+        let named = item.author_id.get() == request.author_id && item.message_id.get() == primary;
         let mut ticket = Some(held);
         let work = async {
+            // The name was found for another input than the one claimed.
+            if !named {
+                return InjectAttempt::NotSent(AUTHOR_MISMATCH);
+            }
             #[cfg(test)]
             test_hook::before_reserve(input.channel).await;
             if !queued_target_matches(&shared, &request, &target, true).await {
@@ -180,4 +192,58 @@ pub(super) async fn queued_attempt(
         Ok(attempt) => attempt,
         Err(_) => InjectAttempt::OwnerFailed { turn_id: None },
     }
+}
+
+/// How long the author lookup may take; an input it cannot name in time is not typed.
+const NAME_LOOKUP: std::time::Duration = std::time::Duration::from_secs(3);
+/// No name was found for the head's author: the input stays queued.
+pub(super) const NAME_UNRESOLVED: &str = "queued_name_unresolved";
+/// The head's message, or the head claimed, is not the author's: the input stays queued.
+pub(super) const AUTHOR_MISMATCH: &str = "queued_author_mismatch";
+
+/// The name Discord shows for the head's author, checked against the head's own message when it
+/// is a Discord message.
+async fn author_name(
+    shared: &SharedData,
+    channel: ChannelId,
+    primary: u64,
+    author: u64,
+) -> Result<String, &'static str> {
+    use poise::serenity_prelude::UserId;
+    if author <= 1 {
+        return Ok("system".to_string());
+    }
+    let http = shared
+        .serenity_http_or_token_fallback()
+        .ok_or(NAME_UNRESOLVED)?;
+    let user = UserId::new(author);
+    let lookup = async {
+        if !crate::services::discord::is_synthetic_headless_message_id_raw(primary) {
+            let message = channel.message(&http, MessageId::new(primary)).await;
+            let message = message.map_err(|_| NAME_UNRESOLVED)?;
+            if message.author.id != user {
+                return Err(AUTHOR_MISMATCH);
+            }
+        }
+        let place = channel
+            .to_channel(&http)
+            .await
+            .map_err(|_| NAME_UNRESOLVED)?;
+        let (nick, user) = match place.guild() {
+            Some(place) => {
+                let member = place.guild_id.member(&http, user).await;
+                let member = member.map_err(|_| NAME_UNRESOLVED)?;
+                (member.nick, member.user)
+            }
+            None => (
+                None,
+                user.to_user(&http).await.map_err(|_| NAME_UNRESOLVED)?,
+            ),
+        };
+        let display = crate::services::tui_input::human_frame::display_name;
+        Ok(display(nick.as_deref(), user.global_name.as_deref(), &user.name).to_string())
+    };
+    tokio::time::timeout(NAME_LOOKUP, lookup)
+        .await
+        .unwrap_or(Err(NAME_UNRESOLVED))
 }

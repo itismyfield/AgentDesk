@@ -143,7 +143,7 @@ fn a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns() {
         assert_eq!(report.failed, ["queue_publish", "pg_boundary"]);
         assert_eq!(
             report.reply(),
-            format!("세션을 초기화했어요.\n{RETRY_FAILED}")
+            format!("세션을 초기화했어요.\n대기 메시지 1건을 비웠어요.\n{RETRY_FAILED}")
         );
         assert_eq!(
             queue_len(&shared, channel_id).await,
@@ -499,7 +499,7 @@ fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() 
         assert_eq!(report.failed, ["pg_boundary"]);
         assert_eq!(
             report.reply(),
-            format!("세션을 초기화했어요.\n{RETRY_FAILED}")
+            format!("세션을 초기화했어요.\n대기 메시지 1건을 비웠어요.\n{RETRY_FAILED}")
         );
         assert_eq!(queue_len(&shared, channel_id).await, 0);
         assert_eq!(session_state(&shared, channel_id).await, (None, true));
@@ -515,7 +515,7 @@ fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() 
         let report = clear(shared.clone()).await.expect("a clear always commits");
         assert_eq!(
             report.reply(),
-            format!("세션을 초기화했어요.\n{RETRY_LANDED}")
+            format!("세션을 초기화했어요.\n대기 메시지 0건을 비웠어요.\n{RETRY_LANDED}")
         );
         assert_eq!(
             (report.retried, report.failed),

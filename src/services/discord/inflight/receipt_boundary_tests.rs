@@ -434,7 +434,7 @@ fn writer(f: &Fixture, row: &InflightTurnState, op: &str) -> String {
             "if_absent" => format!("{:?}", save_inflight_state_if_absent(row)),
             "identity_anchor" => format!("{:?}", bind_recovery_anchor_if_matches_identity(&ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset, row.current_msg_id, Some(row.current_msg_len), 13, 1, None, None)),
             "identity_rebind" => format!("{:?}", save_store::identity_gate::save_existing_inflight_rebind_adoption_if_matches_identity_in_root(&f.dir, &row, &id, row.turn_start_offset)),
-            "rewind" => format!("{:?}", save_inflight_delivery_rewind_if_matches_identity(&row, store::InflightDeliveryRewindReason::TerminalErrorReset)),
+            "rewind" => format!("{:?}", save_inflight_delivery_rewind_if_matches_identity(&row, StreamRelayAuthority::from_state(row), store::InflightDeliveryRewindReason::TerminalErrorReset)),
             "anchor_repost" => format!("{:?}", anchor_repost::mark_anchor_reposted_if_matches_identity_in_root(&f.dir, &ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset)),
             "budget" => format!("{:?}", budget::bump_recovery_relay_attempts_if_matches_identity_in_root(&f.dir, &ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset)),
             "clear" => format!("{:?}", clear_inflight_state_if_matches(&ProviderKind::Claude, CHANNEL, row.user_msg_id)),

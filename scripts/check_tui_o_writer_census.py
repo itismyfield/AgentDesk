@@ -25,6 +25,9 @@ gated funnels. This gate keeps that cut honest on every intermediate head:
       raw claim (a claiming gate fn, or under tui_o any `.claim(` call or
       `::claim` path) may appear only in the RAW_CLAIM_SITES functions, each
       listed with its reason.
+  (e) TURN_MARK_SITES pins the fresh-turn admission helper and its Candidate
+      mark call. TURN_ADMISSION_ORDER keeps that hook ahead of provider
+      submission and bridge spawn along the production intake path.
 
 Census PASS is not flip readiness. `flip_ready` is reported on its own line and
 is true only when no census row is deferred and every FLIP_READY_TESTS funnel
@@ -73,17 +76,22 @@ PRIMITIVES: dict[str, str] = {
     "edit_outbound_message": r"\bedit_outbound_message\s*\(",
 }
 _OWNS = r"o_owns_tui_output(?:_for_channel_tmux|_for_channel|_for_tmux_session|_with)?(?:_reserving)?"
-_RAW_CLAIM = rf"\b{_OWNS}\b|\bcandidate\s*\.\s*claim(?:_body)?\s*\("
+_CLAIM_METHOD = r"claim(?:_body(?:_from)?)?"
+_RAW_CLAIM = rf"\b{_OWNS}\b|\bcandidate\s*\.\s*{_CLAIM_METHOD}\s*\("
 RAW_CLAIM_RE = re.compile(_RAW_CLAIM)
 # `Candidate::claim` and `claim_body` are visible only under tui_o, so there every such call
 # and path counts, whatever the receiver or chain, and whether called or taken as a value.
 TUI_O_ROOT = "src/services/tui_o/"
-TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*claim(?:_body)?\s*\(|::\s*claim(?:_body)?\b")
+TUI_O_RAW_CLAIM_RE = re.compile(rf"{_RAW_CLAIM}|\.\s*{_CLAIM_METHOD}\s*\(|::\s*{_CLAIM_METHOD}\b")
 GATE_RES = {
     "claim": re.compile(rf"{_RAW_CLAIM}|\bclaim_then_(?:direct_)?send(?:_held)?\b|\bclaim_at_post\b"),
     "peek": re.compile(rf"\b(?:peek_{_OWNS}|bridge_o_body_peek_decision)\b"),
 }
 FLAG_RE = re.compile(r"\bO_TUI_WRITER\b")
+TURN_MARK_RES = {
+    "admit": re.compile(r"\bmark_codex_turn_admitted\b"),
+    "mark": re.compile(r"\.\s*mark_turn_admitted\s*\(|::\s*mark_turn_admitted\b"),
+}
 DEFN_RE = re.compile(r"\bfn\s+$")
 FN_RE = re.compile(r"\bfn\s+(\w+)")
 # The switch is defined in topology.rs; the intake gate and its health probe read it there.
@@ -488,22 +496,39 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "claim_for_placement:claim",
     ),
     "src/services/tui_o/cutover/channel_gate.rs": (
-        "claim:claim",
-        "claim:claim",
         "claim_then_send:claim",
+        "decide_with_snapshot:claim",
         "decide_with_snapshot:claim",
     ),
 }
 # Functions where a raw claim may stand outside `claim_then_send`, keyed by file.
 RAW_CLAIM_SITES: dict[str, tuple[str, ...]] = {
     # The helper's own claim, and the adoption transition it reaches.
-    "src/services/tui_o/cutover/channel_gate.rs": ("claim", "claim_then_send_held", "decide_with_snapshot"),
+    "src/services/tui_o/cutover/channel_gate.rs": ("claim_then_send_held", "decide_with_snapshot"),
+    # The caller-location wrapper forwards to the same locked body claim and origin log.
+    "src/services/tui_o/channel_policy/adoption.rs": ("claim_body",),
     # Re-exports; a placement releases a pending adoption by design, with no body.
     "src/services/tui_o/cutover.rs": ("<module>", "claim_for_placement"),
     # The writer host's once-per-channel actor slot, not an adoption.
     "src/services/tui_o/writer/host.rs": ("start_managed",),
     # Claimed right before the first unconfirmed chunk's edit or post, across a resumable loop.
     "src/services/discord/health/recovery.rs": ("maybe_recover_completed_stale_leak",),
+}
+# The Candidate's send/seq capture is reachable only through local fresh-turn admission.
+TURN_MARK_SITES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/router/turn_start.rs": ("log_session_strategy_diagnostic:admit",),
+    "src/services/tui_o/cutover.rs": ("mark_codex_turn_admitted:mark",),
+}
+# Every token must occur once, in this order, inside its named production function.
+TURN_ADMISSION_ORDER: dict[str, dict[str, tuple[str, ...]]] = {
+    "src/services/discord/router/message_handler/intake_turn.rs": {
+        "handle_text_message": (
+            "log_session_strategy_diagnostic", "provider_dispatch::execute", "spawn_turn_bridge",
+        ),
+    },
+    "src/services/discord/router/turn_start.rs": {
+        "log_session_strategy_diagnostic": ("mark_codex_turn_admitted", "spawn_blocking"),
+    },
 }
 # Funnel -> tests that drive it with O owning the channel. Each must exist as a
 # non-ignored test-attributed `fn` in src/; empty funnels or missing tests block the flip.
@@ -591,6 +616,33 @@ def _gate_sites(text: str, patterns=None) -> list[str]:
     return [site for _, site in sorted(found)]
 
 
+def _admission_order_problems(rel: str, text: str) -> list[str]:
+    problems = []
+    bodies = _fn_bodies(text)
+    for owner, tokens in TURN_ADMISSION_ORDER.get(rel, {}).items():
+        spans = [(start, end) for name, start, end in bodies if name == owner]
+        if len(spans) != 1:
+            problems.append(f"turn admission: {rel} needs one production fn {owner}")
+            continue
+        start, end = spans[0]
+        body = text[start + 1:end]
+        positions = []
+        for token in tokens:
+            pattern = r"\b" + r"\s*::\s*".join(map(re.escape, token.split("::"))) + r"\b"
+            matches = list(re.finditer(pattern, body))
+            if len(matches) != 1:
+                problems.append(
+                    f"turn admission: {rel} {owner} has {len(matches)}x {token}, expected 1x"
+                )
+            else:
+                positions.append(matches[0].start())
+        if len(positions) == len(tokens) and positions != sorted(positions):
+            problems.append(
+                f"turn admission: {rel} {owner} must order {' -> '.join(tokens)}"
+            )
+    return problems
+
+
 def measure(root: Path, pinned_test_only_files=None):
     classifier = _load_classifier()
     if pinned_test_only_files is None:
@@ -601,11 +653,18 @@ def measure(root: Path, pinned_test_only_files=None):
     gates: dict[str, list[str]] = {}
     raw: dict[str, list[str]] = {}
     flags: dict[str, int] = {}
+    marks: dict[str, list[str]] = {}
+    admission_problems: list[str] = []
+    seen: set[str] = set()
     for path in files:
         if path in skips:
             continue
         rel = path.relative_to(root).as_posix()
         text = classifier._production_text(path)
+        seen.add(rel)
+        admission_problems.extend(_admission_order_problems(rel, text))
+        if sites := _gate_sites(text, TURN_MARK_RES):
+            marks[rel] = sites
         if rel.startswith(PRIMITIVE_ROOT):
             for name, pattern in compiled.items():
                 if n := _count(pattern, text):
@@ -617,11 +676,18 @@ def measure(root: Path, pinned_test_only_files=None):
             raw[rel] = [site.removesuffix(":raw") for site in sites]
         if n := len(FLAG_RE.findall(text)):
             flags[rel] = n
-    return primitives, gates, flags, raw
+    for rel in sorted(set(TURN_ADMISSION_ORDER) - seen):
+        admission_problems.append(f"turn admission: missing production file {rel}")
+    return primitives, gates, flags, raw, marks, admission_problems
 
 
-def problems_for(primitives, gates, flags, raw) -> list[str]:
+def problems_for(primitives, gates, flags, raw, marks, admission_problems) -> list[str]:
     problems: list[str] = []
+    problems.extend(admission_problems)
+    for rel in sorted(set(TURN_MARK_SITES) | set(marks)):
+        want, have = list(TURN_MARK_SITES.get(rel, ())), marks.get(rel, [])
+        if want != have:
+            problems.append(f"turn mark sites: {rel} has {have}, expected {want}")
     for rel, owners in sorted(raw.items()):
         for owner in sorted(set(owners) - set(RAW_CLAIM_SITES.get(rel, ()))):
             problems.append(
@@ -715,10 +781,10 @@ def flip_readiness(root: Path) -> tuple[bool, str]:
 
 def check(root: Path, pinned_test_only_files=None) -> tuple[bool, str]:
     try:
-        primitives, gates, flags, raw = measure(root, pinned_test_only_files)
+        primitives, gates, flags, raw, marks, admission_problems = measure(root, pinned_test_only_files)
     except RuntimeError as exc:
         return False, str(exc)
-    problems = problems_for(primitives, gates, flags, raw)
+    problems = problems_for(primitives, gates, flags, raw, marks, admission_problems)
     sites = sum(sum(m.values()) for m in primitives.values())
     deferred = sorted(rel for rel, row in CENSUS.items() if DEFER_RE.fullmatch(row[1]))
     if problems:

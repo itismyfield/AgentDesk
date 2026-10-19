@@ -128,6 +128,8 @@ async fn bb_live_rollover_bypasses_legacy_unknown_pg() {
 async fn bb_queued_rollover_bypasses_legacy_idle_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::new(7_108_102, true).await;
+    let _names =
+        crate::services::discord::health::turn_deliver::inject_tests::name_rest("ann", 7).await;
     f.rollover("init").await;
     send_meanwhile(&f.shared, f.channel, f.channel + 20, "queued Discord input").await;
     inject_hook::set_queued_head(f.channel, true);
