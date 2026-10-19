@@ -780,8 +780,11 @@ db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_glo
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
 db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
 db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
+db::relay_dead_letter::migration_tests::state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg
+db::relay_dead_letter::migration_tests::upgrade_path_preserves_original_migration_checksums_pg
 db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
+db::relay_dead_letter::tests::redelivery_state_check_rejects_unknown_values_pg
 db::replay_disposition::register_tests::register_compares_the_whole_request_identity_pg
 db::replay_disposition::register_tests::register_reports_a_lost_commit_as_unknown_pg
 db::replay_disposition::register_tests::same_key_registrations_serialise_and_reuse_one_receipt_pg
