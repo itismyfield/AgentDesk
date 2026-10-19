@@ -193,7 +193,8 @@ fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
         session: &session,
         transcript: &tui.transcript,
         source: "iMessage",
-        author: "ann",
+        author: "200",
+        name: "ann",
         nonce: NONCE,
         text: TEXT,
     };
@@ -372,7 +373,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 
     tui.put("head", WORKING_HEAD);
     assert_eq!(tui.run_text("again", &FAST), restored);
-    let again = frame("iMessage", "ann", NONCE, "again");
+    let again = frame("iMessage", "200", "ann", NONCE, "again");
     assert_eq!(tui.records(), [framed(), again]);
     assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
 

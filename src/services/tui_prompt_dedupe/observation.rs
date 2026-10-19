@@ -1,5 +1,6 @@
 use super::extract::{Decision, Observation, decide_observation};
 use super::*;
+use crate::services::tui_input::human_frame::opens_inject;
 
 pub fn record_discord_originated_prompt(provider: &str, tmux_session_name: &str, prompt: &str) {
     let tmux_session_name = tmux_session_name.trim();
@@ -386,7 +387,13 @@ fn observe_inner(
         return PromptObservation::Ignored;
     }
     // An injected input is settled once, by the first observation that names its native turn.
-    match claim_injected_steer(&provider, tmux_session_name, &candidates, native_turn) {
+    let claim = claim_injected_steer(&provider, tmux_session_name, &candidates, native_turn);
+    // A Codex inject header no ledger entry vouches for (expired, restarted or never recorded)
+    // opens no turn below; Claude records no entry, so its pastes keep the ordinary path.
+    let unvouched = claim.is_none()
+        && provider == "codex"
+        && candidates.iter().any(|prompt| opens_inject(prompt));
+    match claim {
         Some(Claim::Deferred) => return PromptObservation::InjectedDeferred,
         Some(Claim::Joined { first }) => {
             // Every observer's entry id is kept, so a rescan after the ledger expires stays quiet.
@@ -476,6 +483,13 @@ fn observe_inner(
             ),
             PromptIdMatch::Absent | PromptIdMatch::Unannounced => {}
         }
+    }
+    if unvouched {
+        tracing::info!(
+            tmux_session_name,
+            "injected input without its record left unowned"
+        );
+        return PromptObservation::Ignored;
     }
     let local_only_control = candidates
         .first()

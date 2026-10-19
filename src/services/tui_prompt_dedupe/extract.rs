@@ -1,5 +1,6 @@
 use super::observation::PromptObservationEffect;
 use super::*;
+use crate::services::tui_input::human_frame;
 
 pub fn extract_prompt_from_hook_payload(payload: &Value) -> Option<String> {
     for key in [
@@ -175,11 +176,19 @@ pub fn extract_qwen_jsonl_user_prompt(json: &Value) -> Option<String> {
 /// (`tmux_watcher/prompt_observe.rs`) submits `join("")` / `join(" ")` /
 /// `join("\n")` variants of one block, so a line-anchored check would miss the
 /// collapsed ones (codex #3527). Scan the WHOLE string: find `[User: `, then any
-/// following `(ID: <digits>)]` (author may itself contain parens).
+/// following `(ID: <digits>)]` (author may itself contain parens). A v1 header counts only as a
+/// new turn's; input pasted into a running turn is settled by the injected-input ledger.
 pub(super) fn is_discord_relayed_user_prompt(prompt: &str) -> bool {
     let Some(user_at) = prompt.find("[User: ") else {
         return false;
     };
+    let header = &prompt[user_at..];
+    if let Some((header, _)) = human_frame::parse(header) {
+        return header.mode == human_frame::Mode::New;
+    }
+    if human_frame::opens_inject(header) {
+        return false;
+    }
     let mut tail = &prompt[user_at + "[User: ".len()..];
     while let Some(id_at) = tail.find("(ID: ") {
         let after_id = &tail[id_at + "(ID: ".len()..];
@@ -261,7 +270,11 @@ fn strip_leading_tui_response_chrome(input: &str) -> &str {
     }
 }
 
+/// A running turn's input keeps its header, so its body is never read as a machine event.
 fn strip_leading_user_author_prefix(text: &str) -> Option<&str> {
+    if human_frame::opens_inject(text) {
+        return None;
+    }
     let rest = text.strip_prefix("[User: ")?;
     let close = rest.find(']')?;
     Some(rest[close + 1..].trim_start())

@@ -259,7 +259,11 @@ fn provider_reuse_tail<'a>(rest: &'a str, prologue: &str) -> Option<&'a str> {
         .and_then(|tail| tail.strip_prefix("\n\n"))
 }
 
+/// A running turn's input keeps its header, so its body is never rendered as a card.
 fn strip_leading_user_author_prefix(text: &str) -> Option<String> {
+    if crate::services::tui_input::human_frame::opens_inject(text) {
+        return None;
+    }
     let rest = text.strip_prefix("[User: ")?;
     let close = rest.find(']')?;
     let tail = rest[close + 1..].trim_start();
@@ -407,6 +411,23 @@ mod tests {
         let prefixed_human = "[User: 0hbujang] please inspect this log line:\n<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
         assert!(!is_start_anchored_subagent_notification(prefixed_human));
         assert!(sanitize_start_anchored_subagent_notification(prefixed_human).is_none());
+    }
+
+    /// A running turn's input keeps its header, so XML a person sent mid-turn is never a card.
+    #[test]
+    fn an_inject_frame_body_is_never_a_card() {
+        let xml =
+            "<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
+        let inject = crate::services::tui_input::human_frame::inject;
+        let frame = inject(
+            "discord:1:2",
+            "343742347365974026",
+            "0hbujang",
+            "abcdef12",
+            xml,
+        );
+        assert!(!is_start_anchored_subagent_notification(&frame));
+        assert!(sanitize_start_anchored_subagent_notification(&frame).is_none());
     }
 
     #[test]

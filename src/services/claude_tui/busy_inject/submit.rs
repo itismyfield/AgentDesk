@@ -85,7 +85,13 @@ fn inject_gated_with(
     stash: bool,
     turn_gate: TurnGate,
 ) -> Report {
-    let text = frame(request.source, request.author, request.nonce, request.text);
+    let text = frame(
+        request.source,
+        request.author,
+        request.name,
+        request.nonce,
+        request.text,
+    );
     // Both names reach tmux command strings, so only plain characters are accepted.
     let plain = |value: &str, extra: &[char]| {
         !value.is_empty()

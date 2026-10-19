@@ -31,6 +31,12 @@ pub(super) static ATTEMPT_ROWS: std::sync::Mutex<Vec<super::AttemptRow>> =
 #[path = "queued_head_auto_tests.rs"]
 mod auto;
 
+/// The server nickname the fake Discord API gives every member the queued paste looks up; the
+/// member's username and global name differ from it.
+const AUTHOR_NAME: &str = "s2b author";
+/// The fake server every channel belongs to.
+const GUILD: &str = "6813000";
+
 struct Fixture {
     _db: TestPostgresDb,
     pool: sqlx::PgPool,
@@ -45,6 +51,9 @@ struct Fixture {
     channel_gets: Arc<AtomicUsize>,
     /// While set, every read of the channel itself fails; it counts the reads it refused.
     refuse_reads: Arc<(std::sync::atomic::AtomicBool, AtomicUsize)>,
+    /// How the fake API answers name lookups ("answer", "fail" or "slow"), and who wrote every
+    /// Discord message it serves.
+    names: Arc<std::sync::Mutex<(&'static str, u64)>>,
     server: tokio::task::JoinHandle<()>,
     _rest: crate::services::discord::shared_state::test_rest::Guard,
 }
@@ -144,6 +153,8 @@ impl Fixture {
             AtomicUsize::new(0),
         ));
         let refused = refuse_reads.clone();
+        let names = Arc::new(std::sync::Mutex::new(("answer", 200)));
+        let named = names.clone();
         let rest_app = Router::new().route("/gateway", axum::routing::get(
             |ws: axum::extract::ws::WebSocketUpgrade| async {
                 ws.on_upgrade(|mut socket| async move {
@@ -152,9 +163,31 @@ impl Fixture {
             },
         )).fallback(move |method: Method, uri: axum::http::Uri| {
             let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
+            let (lookup, writer) = *named.lock().unwrap();
             async move {
             use axum::response::IntoResponse;
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
+            let user = |id: &str| json!({"id": id, "username": "s2b username",
+                "global_name": "s2b global", "discriminator": "0", "avatar": null});
+            // The paste names its author as the channel's server shows them.
+            if let Some(id) = uri.path().strip_prefix(&format!("/api/v10/guilds/{GUILD}/members/")) {
+                match lookup {
+                    "fail" => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    "slow" => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                    _ => {}
+                }
+                let member = json!({"user": user(id), "nick": AUTHOR_NAME, "roles": [],
+                    "joined_at": null, "deaf": false, "mute": false, "flags": 0});
+                return axum::Json(member).into_response();
+            }
+            if let Some(id) = uri.path().strip_prefix(&format!("/api/v10/channels/{channel}/messages/")) {
+                let message = json!({"id": id, "channel_id": channel.get().to_string(),
+                    "author": user(&writer.to_string()), "content": "status?",
+                    "timestamp": "2026-07-26T00:00:00.000000+00:00", "edited_timestamp": null,
+                    "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+                    "attachments": [], "embeds": [], "pinned": false, "type": 0});
+                return axum::Json(message).into_response();
+            }
             assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
             let mut answer = json!({
                 "id": channel.get().to_string(), "type": 0,
@@ -227,6 +260,7 @@ impl Fixture {
             http,
             channel_gets,
             refuse_reads,
+            names,
             server,
             _rest: rest,
         }
@@ -326,6 +360,11 @@ impl Fixture {
     fn refuse_channel_reads(&self, refuse: bool) -> usize {
         self.refuse_reads.0.store(refuse, Relaxed);
         self.refuse_reads.1.load(Relaxed)
+    }
+
+    /// Makes name lookups answer, fail or answer too late, with every Discord message `writer`'s.
+    fn answer_names(&self, lookup: &'static str, writer: u64) {
+        *self.names.lock().unwrap() = (lookup, writer);
     }
 
     fn disk(&self) -> Value {
@@ -495,6 +534,77 @@ async fn s2b_actual_router_kickoff_keeps_each_gate_independently_off_pg() {
     }
 }
 
+/// A head is typed only under the name Discord shows for its own author: a lookup that fails or
+/// answers too late, or a Discord message another person wrote, types nothing and keeps the queue.
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_a_head_whose_author_is_not_named_stays_queued_pg() {
+    use crate::services::turn_orchestrator::{InterventionMode, SourceMessageQueuedGeneration};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, lookup, discord_message, reason) in [
+        (6_813_431, "fail", false, "queued_name_unresolved"),
+        (6_813_432, "slow", false, "queued_name_unresolved"),
+        (6_813_433, "answer", true, "queued_author_mismatch"),
+    ] {
+        let fixture = Fixture::build(channel, "all").await;
+        let _gate = router::busy_inject_support::open_gate(channel);
+        fixture.answer_names(lookup, 300);
+        let transition = fixture
+            .shared
+            .session_transition_lock(fixture.channel)
+            .lock_owned()
+            .await;
+        if discord_message {
+            // A message author 200 sent, as live intake queues it; the API names 300 as its writer.
+            let id = MessageId::new(1_500_000_000_000_000_000 + channel);
+            let generation = runtime_store::process_generation();
+            let head = Intervention {
+                author_id: UserId::new(200),
+                author_is_bot: false,
+                message_id: id,
+                queued_generation: generation,
+                source_message_ids: vec![id],
+                source_message_queued_generations: vec![SourceMessageQueuedGeneration::new(
+                    id, generation,
+                )],
+                source_text_segments: Vec::new(),
+                text: "status?".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            let persistence = crate::services::discord::queue_persistence_context(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                fixture.channel,
+            );
+            let mailbox = fixture.shared.mailbox(fixture.channel);
+            let enqueued = queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+                mailbox.enqueue(head, persistence),
+            )
+            .await;
+            assert!(enqueued.enqueued, "{:?}", enqueued.refusal_reason);
+        } else {
+            queue_io::with_post_enqueue_idle_queue_kick_suppressed(fixture.enqueue("status?"))
+                .await;
+        }
+        drop(transition);
+        let (bytes, queue) = (fixture.bytes(), format!("{:?}", fixture.queue().await));
+        fixture.kick().await;
+        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let row = rows.iter().rev().find(|row| row.channel_id == channel);
+        let row = row.map(|row| (row.outcome, row.reason));
+        assert_eq!(row, Some(("not_sent", reason)), "{lookup}");
+        assert_eq!(fixture.pane.tmux_calls(), 0, "{lookup}");
+        assert_eq!(format!("{:?}", fixture.queue().await), queue, "{lookup}");
+        assert_eq!(fixture.bytes(), bytes, "{lookup}");
+        fixture.assert_holder_kept().await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_its_identity_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -506,29 +616,20 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     assert!(fixture.pane.transcript_recorded_the_paste());
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    let (header, text) = buffer.split_once('\n').unwrap();
-    assert_eq!(text, "status?", "the owner must paste the original H body");
-    let fields: Vec<_> = header
-        .strip_prefix("[📱 ")
-        .unwrap()
-        .strip_suffix(']')
-        .unwrap()
-        .split(" · ")
-        .collect();
-    assert_eq!(fields.len(), 3);
+    let (header, text) = crate::services::tui_input::human_frame::parse(&buffer).unwrap();
     assert_eq!(
-        fields[0],
-        format!("discord:{}:{}", fixture.channel, before[0].message_id)
+        text, "\nstatus?",
+        "the owner must paste the original H body"
     );
+    let source = format!("discord:{}:{}", fixture.channel, before[0].message_id);
+    assert_eq!((header.name, header.source), (AUTHOR_NAME, source.as_str()));
     assert_eq!(
-        fields[1], "200",
+        header.author, "200",
         "H's author must not become holder A's author"
     );
-    assert_eq!(fields[2].len(), 8);
-    assert!(
-        fields[2]
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
+    assert_eq!(
+        header.mode,
+        crate::services::tui_input::human_frame::Mode::Inject
     );
     let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
@@ -537,7 +638,7 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
         .filter(|record: &Value| record["type"] == "queue-operation")
         .collect();
     assert_eq!(acknowledged.len(), 1);
-    assert_eq!(acknowledged[0]["content"], format!("{header}\nstatus?"));
+    assert_eq!(acknowledged[0]["content"], buffer);
     assert!(!buffer.contains("distinct tail B"));
     let after = fixture.queue().await;
     assert_eq!(after.len(), 1);
@@ -594,7 +695,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
     let (header, text) = buffer.split_once('\n').unwrap();
     assert_eq!(text, before[0].text);
     assert!(header.starts_with(&format!(
-        "[📱 discord:{}:{} · 200 · ",
+        "[User: {AUTHOR_NAME} (ID: 200) · 📱 v1 mode=inject source=discord:{}:{} · ",
         fixture.channel, before[0].message_id
     )));
     assert!(!buffer.contains("distinct tail B"));

@@ -277,9 +277,7 @@ pub(super) fn claude_tui_prompt_remained_in_input_buffer(
             return false;
         };
         let rest = rest.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{00a0}');
-        !rest
-            .get(..6)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("[User:"))
+        !crate::services::tui_input::human_frame::opens_discord_prompt(rest)
             && rest.contains(prompt)
     })
 }
