@@ -130,10 +130,9 @@ class DiscriminationTests(unittest.TestCase):
         copied_script = root / "scripts/check_intake_outbox_done_writer_call_sites.py"
         copied_script.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(SCRIPT, copied_script)
-        shutil.copy2(
-            ROOT / "scripts/test_only_module_skip_pin.py",
-            root / "scripts/test_only_module_skip_pin.py",
-        )
+        for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "registration_fragments.py"):
+            shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+        shutil.copytree(ROOT / "scripts/test_only_module_skip_pin.d", root / "scripts/test_only_module_skip_pin.d")
         shutil.copy2(
             ROOT / "scripts/test_only_module_skip_pin_paths.py",
             root / "scripts/test_only_module_skip_pin_paths.py",

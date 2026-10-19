@@ -137,9 +137,12 @@ class SafeAdditiveSkipTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             path, pin = self._fixture(root, pinned=False)
+            before = path.read_bytes()
             with patch.object(CENSUS.classifier, "_SKIP_PIN", pin):
                 CENSUS.sync_skips(root)
-            self.assertIn('"src/harness.rs",', path.read_text())
+            fragment = root / "scripts/test_only_module_skip_pin.d" / CENSUS.registry.auto_fragment("src/harness.rs")
+            self.assertEqual(fragment.read_text(), "resolver | src/harness.rs\n")
+            self.assertEqual(path.read_bytes(), before)
 
     def test_deletion_and_production_promotion_are_refused_unchanged(self):
         for kwargs in ({"child": False}, {"production": True}):

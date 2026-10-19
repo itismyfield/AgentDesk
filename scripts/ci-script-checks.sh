@@ -355,6 +355,7 @@ fi
 if run_check guards "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census
+"$PYTHON" -m unittest tests.test_registration_fragments tests.test_skip_pin_fragments
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
@@ -497,6 +498,7 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 "$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
+"$PYTHON" -m unittest tests.test_required_id_exception_fragments
 fi
 
 if run_check contracts "PR test selection plan (main runs every lane in full)"; then
