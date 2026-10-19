@@ -14,6 +14,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) struct HeadlessTurnStartOutcome {
     pub turn_id: String,
     pub status: HeadlessTurnStartStatus,
+    pub owned_session_key: Option<String>,
+}
+
+impl HeadlessTurnStartOutcome {
+    pub(crate) fn started(turn_id: String, owned_session_key: Option<String>) -> Self {
+        Self {
+            turn_id,
+            status: HeadlessTurnStartStatus::Started,
+            owned_session_key,
+        }
+    }
+
+    pub(crate) fn consumed(turn_id: String) -> Self {
+        Self {
+            turn_id,
+            status: HeadlessTurnStartStatus::Consumed,
+            owned_session_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

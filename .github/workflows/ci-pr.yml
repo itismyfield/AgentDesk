@@ -34,16 +34,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
-      # A comment-only PR whose gate step succeeded forces the heavy test filters below
-      # to 'false'; the mirrors read these same outputs, so the skipped jobs still publish green.
+      # Verified docs/comment-only changes suppress heavy Rust jobs; their mirrors
+      # read the same effective outputs so expected skips still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
       pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
-      rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
-      # rust_or_policy for the library sweep, which still runs when an include! call
-      # reads a changed file; lint keeps the raw filter.
+      rust_tests_skip: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}
+      rust_or_policy: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      # Include readers retain the compile and library lanes.
       rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
-      rust_compile: ${{ steps.filter.outputs.rust_compile }}
+      rust_compile: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
       # (`lint`, whose clippy compiles the `relay_state_contract_refs` blocks)
@@ -52,8 +52,7 @@ jobs:
       # True when a Rust-compile change touches a source surface that needs
       # native Windows verification. Most relay-only PRs leave this false, but
       # the cross-platform inflight lock primitive is an explicit exception.
-      # The stable required-context mirror permits unrelated-path skips and
-      # fails closed when this output is true but the Windows lane does not pass.
+      # Its mirror permits unrelated-path skips and rejects unexpected skips.
       cross_os_rust: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
     steps:
@@ -486,6 +485,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_review_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/receipt_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
               - 'src/services/discord/turn_presence/activity_tests.rs'
@@ -511,6 +511,7 @@ jobs:
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
               - 'src/services/routines/agent_executor/execution.rs'
+              - 'src/services/routines/agent_executor/owned_session/tests.rs'
               - 'src/services/routines/agent_executor/reliability.rs'
               - 'src/services/routines/reliability_pg_tests.rs'
               - 'src/services/routines/session_control.rs'
@@ -931,7 +932,6 @@ jobs:
               - 'routines/**'
             win32_build_token: ['scripts/build_token.py', 'scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
 
-      # A failed step, or comment_only left unset, reads as the full run in the outputs above.
       - name: Comment-only gate
         id: comment_only
         continue-on-error: true
@@ -1236,9 +1236,10 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.dashboard.result }}
         run: ./scripts/required-check-mirror.sh
 
-  # One lib binary and inventory per candidate; consumers rebuild if sharing is unavailable.
   lib_test_prepare:
     name: Prepare shared lib tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -2234,7 +2235,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
+          expected=c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2279,11 +2280,10 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.scripts_contracts.result }}
         run: ./scripts/required-check-mirror.sh
 
-  # Contract targets and mutation shards run independently on separate runners.
   relay_authority_targets:
     name: Relay authority targets
-    needs: lib_test_prepare
-    if: ${{ !cancelled() }}
+    needs: [changes, lib_test_prepare]
+    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -2363,6 +2363,8 @@ jobs:
 
   relay_authority_mutations:
     name: Relay authority mutations (${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -2455,10 +2457,10 @@ jobs:
         if: always() && (steps.mutation_paths.outputs.mutation_sources != 'false' || steps.mutation_wiring.outputs.wiring_changed != 'false')
         run: sccache --show-stats || true
 
-  # Pin the result helper and gate before mirroring both independent runners.
   relay-authority-contract:
     name: relay-authority-contract
     needs:
+      - changes
       - relay_authority_targets
       - relay_authority_mutations
     if: ${{ !cancelled() }}
@@ -2486,7 +2488,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
+          expected=c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2500,9 +2502,9 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
           PYTHON: python3
-          CHANGED_PATHS_RESULT: success
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: relay_authority
-          FILTER_OUTPUT: 'true'
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_tests_skip != 'true' }}
           UPSTREAM_JOB_NAME: relay_authority_targets
           UPSTREAM_RESULT: ${{ needs.relay_authority_targets.result }}
         shell: bash
@@ -2515,9 +2517,9 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
           PYTHON: python3
-          CHANGED_PATHS_RESULT: success
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: relay_authority
-          FILTER_OUTPUT: 'true'
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_tests_skip != 'true' }}
           UPSTREAM_JOB_NAME: relay_authority_mutations
           UPSTREAM_RESULT: ${{ needs.relay_authority_mutations.result }}
         shell: bash

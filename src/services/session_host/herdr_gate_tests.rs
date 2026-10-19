@@ -58,7 +58,8 @@ struct Server {
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
-    close_reply: Arc<Mutex<Option<Value>>>,
+    close_reply: Scripted,
+    process_info: Scripted,
     /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
     vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -70,6 +71,9 @@ fn socket_path() -> PathBuf {
     PathBuf::from("/tmp").join(format!("adk-hg-{}-{n}.sock", std::process::id()))
 }
 
+/// A whole reply that takes the default one's place for its request.
+type Scripted = Arc<Mutex<Option<Value>>>;
+
 /// Answers by method, one request per connection, like Herdr.
 fn serve() -> Server {
     let path = socket_path();
@@ -79,11 +83,11 @@ fn serve() -> Server {
     let conns = Arc::new(Mutex::new(BTreeMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let version = Arc::new(Mutex::new("0.9.3".into()));
-    let close_reply = Arc::new(Mutex::new(None));
+    let (close_reply, process_info) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
     let vanish_on_close = Arc::new(AtomicBool::new(false));
     let gone = Arc::new(AtomicBool::new(false));
     let (state, stopped) = (conns.clone(), stop.clone());
-    let (hello_version, closed) = (version.clone(), close_reply.clone());
+    let (hello_version, closed) = (version.clone(), (close_reply.clone(), process_info.clone()));
     let vanish = vanish_on_close.clone();
     let thread = thread::spawn(move || {
         let mut handlers = Vec::new();
@@ -112,14 +116,15 @@ fn serve() -> Server {
         stop,
         version,
         close_reply,
+        process_info,
         vanish_on_close,
         thread: Some(thread),
     }
 }
 
-/// `close_reply` is set only for a close request.
-fn reply(request: &Value, version: &str, close_reply: Option<Value>, gone: bool) -> Value {
-    if let Some(mut reply) = close_reply {
+/// `scripted` is set only for the request its slot answers.
+fn reply(request: &Value, version: &str, scripted: Option<Value>, gone: bool) -> Value {
+    if let Some(mut reply) = scripted {
         reply["id"] = request["id"].clone();
         return reply;
     }
@@ -153,7 +158,7 @@ fn answer(
     index: usize,
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
-    close_reply: &Mutex<Option<Value>>,
+    (close_reply, process_info): &(Scripted, Scripted),
     (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let _ = stream.set_nonblocking(false);
@@ -167,10 +172,12 @@ fn answer(
     if let Some(request) = request {
         let close = request["method"] == "pane.close";
         let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
+        let info = process_info.lock().unwrap().clone();
+        let info = info.filter(|_| request["method"] == "pane.process_info");
         let reply = reply(
             &request,
             &version.lock().unwrap(),
-            close_reply,
+            close_reply.or(info),
             gone.load(Ordering::SeqCst),
         );
         if close && vanish_on_close.load(Ordering::SeqCst) {
@@ -1969,6 +1976,7 @@ pub(crate) mod p11 {
     pub(crate) const NODE: &str = "mac-mini";
     pub(crate) const EXECUTION: &str = NONCE;
     pub(crate) const LAUNCHED_PANE: &str = LAUNCHED;
+    const FRESH: u32 = 11;
     pub(crate) use crate::db::dispatched_sessions::hosted_execution::HostedState;
 
     /// Re-runs test `path` in a child owning its boot section, O writer list and Herdr
@@ -1980,27 +1988,7 @@ pub(crate) mod p11 {
             return true;
         }
         let home = tempfile::tempdir().unwrap();
-        let config = home.path().join("config.toml");
-        std::fs::write(&config, CANONICAL_CONFIG).unwrap();
-        let old = std::time::SystemTime::now() - Duration::from_secs(3_600);
-        let file = std::fs::File::options().write(true).open(&config).unwrap();
-        file.set_modified(old).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture", "--test-threads=1"])
-            .env(TERMINATE_TEST_CHILD, name)
-            .env("HERDR_CONFIG_PATH", &config)
-            .env("XDG_CONFIG_HOME", home.path().join("xdg"))
-            .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
-            .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
-            .env(
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                format!("[[{channel},\"claude_tui\"]]"),
-            )
-            .output()
-            .unwrap();
+        let output = child_command(path, channel, home.path()).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -2231,6 +2219,16 @@ pub(crate) mod p11 {
                 let _ = wait.recv_timeout(Duration::from_secs(60));
             }));
             EndCheckPause { arrived, release }
+        }
+
+        /// A restarted server restored the pane as shell `FRESH` alone.
+        pub(crate) fn restore_shell(&self) {
+            let os = FakeOs::launched(Vec::new()).starting(FRESH, &[start(2_000)]);
+            self.os.swap(Arc::new(os));
+            let info = json!({"pane_id": PANE, "shell_pid": FRESH,
+                "foreground_process_group_id": FRESH, "foreground_processes": [{"pid": FRESH}]});
+            let reply = json!({"result": {"type": "pane_process_info", "process_info": info}});
+            *self.server.process_info.lock().unwrap() = Some(reply);
         }
 
         /// Every write the server received, as `(method, pane_id)`, in order.

@@ -51,7 +51,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     pub(in crate::services::discord) local_note_posts: Arc<AtomicUsize>,
     pub(super) first_placeholder_arrived: Arc<Notify>,
     pub(super) release_first_placeholder: Arc<Notify>,
-    pub(super) park_first_placeholder: Arc<AtomicBool>,
+    pub(in crate::services::discord) park_first_placeholder: Arc<AtomicBool>,
     pub(super) note_answer: Arc<Mutex<NoteAnswer>>,
     /// When set, the next non-placeholder POST waits for `release_held_note`
     /// after signalling `note_held`, then answers with `note_answer`.
@@ -132,7 +132,7 @@ impl DiscordMockState {
     }
 
     /// Answers `thread` as a guild thread under `parent`.
-    pub(super) fn add_thread(&self, thread: u64, parent: u64) {
+    pub(in crate::services::discord) fn add_thread(&self, thread: u64, parent: u64) {
         self.threads.lock().expect("threads").insert(thread, parent);
         self.allow_channel(thread);
     }
@@ -517,7 +517,10 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .1 = edited;
         return Json(discord_message_json(id, content)).into_response();
     }
-    if method == Method::POST && path == format!("/api/v10/channels/{CHANNEL_ID}/typing") {
+    if method == Method::POST
+        && channel_allowed
+        && route_channel.is_some_and(|id| path == format!("/api/v10/channels/{id}/typing"))
+    {
         return StatusCode::NO_CONTENT.into_response();
     }
 

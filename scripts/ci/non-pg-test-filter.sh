@@ -220,6 +220,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::message_outbox_recovery_tests
   --skip services::observability::queries::alert_authority_tests
   --skip services::pipeline_routes::tests
+  --skip services::routines::agent_executor::owned_session::tests
   --skip services::routines::agent_executor::reliability::tests
   --skip services::routines::session_control::tests
   --skip services::session_forwarding::home_stop::tests

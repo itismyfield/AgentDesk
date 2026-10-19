@@ -222,6 +222,119 @@ async fn owned_run(pool: &sqlx::PgPool, run: &str, routine: &str, key: &str, age
     .unwrap();
 }
 
+// Consumer contract: use the production running-only writer, then finish the run.
+async fn receipt_run(pool: &sqlx::PgPool, run: &str, routine: &str, receipt: &str) {
+    sqlx::query("INSERT INTO routine_runs (id, routine_id, status) VALUES ($1, $2, 'running')")
+        .bind(run)
+        .bind(routine)
+        .execute(pool)
+        .await
+        .unwrap();
+    let store =
+        crate::services::routines::store::RoutineStore::new_with_timezone_and_checkpoint_limit(
+            Arc::new(pool.clone()),
+            "UTC",
+            4096,
+        );
+    assert!(
+        store
+            .set_run_owned_tmux_session(run, receipt)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE routine_runs SET status = 'succeeded' WHERE id = $1")
+        .bind(run)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn receipt_backstop_kills_only_the_admitted_exact_session_pg() {
+    if !n3bc_isolated("receipt_backstop_kills_only_the_admitted_exact_session_pg") {
+        return;
+    }
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let routine = "receipt-backstop-target";
+    let (target, fallback) = fresh_routine(&pool, routine).await;
+    let unrelated = ProviderKind::Claude.build_tmux_session_name("receipt-unrelated");
+    let target_key = channel_key(&shared, &target);
+    let fallback_key = channel_key(&shared, &fallback);
+    seed(&pool, &target_key, &target, 7_157_001, Stored::Legacy).await;
+    seed(&pool, &fallback_key, &fallback, 7_157_002, Stored::Hosted).await;
+    receipt_run(&pool, "receipt-target-run", routine, &target_key).await;
+    receipt_run(&pool, "receipt-fallback-run", routine, &fallback_key).await;
+    let names = vec![target.clone(), fallback.clone(), unrelated.clone()];
+    let panes: Vec<_> = names
+        .iter()
+        .map(|name| {
+            own(name);
+            PaneLivenessOverrideGuard::set(name, PaneLiveness::DeadOrAbsent)
+        })
+        .collect();
+    super::reap_listed_dead_sessions(&shared, &names).await;
+    assert_eq!(
+        crate::services::platform::tmux::kill_requests::count(&target),
+        1
+    );
+    assert!(
+        !killed(&fallback),
+        "the newer protected fallback receipt stays intact"
+    );
+    assert!(
+        !killed(&unrelated),
+        "the receipt grants no authority over another name"
+    );
+    let requested = std::fs::read_to_string(n3bc_root().join("tmux-kills")).unwrap();
+    assert_eq!(requested.lines().count(), 1, "{requested}");
+    assert!(requested.contains(&format!("-t ={target}")), "{requested}");
+    drop(panes);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn receipt_backstop_keeps_same_name_when_foreign_token_receipt_is_protected_pg() {
+    if !n3bc_isolated("receipt_backstop_keeps_same_name_when_foreign_token_receipt_is_protected_pg")
+    {
+        return;
+    }
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let routine = "receipt-backstop-foreign";
+    let (target, _) = fresh_routine(&pool, routine).await;
+    let local_key = channel_key(&shared, &target);
+    let foreign_key = format!("claude/foreign-token/mac-mini:{target}");
+    seed(&pool, &local_key, &target, 7_157_003, Stored::Legacy).await;
+    seed(&pool, &foreign_key, &target, 7_157_004, Stored::Hosted).await;
+    receipt_run(&pool, "receipt-foreign-run", routine, &foreign_key).await;
+    receipt_run(&pool, "receipt-local-run", routine, &local_key).await;
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions AS s WHERE session_key = $1")
+            .bind(&foreign_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    own(&target);
+    let _pane = PaneLivenessOverrideGuard::set(&target, PaneLiveness::DeadOrAbsent);
+    super::reap_listed_dead_sessions(&shared, std::slice::from_ref(&target)).await;
+    assert!(
+        !killed(&target),
+        "the exact local receipt cannot bypass a protected foreign receipt for the same bare name"
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions AS s WHERE session_key = $1")
+            .bind(&foreign_key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+    assert!(!n3bc_root().join("tmux-kills").exists());
+    pool.close().await;
+    db.drop().await;
+}
+
 // The listed-session pass reaps a fresh routine's dead session only on the row the run
 // that owned that session recorded, even when a newer run owned the other agent's session.
 #[tokio::test]

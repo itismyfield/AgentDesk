@@ -272,6 +272,7 @@ fi
 
 if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
+git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 fi
 
@@ -379,7 +380,7 @@ if run_check guards "Comment-only change checker self-tests"; then
 # what stops that. ci-pr.yml's changes job also runs it, through
 # scripts/ci/comment_only_gate.py, to skip the heavy test jobs.
 "$PYTHON" -m unittest tests.test_comment_only_change
-"$PYTHON" -m unittest tests.test_comment_only_ci_gate
+"$PYTHON" -m unittest tests.test_comment_only_ci_gate tests.test_rust_include_reads tests.test_rust_runtime_reads
 fi
 
 if run_check guards "Hotfile LOC ratchet guard (#3565)"; then

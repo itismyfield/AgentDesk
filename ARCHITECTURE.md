@@ -2219,6 +2219,7 @@ src/
 │   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   └── unit_tests.rs
@@ -2661,8 +2662,11 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── owned_session/
+│   │   │   │   └── tests.rs
 │   │   │   ├── execution.rs
 │   │   │   ├── launch.rs
+│   │   │   ├── owned_session.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
