@@ -35,7 +35,12 @@ pub(crate) fn replay_herdr_turn(
     len: u64,
 ) -> Option<(u64, NativeTerminalKind, u64)> {
     let bytes = read_prefix(file, len).ok()?;
-    let terminal = turn_in(&complete_records(&bytes), submitted_at).ok()??;
+    let records =
+        match crate::services::provider::herdr_before_start::mutant("prb_newline_required") {
+            true => complete_records(&bytes),
+            false => records_to_end(&bytes).0,
+        };
+    let terminal = turn_in(&records, submitted_at, len).ok()??;
     Some((terminal.start, terminal.kind, terminal.end))
 }
 
@@ -50,7 +55,7 @@ pub(crate) fn closed_turn(
     if !last_turn_closed(&bytes, &records) {
         return None;
     }
-    Some(submitted_at.and_then(|at| turn_in(&records, at).ok().flatten()))
+    Some(submitted_at.and_then(|at| turn_in(&records, at, len).ok().flatten()))
 }
 
 /// What the row pass reads of a Herdr turn from its own start once its provider is gone.
@@ -70,20 +75,13 @@ pub(crate) fn ended_turn(
     len: u64,
 ) -> Result<EndedTurn, Unobserved> {
     let bytes = read_prefix(file, len)?;
-    let mut records = complete_records(&bytes);
-    let cut = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |at| at + 1);
-    let tail = std::str::from_utf8(&bytes[cut..]).unwrap_or_default();
-    if serde_json::from_str::<serde_json::Value>(tail).is_ok() {
-        records.push((cut as u64, tail.trim()));
-    } else if !tail.trim().is_empty()
+    let (records, torn) = records_to_end(&bytes);
+    if !torn.trim_ascii().is_empty()
         && crate::services::provider::herdr_before_start::mutant("prb_torn_tail_unobserved")
     {
         return Err(Unobserved);
     }
-    Ok(match turn_in(&records, submitted_at) {
+    Ok(match turn_in(&records, submitted_at, len) {
         Ok(Some(_)) => EndedTurn::Terminal,
         Ok(None) => EndedTurn::NoTerminal,
         Err(Unobserved) => EndedTurn::Mixed,
@@ -94,6 +92,7 @@ pub(crate) fn ended_turn(
 fn turn_in(
     records: &[(u64, &str)],
     submitted_at: chrono::DateTime<chrono::Utc>,
+    len: u64,
 ) -> Result<Option<Terminal>, Unobserved> {
     let stamped = |line: &str| {
         let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
@@ -117,7 +116,8 @@ fn turn_in(
             _ => None,
         }));
         if let Some(kind) = lines.terminal() {
-            let end = record_start + line.len() as u64 + 1;
+            // A final record without its newline ends where the file does.
+            let end = (record_start + line.len() as u64 + 1).min(len);
             let (result, _) = lines.result();
             return Ok(Some(Terminal {
                 kind,
@@ -164,7 +164,59 @@ fn read_prefix(file: &mut std::fs::File, len: u64) -> Result<Vec<u8>, Unobserved
     file.take(len)
         .read_to_end(&mut bytes)
         .map_err(|_| Unobserved)?;
+    // A file cut after its length was read reads short, and a short read is no read.
+    if bytes.len() as u64 != len
+        && !crate::services::provider::herdr_before_start::mutant("prb_short_read_ok")
+    {
+        return Err(Unobserved);
+    }
     Ok(bytes)
+}
+
+/// The complete records, then a final record without its newline when it parses whole; any other
+/// tail is returned as it is.
+fn records_to_end(bytes: &[u8]) -> (Vec<(u64, &str)>, &[u8]) {
+    let mut records = complete_records(bytes);
+    let cut = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |at| at + 1);
+    let tail = std::str::from_utf8(&bytes[cut..]).unwrap_or_default();
+    if serde_json::from_str::<serde_json::Value>(tail).is_err() {
+        return (records, &bytes[cut..]);
+    }
+    records.push((cut as u64, tail));
+    (records, &[])
+}
+
+/// The final record from `from` once the provider is gone, when it lacks only its newline, parses
+/// whole, and `ended_turn` reads the turn's terminal there.
+pub(crate) fn ended_tail(
+    path: &str,
+    (from, opened): (
+        u64,
+        crate::services::cluster::stream_relay::SourceFileIdentity,
+    ),
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    target: &super::HerdrTarget,
+) -> Option<String> {
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if SourceFileIdentity::from_open_file(&file) != opened
+        || crate::services::provider::herdr_before_start::mutant("prb_newline_required")
+    {
+        return None;
+    }
+    let (mut tail, want) = (String::new(), len.checked_sub(from)?);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    (&mut file).take(want).read_to_string(&mut tail).ok()?;
+    let whole = tail.len() as u64 == want
+        && !tail.contains('\n')
+        && serde_json::from_str::<serde_json::Value>(&tail).is_ok();
+    let gone = || target.provider_absent() == Ok(true) && !target.execution_alive();
+    let ends = || ended_turn(&mut file, submitted_at, len) == Ok(EndedTurn::Terminal);
+    (whole && gone() && ends()).then_some(tail)
 }
 
 /// Each newline-terminated record's start offset and trimmed text; a torn tail is not a record.

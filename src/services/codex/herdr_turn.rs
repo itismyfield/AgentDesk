@@ -566,17 +566,25 @@ fn read_reply(
         session_id: session_id.clone(),
         raw_session_id: Some(session_id.clone()),
     });
-    // Under settlement only the provider's terminal or the row pass's wake ends the read.
+    // Under settlement only the provider's terminal or the row pass's wake ends the read; the
+    // tail asks whether the provider lives only of a final record that lacks its newline.
     let held = crate::services::provider::herdr_provider_terminal_only(turn.cancel.as_deref())
         .is_some()
         && !crate::services::provider::herdr_before_start::mutant("prb_codex_reader_liveness");
+    let gone = || target.provider_absent() == Ok(true) && !target.execution_alive();
     let read = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
         path,
         offset,
         Some(&session_id),
         sender.clone(),
         turn.cancel.clone(),
-        || held || target.execution_alive(),
+        || {
+            if held {
+                !gone()
+            } else {
+                target.execution_alive()
+            }
+        },
     )?;
     let ReadOutputResult::Completed { offset } = read else {
         return Ok(());

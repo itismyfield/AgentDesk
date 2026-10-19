@@ -24,6 +24,7 @@ use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
+use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
@@ -654,8 +655,9 @@ fn prompt_and_read(
         if let Some(token) = cancel.as_ref()
             && herdr_provider_terminal_only(Some(token)).is_some()
         {
-            let read =
-                read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive);
+            let ended =
+                |at| terminal_replay::ended_tail(&transcript, at, started_at, &attached.target);
+            let read = read_to_provider_terminal(&transcript, start, &sender, token, ended);
             terminal = read?.map(|terminal| (terminal, token.clone(), start));
             unconfirmed = terminal.is_none();
         } else {
@@ -847,49 +849,66 @@ fn is_turn_prompt(line: &str) -> bool {
 }
 
 /// Under settlement the transcript is read to this turn's own turn-end record, returned unsent;
-/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn.
+/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn, but a
+/// terminal its gone writer left without a newline (`ended`) is read and ends where the file does.
 fn read_to_provider_terminal(
     transcript: &str,
     start: u64,
     sender: &Sender<StreamMessage>,
     token: &Arc<CancelToken>,
-    is_alive: impl FnMut() -> bool,
+    ended: impl Fn((u64, SourceFileIdentity)) -> Option<String>,
 ) -> Result<Option<ClaudeTurnTerminal>, String> {
-    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    use std::cell::Cell;
     let mut lines = HerdrTurnLines::default();
-    let mut opened = SourceFileIdentity::Unavailable;
+    let (opened, tail) = (Cell::new(SourceFileIdentity::Unavailable), Cell::new(None));
     // A buffer's raw end is sent only once a later read shows all its records were processed.
     let pending = std::cell::Cell::new(None::<u64>);
     let (offsets, relay) = (sender.clone(), sender.clone());
     let (local, local_rx) = std::sync::mpsc::channel();
+    let mut process = |line: &str, lines: &mut HerdrTurnLines| {
+        let processed = lines.process(line, &local);
+        // The turn's Done is the typed frame sent after the read, never the stream's own.
+        for message in local_rx.try_iter() {
+            if !matches!(message, StreamMessage::Done { .. }) {
+                let _ = relay.send(message);
+            }
+        }
+        processed
+    };
     let read = poll_output_file_until_result(
         transcript,
         start,
         Some(token.clone()),
         &mut lines,
-        is_alive,
+        || {
+            let at = (pending.get().unwrap_or(start), opened.get());
+            let found = ended(at).map(|found| (at.0, found));
+            let alive = found.is_none();
+            tail.set(found);
+            alive
+        },
         || false,
         |raw_end| {
             if let Some(processed) = pending.replace(Some(raw_end)) {
                 let _ = offsets.send(StreamMessage::OutputOffset { offset: processed });
             }
         },
-        move |line, lines: &mut HerdrTurnLines| {
-            let processed = lines.process(line, &local);
-            // The turn's Done is the typed frame sent after the read, never the stream's own.
-            for message in local_rx.try_iter() {
-                if !matches!(message, StreamMessage::Done { .. }) {
-                    let _ = relay.send(message);
-                }
-            }
-            processed
-        },
+        &mut process,
         |lines| lines.terminal().is_some(),
         |_| false,
         |_| {},
-        |file| opened = SourceFileIdentity::from_open_file(file),
+        |file| opened.set(SourceFileIdentity::from_open_file(file)),
     )
     .map_err(|failure| failure.error)?;
+    let read = match (read, tail.take()) {
+        (ReadOutputResult::SessionDied { offset }, Some((from, tail))) if offset == from => {
+            process(&tail, &mut lines);
+            ReadOutputResult::Completed {
+                offset: offset + tail.len() as u64,
+            }
+        }
+        (read, _) => read,
+    };
     let end = match read {
         ReadOutputResult::Completed { offset }
         | ReadOutputResult::Cancelled { offset }
@@ -905,7 +924,7 @@ fn read_to_provider_terminal(
     };
     let (result, session_id) = lines.result();
     let file = crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
-        Some(&opened),
+        Some(&opened.get()),
     );
     Ok(Some(ClaudeTurnTerminal {
         kind,
