@@ -58,8 +58,8 @@ struct Server {
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
-    close_reply: Arc<Mutex<Option<Value>>>,
-    process_info: Arc<Mutex<Option<Value>>>,
+    close_reply: Scripted,
+    process_info: Scripted,
     /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
     vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -70,6 +70,9 @@ fn socket_path() -> PathBuf {
     let n = SOCKETS.fetch_add(1, Ordering::SeqCst);
     PathBuf::from("/tmp").join(format!("adk-hg-{}-{n}.sock", std::process::id()))
 }
+
+/// A whole reply that takes the default one's place for its request.
+type Scripted = Arc<Mutex<Option<Value>>>;
 
 /// Answers by method, one request per connection, like Herdr.
 fn serve() -> Server {
@@ -155,7 +158,7 @@ fn answer(
     index: usize,
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
-    (close_reply, process_info): &(Arc<Mutex<Option<Value>>>, Arc<Mutex<Option<Value>>>),
+    (close_reply, process_info): &(Scripted, Scripted),
     (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let _ = stream.set_nonblocking(false);
