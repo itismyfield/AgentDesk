@@ -3460,7 +3460,7 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         self.assertIsNone(outcome["passed"])
         self.assertEqual(outcome["required_feature"], "two_message_panel")
 
-    def test_e9_e15_reject_retired_panels_without_requiring_legacy_summary(self):
+    def test_e9_e15_require_summary_and_reject_retired_panels_without_feature_gates(self):
         self.stub(driver, "restart_dcserver_for_e2e")
         self.stub(driver, "assert_health", return_value={"status": "healthy"})
         for scenario_id in ("E-9", "E-15"):
@@ -3478,7 +3478,7 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
                         row for row in rows if self.client.send_prompt.called and int(row["id"]) > int(k.get("after_id") or 0)]
                     rc, report, _ = self.main_result(self.load(scenario_id))
                     result = report["scenarios"][0]
-                    self.assertEqual((rc, result["status"]), (0, "pass") if terminal in ("-# ✅ 1분", "absent") else (1, "fail"), result)
+                    self.assertEqual((rc, result["status"]), (0, "pass") if terminal == "-# ✅ 1분" else (1, "fail"), result)
                     self.assertEqual(report["totals"]["skipped_assertions"], 0)
                     self.assertFalse(any(row.get("spec", {}).get("requires_feature") for row in result["assertions"]))
 

@@ -155,6 +155,7 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     );
 }
 mod turn_completion_events;
+mod turn_end_summary;
 
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
@@ -279,9 +280,6 @@ pub(crate) use turn_bridge::TmuxCleanupPolicy;
 
 use tokio::sync::Mutex;
 
-use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, MessageId, UserId};
-
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
@@ -301,6 +299,7 @@ use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};
 pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
+use poise::serenity_prelude as serenity;
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
@@ -316,6 +315,7 @@ use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
+use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
 use session_idle_cleanup::maybe_cleanup_sessions;

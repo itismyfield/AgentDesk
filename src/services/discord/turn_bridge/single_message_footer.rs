@@ -32,6 +32,7 @@ thread_local! {
     pub(super) static SEPARATE_PANEL_FOR_TESTS: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
+#[cfg(test)]
 pub(super) fn bridge_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
     #[cfg(test)]
     if SEPARATE_PANEL_FOR_TESTS.get() {
@@ -106,6 +107,7 @@ pub(super) fn bridge_should_create_separate_status_panel(
         && (status_panel_msg_id.is_none() || status_panel_msg_id == Some(current_msg_id))
 }
 
+#[cfg(test)]
 pub(super) fn bridge_should_complete_separate_status_panel(status_panel_v2_enabled: bool) -> bool {
     if super::super::footer_retirement::retired() {
         status_panel_v2_enabled

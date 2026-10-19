@@ -65,6 +65,11 @@ pub(super) async fn run_bot_framework_setup(
 
     let shared_for_tmux = shared_for_migrate.clone();
 
+    super::footer_retirement::enqueue_completed_singletons(
+        &provider_for_setup,
+        &shared_for_tmux.token_hash,
+    );
+
     // (Phase 5.1 of intake-node-routing — issue #2007: `run_bot()` starts the
     // intake worker only after the lease result authorizes a registered gateway
     // or standby runtime. No worker bootstrap belongs here.)

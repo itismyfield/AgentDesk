@@ -388,11 +388,11 @@ async fn a_resumed_sessions_synthetic_chrome_is_excluded_and_the_next_answer_pos
     assert_eq!(
         excluded,
         [
-            ("u-synthetic#turn".into(), "turn_summary_open".into()),
             (
                 "u-synthetic".into(),
                 "claude_synthetic_resume_chrome".into()
-            )
+            ),
+            ("msg_e1:0#turn".into(), "turn_summary_open".into())
         ]
     );
 }

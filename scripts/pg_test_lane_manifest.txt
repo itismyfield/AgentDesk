@@ -224,6 +224,7 @@ src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
+src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/terminal_ui_obligation.rs
@@ -579,6 +580,7 @@ services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
+services::discord::task_notification_delivery::retired_metadata::tests::pg
 services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::sweep_tests
@@ -2055,6 +2057,8 @@ services::discord::session_runtime::worktree_reuse_channel_isolation_tests::name
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_corrects_db_cwd_and_stamps_channel
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_does_not_cross_channels
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::restart_restore_cwd_legacy_null_single_row_is_reused
+services::discord::task_notification_delivery::retired_metadata::tests::pg::fresh_missing_replacement_metadata_projection_decodes_bigint_count_pg
+services::discord::task_notification_delivery::retired_metadata::tests::pg::known_receipt_metadata_cleanup_decodes_bigint_count_pg
 services::discord::task_notification_delivery::tests::active_first_turn_cannot_consume_a_distinct_later_sink_turn_pg
 services::discord::task_notification_delivery::tests::bigint_update_count_above_u32_max_remains_claimable_pg
 services::discord::task_notification_delivery::tests::concurrent_ensure_card_unique_winner_pg

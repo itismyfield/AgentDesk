@@ -1445,6 +1445,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
+│   │   │   ├── turn_summary_recovery_tests.rs
 │   │   │   ├── two_message_panel.rs
 │   │   │   └── unix_journal.rs
 │   │   ├── recovery_paths/
@@ -1708,19 +1709,25 @@ src/
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
+│   │   │   │   ├── metadata_retirement_authority_tests.rs
 │   │   │   │   ├── missing_card_replacement.rs
 │   │   │   │   ├── response_chunks.rs
 │   │   │   │   ├── response_fence.rs
 │   │   │   │   ├── response_identity.rs
 │   │   │   │   ├── retention.rs
+│   │   │   │   ├── retired_metadata.rs
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
 │   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
+│   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── gateway.rs
+│   │   │   ├── metadata_retirement_pg_tests.rs
+│   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
+│   │   │   ├── retired_metadata.rs
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
@@ -1761,6 +1768,7 @@ src/
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
+│   │   │   │   ├── completion_actor_capture_tests.rs
 │   │   │   │   └── interrupted_adoption_tests.rs
 │   │   │   ├── jsonl_rotation/
 │   │   │   │   ├── backstop.rs
@@ -2015,7 +2023,9 @@ src/
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
-│   │   │   │   └── contracts.rs
+│   │   │   │   ├── contracts.rs
+│   │   │   │   ├── legacy_summary.rs
+│   │   │   │   └── legacy_summary_tests.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
@@ -2317,6 +2327,7 @@ src/
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
 │   │   ├── footer_retirement.rs
+│   │   ├── footer_retirement_boot_tests.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs
@@ -2447,6 +2458,8 @@ src/
 │   │   ├── tui_prompt_relay.rs
 │   │   ├── tui_task_card.rs
 │   │   ├── turn_completion_events.rs
+│   │   ├── turn_end_summary.rs
+│   │   ├── turn_end_summary_tests.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
 │   │   ├── turn_lease.rs
@@ -2462,6 +2475,7 @@ src/
 │   │   ├── voice_lifecycle.rs
 │   │   ├── voice_routing.rs
 │   │   ├── voice_sensitivity.rs
+│   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
 │   ├── discord_custody/
 │   │   └── tests.rs
@@ -3017,6 +3031,7 @@ src/
 │   │   │   ├── transition_scope_tests.rs
 │   │   │   ├── turn_summary.rs
 │   │   │   ├── turn_summary_actor_tests.rs
+│   │   │   ├── turn_summary_boundary_tests.rs
 │   │   │   ├── turn_summary_codex_verified_tests.rs
 │   │   │   ├── turn_summary_replay_tests.rs
 │   │   │   ├── turn_summary_tests.rs

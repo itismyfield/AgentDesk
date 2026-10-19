@@ -8,11 +8,11 @@ directory. Reclassifying live scenarios as fixtures is separate work.
 
 ## Classification and CI evidence
 
-The current inventory is **40 active YAML files: 35 live, 2 fixture, 3 unsupported**.
+The current inventory is **41 active YAML files: 36 live, 2 fixture, 3 unsupported**.
 The [original audit in #6026](https://github.com/itismyfield/AgentDesk/issues/6026)
 counted 35 files, including 30 live specifications; those counts are historical.
 The six live specifications added since (`E-37`, `E-50`–`E-54`), retirement of
-`E-32`–`E-34`, and addition of `E-60`–`E-61` account for the difference. Retired
+`E-32`–`E-34`, and addition of `E-60`–`E-62` account for the difference. Retired
 manual specifications are archived in `retired/` and excluded from the active
 top-level scan; fixture and known-gap counts are unchanged.
 
@@ -30,7 +30,7 @@ the selected run's evidence; it does not arrange a run.
 CI job `relay_authority_targets` invokes the
 `services::discord::tui_prompt_relay::tests::scenario_census_e2e` filter in
 [`.github/workflows/ci-pr.yml:2357`](../../../../.github/workflows/ci-pr.yml#L2357).
-Its independent pins remain `CENSUS_FIXTURE=2`, `CENSUS_LIVE=35`, and
+Its independent pins remain `CENSUS_FIXTURE=2`, `CENSUS_LIVE=36`, and
 `CENSUS_UNSUPPORTED=3`
 ([`scenario_census_e2e.rs:30`](../../../../src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs#L30)).
 Only `fixture` rows are runnable there: `is_runnable` (`:106`) selects inputs for

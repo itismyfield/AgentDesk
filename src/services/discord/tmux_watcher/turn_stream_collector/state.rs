@@ -135,6 +135,8 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream 
         Option<InflightTurnState>,
     pub(in crate::services::discord::tmux::tmux_watcher) completion_actor:
         Option<std::sync::Weak<crate::services::provider::CancelToken>>,
+    pub(in crate::services::discord::tmux::tmux_watcher) summary_actor:
+        Option<std::sync::Weak<crate::services::provider::CancelToken>>,
     // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
     // the on-disk row so a restart re-hydrating an existing panel carries the
     // SAME epoch it was created with (a stale-epoch completion is thus never

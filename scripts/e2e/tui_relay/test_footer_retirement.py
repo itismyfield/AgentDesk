@@ -129,14 +129,14 @@ class FooterRetirementTests(unittest.TestCase):
             scenario = driver.yaml.safe_load(next(directory.glob(f"E-{number}-*.yaml")).read_text())
             driver.validate_scenario_schema(scenario)
             self.assertIn({"no_status_chrome": True}, scenario["assertions"])
-            self.assertFalse(any("completion_per_turn" in spec for spec in scenario["assertions"]))
+            self.assertTrue(any("completion_per_turn" in spec for spec in scenario["assertions"]))
             self.assertFalse(any("requires_feature" in spec or "status_panel_after_body" in spec
                                  or "single_status_panel" in spec for spec in scenario["assertions"]))
             self.assertTrue(any("wait_for_discord_text" in step for step in scenario["steps"]))
 
     def test_new_live_scenarios_require_actual_owner_and_existing_primitives(self):
         directory = ROOT / "tests/e2e/tui_relay/scenarios"
-        for number, owner in ((60, "o"), (61, "o")):
+        for number, owner in ((60, "o"), (61, "o"), (62, "legacy")):
             scenario = driver.yaml.safe_load(next(directory.glob(f"E-{number}-*.yaml")).read_text())
             driver.validate_scenario_schema(scenario)
             self.assertTrue(scenario["durable_delivery_probe"])

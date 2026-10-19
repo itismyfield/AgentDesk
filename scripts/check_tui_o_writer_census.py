@@ -220,6 +220,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "tui_prompt_relay/synthetic_start_wiring.rs": {".say": 3},
     "turn_bridge/before_start_stop.rs": {"replace_message_with_outcome": 1},
     "turn_bridge/bridge_entry_persist.rs": {"TurnGateway::send_message": 1},
+    "turn_end_summary.rs": {".send_message": 1},
     "turn_bridge/current_message_anchor.rs": {"TurnGateway::edit_message": 1, "TurnGateway::send_message": 1},
     "turn_bridge/headless_delivery.rs": {"edit_channel_message*": 1, "send_long_message*": 1},
     "turn_bridge/mod.rs": {"TurnGateway::edit_message": 1},
@@ -344,6 +345,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "turn_bridge/current_message_anchor.rs": ("W15", "KEEP_NONBODY"),
     "turn_bridge/headless_delivery.rs": ("W17", "KEEP_36"),
     "turn_bridge/mod.rs": ("W18", "KEEP_NONBODY"),
+    "turn_end_summary.rs": ("TURN-END", "KEEP_NONBODY"),
     "turn_bridge/single_message_footer.rs": ("W16", "KEEP_NONBODY"),
     "turn_bridge/status_panel.rs": ("1-B-panel", "KEEP_NONBODY"),
     "turn_bridge/status_panel/fallback.rs": ("1-B-panel", "KEEP_NONBODY"),
@@ -371,6 +373,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/turn_end_summary.rs": ("post_live:peek",),
     "src/services/discord/footer_view_reconciler/mod.rs": (
         "edit_body_message:claim",
     ),

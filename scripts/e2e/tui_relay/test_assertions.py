@@ -1624,7 +1624,7 @@ class TargetHealthR2Contract(unittest.TestCase):
 
 
 class E35CurrentRunContract(unittest.TestCase):
-    def test_actual_yaml_through_real_runner_checks_final_body_and_rejects_status_chrome(self):
+    def test_actual_yaml_through_real_runner_checks_final_body_and_completion(self):
         path = ROOT / "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml"
         scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
         original = copy.deepcopy(scenario)
@@ -1636,8 +1636,8 @@ class E35CurrentRunContract(unittest.TestCase):
             "missing": ([_relay_msg(3, "unrelated response"), completion], "fail"),
             "duplicate marker": ([body, _relay_msg(4, marker + " resent"), completion], "fail"),
             "duplicate content": ([body, _relay_msg(4, "same body"), _relay_msg(5, "same body"), completion], "fail"),
-            "missing completion": ([body], "pass"),
-            "early completion": ([_raw_bot_msg(2, "-# ✅ 1초"), body], "pass"),
+            "missing completion": ([body], "fail"),
+            "early completion": ([_raw_bot_msg(2, "-# ✅ 1초"), body], "fail"),
         }
         for cell in scenario["cells"]:
             for label, (messages, expected) in cases.items():
@@ -1728,7 +1728,7 @@ class RequiredCompletionWait(unittest.TestCase):
              move_at=None):
         scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/"
                                          "E-35-durable-delivery-record.yaml").read_text())
-        scenario["assertions"][-1:] = [{"completion_chrome_after_body": {"body_marker": self.MARKER, "required": not optional}}]
+        scenario["assertions"][-2:] = [{"completion_chrome_after_body": {"body_marker": self.MARKER, "required": not optional}}]
         if mutation == "raw_count":
             scenario["assertions"].insert(0, {"raw_message_count_between_markers": {"min": 1, "max": 36}})
         if other_failure:

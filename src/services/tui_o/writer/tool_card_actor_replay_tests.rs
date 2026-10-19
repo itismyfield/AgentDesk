@@ -177,6 +177,9 @@ async fn old_panel_startup(provider: ShadowProvider, channel: u64) {
         ["answer"],
         "{provider:?}"
     );
+    if provider == ShadowProvider::Codex {
+        assert_eq!(harness.port.posts(), ["answer"]);
+    }
     let store = harness.channel();
     assert_eq!(store.ledger().excluded(&key), Some(pieces::TOOL_CALL_PANEL));
     let card_key = UnitKey {
@@ -190,6 +193,9 @@ async fn old_panel_startup(provider: ShadowProvider, channel: u64) {
     polls(4).await;
     halt(stop, task).await;
     assert_eq!(card_and_body(harness.port.posts()), ["answer"]);
+    if provider == ShadowProvider::Codex {
+        assert_eq!(harness.port.posts(), ["answer"]);
+    }
     assert!(harness.alarms.taken().is_empty());
 }
 

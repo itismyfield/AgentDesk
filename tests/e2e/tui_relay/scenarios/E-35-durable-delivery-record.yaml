@@ -18,3 +18,6 @@ assertions:
   - no_duplicate_marker: "[E2E:E35:{run_id}:OK]"
   - no_duplicate_content: true
   - no_status_chrome: true
+  - completion_per_turn:
+      exact: 1
+      marker: "[E2E:E35:{run_id}:OK]"

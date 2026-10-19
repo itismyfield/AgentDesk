@@ -60,7 +60,9 @@ impl TurnSummaryRun {
     }
 
     pub(super) fn prompt(&mut self, value: &Value) {
-        if self.provider == ShadowProvider::Claude && self.open.is_none() {
+        if self.provider == ShadowProvider::Claude
+            && self.open.as_ref().is_none_or(|turn| turn.first.is_none())
+        {
             self.open(value, None);
         }
     }
@@ -78,6 +80,11 @@ impl TurnSummaryRun {
             return;
         }
         if self.open.is_none() {
+            if value.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+                && value.get("isApiErrorMessage") != Some(&Value::Bool(true))
+            {
+                return;
+            }
             self.open(value, None);
         }
         let Some(turn) = self.open.as_mut() else {
@@ -197,3 +204,7 @@ impl TurnSummaryRun {
 fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
     value.get("timestamp")?.as_str()?.parse().ok()
 }
+
+#[cfg(test)]
+#[path = "turn_summary_boundary_tests.rs"]
+mod turn_summary_boundary_tests;

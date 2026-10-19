@@ -316,7 +316,12 @@ class ScenarioFilter(unittest.TestCase):
             self.assertEqual(wait_steps[0]["late_marker"], "[E2E:E22:HEAD]")
             self.assertIn({"provider_hold_marker_seen": "[E2E:E22:PRE]"}, e22["assertions"])
             self.assertIn(
-                {"no_status_chrome": True},
+                {
+                    "completion_per_turn": {
+                        "marker": "[E2E:E22:TAIL]",
+                        "exact": 1,
+                    }
+                },
                 e22["assertions"],
             )
 
@@ -331,7 +336,12 @@ class ScenarioFilter(unittest.TestCase):
             self.assertIn("acceptance_criteria", e23)
             self.assertNotIn("skip_reason", e23)
             self.assertIn(
-                {"no_status_chrome": True},
+                {
+                    "completion_per_turn": {
+                        "marker": "[E2E:E23:BODY-END]",
+                        "exact": 1,
+                    }
+                },
                 e23["assertions"],
             )
 
