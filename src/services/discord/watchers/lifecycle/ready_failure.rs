@@ -1,40 +1,5 @@
 use super::*;
 
-pub(crate) fn normalize_human_alert_target(channel: &str) -> Option<String> {
-    let channel = channel.trim();
-    if channel.is_empty() {
-        return None;
-    }
-    Some(if channel.starts_with("channel:") {
-        channel.to_string()
-    } else {
-        format!("channel:{channel}")
-    })
-}
-
-pub(crate) fn load_human_alert_target(shared: &SharedData) -> Option<String> {
-    if let Some(pool) = shared.pg_pool.as_ref() {
-        return crate::utils::async_bridge::block_on_pg_result(
-            pool,
-            |pool| async move {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT value FROM kv_meta WHERE key = 'kanban_human_alert_channel_id'",
-                )
-                .fetch_optional(&pool)
-                .await
-                .map_err(|error| format!("load postgres human alert target: {error}"))
-            },
-            |message| message,
-        )
-        .ok()
-        .flatten()
-        .and_then(|channel| normalize_human_alert_target(&channel));
-    }
-
-    let _ = shared;
-    None
-}
-
 pub(crate) fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
     let mut metadata = existing_metadata
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -125,7 +90,6 @@ pub(in crate::services::discord) struct ReadyForInputFailureResult {
     pub dispatch_failed: bool,
     pub card_id: Option<String>,
     pub card_marked: bool,
-    pub human_alert_sent: bool,
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stall(
@@ -160,28 +124,9 @@ pub(in crate::services::discord) async fn fail_dispatch_for_ready_for_input_stal
         };
     }
 
-    let human_alert_sent = if changed > 0 {
-        load_human_alert_target(shared.as_ref()).is_some_and(|target| {
-            let card_label = card_id.as_deref().unwrap_or("-");
-            let content = format!(
-                "자동큐 safety-net 발동: dispatch {dispatch_id} / card {card_label} / session {tmux_session_name} / {READY_FOR_INPUT_STUCK_REASON}"
-            );
-            enqueue_lifecycle_notification_best_effort(
-                shared.pg_pool.as_ref(),
-                &target,
-                Some(dispatch_id),
-                "dispatch.stuck_at_ready",
-                &content,
-            )
-        })
-    } else {
-        false
-    };
-
     Ok(ReadyForInputFailureResult {
         dispatch_failed: changed > 0,
         card_id,
         card_marked,
-        human_alert_sent,
     })
 }
