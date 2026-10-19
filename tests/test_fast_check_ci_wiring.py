@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "d6185791546e805d03d7c36685ef940b1cc8ca1c22bdc2544a41d35e2133e243"
+    "baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -3356,6 +3356,7 @@ jobs:
             "scripts/check_test_lane_coverage.py --baseline-ref base-sha",
             "-m unittest tests.test_test_lane_coverage",
             "-m unittest tests.test_lane_source_parity tests.test_lane_activation",
+            "-m unittest tests.test_required_id_exception_fragments",
         ]
         with tempfile.TemporaryDirectory() as tmp:
             probe, journal = Path(tmp) / "python-probe", Path(tmp) / "argv"

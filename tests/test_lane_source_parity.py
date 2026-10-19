@@ -328,6 +328,45 @@ class RequiredPrParityTests(unittest.TestCase):
                 change(repo)
                 self.assert_clean(repo)
 
+    def test_run_body_guard_text_keeps_required_step_and_mirror_evidence(self) -> None:
+        for guard in ("if: false", "continue-on-error: true"):
+            for owner in ("test step", "mirror step"):
+                with self.subTest(guard=guard, owner=owner):
+                    repo = guarded_repo()
+                    commands = ["cat <<'YAML'", guard, "YAML"]
+                    if owner == "test step":
+                        repo.pr["delta_job"] = [*commands, "cargo test --lib delta"]
+                    else:
+                        body = "\n".join(f"          {line}" for line in [
+                            *commands, "./scripts/required-check-mirror.sh",
+                        ])
+                        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+                            "run: ./scripts/required-check-mirror.sh", f"run: |\n{body}")
+                    self.assert_clean(repo)
+
+    def test_conditional_mirror_of_listing_only_job_has_no_required_run_to_lose(self) -> None:
+        for mode in ("--list", "--ignored"):
+            with self.subTest(mode=mode):
+                repo = Repo()
+                repo.pr["listing"] = [f"cargo test --lib gamma -- {mode}"]
+                repo.mirrors["listing"] = None
+                repo.mirror_text["listing"] = mirror("listing").replace(
+                    "      - env:", "      - if: false\n        env:")
+                self.assert_clean(repo)
+
+    def test_conditional_mirror_still_reports_job_that_lists_and_runs_tests(self) -> None:
+        repo = guarded_repo()
+        repo.pr["delta_job"].insert(0, "cargo test --lib delta -- --list")
+        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        result, output = repo.check()
+        self.assertEqual(result, 1, output)
+        unproven = findings(output, "pr-context-unproven")
+        self.assertEqual(len(unproven), 1, output)
+        self.assertIn("every proven mirror of delta_job may skip or swallow", unproven[0])
+        self.assertIn("  + delta (e.g. delta::reads_pg_env)", output)
+        self.assertEqual(len(findings(output, "pr-parity-missing")), 1, output)
+
     def test_unreadable_command_in_a_conditionally_mirrored_job_stays_unresolved(self) -> None:
         repo = guarded_repo()
         repo.pr["delta_job"].append('cargo test --lib "$FILTER"')

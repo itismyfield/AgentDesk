@@ -26,7 +26,7 @@ const FAST: Timing = Timing {
 };
 
 fn text() -> String {
-    frame("iMessage", "ann", NONCE, "are you there?")
+    frame("iMessage", "200", "ann", NONCE, "are you there?")
 }
 
 // Claude draws continuation rows two columns in.
@@ -180,7 +180,8 @@ impl Fake {
             session: &session,
             transcript: &self.transcript,
             source: "iMessage",
-            author: "ann",
+            author: "200",
+            name: "ann",
             nonce: NONCE,
             text: "are you there?",
         };
@@ -230,7 +231,7 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": marker_text}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": marker_text}),
         serde_json::json!({"type": "queue-operation", "operation": "dequeue"}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "ann", "ffff0000", "x")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "x")}),
     ];
     for record in ignored {
         writeln!(file, "{}", real(record)).unwrap();
@@ -371,7 +372,7 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
         serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "ann", "ffff0000", "are you there?")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "are you there?")}),
     ] {
         writeln!(file, "{}", real(record.clone())).unwrap();
         assert_eq!(
@@ -406,9 +407,31 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
 }
 
 #[test]
-fn the_header_names_the_source_and_cannot_start_a_command_or_close_early() {
-    let framed = frame("iMessage", "a]b\nc", NONCE, "/clear");
-    assert_eq!(framed, "[📱 iMessage · a b c · abcd1234]\n/clear");
+fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
+    let framed = frame("iMessage", "200", "a]b\nc", NONCE, "/clear");
+    let header = "[User: a)b c (ID: 200) · 📱 v1 mode=inject source=iMessage · abcd1234]";
+    assert_eq!(framed, format!("{header}\n/clear"));
+}
+
+/// A running turn's input left in the composer, flat, wrapped or after a person's keys, is
+/// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
+#[test]
+fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
+    use crate::services::claude_tui::composer_lock::DraftSighting;
+    let source = "discord:1479671298497183835:1561196979327869080";
+    let framed = frame(source, "343742347365974026", "0hbujang", NONCE, "status?");
+    let header = framed.lines().next().unwrap();
+    let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
+    let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());
+    let typed_first = format!("person typed {wrapped}");
+    for shown in [&framed, &wrapped, &typed_first].map(|composer| screen(composer, "")) {
+        assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{shown}");
+        assert_eq!(composer_owner(&shown), ComposerOwner::Person, "{shown}");
+    }
+    let idle = screen("[User: 0hbujang (ID: 343742347365974026)] status?", "");
+    assert_eq!(composer_owner(&idle), ComposerOwner::AgentDesk);
+    let person = screen("[User: my own draft", "");
+    assert_eq!(draft_sighting(&person), DraftSighting::PersonDraft);
 }
 
 #[test]
@@ -482,7 +505,8 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
             session,
             transcript: &fake.transcript,
             source: "iMessage",
-            author: "ann",
+            author: "200",
+            name: "ann",
             nonce,
             text: "are you there?",
         };

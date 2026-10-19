@@ -278,6 +278,7 @@ fi
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
 "$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect tests.test_h2_session_driver tests.test_h2_session tests.test_h2_items
+"$PYTHON" -m unittest tests.test_h2_admission_carriers
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -337,6 +338,7 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 # measures each one.
 "$PYTHON" scripts/check_durable_frontier_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
+"$PYTHON" -m unittest tests.test_durable_frontier_writer_cfg_carriers
 fi
 
 if run_check guards "Input thread mapping census"; then
@@ -353,6 +355,7 @@ fi
 if run_check guards "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census
+"$PYTHON" -m unittest tests.test_registration_fragments tests.test_skip_pin_fragments
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
@@ -437,7 +440,8 @@ fi
 
 if run_check guards "Relay-authority fixed mutation gate (#5071)"; then
 "$PYTHON" scripts/check_relay_mutation_sources.py
-"$PYTHON" -m unittest tests.test_relay_authority_mutations
+"$PYTHON" -m unittest tests.test_relay_authority_mutations \
+  tests.test_relay_authority_mutation_coupling
 fi
 
 if run_check guards "Relay-authority mutation wiring digest (#5997)"; then
@@ -495,6 +499,7 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 "$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
+"$PYTHON" -m unittest tests.test_required_id_exception_fragments
 fi
 
 if run_check contracts "PR test selection plan (main runs every lane in full)"; then
@@ -722,10 +727,12 @@ if run_check contracts "Shell test suites (tests/*.sh)"; then
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
+  tests/test_cluster_deploy_peer_host_paths_6162.sh
   tests/test_cluster_deploy_peer_verdict_5189.sh
   tests/test_deploy_e2e_readers_gate_6577.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
+  tests/test_deploy_rollback_policies_6355.sh
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_runner_profile.sh
   tests/test_deploy_smoke_warn_scope_4511.sh

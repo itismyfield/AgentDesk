@@ -20,6 +20,8 @@ use guarded_persist::{
 };
 #[path = "stream_tick/output.rs"]
 mod output;
+#[path = "stream_tick/reclaim.rs"]
+mod reclaim;
 #[path = "stream_tick/runtime.rs"]
 mod runtime;
 use rollover_guard::{GuardedRolloverEditOutcome, guarded_bridge_rollover_edit};
@@ -552,27 +554,9 @@ pub(super) async fn run_bridge_stream_tick(
         }
     }
 
-    if bridge_should_reclaim_relay_from_missing_watcher(
-        watcher_owns_assistant_relay,
-        standby_relay_owns_output,
-        live_watcher_registered_for_relay(shared_owned.as_ref(), watcher_owner_channel_id),
-    ) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
-            "  [{ts}] ⚠ turn_bridge reclaiming assistant relay for channel {} after watcher disappeared",
-            channel_id.get()
-        );
-        watcher_owns_assistant_relay = false;
-        watcher_relay_available_for_turn = false;
-        inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
-        rewind_and_persist_delivery_on_reclaim(
-            &full_response,
-            bridge_confirmed_response_sent_offset,
-            &mut response_sent_offset,
-            &mut *inflight_state,
-            channel_id,
-        );
-        state_dirty = true;
+    match reclaim::reclaim_missing_watcher_delivery(&tick_context!(), &mut tick_runtime!()) {
+        std::ops::ControlFlow::Continue(changed) => state_dirty |= changed,
+        std::ops::ControlFlow::Break(()) => return_authority_lost!(),
     }
 
     if state_dirty

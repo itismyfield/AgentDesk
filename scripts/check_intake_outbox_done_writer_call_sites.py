@@ -37,7 +37,7 @@ action. Conversely, a same-spelled free function in a file importing this
 writer could be over-counted. Comments, strings, pinned whole-file test modules,
 and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
 target evaluation. Whole-file skips use the basename rule with production
-module mounts rejected, plus the resolver pin in `scripts/test_only_module_skip_pin.py`.
+module mounts rejected, plus the resolver pin in `scripts/test_only_module_skip_pin_paths.py` plus `.d/` fragments.
 Non-`.rs` regular files and `src/` symlinks are rejected before classification;
 the skipped census must equal basename count plus resolver pin count.
 Symlink rejection is lexical rather than atomic

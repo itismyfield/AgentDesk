@@ -43,7 +43,11 @@ impl Fixture {
     /// H's frame under `nonce`, in the paste block Claude records it in.
     fn wrapped_head(&self, head: MessageId, nonce: &str) -> String {
         let source = format!("discord:{}:{head}", self.channel);
-        paste_block("b0ac", &frame(&source, "200", nonce, "status?"), "b0ac")
+        paste_block(
+            "b0ac",
+            &frame(&source, "200", AUTHOR_NAME, nonce, "status?"),
+            "b0ac",
+        )
     }
 
     fn append(&self, lines: &str) {

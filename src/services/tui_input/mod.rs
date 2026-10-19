@@ -2,12 +2,15 @@
 
 pub mod actor;
 pub mod bounded_tmux;
+pub(crate) mod human_frame;
 pub mod input_key;
 pub(crate) mod submission;
 pub(crate) mod submission_tmux;
 
 #[cfg(test)]
 mod bounded_tmux_tests;
+#[cfg(test)]
+mod human_frame_tests;
 #[cfg(test)]
 mod input_key_tests;
 

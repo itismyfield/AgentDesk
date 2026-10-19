@@ -136,6 +136,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+. "$SCRIPT_DIR/_deploy_policy_generation.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
@@ -1167,7 +1168,7 @@ print("|".join(ids))
     echo "▸ Pre-existing reader-count alarms (non-blocking after deploy): ${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-none}"
 }
 
-# #3858: restore the last-known-good release binary and restart the service.
+# Restore the last-known-good release binary and its policies, then restart.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
 # promotion, not only the explicit health-check branch (an unguarded
@@ -1200,7 +1201,7 @@ _rollback_release_binary() {
         echo "   turning a one-node deploy failure into a cluster-wide outage."
         echo ""
         echo "   FAIL-FORWARD: leaving the NEW binary live (it is what is currently running under"
-        echo "   launchd). The rollback backup at $rel_backup is preserved for manual use."
+        echo "   launchd). The rollback backup at $rel_backup (with policies.prev, if any) is kept for manual use."
         echo ""
         echo "   MANUAL INTERVENTION REQUIRED:"
         echo "     1. Check whether the new binary is actually serving:"
@@ -1265,6 +1266,7 @@ _rollback_release_binary() {
     # below. A failed chflags can never leave the good binary restored but the
     # service stopped.
     chflags uchg "$rel_binary" 2>/dev/null || true
+    _restore_policy_generation "$ADK_REL"
     echo "↩ Previous binary restored — restarting release..."
     xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
     if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
@@ -1584,8 +1586,8 @@ _resolve_deploy_peers() {
 _deploy_peer_env_prelude() {
     printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
     local name value
-    # AGENTDESK_DEPLOY_BINARY is deliberately absent: it names a host-local path, so
-    # each peer builds from its own verified source with the provenance gates enabled.
+    # Host-local paths (binary, repo, root, lock) are deliberately absent: the peer resolves
+    # its own, so it builds its synced checkout under the root its verdict is read from.
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
@@ -1596,7 +1598,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
-        AGENTDESK_DEPLOY_LOCK_FILE \
         AGENTDESK_DEPLOY_PEERS \
         AGENTDESK_DEPLOY_PEERS_FILE \
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
@@ -1619,8 +1620,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
         AGENTDESK_PLIST_REL \
-        AGENTDESK_ROOT_DIR \
-        AGENTDESK_REPO_DIR \
         OBSIDIAN_VAULT_ROOT \
         AGENTDESK_OBSIDIAN_AGENTS_SRC
     do
@@ -2033,7 +2032,8 @@ echo \"\$port\"")"'')"; then
     fi
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
+    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
+    remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
     # peer's own `git fetch` above cannot deliver them. Push them before the peer
@@ -2337,6 +2337,7 @@ export AGENTDESK_DEPLOY_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
+export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=$(printf '%q' "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}")
 export AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=$(printf '%q' "$POST_DEPLOY_SMOKE_SCOPE")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
@@ -2391,9 +2392,8 @@ EOF
     echo "    so the wait below covers the cluster verdict too (#5189)."
     echo ""
     echo "    One-shot wait command (polling loop — self-terminates after match):"
-    # `^`-anchored: `grep -qm1` stops at the FIRST match, so a line that merely quotes
-    # a marker (the per-peer ✓ lines do) would end the wait early and be reported as
-    # the verdict. Terminal markers are emitted at column 0 (#5189).
+    # `^`-anchored: `grep -qm1` stops at the first match, so a line quoting a marker (the
+    # per-peer ✓ lines do) would end the wait early; terminal markers start at column 0.
     echo "      LOG=$log_path; until [ -f \"\$LOG\" ] && grep -qm1 -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\"; do sleep 3; done; grep -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\" | tail -1"
     echo ""
     echo "    ⚠ DO NOT use 'tail -F | grep -m1' — grep -m1 exits on match but tail -F stays alive"
@@ -3182,16 +3182,16 @@ fi
 _capture_deploy_preexisting_reader_alarms
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
-# #5245 Phase 2A-S: `$ADK_REL` remains the sole canonical watched root.
-# Every shipped runtime and restart-marker writer already agrees on this path;
-# `$ADK_REL/runtime` stores other runtime state but is not a restart-marker root.
+# `$ADK_REL` is the sole canonical restart-marker root; `$ADK_REL/runtime` is not one.
 if ! request_restart_drain_mode_or_fail \
     "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL" "deploy-release"; then
     exit 1
 fi
 RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
 # >>> BEGIN restart-durability gate (#5254)
-if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
+if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" = "1" ]; then
+    echo "⚠ [gate] release restart durability gate skipped by operator override AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1 (drain: ${AGENTDESK_RESTART_DRAIN_VERDICT})"
+elif [ "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
     if [ -z "$RESTART_REQUEST_NONCE" ]; then
         echo "✗ [gate] release restart request nonce missing" >&2
         clear_restart_drain_mode "$ADK_REL" || true
@@ -3320,6 +3320,7 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
+_arm_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 if [ -f "$REL_BINARY_BACKUP" ]; then
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
     # .prev means a PRIOR deploy failed before its success-path cleanup, so it
@@ -3364,6 +3365,9 @@ STAGED_BINARY=""
 # ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
 # last-known-good backup and restarts the service — see _rollback_release_binary.
 ROLLBACK_ARMED=1
+# Swap policies with nothing fallible since promotion, so rollback and fail-forward see one generation.
+_swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
+POLICIES_STAGED=""
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
 # check passes (see below). Locking here would force the rollback path to fight
 # the uchg flag on the bad binary, and the lock's only job — blocking unsigned
@@ -3398,12 +3402,6 @@ rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
-
-rm -rf "$ADK_REL/policies.old"
-[ -d "$ADK_REL/policies" ] && mv "$ADK_REL/policies" "$ADK_REL/policies.old"
-mv "$POLICIES_STAGED" "$ADK_REL/policies"
-POLICIES_STAGED=""
-rm -rf "$ADK_REL/policies.old"
 
 # #3288: self-heal policies.dir config drift. The release runtime must load
 # policies from the deployed snapshot ($ADK_REL/policies, staged above from the
@@ -3640,9 +3638,9 @@ fi
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
-# #3858 (re-review finding 1): also drop any stray atomic-backup temp so an
-# interrupted prior backup copy never lingers in bin/.
+# Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
+_drop_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"

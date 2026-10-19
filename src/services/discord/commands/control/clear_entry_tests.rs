@@ -310,9 +310,16 @@ async fn run_matrix(entry: Entry) {
 
         let replies = rig.clear(entry, channel).await;
 
+        // The queued input waits; the dequeued one is starting and an active turn's is running.
+        let count = match fault {
+            Fault::CorruptMarker => "대기 메시지 수를 확인하지 못했어요.".to_string(),
+            Fault::StopRefused => "대기 메시지 2건을 비웠어요.".to_string(),
+            _ => "대기 메시지 1건을 비웠어요.".to_string(),
+        };
+        let notice = format!("{SESSION_CLEARED_RESPONSE}\n{count}");
         let expected = match fault.warning() {
-            Some(warning) => format!("{SESSION_CLEARED_RESPONSE}\n{warning}"),
-            None => SESSION_CLEARED_RESPONSE.to_string(),
+            Some(warning) => format!("{notice}\n{warning}"),
+            None => notice,
         };
         assert_eq!(replies, [expected], "{case}: one notice, one warning line");
         let shared = rig.shared();
@@ -432,7 +439,7 @@ async fn a_clear_without_a_pool_commits_and_warns_through_both_entries_pg() {
     for (n, entry) in [Entry::Slash, Entry::Text].into_iter().enumerate() {
         let (channel, _) = rig.channel(20 + n as u64, Fault::Clean).await;
         let replies = rig.clear(entry, channel).await;
-        let expected = format!("{SESSION_CLEARED_RESPONSE}\n{FAILED}");
+        let expected = format!("{SESSION_CLEARED_RESPONSE}\n대기 메시지 1건을 비웠어요.\n{FAILED}");
         assert_eq!(replies, [expected], "{entry:?}");
         assert!(
             rig.shared()

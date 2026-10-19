@@ -1,11 +1,22 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-10-18T03:27:30Z",
+  "refreshed_at": "2026-10-19T09:19:10Z",
   "ratchets": {
-    "closed_deadline_entries": 74,
-    "transition_list_entries": 74
+    "closed_deadline_entries": 69,
+    "transition_list_entries": 69
   },
   "issues": [
+    {
+      "number": 4229,
+      "state": "open",
+      "title": "decompose: tmux_watcher.rs giant 잔여 — root 2,541 prod LoC + turn_stream_collector 1,148줄 (#3832/#4712 승계)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/tmux_watcher.rs"
+      ]
+    },
     {
       "number": 4710,
       "state": "closed",
@@ -145,6 +156,30 @@
       ],
       "files": [
         "src/services/discord/tmux_watcher_registry.rs"
+      ]
+    },
+    {
+      "number": 6487,
+      "state": "open",
+      "title": "[commands] Discord 커맨드 정리 — 미사용·죽은·중복 24개와 `!` 텍스트 계층 제거, /help 재작성, 남는 저사용 커맨드 소규모 결함 수정",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/commands/text_commands.rs"
+      ]
+    },
+    {
+      "number": 7160,
+      "state": "open",
+      "title": "decompose: discord/mod.rs·headless_turn.rs·discord_config_audit.rs giant owner (#4712 승계)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/mod.rs",
+        "src/services/discord/router/message_handler/headless_turn.rs",
+        "src/services/discord_config_audit.rs"
       ]
     }
   ]

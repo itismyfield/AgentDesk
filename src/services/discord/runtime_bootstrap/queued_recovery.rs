@@ -262,13 +262,18 @@ async fn restore_and_hold(
     // A held channel's undecided owners are not judged by the queued-only filter here.
     restored_queued_placeholders.retain(|(channel_id, _), _| !held.contains_key(channel_id));
     if !restored_queued_placeholders.is_empty() {
-        let live_queue_ids = collect_live_queue_message_ids(shared).await;
-        let filter_outcome =
-            filter_restored_queued_placeholders(restored_queued_placeholders, &live_queue_ids);
-        let live_count = filter_outcome.live.len();
+        let observed = super::queued_placeholders::observe_live_queue_message_ids(shared).await;
+        // A channel whose actor never answered has no measured queue to judge its cards against.
+        let (unmeasured, judged): (std::collections::HashMap<_, _>, _) =
+            restored_queued_placeholders
+                .into_iter()
+                .partition(|((channel_id, _), _)| observed.unmeasured.contains(channel_id));
+        let filter_outcome = filter_restored_queued_placeholders(judged, &observed.ids);
+        let live: Vec<_> = filter_outcome.live.into_iter().chain(unmeasured).collect();
+        let live_count = live.len();
         let uninstalled = super::queued_placeholders::install_restored_queued_placeholders(
             shared,
-            filter_outcome.live,
+            live,
             &filter_outcome.channels_with_stale,
         )
         .await;

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     "scripts/run_relay_authority_mutations.sh",
     "tests/test_relay_authority_mutations.py",
+    "tests/test_relay_authority_mutation_coupling.py",
     "scripts/check_relay_mutation_sources.py",
     "scripts/ci-script-checks.sh",
 )

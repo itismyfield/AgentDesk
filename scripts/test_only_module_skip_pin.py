@@ -36,21 +36,29 @@ try:
 except ModuleNotFoundError:
     from rust_lex import StripState, strip_line
 
-_paths_spec = importlib.util.spec_from_file_location(
-    "test_only_module_skip_pin_paths", Path(__file__).with_name("test_only_module_skip_pin_paths.py")
-)
-assert _paths_spec is not None and _paths_spec.loader is not None
-_paths = importlib.util.module_from_spec(_paths_spec)
-_paths_spec.loader.exec_module(_paths)
-PINNED_RESOLVER_TEST_ONLY_FILES = _paths.PINNED_RESOLVER_TEST_ONLY_FILES
 
+def _load_sibling(name):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().with_name(name + ".py"))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load scripts/{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+PINNED_RESOLVER_TEST_ONLY_FILES = _load_sibling(
+    "skip_pin_registry"
+).load(Path(__file__).resolve().parents[1]).frozensets()[1]
 # Basenames are classified by rule; only resolver exclusions need review pins.
 PINNED_TEST_ONLY_MODULE_FILES = PINNED_RESOLVER_TEST_ONLY_FILES
 
 _UPDATE_HINT = (
     "Review basename and resolver classification in scripts/test_only_module_skip_pin.py, "
-    "then update PINNED_RESOLVER_TEST_ONLY_FILES in "
-    "scripts/test_only_module_skip_pin_paths.py for resolver drift; "
+    "then register resolver drift in "
+    "scripts/test_only_module_skip_pin.d/; "
     "tests.rs / *_tests.rs need no path pin."
 )
 
@@ -60,22 +68,7 @@ _SYMLINK_HINT = (
 )
 
 
-def _load_inventory_generator():
-    name = "generate_inventory_docs"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(
-        name, Path(__file__).resolve().parent / "generate_inventory_docs.py"
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load scripts/generate_inventory_docs.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_INVENTORY = _load_inventory_generator()
+_INVENTORY = _load_sibling("generate_inventory_docs")
 
 
 def is_basename_test_file(name: str) -> bool:

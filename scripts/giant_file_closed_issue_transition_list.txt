@@ -25,6 +25,16 @@ records that turn_output_controller.rs clears the threshold by only 4
 production lines. The #4711 header count was also corrected from a stale 23 to
 the actual 22.
 
+2026-10-19: five paths were removed because their registry entries now point
+at open owner issues; they stay registered, so a later closed owner reports as
+a new dead pointer instead of a kept one:
+  - services/discord/commands/text_commands.rs                 -> #6487
+  - services/discord/tmux_watcher.rs                           -> #4229
+  - services/discord/mod.rs                                    -> #7160
+  - services/discord/router/message_handler/headless_turn.rs   -> #7160
+  - services/discord_config_audit.rs                           -> #7160
+(paths relative to src/, as above)
+
 ---
 
 # Issue #4710 (35 entries)
@@ -89,23 +99,18 @@ src/services/routines/agent_executor.rs
 src/services/routines/discord_log.rs
 src/services/routines/store.rs
 
-# Issue #4712 (18 entries)
+# Issue #4712 (13 entries)
 
 src/services/codex_tui/rollout_tail.rs
 src/services/discord/catch_up.rs
-src/services/discord/commands/text_commands.rs
 src/services/discord/health/recovery.rs
-src/services/discord/mod.rs
 src/services/discord/outbound/delivery_record.rs
 src/services/discord/recovery_engine/restore_inflight.rs
 src/services/discord/router/intake_gate.rs
-src/services/discord/router/message_handler/headless_turn.rs
 src/services/discord/router/message_handler/intake_turn.rs
 src/services/discord/session_relay_sink.rs
 src/services/discord/tmux.rs
-src/services/discord/tmux_watcher.rs
 src/services/discord/tmux_watcher/turn_stream_collector.rs
 src/services/discord/tui_prompt_relay/synthetic_start.rs
 src/services/discord/turn_bridge/stream_tick.rs
-src/services/discord_config_audit.rs
 src/services/tmux_common.rs

@@ -77,24 +77,7 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
             let tail_session_id = session_id.clone();
             let tail_cancel_token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
             let cancel_bridge_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let watcher_cancel_for_bridge = watcher_cancel_for_writer.clone();
-            let tail_cancel_for_bridge = tail_cancel_token.clone();
-            let cancel_bridge_done_for_thread = cancel_bridge_done.clone();
-            let cancel_bridge_handle = std::thread::Builder::new()
-                .name("codex_tui_rebind_cancel_bridge".to_string())
-                .spawn(move || {
-                    while !cancel_bridge_done_for_thread
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        if watcher_cancel_for_bridge.load(std::sync::atomic::Ordering::Relaxed) {
-                            tail_cancel_for_bridge
-                                .cancelled
-                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                });
+            let cancel_bridge_handle = cancel_bridge(watcher_cancel_for_writer.clone(), tail_cancel_token.clone(), cancel_bridge_done.clone());
             if let Err(error) = &cancel_bridge_handle {
                 tracing::warn!(
                     tmux_session = %tmux_session_name,
@@ -212,4 +195,24 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
         })?;
 
     Ok(relay_output_path)
+}
+
+pub(in crate::services::discord::recovery_engine) fn cancel_bridge(
+    watcher_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tail_cancel: std::sync::Arc<crate::services::provider::CancelToken>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("codex_rebind_cancel_bridge".into())
+        .spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Acquire) {
+                if watcher_cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    tail_cancel
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        })
 }

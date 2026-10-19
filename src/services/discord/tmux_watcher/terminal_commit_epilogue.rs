@@ -111,6 +111,26 @@ pub(super) async fn run_terminal_commit_epilogue(
     locals: TerminalCommitEpilogueLocals<'_>,
     state: &mut TerminalCommitEpilogueState<'_>,
 ) -> TerminalCommitEpilogueOutcome {
+    if locals.terminal_output_committed
+        && let Some(key) = watcher_completion_key(
+            context.shared,
+            context.channel_id,
+            locals.inflight_before_relay.as_ref(),
+            context.tmux_session_name,
+            locals.current_offset,
+        )
+        && crate::services::discord::recovery_engine::producer_resume::waiting_for_receipt(
+            context.shared,
+            context.provider_kind,
+            key,
+        )
+    {
+        tracing::warn!(
+            channel_id = context.channel_id.get(),
+            "repaired Codex terminal held until exact receipt commits"
+        );
+        return TerminalCommitEpilogueOutcome::Fallthrough;
+    }
     let shared = context.shared;
     let channel_id = context.channel_id;
     let watcher_provider = context.watcher_provider;
@@ -161,6 +181,11 @@ pub(super) async fn run_terminal_commit_epilogue(
     // re-evaluates the gate and finishes the cleanup once the pane
     // actually reports idle.
     if terminal_output_committed && !lifecycle_stage_paused {
+        #[cfg(all(test, unix))]
+        crate::services::discord::recovery_engine::producer_resume::record_epilogue_body(
+            channel_id.get(),
+            watcher_turn_nonce.as_deref(),
+        );
         // #3142: gate the TUI history push on `!completion_is_stale_for_newer_turn`.
         // When stale, the late `inflight_state.user_text` is the NEWER turn's
         // prompt; pairing it with the OLDER `full_response` would poison the

@@ -424,3 +424,106 @@ async fn turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg() 
     eprintln!("E1_ROUTE_START channel={channel} starter=1 extra=0 skip=0");
     server.abort();
 }
+
+#[derive(Clone, Default)]
+struct LogSink(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl LogSink {
+    fn leaf_lines(&self) -> Vec<String> {
+        let logs = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+        let lines = logs.lines().filter(|l| l.contains("unbound hold leaf"));
+        lines.map(str::to_owned).collect()
+    }
+}
+
+/// The Hold leaf behind an unresolved answer is logged once while it repeats, again after the
+/// channel settles Idle or reads Bound, and under its own label when the leaf changes.
+#[tokio::test(flavor = "current_thread")]
+async fn unresolved_hold_leaf_is_logged_once_per_transition_pg() {
+    use crate::services::discord::TmuxWatcherHandle;
+    let rig = Rig::new(69_183_105, false, false).await;
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    host.start(STRAY);
+    let sink = LogSink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let unknown = observed(Activity::Unknown, "session_identity_unresolved");
+    assert_eq!(unbound(&rig).await.0, unknown);
+    assert_eq!(unbound(&rig).await.0, unknown);
+    let lines = sink.leaf_lines();
+    assert_eq!(lines.len(), 1, "a repeated leaf logged again: {lines:?}");
+    let line = &lines[0];
+    for field in [
+        format!("channel_id={}", rig.channel),
+        r#"leaf="owner_unresolved""#.into(),
+        r#"unresolved_owners=["AgentDesk-claude-stray"]"#.into(),
+        "unresolved_owner_count=1".into(),
+        "exact_matches_canonical=true".into(),
+        "inflight=false".into(),
+    ] {
+        assert!(line.contains(&field), "{field} missing: {line}");
+    }
+    assert!(!line.contains(&rig.shared.token_hash), "{line}");
+
+    host.tmux(&["kill-session", "-t", STRAY]);
+    assert_eq!(
+        unbound(&rig).await.0,
+        observed(Activity::Idle, "no_session")
+    );
+    host.start(STRAY);
+    assert_eq!(unbound(&rig).await.0, unknown);
+    assert_eq!(sink.leaf_lines().len(), 2, "settling Idle did not re-arm");
+
+    rig.shared.tmux_watchers.insert(
+        rig.channel,
+        TmuxWatcherHandle {
+            tmux_session_name: MANUAL.into(),
+            output_path: rig.root.path().join("bound.jsonl").display().to_string(),
+            paused: Arc::new(false.into()),
+            resume_offset: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(false.into()),
+            pause_epoch: Arc::new(0.into()),
+            turn_delivered: Arc::new(false.into()),
+            last_heartbeat_ts_ms: Arc::new(chrono::Utc::now().timestamp_millis().into()),
+        },
+    );
+    let reading_now = crate::services::discord::turn_presence::activity::reading_now;
+    reading_now(&rig.shared, &ProviderKind::Claude, rig.channel).await;
+    assert!(rig.shared.tmux_watchers.remove(&rig.channel).is_some());
+    assert_eq!(unbound(&rig).await.0, unknown);
+    assert_eq!(sink.leaf_lines().len(), 3, "a Bound read did not re-arm");
+
+    let other = ProviderKind::Claude.build_tmux_session_name("other");
+    let token = &rig.shared.token_hash;
+    let key = adk_session::build_namespaced_session_key(token, &ProviderKind::Claude, &other);
+    let pool = rig.shared.pg_pool.as_ref().unwrap();
+    inflight::seed_session_row_hashed(pool, &key, rig.channel.get(), token, None).await;
+    assert_eq!(unbound(&rig).await.0, unknown);
+    let lines = sink.leaf_lines();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for field in [
+        r#"leaf="exact_canonical_mismatch""#,
+        r#"exact="missing""#,
+        r#"canonical="found""#,
+        "exact_matches_canonical=false",
+    ] {
+        assert!(lines[3].contains(field), "{field} missing: {}", lines[3]);
+    }
+    assert!(!lines[3].contains(token.as_str()), "{}", lines[3]);
+}

@@ -308,3 +308,53 @@ fn a_newer_files_native_terminal_replaces_instead_of_appending() {
     let body = single_body(parser.ingest_verified_native_terminal(&terminal, "b canonical"));
     assert_eq!(body, "b canonical");
 }
+
+#[test]
+fn incident_native_watermark_then_wrapper_switch_preserves_fresh_1755_bytes() {
+    let channel = 7_139_111;
+    let binding = matched(&channel.to_string());
+    let before = counters(channel);
+    let mut parser = SessionRelayParser::default();
+    let old = assistant("native-before-restart");
+    assert!(
+        parser
+            .ingest_frame(&read(
+                &binding,
+                &old,
+                1,
+                3_964_928 - old.len() as u64,
+                (1, 1)
+            ))
+            .is_empty()
+    );
+    let mut first = assistant("wrapper-prefix");
+    first.push_str(&" ".repeat(16_384 - first.len()));
+    assert!(
+        parser
+            .ingest_frame(&read(&binding, &first, 2, 0, (2, 10)))
+            .is_empty()
+    );
+    let late = assistant("stale-native-must-not-arrive");
+    assert!(
+        parser
+            .ingest_frame(&read(&binding, &late, 3, 3_964_928, (1, 1)))
+            .is_empty()
+    );
+    let mut fresh = assistant("fresh-wrapper-suffix");
+    let end = result("");
+    fresh.push_str(&" ".repeat(1_755 - fresh.len() - end.len()));
+    fresh.push_str(&end);
+    assert!(
+        parser
+            .ingest_frame(&read(&binding, &fresh[..312], 4, 1_506_404, (2, 10)))
+            .is_empty()
+    );
+    let body =
+        single_body(parser.ingest_frame(&read(&binding, &fresh[312..], 5, 1_506_716, (2, 10))));
+    assert!(body.contains("native-before-restart"));
+    assert!(body.contains("wrapper-prefix"));
+    assert_eq!(body.matches("fresh-wrapper-suffix").count(), 1);
+    assert!(!body.contains("stale-native-must-not-arrive"));
+    let after = counters(channel);
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1));
+}

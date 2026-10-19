@@ -10,8 +10,10 @@ from collections import Counter
 from pathlib import Path
 try:
     from scripts import check_durable_frontier_writer_call_sites as classifier
+    from scripts import skip_pin_registry as registry
 except ModuleNotFoundError:
     import check_durable_frontier_writer_call_sites as classifier
+    import skip_pin_registry as registry
 
 D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
@@ -107,51 +109,21 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root, promoted_paths=(), deleted_paths=()):
+def sync_skips(root, promoted_paths=(), deleted_paths=(), *, fragment=None):
+    """Validate basename mounts, then sync resolver fragments without rewriting legacy pins."""
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
     pin.validate_basename_mounts(files, basename, resolved)
-    path = root / "scripts/test_only_module_skip_pin_paths.py"
-    if not path.is_file():
-        path = root / "scripts/test_only_module_skip_pin.py"
-    source = path.read_text()
-    actual = {p.relative_to(root).as_posix() for p in resolved}
-    pinned = pin.PINNED_RESOLVER_TEST_ONLY_FILES
+    measured = {p.relative_to(root).as_posix(): "resolver" for p in resolved}
+    prior = registry.load(root)
+    for path in basename:
+        rel = path.relative_to(root).as_posix()
+        if rel in prior.rows and prior.rows[rel].payload == "basename":
+            measured[rel] = "basename"
     existing = {p.relative_to(root).as_posix() for p in files}
-    promoted = set(promoted_paths)
-    deleted = set(deleted_paths)
-    for rel in sorted(deleted):
-        if (root / rel).exists() or (root / rel).is_symlink():
-            raise RuntimeError("deletion path still exists: " + rel)
-        if rel not in pinned:
-            raise RuntimeError("deletion is not pinned: " + rel)
-    for rel in sorted(promoted):
-        if rel not in existing:
-            raise RuntimeError("promotion path missing: " + rel)
-        if rel in actual:
-            raise RuntimeError("promotion remains test-only: " + rel)
-        if rel not in pinned:
-            raise RuntimeError("promotion is not pinned: " + rel)
-    if pinned - actual - promoted - deleted:
-        raise RuntimeError("refusing pin removal")
-    for rel in sorted(promoted | deleted):
-        pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
-        source, count = re.subn(pattern, '', source)
-        if count != 1:
-            raise RuntimeError("removal pin is ambiguous: " + rel)
-    for rel in sorted(actual - pinned):
-        start = source.index("PINNED_RESOLVER_TEST_ONLY_FILES =")
-        closing = re.search(r"\n[ \t]*\}\s*\)", source[start:])
-        if closing is None:
-            raise RuntimeError("resolver pin closing delimiter missing")
-        end = start + closing.start()
-        directory = re.escape(Path(rel).parent.as_posix() + '/')
-        sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
-        at = start + sibling.start() if sibling else end
-        source = source[:at] + '\n        "' + rel + '",' + source[at:]
-    path.write_text(source)
+    return registry.sync(root, measured, existing, promoted_paths, fragment, deleted=deleted_paths)
 
 
 if __name__ == "__main__":
@@ -161,9 +133,13 @@ if __name__ == "__main__":
                             help='explicitly remove this existing production module from the skip pin')
         parser.add_argument('--remove-deleted', '--delete-pin', action='append', default=[], metavar='PATH',
                             help='explicitly remove this deleted file from the skip pin')
+        parser.add_argument('--fragment', metavar='NODE-ISSUE-SLICE',
+                            help='skip-pin fragment for new pins (default: one auto fragment per new path)')
         args = parser.parse_args(sys.argv[2:])
-        sync_skips(Path.cwd(), args.promote, args.remove_deleted)
-        sys.exit(0)
+        manual, written = sync_skips(Path.cwd(), args.promote, args.remove_deleted, fragment=args.fragment)
+        for line in (*(f"skip pin fragment written: {path}" for path in written), *manual):
+            print(line, file=sys.stderr if manual else sys.stdout)
+        sys.exit(1 if manual else 0)
     ok, report = check(Path.cwd())
     print(report)
     sys.exit(0 if ok else 1)
