@@ -63,11 +63,8 @@ impl QueueParkLedger {
             .channels
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        for owner in ["codex_clear_compat", "codex_verified", "session_transition"] {
+        for owner in ["canary_workspace", "codex_verified", "session_transition"] {
             if let Some(reason) = state.promote_holds.get(&(channel, owner)) {
-                if owner == "codex_clear_compat" {
-                    return Some(((*reason).to_string(), owner));
-                }
                 return Some((format!("{owner}_held:{reason}"), owner));
             }
         }

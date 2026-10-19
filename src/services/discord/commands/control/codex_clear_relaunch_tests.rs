@@ -38,6 +38,15 @@ const TEST_BOT: &str = "e51-isolated-test-bot";
 
 struct SourceMode(Option<CodexSourceMode>);
 
+fn mode_name(mode: CodexSourceMode) -> &'static str {
+    match mode {
+        CodexSourceMode::Legacy => "legacy",
+        CodexSourceMode::Shadow => "shadow",
+        CodexSourceMode::Verified => "verified",
+        CodexSourceMode::Invalid => "invalid",
+    }
+}
+
 impl Drop for SourceMode {
     fn drop(&mut self) {
         SOURCE_MODE_TEST.with(|mode| mode.set(self.0));
@@ -128,6 +137,15 @@ impl CanaryFixture {
     }
 
     pub(in crate::services::discord) async fn new_with_audit_prefix(prefix: u64) -> Self {
+        Self::build(prefix, CodexSourceMode::Verified).await
+    }
+
+    /// A live canary whose pin is verified while this process runs in `process_mode`.
+    pub(in crate::services::discord) async fn new_in(process_mode: CodexSourceMode) -> Self {
+        Self::build(0, process_mode).await
+    }
+
+    async fn build(prefix: u64, process_mode: CodexSourceMode) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -174,11 +192,10 @@ impl CanaryFixture {
             "AGENTDESK_TEST_CODEX_BINDING_ROOT",
             root.path(),
         );
-        let mode =
-            SourceMode(SOURCE_MODE_TEST.with(|mode| mode.replace(Some(CodexSourceMode::Verified))));
+        let mode = SourceMode(SOURCE_MODE_TEST.with(|mode| mode.replace(Some(process_mode))));
         let source_env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_CODEX_DIRECT_TUI_SOURCE_MODE",
-            "verified".as_ref(),
+            mode_name(process_mode).as_ref(),
         );
         let fake = FakeTmux::install(CANARY_TMUX);
         fake.become_missing_after_kill();
@@ -423,10 +440,6 @@ PY
         }).await.expect("the actual cold launch did not publish its fresh nonce")
     }
 
-    pub(in crate::services::discord) async fn publish_new_hook(&self) -> BindingContext {
-        self.publish_context(self.wait_new_context().await)
-    }
-
     fn publish_context(&self, context: BindingContext) -> BindingContext {
         let path = context
             .provider_root
@@ -439,18 +452,19 @@ PY
         };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
-        assert_eq!(
-            observe_binding_hook(
-                "codex",
-                "session-start",
-                Some(NEW_NATIVE_ID),
-                Some(NEW_NATIVE_ID),
-                &json!({"session_id":NEW_NATIVE_ID,"transcript_path":path,"source":"startup"}),
-                &headers,
-            ),
-            IngressOutcome::Durable(DurableKind::Adopted)
+        let outcome = observe_binding_hook(
+            "codex",
+            "session-start",
+            Some(NEW_NATIVE_ID),
+            Some(NEW_NATIVE_ID),
+            &json!({"session_id":NEW_NATIVE_ID,"transcript_path":path,"source":"startup"}),
+            &headers,
         );
-        let fold = p5::codex::read_ownership(&context).unwrap();
+        // Only a verified launch records ownership; the others keep the legacy publication.
+        if context.source_policy.as_deref() == Some("verified") {
+            assert_eq!(outcome, IngressOutcome::Durable(DurableKind::Adopted));
+        }
+        let fold = p5::codex::read_ownership(&context).ok();
         let binding = dedupe::runtime_binding_for_tmux_session(CANARY_TMUX);
         let allowed = dedupe::codex_verified_source_allowed(
             CANARY_TMUX,
@@ -458,10 +472,11 @@ PY
             Some(NEW_NATIVE_ID),
         );
         eprintln!(
-            "E51_HOOK_PUBLISHED nonce={} proof={:?} pending={} binding={:?} source_allowed={allowed}",
+            "E51_HOOK_PUBLISHED nonce={} proof={:?} pending={:?} binding={:?} source_allowed={allowed}",
             context.execution_nonce,
-            fold.verified.as_ref().map(|p| p.seq),
-            fold.pending.len(),
+            fold.as_ref()
+                .and_then(|fold| fold.verified.as_ref().map(|p| p.seq)),
+            fold.as_ref().map(|fold| fold.pending.len()),
             binding,
         );
         assert!(
@@ -499,8 +514,8 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
             module_path!(),
             "::canary_clear_reopens_launch_without_releasing_old_source_pg"
         ),
-        false,
-        false,
+        (false, false),
+        CodexSourceMode::Verified,
     )
     .await;
 }
@@ -512,8 +527,8 @@ async fn canary_clear_with_unwatched_external_tmux_launches_first_input_pg() {
             module_path!(),
             "::canary_clear_with_unwatched_external_tmux_launches_first_input_pg"
         ),
-        true,
-        false,
+        (true, false),
+        CodexSourceMode::Verified,
     )
     .await;
 }
@@ -525,13 +540,55 @@ async fn clear_without_core_session_still_retires_dead_canary_pg() {
             module_path!(),
             "::clear_without_core_session_still_retires_dead_canary_pg"
         ),
-        true,
-        true,
+        (true, true),
+        CodexSourceMode::Verified,
     )
     .await;
 }
 
-async fn clear_and_first_input(test: &str, external_inventory: bool, without_core: bool) {
+/// A verified pin outlives a rollback of the process mode, so the clear must reopen launch there.
+#[tokio::test(flavor = "current_thread")]
+async fn shadow_canary_clear_launches_the_first_input_pg() {
+    let test = concat!(
+        module_path!(),
+        "::shadow_canary_clear_launches_the_first_input_pg"
+    );
+    clear_and_first_input(test, (false, false), CodexSourceMode::Shadow).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shadow_canary_clear_without_core_session_launches_the_first_input_pg() {
+    let test = concat!(
+        module_path!(),
+        "::shadow_canary_clear_without_core_session_launches_the_first_input_pg"
+    );
+    clear_and_first_input(test, (true, true), CodexSourceMode::Shadow).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_canary_clear_launches_the_first_input_pg() {
+    let test = concat!(
+        module_path!(),
+        "::legacy_canary_clear_launches_the_first_input_pg"
+    );
+    clear_and_first_input(test, (false, false), CodexSourceMode::Legacy).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_canary_clear_without_core_session_launches_the_first_input_pg() {
+    let test = concat!(
+        module_path!(),
+        "::legacy_canary_clear_without_core_session_launches_the_first_input_pg"
+    );
+    clear_and_first_input(test, (true, true), CodexSourceMode::Legacy).await;
+}
+
+/// Clears the pinned canary, sends the first input through intake and clears the relaunch again.
+async fn clear_and_first_input(
+    test: &str,
+    (external_inventory, without_core): (bool, bool),
+    process_mode: CodexSourceMode,
+) {
     if !crate::services::tui_o::cutover::test_override::in_empty_list_process(test) {
         return;
     }
@@ -539,7 +596,7 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     if !crate::services::discord::admin_host_guard::tests::api_child(qualified) {
         return;
     }
-    let mut fixture = CanaryFixture::new().await;
+    let mut fixture = CanaryFixture::new_in(process_mode).await;
     assert!(
         !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
             CANARY_CHANNEL,
@@ -589,7 +646,7 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
         assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
     }
     clear_persist_failure_tests::seed_backlog(&fixture.shared, &ProviderKind::Codex, channel).await;
-    clear_channel_session_state(
+    let cleared = clear_channel_session_state(
         &api.http,
         &fixture.shared,
         &ProviderKind::Codex,
@@ -599,6 +656,7 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     )
     .await
     .unwrap();
+    assert_no_retirement_warning(&cleared);
     assert!(!fixture.alive.load(Ordering::SeqCst));
     let kills = fixture
         .fake
@@ -763,7 +821,8 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     });
     assert_ne!(new.execution_nonce, fixture.context.execution_nonce);
     assert_eq!(new.launch_mode, "fresh");
-    assert_eq!(new.source_policy.as_deref(), Some("verified"));
+    let verified = process_mode == CodexSourceMode::Verified;
+    assert_eq!(new.source_policy.as_deref(), Some(mode_name(process_mode)));
     assert!(new.expected_native_session_id.is_none());
     let argv: Vec<String> =
         serde_json::from_slice(&fs::read(fixture.root.path().join("fresh-argv.json")).unwrap())
@@ -784,15 +843,18 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
         clear_persist_failure_tests::queue_len(&fixture.shared, channel).await,
         0
     );
-    let current = p5::codex::read_ownership(&new).unwrap();
-    assert_eq!(current.verified.unwrap().source.session_id, NEW_NATIVE_ID);
-    assert!(current.pending.is_empty() && !current.conflicted);
+    if verified {
+        let current = p5::codex::read_ownership(&new).unwrap();
+        assert_eq!(current.verified.unwrap().source.session_id, NEW_NATIVE_ID);
+        assert!(current.pending.is_empty() && !current.conflicted);
+    }
     // A cancelled probe returns immediately even if a mutant restores the old blocking hold.
     let cancel = Arc::new(CancelToken::new());
     cancel.cancelled.store(true, Ordering::SeqCst);
-    assert!(
+    assert_eq!(
         crate::services::codex_tui::verified_hold::preflight(CANARY_TMUX, Some(&cancel)).is_some(),
-        "the new incarnation must close the launch allowance"
+        verified,
+        "only a new verified incarnation closes the launch allowance"
     );
     let after = fixture.shared.mailbox(channel).snapshot().await;
     assert!(
@@ -806,6 +868,28 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     failure_guard
         .expect("the actual turn had a cancellation owner")
         .finish();
+    let again = clear_channel_session_state(
+        &api.http,
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        "!clear",
+        SoftClearNotifyMode::Suppress,
+    )
+    .await
+    .unwrap();
+    assert_no_retirement_warning(&again);
+    assert!(
+        dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
+        "clearing the relaunched incarnation reopens launch again"
+    );
+}
+
+/// The clear retired its canary: no retirement step failed, so its reply carries no such warning.
+fn assert_no_retirement_warning(report: &ClearReport) {
+    let retirement = |what: &&str| what.starts_with("codex_retirement");
+    assert!(!report.failed.iter().any(retirement), "{report:?}");
+    eprintln!("E51_CLEAR_REPLY {:?}", report.reply());
 }
 
 pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String]) {
@@ -847,33 +931,4 @@ pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String
         "one response message including progress edits: {sent:?}"
     );
     assert!(posts <= 1, "a repeated POST is another response: {sent:?}");
-}
-
-pub(in crate::services::discord) async fn collect_completed_response(
-    api: &crate::services::discord::admin_host_guard::tests::Recorder,
-) -> Vec<String> {
-    let mut sent = Vec::new();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            sent.extend(api.take());
-            if sent.iter().any(|call| {
-                let mut parts = call.splitn(3, ' ');
-                let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default();
-                let body = parts.next().unwrap_or_default();
-                matches!(method, "POST" | "PATCH")
-                    && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
-                    && serde_json::from_str::<serde_json::Value>(body)
-                        .ok()
-                        .is_some_and(|value| value["content"] == "clear relaunch completed")
-            }) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the completed terminal never delivered its final response");
-    sent.extend(api.take());
-    sent
 }

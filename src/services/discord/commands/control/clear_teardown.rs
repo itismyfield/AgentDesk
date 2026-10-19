@@ -22,8 +22,6 @@ pub(super) async fn write_boundary(
     channel_id: serenity::ChannelId,
     report: &mut ClearReport,
 ) {
-    #[cfg(unix)]
-    super::super::super::queue_dispatch::codex_clear_compat::reset(shared, channel_id);
     let Some(pool) = shared.pg_pool.as_ref() else {
         report.fail("pg_boundary", "postgres pool unavailable");
         return;

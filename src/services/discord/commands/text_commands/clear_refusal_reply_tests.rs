@@ -186,6 +186,9 @@ fn input(id: MessageId) -> Intervention {
     }
 }
 
+/// The fixture's one queued input.
+const WAITING: &str = "대기 메시지 1건을 비웠어요.";
+
 /// The clear ran: one reply, the notice with `warning` under it, and the session, its queue and
 /// its transcript boundary are reset.
 async fn assert_cleared(
@@ -195,9 +198,10 @@ async fn assert_cleared(
     warning: Option<&str>,
 ) {
     assert!(handled.expect("the clear ran"), "the command is consumed");
+    let notice = format!("{SESSION_CLEARED_RESPONSE}\n{WAITING}");
     let notice = match warning {
-        Some(warning) => format!("{SESSION_CLEARED_RESPONSE}\n⚠️ {warning}"),
-        None => SESSION_CLEARED_RESPONSE.to_string(),
+        Some(warning) => format!("{notice}\n⚠️ {warning}"),
+        None => notice,
     };
     assert_eq!(replies, [(channel.id.get() + 2, notice)], "one notice");
     let core = rig.shared.core.lock().await;
@@ -279,7 +283,7 @@ async fn a_text_clear_that_runs_answers_only_the_cleared_notice_pg() {
     let (handled, replies) = rig.text_clear(&channel).await;
 
     assert!(handled.expect("the clear ran"), "the command is consumed");
-    let notice = SESSION_CLEARED_RESPONSE.to_string();
+    let notice = format!("{SESSION_CLEARED_RESPONSE}\n{WAITING}");
     assert_eq!(
         replies,
         [(channel.id.get() + 2, notice)],

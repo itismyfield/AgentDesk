@@ -333,9 +333,14 @@ pub(in crate::services::discord) async fn mailbox_clear_channel(
 ) -> ClearChannelResult {
     let handle = shared.mailbox(channel_id);
     let persistence = queue_persistence_context(shared, provider, channel_id);
-    // A purge-closed actor held nothing to clear.
-    let Ok(result) = handle.clear_or_refused(persistence).await else {
-        return ClearChannelResult::default();
+    // A purge-closed actor held nothing to clear; an unreachable one may have held anything.
+    let result = match handle.clear_or_refused(persistence).await {
+        Ok(result) => result,
+        Err(refusal) => {
+            let mut nothing = ClearChannelResult::default();
+            nothing.persistence.count_unknown = refusal == MailboxRefusal::Unreachable;
+            return nothing;
+        }
     };
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
