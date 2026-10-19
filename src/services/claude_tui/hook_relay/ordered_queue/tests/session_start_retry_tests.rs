@@ -30,6 +30,7 @@ struct Retry {
     _log_root: tempfile::TempDir,
     dir: tempfile::TempDir,
     state: HookServerState,
+    receiver: ReceiverThread,
     endpoint: String,
     attempts: Attempts,
     tmux: String,
@@ -38,7 +39,7 @@ struct Retry {
 }
 
 impl Retry {
-    async fn new(channel: u64, tmux: &str, rule: Rule) -> Self {
+    fn new(channel: u64, tmux: &str, rule: Rule) -> Self {
         reset_state_for_tests();
         reset_deferred_adoptions_for_tests();
         let log_root = tempfile::tempdir().unwrap();
@@ -48,23 +49,25 @@ impl Retry {
         let marker = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
         std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
         std::fs::write(&marker, uuid::Uuid::new_v4().simple().to_string()).unwrap();
-        let retry = |dir: tempfile::TempDir, state, endpoint, attempts| Self {
+        let state = HookServerState::new();
+        let app = hook_receiver_router_with_state(state.clone());
+        let attempts = Attempts::default();
+        let proxied = attempts.clone();
+        let receiver = ReceiverThread::spawn(log_root.path(), move |listener| {
+            proxy_with_rule(listener, app, proxied, rule)
+        });
+        let endpoint = receiver.endpoint.clone();
+        let mut retry = Self {
             _log_root: log_root,
             dir,
             state,
+            receiver,
             endpoint,
             attempts,
             tmux: tmux.to_owned(),
-            a: a.clone(),
+            a,
             workers: Vec::new(),
         };
-        let state = HookServerState::new();
-        let app = hook_receiver_router_with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let attempts = Attempts::default();
-        tokio::spawn(proxy_with_rule(listener, app, attempts.clone(), rule));
-        let mut retry = retry(dir, state, endpoint, attempts);
         let a_path = retry.transcript(&retry.a.clone());
         register_provider_session("claude", &retry.a, tmux);
         register_tmux_channel(tmux, channel);
@@ -147,6 +150,7 @@ impl Drop for Retry {
         for (_, worker) in self.workers.drain(..) {
             release_worker(worker);
         }
+        self.receiver.stop();
         set_test_root(None);
         reset_deferred_adoptions_for_tests();
         reset_state_for_tests();
@@ -241,7 +245,7 @@ fn a_session_start_whose_first_send_fails_is_retried_and_adopted() {
             ("SessionStart", 1) => Fate::Drop,
             _ => Fate::Forward,
         });
-        let tq = Retry::new(7_540, "n2b-h18", rule).await;
+        let tq = Retry::new(7_540, "n2b-h18", rule);
         let (b, c) = (
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -303,7 +307,7 @@ fn only_a_claude_session_start_retries_a_transport_failure() {
             1 => Fate::Drop,
             _ => Fate::Forward,
         });
-        let mut tq = Retry::new(7_541, "n2b-h22", rule).await;
+        let mut tq = Retry::new(7_541, "n2b-h22", rule);
         let b = uuid::Uuid::new_v4().to_string();
         tq.transcript(&b);
         tq.hook("UserPromptSubmit", &b, None);
@@ -335,7 +339,7 @@ fn a_session_start_retries_a_gateway_status_but_not_a_permanent_one() {
             ("Stop", _) => Fate::Status(500),
             _ => Fate::Forward,
         });
-        let tq = Retry::new(7_542, "n2b-retry-status", rule).await;
+        let tq = Retry::new(7_542, "n2b-retry-status", rule);
         let b = uuid::Uuid::new_v4().to_string();
         tq.transcript(&b);
         tq.hook("SessionStart", &b, Some("clear"));
@@ -385,7 +389,7 @@ fn an_old_session_start_redelivered_after_another_queue_moved_on_is_refused() {
             }
             _ => Fate::Forward,
         });
-        let mut tq = Retry::new(7_543, "n2b-cross-queue", rule).await;
+        let mut tq = Retry::new(7_543, "n2b-cross-queue", rule);
         let x = uuid::Uuid::new_v4().to_string();
         let (y, other) = (
             uuid::Uuid::new_v4().to_string(),
@@ -456,7 +460,7 @@ fn a_resent_session_start_is_judged_once_while_its_receipt_lasts() {
     let _locks = TqLocks::take();
     current_thread().block_on(async {
         let rule: Rule = Arc::new(|_, _, _| Fate::Forward);
-        let tq = Retry::new(7_544, "n2b-receipt", rule).await;
+        let tq = Retry::new(7_544, "n2b-receipt", rule);
         let (b, c) = (
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -594,8 +598,11 @@ fn a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted() {
         }
         current_thread().block_on(async {
             let rule: Rule = Arc::new(|_, _, _| Fate::Forward);
-            let tq = Retry::new(7_545, "herdr-p7s-relay", rule).await;
-            withhold_herdr_execution(&tq.tmux, Some("n1"));
+            let tq = Retry::new(7_545, "herdr-p7s-relay", rule);
+            // The receiver reads the hold per thread in test builds, so it is set on its thread.
+            let tmux = tq.tmux.clone();
+            tq.receiver
+                .run(move || withhold_herdr_execution(&tmux, Some("n1")));
             let b = uuid::Uuid::new_v4().to_string();
             tq.transcript(&b);
             tq.hook("UserPromptSubmit", &b, None);
@@ -603,7 +610,8 @@ fn a_withheld_herdr_pane_switch_is_resent_through_the_relay_until_admitted() {
             tq.until(&format!("{condition}: resends"), resent).await;
             assert_eq!(tq.bound().as_deref(), Some(tq.a.as_str()), "{condition}");
 
-            admit_herdr_execution(&tq.tmux, "n1");
+            let tmux = tq.tmux.clone();
+            tq.receiver.run(move || admit_herdr_execution(&tmux, "n1"));
             tq.adopted(&b).await;
             let attempts = tq.attempts("UserPromptSubmit");
             let ids: std::collections::HashSet<_> = attempts.iter().map(|a| &a.0).collect();
