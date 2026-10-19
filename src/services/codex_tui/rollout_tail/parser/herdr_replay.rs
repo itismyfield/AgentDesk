@@ -100,11 +100,7 @@ pub(super) fn take_whole_tail(
     accept: &RecordAcceptance<'_>,
     gone: impl FnOnce() -> bool,
 ) -> bool {
-    if !whole(partial)
-        || mutant("prb_newline_required")
-        || accept.accept_next_record(state) == NextRecord::StopBefore
-        || !gone()
-    {
+    if !whole(partial) || accept.accept_next_record(state) == NextRecord::StopBefore || !gone() {
         return false;
     }
     let line = std::mem::take(partial);

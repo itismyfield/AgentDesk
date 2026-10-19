@@ -601,13 +601,13 @@ pub(super) fn herdr_eof(
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
     }
-    if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, || !is_alive()) {
+    use crate::services::provider::herdr_before_start::mutant;
+    let gone = || !mutant("prb_newline_required") && !is_alive();
+    if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, gone) {
         return Some(None);
     }
     // No drain, deadline, idle wait or dead writer ends a Herdr turn.
-    let liveness =
-        crate::services::provider::herdr_before_start::mutant("prb_codex_reader_liveness");
-    if liveness && !is_alive() {
+    if mutant("prb_codex_reader_liveness") && !is_alive() {
         let offset = turn.0.saturating_add(state.bytes_read);
         return Some(Some(ReadOutputResult::SessionDied { offset }));
     }
