@@ -4176,6 +4176,7 @@ services::discord::health::redaction::tests::visible_message_id_redacts_zero_pla
 services::discord::health::relay_auto_heal::orphan_token_tests::agentdesk_session_probe_failure_is_graded_as_unmeasured
 services::discord::health::relay_auto_heal::orphan_token_tests::confirmed_dead_rowless_orphan_token_still_needs_a_warrant
 services::discord::health::relay_auto_heal::orphan_token_tests::unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once
+services::discord::health::relay_auto_heal::refusal_dispatch_tests::redrive_entrypoint_counts_a_durable_zero_frontier_refusal_5986
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_nudge_outcome
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_reattach_outcome
 services::discord::health::relay_auto_heal::retired_redrive_tests::legacy_request_nudges_its_watcher_owner_slot
