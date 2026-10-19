@@ -422,7 +422,7 @@ pub(super) fn enqueue_ordered_hook_relay_request_with_binding(
         return Err("ordered hook relay producer lock was unavailable".to_string());
     };
     let request_id = uuid::Uuid::new_v4().to_string();
-    let published_at = Utc::now();
+    let published_at = super::response_window::published_now();
     let delivery_deadline = published_at
         + chrono::Duration::from_std(DELIVERY_TTL)
             .map_err(|err| format!("convert hook relay delivery TTL: {err}"))?;
@@ -548,7 +548,7 @@ pub(super) fn handoff_ordered_hook_event_response_with_timeout(
         event,
         session_id,
         payload,
-        Some(started + timeout),
+        Some(super::response_window::first_deadline(started + timeout)),
         Some(binding),
     )?;
     let response_path = response_path
@@ -571,7 +571,7 @@ pub(super) fn handoff_ordered_hook_event_response_with_timeout(
                 ));
             }
         }
-        if started.elapsed() >= timeout {
+        if super::response_window::caller_deadline_passed(started, timeout) {
             let _ = std::fs::remove_file(&response_path);
             return Err(format!(
                 "ordered hook relay response timed out after {}ms",
