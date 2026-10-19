@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::{HerdrTurnLines, SourceFileIdentity, is_turn_output, is_turn_prompt};
 use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
+use crate::services::provider::herdr_before_start::mutant;
 
 /// A turn's provider terminal as `HerdrTurnLines` accepts it, and the record range it read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,9 +72,7 @@ pub(crate) fn ended_turn(
 ) -> Result<EndedTurn, Unobserved> {
     let bytes = read_prefix(file, len)?;
     let (records, torn) = records_to_end(&bytes);
-    if !torn.trim_ascii().is_empty()
-        && crate::services::provider::herdr_before_start::mutant("prb_torn_tail_unobserved")
-    {
+    if !torn.trim_ascii().is_empty() && mutant("prb_torn_tail_unobserved") {
         return Err(Unobserved);
     }
     Ok(match turn_in(&records, submitted_at, len) {
@@ -160,9 +159,7 @@ fn read_prefix(file: &mut std::fs::File, len: u64) -> Result<Vec<u8>, Unobserved
         .read_to_end(&mut bytes)
         .map_err(|_| Unobserved)?;
     // A file cut after its length was read reads short, and a short read is no read.
-    if bytes.len() as u64 != len
-        && !crate::services::provider::herdr_before_start::mutant("prb_short_read_ok")
-    {
+    if bytes.len() as u64 != len && !mutant("prb_short_read_ok") {
         return Err(Unobserved);
     }
     Ok(bytes)
@@ -194,9 +191,7 @@ pub(crate) fn ended_tail(
 ) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    if SourceFileIdentity::from_open_file(&file) != opened
-        || crate::services::provider::herdr_before_start::mutant("prb_newline_required")
-    {
+    if SourceFileIdentity::from_open_file(&file) != opened || mutant("prb_newline_required") {
         return None;
     }
     let (mut tail, want) = (String::new(), len.checked_sub(from)?);

@@ -601,8 +601,7 @@ pub(super) fn herdr_eof(
     if super::try_process_complete_partial_line(partial_line, sender, state, accept) {
         return Some(None);
     }
-    let tail = (sender, &mut *state);
-    if herdr_replay::take_whole_tail(partial_line, tail, accept, || !is_alive()) {
+    if herdr_replay::take_whole_tail(partial_line, (sender, state), accept, || !is_alive()) {
         return Some(None);
     }
     // No drain, deadline, idle wait or dead writer ends a Herdr turn.
