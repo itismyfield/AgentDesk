@@ -30,7 +30,6 @@ _UPSTREAM_RESULT = re.compile(
     r"\bUPSTREAM_RESULT\s*:\s*['\"]?\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}"
 )
 _KEY = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)\s*:(?P<value>.*)$")
-_STEP_GUARD = re.compile(r"^[ \t]*(?:-[ \t]+)?(?P<key>if|continue-on-error)\s*:(?P<value>.*)$")
 # `if:` values that always run the step; `continue-on-error` is safe only as false.
 RUNNING_IF = frozenset({"true", "always()", "!cancelled()", "success()"})
 
@@ -332,12 +331,12 @@ def unconditional(key: str, value: str) -> bool:
     return value == "false" if key == "continue-on-error" else value in RUNNING_IF
 
 
-def _step_guard(step_lines: list[str]) -> str:
-    """The first `if:` or `continue-on-error:` of one step that may skip it or hide a failure."""
-    for line in step_lines:
-        match = _STEP_GUARD.match(line)
-        if match and not unconditional(match.group("key"), match.group("value")):
-            return f"step {match.group('key')}: {match.group('value').strip()}"
+def _step_guard(pgm, step_lines: list[str]) -> str:
+    """Read only the step's own guard keys, excluding nested mappings and scalar bodies."""
+    code = "\n".join([re.sub(r"^([ \t]*)-", r"\1 ", step_lines[0]), *step_lines[1:]])
+    for key, (value, _) in job_keys(pgm, code).items():
+        if key in ("if", "continue-on-error") and not unconditional(key, value):
+            return f"step {key}: {value}"
     return ""
 
 
@@ -370,7 +369,7 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
                 problem = f"upstream {upstreams[0]} is not in needs"
             elif upstreams[0] not in names:
                 problem = f"upstream {upstreams[0]} is not a job in this workflow"
-            conditional = bool(_step_guard(lines[first:last + 1])) or any(
+            conditional = bool(_step_guard(pgm, lines[first:last + 1])) or any(
                 key in keys and not unconditional(key, keys[key][0])
                 for key in ("if", "continue-on-error")
             )
@@ -390,7 +389,7 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
 
 def _conditionally_mirrored(rel: Path, mirrors, demoted: set[str], found) -> list[Finding]:
     """A test-selecting job that only conditional mirrors report has no required run."""
-    selecting = demoted & {source.owner for source in found}
+    selecting = demoted & {source.owner for source in found if source.runs}
     pairs = dict.fromkeys(
         (m.job, m.upstream) for m in mirrors if m.proven and m.upstream in selecting
     )
@@ -416,7 +415,7 @@ def guarded_lines(pgm, jobs, headers) -> dict[int, str]:
             f"job continue-on-error: {value}"
         )
         for first, last in _steps(pgm, job.code) if job.name in headers else ():
-            guard = _step_guard(lines[first:last + 1]) or swallowed
+            guard = _step_guard(pgm, lines[first:last + 1]) or swallowed
             span = range(headers[job.name] + first, headers[job.name] + last + 1)
             guarded.update(dict.fromkeys(span, guard) if guard else {})
     return guarded
