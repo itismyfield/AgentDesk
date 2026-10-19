@@ -1,8 +1,9 @@
 //! Verified owed delivery through the real writer and actor: exact permits, FIFO holds, kept
 //! debt and per-source GC protection, with the readiness gate opened only by the test.
-
-use std::sync::atomic::Ordering;
-
+#[path = "tool_card_provenance_tests.rs"]
+mod tool_card_provenance;
+#[path = "tool_card_codex_tests.rs"]
+mod tool_cards;
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
@@ -11,10 +12,9 @@ use crate::services::tui_o::writer::owed::{PROBES, Reevaluation, deliver_owed};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::{
     self, forget_channel_for_tests, issue_for_tests, set_ready_for_tests,
 };
-
+use std::sync::atomic::Ordering;
 /// Opens the readiness gate for one channel on this thread and forgets its records on drop.
 struct Gate(u64);
-
 impl Gate {
     fn open(channel: u64, ready: bool) -> Self {
         set_ready_for_tests(channel, ready);

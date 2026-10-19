@@ -193,6 +193,35 @@ impl LedgerState {
         self.excluded.get(unit_key).map(String::as_str)
     }
 
+    /// Native tools whose recorded disposition must survive a runtime switch change.
+    pub fn card_tool_keys(&self) -> std::collections::BTreeSet<UnitKey> {
+        self.excluded
+            .iter()
+            .filter(|(key, reason)| {
+                key.kind == super::super::shadow::UnitKind::Tool
+                    && !key.native_key.contains('#')
+                    && reason.as_str() == "tool_call_card"
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Historical panel tools and native tool pieces are boundaries, never card backfill.
+    pub fn non_card_tool_keys(&self) -> std::collections::BTreeSet<UnitKey> {
+        let excluded = self
+            .excluded
+            .iter()
+            .filter(|(_, reason)| reason.as_str() != "tool_call_card")
+            .map(|(key, _)| key);
+        excluded
+            .chain(self.latest.keys().map(|(key, _)| key))
+            .filter(|key| {
+                key.kind == super::super::shadow::UnitKind::Tool && !key.native_key.contains('#')
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn approval(&self, rejected_serial: u64) -> Option<&ResumeApproval> {
         self.approvals.get(&rejected_serial)
     }

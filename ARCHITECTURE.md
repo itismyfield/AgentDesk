@@ -981,6 +981,8 @@ src/
 │   │   │   ├── stop.rs
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
+│   │   │   ├── tool_call.rs
+│   │   │   ├── tool_call_tests.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
 │   │   ├── delivery_lease_cell/
@@ -2835,7 +2837,9 @@ src/
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
-│   │   │   └── spool_transition_tests.rs
+│   │   │   ├── spool_transition_tests.rs
+│   │   │   ├── tool_card_switch.rs
+│   │   │   └── tool_card_switch_tests.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
 │   │   │   │   ├── codex_submission.rs
@@ -2957,6 +2961,14 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_card_actor_tests.rs
+│   │   │   ├── tool_card_codex_tests.rs
+│   │   │   ├── tool_card_fork_tests.rs
+│   │   │   ├── tool_card_known_tests.rs
+│   │   │   ├── tool_card_provenance_tests.rs
+│   │   │   ├── tool_card_replay_tests.rs
+│   │   │   ├── tool_card_tests.rs
+│   │   │   ├── tool_cards.rs
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs

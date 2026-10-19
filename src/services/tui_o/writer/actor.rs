@@ -252,8 +252,17 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let writer = writer.with_repost_stop(stop.clone());
-    let deriver = UnitDeriver::new(writer.channel(), provider);
+    let mut writer = writer.with_repost_stop(stop.clone());
+    let channel = writer.channel();
+    let ledger = writer.store().ledger();
+    let inputs = super::pieces::ToolCardInputs {
+        known: ledger.non_card_tool_keys(),
+        recorded_cards: ledger.card_tool_keys(),
+        switch: crate::services::tui_o::store::tool_card_switch::ToolCardSwitch::for_channel(
+            channel,
+        ),
+    };
+    let deriver = UnitDeriver::new(channel, provider).with_tool_cards(inputs);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);

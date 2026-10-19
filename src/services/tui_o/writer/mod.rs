@@ -19,7 +19,11 @@ pub mod resume;
 pub mod rotation;
 pub mod round_trip;
 pub mod switch;
+mod tool_cards;
 mod tool_results;
+
+#[cfg(test)]
+mod tool_card_tests;
 
 use std::future::Future;
 

@@ -1,10 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
-use tokio::sync::watch;
-
+#[path = "tool_card_actor_tests.rs"]
+mod tool_cards;
 use super::super::actor::{POLL_INTERVAL, run_channel, spawn_if_enabled};
 use super::super::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
@@ -15,6 +12,9 @@ use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 fn row(id: &str, text: &str) -> Vec<u8> {
     let row = serde_json::json!({

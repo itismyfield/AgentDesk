@@ -460,6 +460,8 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_driver_health \
   scripts.e2e.tui_relay.test_herdr_observe \
   scripts.e2e.tui_relay.test_durable_delivery \
+  scripts.e2e.tui_relay.test_durable_delivery_tool_cards \
+  scripts.e2e.tui_relay.test_tool_cards \
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \

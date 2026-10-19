@@ -244,6 +244,7 @@ pub(in crate::services::discord) fn run_bot_build_slash_commands()
         commands::cmd_node(),
         commands::cmd_sidecar(),
         commands::cmd_fast(),
+        commands::cmd_tool_call(),
         commands::cmd_goals(),
         commands::cmd_effort(),
         commands::cmd_compact(),
