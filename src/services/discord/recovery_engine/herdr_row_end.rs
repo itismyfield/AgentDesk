@@ -49,12 +49,7 @@ pub(super) fn held_at_restore(
 
 /// A prior process's Herdr row with no path, kind, receipt, planned hand-off or other owner.
 fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current: u64) -> bool {
-    let hosted_provider = match provider {
-        ProviderKind::Claude => true,
-        ProviderKind::Codex => crate::services::turn_host::herdr_turn_switched_on_for(provider),
-        _ => false,
-    };
-    hosted_provider
+    hosted_provider(provider)
         && state.channel_id != 0
         && !inflight::row_is_current_generation(state, current)
         && state
@@ -73,6 +68,15 @@ fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current:
             || recovery_tmux_session_name(provider, state)
                 .is_some_and(|name| super::turn_bridge::herdr_marked(&name)))
         && !inflight::before_start_receipt_present(provider, state.channel_id)
+}
+
+/// Claude, and Codex while its Herdr switch is on.
+fn hosted_provider(provider: &ProviderKind) -> bool {
+    match provider {
+        ProviderKind::Claude => true,
+        ProviderKind::Codex => crate::services::turn_host::herdr_turn_switched_on_for(provider),
+        _ => false,
+    }
 }
 
 /// Channels whose row an end task is reading now.

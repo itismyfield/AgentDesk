@@ -1,4 +1,4 @@
-//! Bridge admission re-reads a Herdr Codex turn with the tail's own record acceptance.
+//! Bridge admission and the row pass re-read a Herdr Codex turn with the tail's own record acceptance.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -82,18 +82,12 @@ fn replay(
         state.record(line.len());
         super::process_rollout_line_bytes(line, &sender, &mut state);
     }
-    // The tail flushes a final record that has no newline yet the same way.
+    // The tail flushes a final record that has no newline yet the same way; once the writer is
+    // gone such a record counts when it parses whole.
     let mut partial = rest.to_vec();
-    let whole = serde_json::from_slice::<serde_json::Value>(&partial).is_ok();
-    if ended && whole {
+    if ended && serde_json::from_slice::<serde_json::Value>(&partial).is_ok() {
         partial.push(b'\n');
-    } else if ended && !partial.trim_ascii().is_empty() && mutant("prb_torn_tail_unobserved") {
-        return None;
     }
     super::super::try_process_complete_partial_line(&mut partial, &sender, &mut state, &accept);
     Some(state)
-}
-
-fn mutant(name: &str) -> bool {
-    crate::services::provider::herdr_before_start::mutant(name)
 }
