@@ -1,7 +1,7 @@
 //! A confirmed clear retires history for launching, without granting source consumption.
 
 use super::*;
-use crate::services::codex_tui::canary::{self, CANARY_CHANNEL, CANARY_TMUX};
+use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
 use crate::services::platform::tmux::{self, SessionPresence};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,7 @@ fn read() -> Result<Option<Watermark>, String> {
 
 fn capture_under(authority: &TmuxSourceAuthority<'_>) -> Result<Option<Captured>, String> {
     let tmux = authority.session();
-    if tmux != CANARY_TMUX || !canary::enabled_for(tmux) {
+    if tmux != CANARY_TMUX {
         return Ok(None);
     }
     let Some((seq, nonce, committed_at)) =
@@ -83,9 +83,12 @@ fn capture_under(authority: &TmuxSourceAuthority<'_>) -> Result<Option<Captured>
         .ok_or("ownership context unavailable")?;
     if context.owner_runtime_root != tc::current_tmux_owner_marker()
         || context.host != binding_context::stable_host_identity()
-        || context.source_policy.as_deref() != Some("verified")
     {
         return Err("ownership runtime mismatch".into());
+    }
+    // Only a verified pin holds launches, so any other incarnation has nothing to retire.
+    if context.source_policy.as_deref() != Some("verified") {
+        return Ok(None);
     }
     Ok(Some(Captured {
         seq,
@@ -123,10 +126,7 @@ pub(crate) fn vacant(tmux: &str) -> bool {
 }
 
 pub(super) fn open_under(authority: &TmuxSourceAuthority<'_>) -> bool {
-    if authority.session() != CANARY_TMUX
-        || !canary::enabled_for(authority.session())
-        || !vacant_under(authority)
-    {
+    if authority.session() != CANARY_TMUX || !vacant_under(authority) {
         return false;
     }
     let (Ok(Some(current)), Ok(Some(mark))) = (capture_under(authority), read()) else {
@@ -163,9 +163,7 @@ pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
         if !vacant_under(authority) {
             return Err("clear target is not confirmed vacant".into());
         }
-        if origin == "legacy_clear_boundary" {
-            read()?;
-        } else if origin != "explicit_clear" {
+        if origin != "explicit_clear" {
             return Err("unknown retirement origin".into());
         }
         let mark = Watermark {

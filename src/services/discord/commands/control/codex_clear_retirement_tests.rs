@@ -413,3 +413,201 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
         assert!(after.pending_user_dispatch.is_none());
     }
 }
+
+/// A Discord API stand-in that names the canary channel, so intake and the clear stay offline.
+async fn canary_api(
+    fixture: &mut CanaryFixture,
+) -> crate::services::discord::admin_host_guard::tests::Recorder {
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
+        |method, path| {
+            (method == axum::http::Method::GET
+                && path.ends_with(&format!("/channels/{CANARY_CHANNEL}")))
+            .then(|| {
+                json!({
+                    "id": CANARY_CHANNEL.to_string(), "type": 0,
+                    "name": "adk-codex-tui-e2e", "guild_id": "42000",
+                    "position": 0, "permission_overwrites": [], "nsfw": false,
+                    "parent_id": null
+                })
+            })
+        },
+    ))
+    .await;
+    crate::services::discord::internal_api::init(api.port, None);
+    Arc::get_mut(&mut fixture.shared).unwrap().api_port = api.port;
+    api
+}
+
+fn isolated(test: &str) -> bool {
+    crate::services::tui_o::cutover::test_override::in_empty_list_process(test)
+        && crate::services::discord::admin_host_guard::tests::api_child(
+            test.split_once("::").unwrap().1,
+        )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unretired_pin_in_shadow_mode_parks_restored_input_until_clear_pg() {
+    let test = concat!(
+        module_path!(),
+        "::unretired_pin_in_shadow_mode_parks_restored_input_until_clear_pg"
+    );
+    if isolated(test) {
+        parked_until_clear(crate::services::codex::CodexSourceMode::Shadow).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unretired_pin_with_an_old_boundary_parks_restored_input_until_clear_pg() {
+    let test = concat!(
+        module_path!(),
+        "::unretired_pin_with_an_old_boundary_parks_restored_input_until_clear_pg"
+    );
+    if isolated(test) {
+        parked_until_clear(crate::services::codex::CodexSourceMode::Verified).await;
+    }
+}
+
+/// A dead pinned canary with no core session and no clear since: the restored input is parked,
+/// never taken into a launch that would wait on the pin, and the next clear discards and reopens.
+async fn parked_until_clear(mode: crate::services::codex::CodexSourceMode) {
+    use crate::services::turn_orchestrator::QueueIdentity;
+    let mut fixture = CanaryFixture::new_in(mode).await;
+    let api = canary_api(&mut fixture).await;
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://127.0.0.1:{}",
+        api.port
+    ));
+    let _cli = fixture.cold_cli();
+    vacate(&fixture);
+    let channel = ChannelId::new(CANARY_CHANNEL);
+    fixture.shared.core.lock().await.sessions.remove(&channel);
+    // An earlier clear's boundary is no explicit clear of this incarnation.
+    let ended =
+        crate::services::tui_prompt_dedupe::binding_events::binding_events_since(CANARY_CHANNEL, 0)
+            .unwrap()
+            .last()
+            .unwrap()
+            .committed_at;
+    sqlx::query(
+        "INSERT INTO channel_session_clear_boundaries (channel_id, cleared_at, clear_generation)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(CANARY_CHANNEL.to_string())
+    .bind(ended + chrono::Duration::seconds(1))
+    .execute(fixture.shared.pg_pool.as_ref().unwrap())
+    .await
+    .unwrap();
+    super::clear_persist_failure_tests::seed_backlog(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+    )
+    .await;
+    let before = fixture.shared.mailbox(channel).snapshot().await;
+    let identity = QueueIdentity::of(&before.intervention_queue[0]);
+    api.take();
+    let deps = crate::services::discord::router::IntakeDeps {
+        http: &api.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared: &fixture.shared,
+        token: "e51-isolated-test-bot",
+    };
+    let kick = crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queues_with_deps;
+    let started = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        kick(&deps, &ProviderKind::Codex),
+    )
+    .await
+    .expect("a parked kickoff returns at once");
+    assert_eq!(started, 0, "the pinned canary must not launch");
+    let after = fixture.shared.mailbox(channel).snapshot().await;
+    assert_eq!(after.intervention_queue.len(), 1);
+    assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
+    assert!(after.pending_user_dispatch.is_none() && after.cancel_token.is_none());
+    let parked = fixture.shared.queue_park_ledger.project(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        &after,
+    );
+    assert_eq!(parked.owner, Some("codex_verified"), "{parked:?}");
+    assert!(
+        !fixture
+            .fake
+            .take_calls()
+            .iter()
+            .any(|call| call.starts_with("new-session ")),
+    );
+    assert_launch_held();
+
+    let report = clear_channel_session_state(
+        &api.http,
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        "!clear",
+        SoftClearNotifyMode::Suppress,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.reply().lines().nth(1),
+        Some("대기 메시지 1건을 비웠어요.")
+    );
+    assert!(
+        !report
+            .failed
+            .iter()
+            .any(|what| what.starts_with("codex_retirement")),
+        "{report:?}"
+    );
+    let retired: Value = serde_json::from_slice(&fs::read(watermark()).unwrap()).unwrap();
+    assert_eq!(retired["origin"], "explicit_clear");
+    assert!(clear_relaunch::relaunch_open(CANARY_TMUX));
+    assert!(!clear_relaunch::launch_blocked(CANARY_TMUX));
+    let readiness = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
+    assert!(!readiness(&fixture.shared, &ProviderKind::Codex, channel).await);
+}
+
+/// A canary pane that outlived its core session is not vacant: the clear warns, writes no
+/// retirement and leaves launch closed, in a non-verified process mode too.
+#[tokio::test(flavor = "current_thread")]
+async fn clear_of_a_live_sessionless_canary_warns_without_retiring_pg() {
+    let test = concat!(
+        module_path!(),
+        "::clear_of_a_live_sessionless_canary_warns_without_retiring_pg"
+    );
+    if !isolated(test) {
+        return;
+    }
+    let mut fixture = CanaryFixture::new_in(crate::services::codex::CodexSourceMode::Shadow).await;
+    let api = canary_api(&mut fixture).await;
+    let channel = ChannelId::new(CANARY_CHANNEL);
+    fixture.shared.core.lock().await.sessions.remove(&channel);
+    let report = clear_channel_session_state(
+        &api.http,
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        "!clear",
+        SoftClearNotifyMode::Suppress,
+    )
+    .await
+    .unwrap();
+    assert!(
+        report.failed.contains(&"codex_retirement_commit"),
+        "{report:?}"
+    );
+    assert!(report.warning().is_some());
+    assert!(!watermark().exists());
+    assert!(!clear_relaunch::relaunch_open(CANARY_TMUX));
+    assert!(
+        !fixture
+            .fake
+            .take_calls()
+            .iter()
+            .any(|call| call.starts_with("kill-session")),
+        "the clear gains no kill over a pane its core session does not name"
+    );
+}

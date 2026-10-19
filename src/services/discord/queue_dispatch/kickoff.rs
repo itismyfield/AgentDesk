@@ -83,9 +83,7 @@ async fn kickoff_queue_channel_inner(
     }
 
     #[cfg(unix)]
-    if !queue_dispatch::codex_clear_compat::admit(shared, provider, channel_id, &fresh_snapshot)
-        .await
-    {
+    if queue_dispatch::canary_workspace::parked(shared, provider, channel_id).await {
         return IdleQueueKickoffChannelOutcome::default();
     }
 

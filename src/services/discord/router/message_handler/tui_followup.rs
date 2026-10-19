@@ -1,9 +1,12 @@
 #[path = "tui_followup/codex_observation.rs"]
 mod codex_observation;
+#[path = "tui_followup/nameless_gate.rs"]
+mod nameless_gate;
 #[cfg(unix)]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
 #[cfg(all(test, unix))]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
+use nameless_gate::nameless_promote_blocked;
 
 use super::*;
 
@@ -757,18 +760,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         );
     }
     blocked
-}
-
-/// With no session name, the nameless host check decides.
-async fn nameless_promote_blocked(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    let park = &shared.queue_park_ledger;
-    park.clear_promote_hold(channel_id, "codex_verified");
-    let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
-    nameless(shared, provider, channel_id.get()).await
 }
 
 /// #4270 A — live-dispatch promote defer: the composite the

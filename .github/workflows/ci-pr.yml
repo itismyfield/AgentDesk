@@ -381,7 +381,7 @@ jobs:
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
-              - 'src/services/discord/queue_dispatch/codex_clear_compat_tests.rs'
+              - 'src/services/discord/queue_dispatch/canary_workspace_tests.rs'
               - 'src/services/discord/queue_io/queued_head_auto_tests.rs'
               - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
