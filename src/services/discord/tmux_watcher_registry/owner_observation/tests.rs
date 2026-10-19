@@ -151,6 +151,11 @@ fn unrelated_registry_owner_mutation_invalidates_old_publication() {
 
 #[test]
 fn publication_callback_holds_guard_and_tls_until_return() {
+    let poisoned = std::panic::catch_unwind(|| {
+        let _guard = lock_tmux_watcher_registry();
+        panic!("interrupted registry writer");
+    });
+    assert!(poisoned.is_err());
     let registry = registry();
     let calls = Cell::new(0);
     assert!(!owner_publication_fence_held_for_tests());

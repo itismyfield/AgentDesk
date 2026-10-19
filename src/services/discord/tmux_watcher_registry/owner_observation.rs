@@ -21,9 +21,11 @@ pub(in crate::services::discord) fn with_owner_publication<R>(
     expected_epoch: u64,
     publish: impl FnOnce(&TmuxWatcherRegistryGuard) -> R,
 ) -> Result<R, &'static str> {
-    let guard = TMUX_WATCHER_REGISTRY_LOCK
-        .try_lock()
-        .map_err(|_| "registry_busy")?;
+    let guard = match TMUX_WATCHER_REGISTRY_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err("registry_busy"),
+    };
     if owner_observation_epoch() != Some(expected_epoch) {
         return Err("owner_epoch");
     }
