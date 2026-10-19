@@ -482,7 +482,10 @@ async fn unresolved_hold_leaf_is_logged_once_per_transition_pg() {
     assert!(!line.contains(&rig.shared.token_hash), "{line}");
 
     host.tmux(&["kill-session", "-t", STRAY]);
-    assert_eq!(unbound(&rig).await.0, observed(Activity::Idle, "no_session"));
+    assert_eq!(
+        unbound(&rig).await.0,
+        observed(Activity::Idle, "no_session")
+    );
     host.start(STRAY);
     assert_eq!(unbound(&rig).await.0, unknown);
     assert_eq!(sink.leaf_lines().len(), 2, "settling Idle did not re-arm");
