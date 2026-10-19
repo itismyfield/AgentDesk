@@ -110,18 +110,28 @@ impl ReceiverThread {
         rx.recv().expect("receiver thread alive")
     }
 
-    /// Ends the proxy and its connections, so nothing serves past the test's locks.
-    fn stop(&mut self) {
+    /// Ends the proxy and its connections, so nothing serves past the test's locks; yields how
+    /// the receiver thread ended.
+    fn stop(&mut self) -> std::thread::Result<()> {
         drop(self.calls.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.thread
+            .take()
+            .map_or(Ok(()), std::thread::JoinHandle::join)
     }
 }
 
 impl Drop for ReceiverThread {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
+    }
+}
+
+/// Fails the test with the receiver's panic once its state is reset, unless it is failing already.
+fn rethrow_receiver_panic(stopped: std::thread::Result<()>) {
+    if let Err(panic) = stopped
+        && !std::thread::panicking()
+    {
+        std::panic::resume_unwind(panic);
     }
 }
 
@@ -377,10 +387,11 @@ impl Drop for Tq {
         if let Some(worker) = self.worker.take() {
             release_worker(worker);
         }
-        self.receiver.stop();
+        let stopped = self.receiver.stop();
         set_test_root(None);
         reset_deferred_adoptions_for_tests();
         reset_state_for_tests();
+        rethrow_receiver_panic(stopped);
     }
 }
 
@@ -682,18 +693,55 @@ fn a_relay_is_answered_while_the_test_body_blocks_its_runtime_thread() {
         let tq = Tq::new(7_535, "tq-receiver-thread");
         let prompt = json!({ "session_id": tq.a, "prompt": "sent while the body blocks" });
         tq.non_wait("UserPromptSubmit", prompt);
-        // Waits without yielding: a proxy this runtime drives would answer nothing before the
-        // worker's fixed budget ran out.
+        // Waits without yielding until the worker finished its only request, any failure marker
+        // written: a proxy this runtime drives would answer nothing before the budget ran out.
+        let completed = tq.queue_dir.join("completed-high-water");
+        let finished = || read_high_water(&completed).unwrap().unwrap_or(0) >= 1;
         let deadline = Instant::now() + LIVENESS;
-        while tq.accepted("UserPromptSubmit").is_empty() && Instant::now() < deadline {
+        while !finished() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(finished(), "the worker finished the request");
         let accepted = tq.accepted("UserPromptSubmit");
         assert_eq!(accepted.len(), 1, "relayed while the body blocked");
         let markers = failure_marker_dir("claude").unwrap();
-        let failures = std::fs::read_dir(markers).map_or(0, |d| d.count());
+        let failures = match std::fs::read_dir(&markers) {
+            Ok(dir) => dir.count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("read {}: {error}", markers.display()),
+        };
         assert_eq!(failures, 0, "the relay met its budget");
     });
+}
+
+#[test]
+fn a_receiver_panic_after_its_last_request_fails_the_test_once_state_is_reset() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _locks = TqLocks::take();
+    let tmux = "tq-receiver-panic";
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(async {
+            let tq = Tq::new(7_536, tmux);
+            let prompt = json!({ "session_id": tq.a, "prompt": "the last request" });
+            tq.non_wait("UserPromptSubmit", prompt);
+            tq.until("prompt accepted", |tq| {
+                !tq.accepted("UserPromptSubmit").is_empty()
+            })
+            .await;
+            let panic: ReceiverCall = Box::new(|| panic!("receiver failed after its last request"));
+            tq.receiver.calls.as_ref().unwrap().send(panic).unwrap();
+        });
+    }));
+    let panic = outcome.expect_err("a receiver panic fails the test");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"receiver failed after its last request")
+    );
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux);
+    assert!(binding.is_none(), "state reset before the panic");
 }
 
 #[path = "session_start_retry_tests.rs"]

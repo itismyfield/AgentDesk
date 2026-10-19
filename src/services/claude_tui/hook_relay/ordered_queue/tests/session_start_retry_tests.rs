@@ -150,10 +150,11 @@ impl Drop for Retry {
         for (_, worker) in self.workers.drain(..) {
             release_worker(worker);
         }
-        self.receiver.stop();
+        let stopped = self.receiver.stop();
         set_test_root(None);
         reset_deferred_adoptions_for_tests();
         reset_state_for_tests();
+        rethrow_receiver_panic(stopped);
     }
 }
 
