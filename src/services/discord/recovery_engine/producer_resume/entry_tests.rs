@@ -66,6 +66,7 @@ struct Fixture {
     session_bound: bool,
     _rest: discord::shared_state::test_rest::Guard,
     _env: crate::config::TestEnvVarGuard,
+    _o_channels: crate::config::TestEnvVarGuard,
     _root: tempfile::TempDir,
 }
 
@@ -75,6 +76,10 @@ impl Fixture {
         let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             root.path(),
+        );
+        let o_channels = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+            std::ffi::OsStr::new("[]"),
         );
         let channel = ChannelId::new(channel);
         let tmux =
@@ -282,6 +287,7 @@ impl Fixture {
             session_bound,
             _rest: rest,
             _env: env,
+            _o_channels: o_channels,
             _root: root,
         }
     }
