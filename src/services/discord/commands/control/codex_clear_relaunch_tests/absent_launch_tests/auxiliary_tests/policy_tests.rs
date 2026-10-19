@@ -145,6 +145,7 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
     wait_completion(&first.token).await;
     wait_idle(&fixture).await;
     first.finish();
+    wait_recovery_custody_settled(&fixture, &n2, false).await;
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
     assert!(
         fixture
@@ -190,6 +191,7 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
         "explicit clear still discards the waiting queue"
     );
     assert!(dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+    recovery_diagnostic(&fixture, &n2, false, "shadow_after_explicit_clear", None).await;
     let cli = fixture.root.path().join("codex-fixture");
     fs::write(
         &cli,
@@ -200,7 +202,11 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
     .unwrap();
     restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 123, Q3)]).await;
     fixture.fake.take_calls();
-    assert!(kickoff(&fixture, &api).await);
+    let started = kickoff(&fixture, &api).await;
+    if !started {
+        recovery_diagnostic(&fixture, &n2, false, "shadow_clear_kickoff_refused", None).await;
+    }
+    assert!(started, "explicit clear permits the next restored input");
     let next = fixture.turn_failure_guard().await;
     let n3 = wait_context_after(&fixture, &n2.execution_nonce).await;
     assert_eq!(n3.launch_mode, "fresh");
