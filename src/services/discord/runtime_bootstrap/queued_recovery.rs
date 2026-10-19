@@ -268,12 +268,12 @@ async fn restore_and_hold(
             restored_queued_placeholders
                 .into_iter()
                 .partition(|((channel_id, _), _)| observed.unmeasured.contains(channel_id));
-        let mut filter_outcome = filter_restored_queued_placeholders(judged, &observed.ids);
-        filter_outcome.live.extend(unmeasured);
-        let live_count = filter_outcome.live.len();
+        let filter_outcome = filter_restored_queued_placeholders(judged, &observed.ids);
+        let live: Vec<_> = filter_outcome.live.into_iter().chain(unmeasured).collect();
+        let live_count = live.len();
         let uninstalled = super::queued_placeholders::install_restored_queued_placeholders(
             shared,
-            filter_outcome.live,
+            live,
             &filter_outcome.channels_with_stale,
         )
         .await;
