@@ -269,19 +269,32 @@ async fn exercise(case: Case) {
                     let warm_pending = dedupe::binding_events::codex::read_ownership(&next);
                     std::fs::rename(&parked, &path).unwrap();
                     let warm_pending = warm_pending.unwrap();
-                    assert!(!warm_pending.conflicted);
+                    assert!(warm_pending.conflicted, "retained proof plus Pending holds");
                     assert_eq!(warm_pending.pending.len(), 1);
                     assert!(warm_pending.pending[0].seq > resolved.seq);
+                    assert_eq!(warm_pending.verified.as_ref(), Some(&resolved));
+                    assert!(!dedupe::codex_verified_channel_delivery_allowed(
+                        CANARY_CHANNEL
+                    ));
+                    assert!(!dedupe::codex_verified_o_source_allowed(
+                        CANARY_CHANNEL,
+                        &resolved.source
+                    ));
                     hook(&next, &id, &path, "user_prompt_submit");
-                    let warm = dedupe::binding_events::codex::read_ownership(&next)
-                        .unwrap()
-                        .verified
-                        .unwrap();
+                    let warm_fold = dedupe::binding_events::codex::read_ownership(&next).unwrap();
+                    assert!(!warm_fold.conflicted);
+                    assert!(warm_fold.pending.is_empty());
+                    let warm = warm_fold.verified.unwrap();
                     assert!(
                         warm.seq > resolved.seq,
                         "the actual warm claim must advance latest proof"
                     );
                     assert_eq!(warm.source, resolved.source, "same path, session and inode");
+                    assert_eq!(warm.ownership.reused_proof_seq, Some(resolved.seq));
+                    assert!(dedupe::codex_verified_o_source_allowed(
+                        CANARY_CHANNEL,
+                        &warm.source
+                    ));
                     assert_eq!(
                         warm.ownership.pending_seq,
                         Some(warm_pending.pending[0].seq)
