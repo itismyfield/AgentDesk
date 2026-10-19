@@ -2,13 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { loadPolicy } = require("./support/harness");
 
-const GRACE_WRITE = "SET phase_gate_grace_until = ?";
+const GRACE_WRITE = /SET phase_gate_grace_until = (?!NULL)/;
 
 // Finish phase 0 of run-a with nothing left, so the continuation would open its phase gate.
 function continueAfterLastEntry(graceWrite) {
   const { module, agentdesk, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
     dbExecute(sql, params) {
-      return sql.includes(GRACE_WRITE) ? graceWrite(params) : { changes: 1 };
+      return GRACE_WRITE.test(sql) ? graceWrite(params) : { changes: 1 };
     },
     globals: { notifyCardOwner() {} }
   });

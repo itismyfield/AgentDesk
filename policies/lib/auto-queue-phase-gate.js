@@ -577,7 +577,7 @@ function beginPhaseGateGraceWindow(runId) {
   var until = new Date(Date.now() + PHASE_GATE_GRACE_WINDOW_MS).toISOString();
   try {
     var result = agentdesk.db.execute(
-      "UPDATE auto_queue_runs SET phase_gate_grace_until = ? WHERE id = ? " +
+      "UPDATE auto_queue_runs SET phase_gate_grace_until = CAST(? AS TIMESTAMPTZ) WHERE id = ? " +
       "AND status IN ('active', 'paused', 'restoring', 'generated', 'pending', 'cancelled')",
       [until, runId]
     );
