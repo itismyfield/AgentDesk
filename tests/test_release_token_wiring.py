@@ -30,7 +30,8 @@ class ReleaseTokenWiringTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.repo = Path(temp.name)
         (self.repo / "scripts").mkdir()
-        for name in ("build-release.sh", "deploy-release.sh", "build_token.py"):
+        for name in ("build-release.sh", "deploy-release.sh", "_deploy_policy_generation.sh",
+                     "build_token.py"):
             shutil.copy2(REPO / "scripts" / name, self.repo / "scripts" / name)
 
     def inject(self, script, command):
