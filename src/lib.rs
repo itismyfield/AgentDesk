@@ -276,6 +276,8 @@ pub fn run_from_args() -> Result<()> {
 
 #[cfg(test)]
 mod test_env_panic_probe;
+#[cfg(test)]
+mod test_support;
 
 /// Shared home lifetime contracts; registration and authority admission remain internal.
 pub mod home_runtime {

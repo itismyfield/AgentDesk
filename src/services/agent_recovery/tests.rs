@@ -448,8 +448,33 @@ fn test_004_lock_gives_fallback_allow_owner_skip_fallback_http_no_mailbox_handof
     assert_eq!(spawn.watcher_http_bot, "codex");
     assert!(!spawn.mailbox_handoff_called);
     assert_eq!(runtime.mailbox_handoff_calls(), 0);
-    assert!(!include_str!("handoff.rs").contains("start_agent_handoff_turn"));
-    assert!(!include_str!("mod.rs").contains("start_agent_handoff_turn"));
+    for source in RECOVERY_SOURCES {
+        assert!(!starts_handoff_turn(source));
+    }
+}
+
+const RECOVERY_SOURCES: [&str; 2] = [include_str!("handoff.rs"), include_str!("mod.rs")];
+
+/// Classification 2: the retired entry point is searched in comment-free text, so
+/// prose naming it is not a call. A lexical tripwire, not a call graph.
+fn starts_handoff_turn(source: &str) -> bool {
+    crate::test_support::strip_rust_comments(source)
+        .expect("agent_recovery source lexes")
+        .contains("start_agent_handoff_turn")
+}
+
+#[test]
+fn test_004b_retired_handoff_turn_counts_in_code_but_not_in_comments() {
+    for source in RECOVERY_SOURCES {
+        let prose = format!(
+            "// start_agent_handoff_turn is retired\n\
+             /* outer /* start_agent_handoff_turn(); */ */\n{source}"
+        );
+        assert!(prose.contains("start_agent_handoff_turn"));
+        assert!(!starts_handoff_turn(&prose));
+        let call = format!("{source}\nfn forged() {{ start_agent_handoff_turn(); }}\n");
+        assert!(starts_handoff_turn(&call));
+    }
 }
 
 #[test]

@@ -1,0 +1,280 @@
+//! Test-only Rust source text helpers for `include_str!` guards.
+//!
+//! A small lexer that knows only comments and literals: it does not evaluate
+//! `cfg`, expand macros or resolve names, and it is not a TOML/YAML/SQL parser.
+
+use std::fmt;
+use std::ops::Range;
+
+/// A comment or literal that never closes; the guard must fail, not match nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnterminatedSource {
+    pub(crate) kind: &'static str,
+    pub(crate) offset: usize,
+}
+
+impl fmt::Display for UnterminatedSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unterminated {} starting at byte {}",
+            self.kind, self.offset
+        )
+    }
+}
+
+/// Source with every comment byte blanked to a space; literals, CR and LF stay.
+pub(crate) fn strip_rust_comments(source: &str) -> Result<String, UnterminatedSource> {
+    blank(source, false)
+}
+
+/// Code-only view: comments and string/char literals are blanked to spaces.
+pub(crate) fn rust_code_mask(source: &str) -> Result<String, UnterminatedSource> {
+    blank(source, true)
+}
+
+/// Byte range from the first `signature` in a code mask through its matching `}`.
+/// `None` when the signature is absent, ends in `;` first, or never closes.
+pub(crate) fn braced_item_span(code: &str, signature: &str) -> Option<Range<usize>> {
+    let start = code.find(signature)?;
+    let open = start + code[start..].find(['{', ';'])?;
+    if code.as_bytes()[open] == b';' {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (index, byte) in code.bytes().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(start..index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// How a forgery test hides code: a `//` comment ending the line, or a nested block.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CommentForgery {
+    Line,
+    NestedBlock,
+}
+
+impl CommentForgery {
+    pub(crate) const ALL: [Self; 2] = [Self::Line, Self::NestedBlock];
+
+    fn wrap(self, text: &str) -> String {
+        match self {
+            Self::Line => format!("// {text}\n"),
+            Self::NestedBlock => format!("/* outer /* {text} */ */"),
+        }
+    }
+}
+
+/// Rewrites every non-comment occurrence of `needle` as a comment that still
+/// contains it verbatim, so a raw `contains` keeps matching the forged source.
+pub(crate) fn comment_out_code(source: &str, needle: &str, forgery: CommentForgery) -> String {
+    let code = strip_rust_comments(source).expect("forgery input lexes");
+    let starts: Vec<usize> = code.match_indices(needle).map(|(start, _)| start).collect();
+    assert!(
+        !starts.is_empty(),
+        "no code occurrence of `{needle}` to forge"
+    );
+    let mut forged = source.to_string();
+    for start in starts.into_iter().rev() {
+        forged.replace_range(start..start + needle.len(), &forgery.wrap(needle));
+    }
+    let forged_code = strip_rust_comments(&forged).expect("forged source lexes");
+    assert!(forged.contains(needle) && !forged_code.contains(needle));
+    forged
+}
+
+/// One byte per byte: blanking whole comments or literals keeps byte offsets,
+/// line breaks and UTF-8 validity, so offsets in the result index `source`.
+fn blank(source: &str, literals: bool) -> Result<String, UnterminatedSource> {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let (end, comment) = match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => (line_comment_end(bytes, index), true),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => (block_comment_end(bytes, index)?, true),
+            b'"' => (quoted_end(bytes, index, index + 1)?, false),
+            b'\'' => match char_literal_end(bytes, index)? {
+                Some(end) => (end, false),
+                None => {
+                    index += 1;
+                    continue;
+                }
+            },
+            byte if is_word(byte) => {
+                let word_end = word_end(bytes, index);
+                match prefixed_literal_end(bytes, index, word_end)? {
+                    Some(end) => (end, false),
+                    None => {
+                        index = word_end;
+                        continue;
+                    }
+                }
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if comment || literals {
+            for byte in &mut out[index..end] {
+                if *byte != b'\n' && *byte != b'\r' {
+                    *byte = b' ';
+                }
+            }
+        }
+        index = end;
+    }
+    Ok(String::from_utf8(out).expect("blanking whole UTF-8 sequences keeps UTF-8"))
+}
+
+fn unterminated<T>(kind: &'static str, offset: usize) -> Result<T, UnterminatedSource> {
+    Err(UnterminatedSource { kind, offset })
+}
+
+/// Identifier, keyword or number bytes; non-ASCII is treated as identifier text.
+fn is_word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+fn word_end(bytes: &[u8], start: usize) -> usize {
+    start
+        + bytes[start..]
+            .iter()
+            .position(|byte| !is_word(*byte))
+            .unwrap_or(bytes.len() - start)
+}
+
+fn line_comment_end(bytes: &[u8], start: usize) -> usize {
+    start
+        + bytes[start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(bytes.len() - start)
+}
+
+fn block_comment_end(bytes: &[u8], start: usize) -> Result<usize, UnterminatedSource> {
+    let mut depth = 1;
+    let mut index = start + 2;
+    while depth > 0 {
+        match (bytes.get(index), bytes.get(index + 1)) {
+            (None, _) => return unterminated("block comment", start),
+            (Some(b'/'), Some(b'*')) => (depth, index) = (depth + 1, index + 2),
+            (Some(b'*'), Some(b'/')) => (depth, index) = (depth - 1, index + 2),
+            _ => index += 1,
+        }
+    }
+    Ok(index)
+}
+
+fn quoted_end(bytes: &[u8], start: usize, body: usize) -> Result<usize, UnterminatedSource> {
+    let mut index = body;
+    loop {
+        match bytes.get(index) {
+            None => return unterminated("string literal", start),
+            Some(b'\\') => index += 2,
+            Some(b'"') => return Ok(index + 1),
+            Some(_) => index += 1,
+        }
+    }
+}
+
+/// `Some(end)` for a char literal, `None` for a lifetime or label such as `'a`.
+fn char_literal_end(bytes: &[u8], quote: usize) -> Result<Option<usize>, UnterminatedSource> {
+    let body = quote + 1;
+    let close = match bytes.get(body) {
+        None => return unterminated("char literal", quote),
+        Some(b'\\') => match bytes.get(body + 1) {
+            Some(b'u') if bytes.get(body + 2) == Some(&b'{') => {
+                match bytes[body..].iter().position(|byte| *byte == b'}') {
+                    Some(brace) => body + brace + 1,
+                    None => return unterminated("char literal", quote),
+                }
+            }
+            Some(b'x') => body + 4,
+            Some(escaped) => body + 1 + utf8_len(*escaped),
+            None => return unterminated("char literal", quote),
+        },
+        Some(first) => {
+            let close = body + utf8_len(*first);
+            if bytes.get(close) != Some(&b'\'') && is_word(*first) && !first.is_ascii_digit() {
+                return Ok(None);
+            }
+            close
+        }
+    };
+    match bytes.get(close) {
+        Some(b'\'') => Ok(Some(close + 1)),
+        _ => unterminated("char literal", quote),
+    }
+}
+
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    }
+}
+
+/// Literal end for `b"`, `c"`, `b'`, `r"`, `r#"`, `br`/`cr` forms, or `None` for a
+/// plain word such as `br` or the raw identifier `r#type`.
+fn prefixed_literal_end(
+    bytes: &[u8],
+    start: usize,
+    word_end: usize,
+) -> Result<Option<usize>, UnterminatedSource> {
+    let word = &bytes[start..word_end];
+    match (word, bytes.get(word_end)) {
+        (b"b" | b"c", Some(b'"')) => quoted_end(bytes, start, word_end + 1).map(Some),
+        (b"b", Some(b'\'')) => match char_literal_end(bytes, word_end)? {
+            Some(end) => Ok(Some(end)),
+            None => unterminated("byte literal", start),
+        },
+        (b"r" | b"br" | b"cr", Some(b'"' | b'#')) => {
+            let hashes = bytes[word_end..]
+                .iter()
+                .take_while(|byte| **byte == b'#')
+                .count();
+            let open = word_end + hashes;
+            if bytes.get(open) != Some(&b'"') {
+                if word == b"r" && hashes == 1 && bytes.get(open).is_some_and(|b| is_word(*b)) {
+                    return Ok(None);
+                }
+                return unterminated("raw string literal", start);
+            }
+            let mut index = open + 1;
+            loop {
+                match bytes.get(index) {
+                    None => return unterminated("raw string literal", start),
+                    Some(b'"')
+                        if bytes[index + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|byte| **byte == b'#')
+                            .count()
+                            == hashes =>
+                    {
+                        return Ok(Some(index + 1 + hashes));
+                    }
+                    Some(_) => index += 1,
+                }
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod source_text_tests;
