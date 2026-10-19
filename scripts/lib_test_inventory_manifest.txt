@@ -2095,7 +2095,9 @@ services::claude_tui::hook_relay::ordered_queue::tests::receiver_in_flight_respo
 services::claude_tui::hook_relay::ordered_queue::tests::receiver_pin_mismatch_is_quarantined_and_later_request_continues
 services::claude_tui::hook_relay::ordered_queue::tests::recovery_scan_reports_idle_queue_cardinality_with_bounded_latency
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does
+services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_receiver_panic_after_its_last_request_fails_the_test_once_state_is_reset
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepted
+services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_relay_is_answered_while_the_test_body_blocks_its_runtime_thread
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_stop_refused_past_its_reply_window_is_delivered_detached_and_not_lost
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_resent_session_start_is_judged_once_while_its_receipt_lasts
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::session_start_retry::a_session_start_retries_a_gateway_status_but_not_a_permanent_one
