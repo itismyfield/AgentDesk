@@ -986,3 +986,7 @@ pub(super) async fn run_stream_loop(
         pending_long_running_retarget_after_state_save,
     }
 }
+
+#[cfg(test)]
+#[path = "stream_loop/rewind_owner_tests.rs"]
+mod rewind_owner_tests;

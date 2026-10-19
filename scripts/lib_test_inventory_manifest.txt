@@ -4857,6 +4857,17 @@ services::discord::inflight::save_store::create_monotonic_observer::tests::path_
 services::discord::inflight::save_store::create_monotonic_observer::tests::same_path_lower_start_warns
 services::discord::inflight::save_store::create_monotonic_observer::tests::unobservable_births_do_not_allocate_and_evidenced_slots_are_bounded
 services::discord::inflight::save_store::create_monotonic_observer::tests::witness_io_is_outside_mutex_and_revision_blocks_stale_install
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_applies_when_expected_owner_matches
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_identity_and_terminal_guards_win
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_legacy_watcher_authority_matches
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_observes_owner_after_lock_contention
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_legacy_bool_change
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_owner_channel_change
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_rebind_owner_without_writing
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_stale_already_reclaimed_owner
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_stale_owner_without_writing
+services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_unknown_owner_without_writing
+services::discord::inflight::save_store::delivery_rewind::tests::terminal_reset_preserves_matching_bridge_authority
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::placeholder_clear_effect_reports_only_the_bridge_winner
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::slice_a_pair_contention
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
@@ -9848,6 +9859,7 @@ services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recover
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_checkpoint_wakeup_positive_stop_off_and_absent_pg
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
 services::discord::turn_bridge::stream_loop::provider_recovery::profile_tests::only_unprocessed_anchored_classified_failures_are_replayed
+services::discord::turn_bridge::stream_loop::rewind_owner_tests::rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::an_unchanged_tool_arm_adoption_records_nothing
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::queued_restart_foreign_authority_propagates_loss_while_self_delegation_continues
@@ -9888,6 +9900,10 @@ services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::failed_anchor_bind_keeps_absence_and_deletes_candidate
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::invariant_4371_turn_bridge_rollover_never_edits_raw_control_data
+services::discord::turn_bridge::stream_tick::reclaim::tests::missing_watcher_caller_preserves_local_rewind_on_io_error
+services::discord::turn_bridge::stream_tick::reclaim::tests::missing_watcher_caller_rejects_changed_and_already_reclaimed_owners
+services::discord::turn_bridge::stream_tick::reclaim::tests::missing_watcher_caller_rewinds_the_matching_watcher_owner
+services::discord::turn_bridge::stream_tick::reclaim::tests::missing_watcher_caller_with_no_rewind_does_not_write_w4
 services::discord::turn_bridge::streaming_edit_text::pre_submission_tui_prompt_error_tests::classifier_matches_wrapped_readiness_errors
 services::discord::turn_bridge::streaming_edit_text::pre_submission_tui_prompt_error_tests::classifier_rejects_post_submit_and_ambiguous_tui_errors
 services::discord::turn_bridge::streaming_edit_text::pre_submission_tui_prompt_error_tests::different_or_absent_pane_input_still_requeues_so_followup_is_deferred_not_dropped
