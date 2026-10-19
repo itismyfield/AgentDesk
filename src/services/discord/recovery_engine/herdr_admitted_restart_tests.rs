@@ -77,6 +77,35 @@ impl Fixture {
         inflight::load_inflight_state(&self.provider, CHANNEL)
     }
 
+    /// Opens O's store for the channel with a recorded frontier and returns its durable state.
+    fn o_store_with_frontier(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let (store, era) =
+            crate::services::herdr_launch::o_store_for_test(self.root.path(), &[CHANNEL]);
+        let mut channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+        channel.set_binding_checkpoint(3).unwrap();
+        let state = self.o_state();
+        assert!(!state.is_empty(), "O's store is on disk");
+        state
+    }
+
+    /// Every durable byte under the root but the inflight rows: O's frontier, ledger and owed.
+    fn o_state(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let rows = self.path().parent().unwrap().to_path_buf();
+        let mut files = std::collections::BTreeMap::new();
+        let mut dirs = vec![self.root.path().to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() && path != rows {
+                    dirs.push(path);
+                } else if path.is_file() {
+                    files.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        files
+    }
+
     fn terminal(&self, row: &inflight::InflightTurnState) -> AdmittedRestartTerminal {
         admitted(&self.provider, row).expect("an admitted restart terminal")
     }
@@ -259,6 +288,7 @@ async fn an_o_owned_destination_ends_the_row_without_a_legacy_body() {
     ] {
         let fixture = Fixture::new("o-owned");
         let _o = force_channels(&[(CHANNEL, ClaudeTui)]);
+        let o_owed = fixture.o_store_with_frontier();
         let mut row = fixture.row.clone();
         row.tui_terminal_kind = Some(kind);
         row.terminal_delivery_committed = committed;
@@ -271,6 +301,11 @@ async fn an_o_owned_destination_ends_the_row_without_a_legacy_body() {
         let (case, calls) = (format!("{kind:?} committed={committed}"), discord.calls());
         assert_eq!(outcome, AdmittedRestart::Settled, "{case}: {calls:?}");
         assert!(fixture.durable().is_none(), "{case}");
+        assert_eq!(
+            fixture.o_state(),
+            o_owed,
+            "{case}: O's frontier and owed are O's"
+        );
         assert_eq!(calls.len(), replies, "{case}: {calls:?}");
         for call in calls {
             assert!(call.route.starts_with("POST "), "{case}: {call:?}");
