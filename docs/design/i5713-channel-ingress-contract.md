@@ -150,7 +150,9 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/cluster/channel_home/ingress_snapshot.rs` | 관측 | `try_sample`·`sample_gate`: registry·local·inner gate를 `try_lock` 한 번씩 읽어 복사만 한다. expire·prune·close·초기화 없음 |
 | `src/services/cluster/channel_ingress.rs` | 관측 | 이 계약. 호출자는 shadow worker뿐 |
 | `src/services/cluster/intake_router_hook.rs` | readiness·라우팅 | `home_availability::refusal` :130, `read_home` :135 → `route_to_home` :162 |
+| `src/services/cluster/intake_router_hook/o_input.rs` | readiness·입력 placement | `home_availability::refusal` :11, 매 입력 `read_home` :16 → `route_to_home` :18을 fresh writer admission보다 먼저 확인 |
 | `src/services/cluster/intake_worker.rs` | admission | accept 전 `intake_hold` :558 |
+| `src/services/cluster/intake_worker/o_input.rs` | claimed 입력 admission | exact SQL claim 재확인 뒤 `channel_home::intake_hold` :47을 first/final O eligibility보다 먼저 확인; 거절은 해당 claim만 pending으로 반환 |
 | `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
 | `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
 | `src/services/discord/commands/control.rs` | admission | `home_fence::admit` :354·:641, `home_fence::refused` :582·:637 |
