@@ -77,7 +77,7 @@ fn coldstop_phases_require_positive_untouched_and_preserve_base_hold() {
             }
         }
         let (actor, _) = prepared(provider.clone(), 903);
-        finish_execution(Some(&actor));
+        finish_execution(Some(&actor), false);
         assert_eq!(
             actor
                 .herdr_interrupt_state()
@@ -304,7 +304,7 @@ fn coldstop_closed_drops_callback_and_own_start_is_negative_evidence() {
     let (actor, _) = prepared(ProviderKind::Codex, 915);
     let state = actor.herdr_interrupt_state().unwrap();
     state.own_start_observed(1, "own");
-    finish_execution(Some(&actor));
+    finish_execution(Some(&actor), false);
     state.user_stop.store(true, Ordering::Release);
     assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
 }

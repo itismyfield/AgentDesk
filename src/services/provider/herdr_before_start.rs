@@ -26,6 +26,12 @@ pub(crate) struct HerdrInputState {
     pub(crate) exit: Option<ExitDecision>,
     /// Recorded by the close itself, so a later seal still names its evidence.
     pub(crate) closed_from: Option<CloseBasis>,
+    /// The execution nonce this input went to, recorded under this lock before any write.
+    pub(crate) execution: Option<String>,
+    /// The executor returned an error: no reader is left to read this turn's terminal.
+    pub(crate) failed: bool,
+    /// The row pass logged once that the execution ended before its source was known.
+    pub(crate) source_unknown_logged: bool,
 }
 
 impl Default for HerdrInputState {
@@ -35,6 +41,9 @@ impl Default for HerdrInputState {
             phase: InputPhase::BeforeInput,
             exit: None,
             closed_from: None,
+            execution: None,
+            failed: false,
+            source_unknown_logged: false,
         }
     }
 }
@@ -132,8 +141,8 @@ impl HerdrInterruptState {
     }
 }
 
-/// Runs only on the blocking executor thread, after all Result exits converge.
-pub(crate) fn finish_execution(token: Option<&CancelToken>) {
+/// Runs only on the blocking executor thread, after all Result exits converge; `failed` is an `Err`.
+pub(crate) fn finish_execution(token: Option<&CancelToken>, failed: bool) {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && crate::services::tui_o::exact_submission::logical_key().is_none()
     {
@@ -143,6 +152,7 @@ pub(crate) fn finish_execution(token: Option<&CancelToken>) {
         return;
     };
     let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+    input.failed |= failed;
     if input.phase == InputPhase::BeforeInput && !mutant("noattempt_error_exit_unclosed") {
         input.phase = InputPhase::FinishedNoAttempt;
     }
@@ -158,7 +168,7 @@ pub(crate) fn observed_execution(
         return Ok(());
     }
     let result = run();
-    finish_execution(token);
+    finish_execution(token, result.is_err());
     result
 }
 
@@ -254,7 +264,11 @@ pub(crate) fn seal_exit(
             generation: token.claude_interrupt_generation(),
             basis,
         })
-    } else if stop || input.submission != HerdrSubmission::Unsubmitted {
+    } else if stop
+        || (input.submission != HerdrSubmission::Unsubmitted
+            && (!input.failed || mutant("prb_err_after_submit_holds")))
+    {
+        // A failed executor left no reader for the terminal: without a stop it ends as main does.
         ExitDecision::Hold
     } else {
         ExitDecision::Normal
@@ -288,7 +302,9 @@ pub(crate) fn claude_observed_input(
             return Ok(HerdrInputRun::Closed);
         }
         crate::services::tui_o::exact_submission::begin_input()?;
-        if !state.record_turn_start(start()) {
+        let start = start();
+        input.execution = Some(start.execution_nonce.clone());
+        if !state.record_turn_start(start) {
             return Err("herdr turn: the token already began another turn".into());
         }
         let run = write();

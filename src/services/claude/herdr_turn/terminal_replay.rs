@@ -53,6 +53,43 @@ pub(crate) fn closed_turn(
     Some(submitted_at.and_then(|at| turn_in(&records, at).ok().flatten()))
 }
 
+/// What the row pass reads of a Herdr turn from its own start once its provider is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndedTurn {
+    Terminal,
+    NoTerminal,
+    /// Another turn's records share the turn's range.
+    Mixed,
+}
+
+/// The row pass's read once the writer is gone: a torn tail that parses whole is the last record,
+/// any other is none, so only an unreadable transcript leaves the turn unobserved.
+pub(crate) fn ended_turn(
+    file: &mut std::fs::File,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    len: u64,
+) -> Result<EndedTurn, Unobserved> {
+    let bytes = read_prefix(file, len)?;
+    let mut records = complete_records(&bytes);
+    let cut = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |at| at + 1);
+    let tail = std::str::from_utf8(&bytes[cut..]).unwrap_or_default();
+    if serde_json::from_str::<serde_json::Value>(tail).is_ok() {
+        records.push((cut as u64, tail.trim()));
+    } else if !tail.trim().is_empty()
+        && crate::services::provider::herdr_before_start::mutant("prb_torn_tail_unobserved")
+    {
+        return Err(Unobserved);
+    }
+    Ok(match turn_in(&records, submitted_at) {
+        Ok(Some(_)) => EndedTurn::Terminal,
+        Ok(None) => EndedTurn::NoTerminal,
+        Err(Unobserved) => EndedTurn::Mixed,
+    })
+}
+
 /// `Ok(None)` while no record is stamped at or after the input, or no terminal follows it yet.
 fn turn_in(
     records: &[(u64, &str)],

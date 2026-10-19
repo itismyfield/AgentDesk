@@ -1,5 +1,5 @@
-//! A prior process's path-less Herdr row ends once its provider is seen idle or its execution gone:
-//! one notice, an exact clear, then the idle queue. Every unclear read leaves the row as it was.
+//! A prior process's path-less Herdr row ends once its provider is seen idle or its execution gone,
+//! and a live turn's once its execution is gone. Every unclear read leaves the row as it was.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -100,7 +100,8 @@ pub(in crate::services::discord) async fn row_end_pass(
     let current = shared.restart.current_generation;
     for row in inflight::load_inflight_states(provider) {
         let key = (provider.as_str().to_owned(), row.channel_id);
-        if !target(provider, &row, current)
+        let live = live::live_target(provider, &row, current).is_some();
+        if !(live || target(provider, &row, current))
             || !ENDING
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -111,12 +112,18 @@ pub(in crate::services::discord) async fn row_end_pass(
         let ending = Ending(key);
         let (shared, provider) = (shared.clone(), provider.clone());
         if mutant("inline") {
-            end_row(&shared, &provider, row).await;
+            match live {
+                true => live::end_live(&shared, &provider, row).await,
+                false => end_row(&shared, &provider, row).await,
+            }
             continue;
         }
         super::task_supervisor::spawn_observed("herdr_row_end", async move {
             let _ending = ending;
-            end_row(&shared, &provider, row).await;
+            match live {
+                true => live::end_live(&shared, &provider, row).await,
+                false => end_row(&shared, &provider, row).await,
+            }
         });
     }
 }
@@ -513,6 +520,9 @@ fn codex_last_turn_closed(file: &mut std::fs::File, len: u64) -> Option<bool> {
 fn mutant(name: &str) -> bool {
     cfg!(test) && std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
 }
+
+#[path = "herdr_row_end_live.rs"]
+mod live;
 
 #[cfg(test)]
 #[path = "herdr_row_end_tests.rs"]

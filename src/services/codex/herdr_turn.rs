@@ -153,7 +153,8 @@ pub(crate) fn execute(
         };
         first_prompt(&turn, &runtime, ports, &nonce, sender)
     })();
-    crate::services::provider::herdr_before_start::finish_execution(turn.cancel.as_deref());
+    let failed = result.is_err();
+    crate::services::provider::herdr_before_start::finish_execution(turn.cancel.as_deref(), failed);
     result
 }
 
@@ -380,6 +381,7 @@ fn first_prompt(
     crate::services::provider::herdr_before_start::test_input_boundary(turn.cancel.as_deref());
     let run = observed_input(
         turn.cancel.as_deref(),
+        nonce,
         || None,
         || run_herdr(&target, &plan, turn.cancel.as_deref()),
     )?;
@@ -443,6 +445,7 @@ fn first_prompt(
 /// follow-up's turn start is built and recorded under the same lock, before its input, only then.
 fn observed_input(
     cancel: Option<&CancelToken>,
+    nonce: &str,
     start: impl FnOnce() -> Option<HerdrTurnStart>,
     write: impl FnOnce() -> PlanRun,
 ) -> Result<crate::services::provider::herdr_before_start::InputRun<PlanRun>, String> {
@@ -461,6 +464,7 @@ fn observed_input(
     if !state.prepare_input(&mut submitted) {
         return Ok(HerdrInputRun::Closed);
     }
+    submitted.execution = Some(nonce.to_owned());
     crate::services::tui_o::exact_submission::begin_input()?;
     if let Some(start) = start()
         && !state.record_turn_start(start)
@@ -528,7 +532,7 @@ fn followup(
             ..start
         })
     };
-    let run = observed_input(turn.cancel.as_deref(), start, || {
+    let run = observed_input(turn.cancel.as_deref(), nonce, start, || {
         run_herdr(&target, &plan, turn.cancel.as_deref())
     })?;
     let run = match run {
@@ -562,13 +566,17 @@ fn read_reply(
         session_id: session_id.clone(),
         raw_session_id: Some(session_id.clone()),
     });
+    // Under settlement only the provider's terminal or the row pass's wake ends the read.
+    let held = crate::services::provider::herdr_provider_terminal_only(turn.cancel.as_deref())
+        .is_some()
+        && !crate::services::provider::herdr_before_start::mutant("prb_codex_reader_liveness");
     let read = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
         path,
         offset,
         Some(&session_id),
         sender.clone(),
         turn.cancel.clone(),
-        || target.execution_alive(),
+        || held || target.execution_alive(),
     )?;
     let ReadOutputResult::Completed { offset } = read else {
         return Ok(());
@@ -619,7 +627,7 @@ mod observed_input_tests {
                     enter_attempted: true,
                 }
             };
-            assert!(observed_input(Some(&token), start, write).is_ok());
+            assert!(observed_input(Some(&token), "nonce", start, write).is_ok());
             seen.push(calls.into_inner());
         }
         HERDR_SETTLEMENT_OVERRIDE.set(true);
@@ -656,6 +664,7 @@ mod coldstop_input_tests {
             let calls = std::cell::Cell::new(0);
             let run = observed_input(
                 Some(&token),
+                &nonce,
                 || {
                     calls.set(calls.get() + 1);
                     None
@@ -709,6 +718,7 @@ mod coldstop_input_tests {
             let state = token.prepare_herdr_interrupt(ProviderKind::Codex, &owner);
             let _ = observed_input(
                 Some(&token),
+                "nonce",
                 || None,
                 || PlanRun {
                     run,
