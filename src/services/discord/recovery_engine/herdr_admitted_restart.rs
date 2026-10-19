@@ -124,18 +124,16 @@ impl AdmittedRestartTerminal {
             return kept(state, "a live actor owns the channel");
         }
         let mut row = state.clone();
-        // A drain restart left the row to this process: take that authority as recovery does, so
-        // the row's own delivery ack and clear apply to it.
+        // A drain restart left the row to this process: take that authority from the locked row
+        // only while it is still this episode, and carry on with the row that write stored.
         if row.restart_mode.is_some() {
-            let identity = inflight::InflightTurnIdentity::from_state(&row);
-            let take = inflight::mark_readopted_from_inflight_if_identity_unchanged;
-            let taken =
-                take(provider, channel_id.get(), &identity) == inflight::GuardedSaveOutcome::Saved;
-            let fresh = taken.then(|| inflight::load_inflight_state(provider, channel_id.get()));
-            let Some(fresh) = fresh.flatten().filter(|fresh| fresh.restart_mode.is_none()) else {
+            let (snapshot, provider) = (row.clone(), provider.clone());
+            let current = super::runtime_store::process_generation();
+            let take = move || snapshot.take_drain_restart(&provider, current);
+            let Ok(Some(taken)) = tokio::task::spawn_blocking(take).await else {
                 return kept(state, "the drain restart's row was not taken");
             };
-            row = fresh;
+            row = taken;
         }
         if o_body {
             // Nothing is sent for O's body; an Aborted still shows its stop as a reply.

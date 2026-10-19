@@ -74,3 +74,39 @@ async fn coldstop_unreadable_o_ownership_shows_nothing() {
     assert_eq!(close.receipt_pending(), Some(true));
     assert!(close.held().await);
 }
+
+/// A reply shown whose receipt ack then failed is not shown again: the next attempt gets the same
+/// message back from the outbound dedupe and only acks it.
+#[tokio::test(flavor = "current_thread")]
+async fn coldstop_o_reply_shown_before_a_failed_ack_is_acked_without_a_second_send() {
+    let close = Close::open(929, |row| row.runtime_kind = Some(ClaudeTui)).await;
+    let _o = force_channels(&[(929, ClaudeTui)]);
+    let polled = AtomicBool::new(false);
+    {
+        let _rest = test_rest::install(dead_http());
+        assert!(!close.consume(recorded(&polled)).await, "a refused reply");
+    }
+    assert_eq!(close.receipt_pending(), Some(true));
+    let discord = o_cut_recorder::start(929).await;
+    let _rest = test_rest::install(discord.http.clone());
+    InflightTurnState::arm_before_start_receipt_fault(929, false);
+    assert!(!close.consume(recorded(&polled)).await, "the ack failed");
+    assert!(InflightTurnState::before_start_receipt_faults_consumed(929));
+    assert_eq!(close.receipt_pending(), Some(true), "no ack yet");
+    assert_eq!(discord.calls().len(), 1, "{:?}", discord.calls());
+    let shown = discord.calls()[0].clone();
+    let row = close.durable().unwrap();
+    let again = send_stop_reply(&discord.http, &close.shared, &row).await;
+    let first = Some(MessageId::new(900_001));
+    assert_eq!(again, Ok(first), "the same message, not a new one");
+    assert!(
+        close.consume(recorded(&polled)).await,
+        "{:?}",
+        discord.calls()
+    );
+    assert!(close.durable().is_none(), "the acked close settled");
+    let calls = discord.calls();
+    assert_eq!(calls.len(), 1, "one reply in all: {calls:?}");
+    assert_eq!(calls[0].reply_to, shown.reply_to);
+    assert!(!polled.load(Ordering::Acquire), "O's body is never edited");
+}
