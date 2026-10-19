@@ -26,6 +26,8 @@ src/
 │   │   └── transport.rs
 │   ├── dcserver/
 │   │   └── startup.rs
+│   ├── direct/
+│   │   └── auto_queue_add.rs
 │   ├── doctor/
 │   │   ├── health/
 │   │   │   └── measurement.rs
@@ -123,6 +125,8 @@ src/
 │   │   ├── phase_gate_verdict.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
+│   │   ├── run_admission.rs
+│   │   ├── run_admission_pg_tests.rs
 │   │   ├── run_completion_contract_tests.rs
 │   │   ├── run_completion_pg_tests.rs
 │   │   ├── run_owner_guard.rs
@@ -446,6 +450,7 @@ src/
 │   │   ├── analytics.rs
 │   │   ├── auth.rs
 │   │   ├── auto_queue.rs
+│   │   ├── auto_queue_admission_pg_tests.rs
 │   │   ├── auto_queue_lifecycle_pg_tests.rs
 │   │   ├── automation_candidates.rs
 │   │   ├── campaigns.rs
