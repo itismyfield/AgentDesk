@@ -997,21 +997,16 @@ past. I19 governs the resume point itself.
   2026-09-16T14:13:37Z..14:21:32Z five consecutive redrives ran with
   `last_relay_offset=0` and `unread_bytes=24_553_403` — the entire transcript —
   after a dcserver restart dropped the in-memory coordinate.
-- Witness: `DurableFrontierObservation::durable_delivery_witness`, carried onto
-  the snapshot as `WatcherStateSnapshot::durable_frontier`: the one term the
-  restart does not take with it (both I12 readings live in the emptied
-  `SharedData::tmux_relay_coords`). `RowPresent` alone is not the predicate —
-  `live_generation_mtime_ns` is read off the coordinate ENTRY, so after that
-  restart `observe` can only answer `GenerationUnresolved`; both count. Three
-  shapes give NO witness: `GenerationMismatch` (a different incarnation, whose
-  re-created wrapper legitimately zeroes), a `relayed_start` of zero (the very
-  value the guard distrusts), and a row with no relayed offset (`RowUnrelayed`,
-  `RowAbsent`).
-- Wire note: each mailbox entry in `GET /api/health/detail` exposes the tagged
-  `frontier_provenance.durable_observation` value. A durable row with no relayed
-  offset serializes as `{"kind":"row_unrelayed","turn_start_offset":N}`;
-  this is distinct from `{"kind":"row_absent"}`. Consumers must tolerate
-  additional `kind` values instead of treating this tagged union as closed.
+- Witness: `DurableFrontierObservation::durable_delivery_witness`, exposed as
+  `WatcherStateSnapshot::durable_frontier`, survives restart; the I12 readings in
+  `SharedData::tmux_relay_coords` do not. `RowPresent` and `GenerationUnresolved`
+  count: after restart the coordinate entry's `live_generation_mtime_ns` is gone.
+  `GenerationMismatch` (a different incarnation that legitimately zeroes), zero
+  `relayed_start`, `RowUnrelayed`, and `RowAbsent` give NO witness. Wire: each
+  `GET /api/health/detail` mailbox entry exposes the tagged union at
+  `frontier_provenance.durable_observation`; a row with no relayed offset is
+  `{"kind":"row_unrelayed","turn_start_offset":N}`, distinct from
+  `{"kind":"row_absent"}`. Consumers must tolerate additional `kind` values.
 - Floor (r3): an unwitnessed zero is NOT approved as zero. The row's
   `last_watcher_relayed_offset` is `None` from the turn's birth until its first
   relay, so every fresh turn arrives unwitnessed and zero would re-read every
