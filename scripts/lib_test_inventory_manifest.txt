@@ -8573,6 +8573,8 @@ services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_t
 services::discord::tmux_reaper::host_guard_tests::n3bc_public_bound_legacy_orphan_cleanup_removes_old_files_pg
 services::discord::tmux_reaper::host_guard_tests::n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg
 services::discord::tmux_reaper::host_guard_tests::orphan_cleanup_kills_only_what_the_host_guard_admits_pg
+services::discord::tmux_reaper::host_guard_tests::receipt_backstop_keeps_same_name_when_foreign_token_receipt_is_protected_pg
+services::discord::tmux_reaper::host_guard_tests::receipt_backstop_kills_only_the_admitted_exact_session_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::retirement_await_tests::intake_finalizes_after_final_probe
@@ -10444,6 +10446,7 @@ services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_en
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::queued_input_drains_in_order_once_unrelated_sessions_remain_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_tests::routine_receipt_survives_reset_and_starts_one_provider_turn_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::start_gate_and_deliver_start_once_beside_unrelated_sessions_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::unrelated_host_sessions_leave_a_session_less_channel_idle_pg
@@ -11510,6 +11513,10 @@ services::routines::agent_executor::execution::tests::durable_mode_keeps_process
 services::routines::agent_executor::execution::tests::process_is_opt_in_and_only_for_fresh_runs
 services::routines::agent_executor::execution::tests::process_labels_do_not_replace_legacy_or_other_attempt_session_rows
 services::routines::agent_executor::execution::tests::process_mode_refuses_unsupported_providers_instead_of_launching_tmux
+services::routines::agent_executor::owned_session::tests::boot_receipt_recovery_disconnects_only_exact_token_row_pg
+services::routines::agent_executor::owned_session::tests::boot_receipt_recovery_keeps_reused_session_for_replacement_and_null_legacy_pg
+services::routines::agent_executor::owned_session::tests::owned_session_recorder_preserves_legacy_fallback_and_receipt_precedence_pg
+services::routines::agent_executor::owned_session::tests::owned_session_recorder_skips_non_owned_routes_and_closed_runs_pg
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg

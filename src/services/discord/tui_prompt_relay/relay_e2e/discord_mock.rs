@@ -132,7 +132,7 @@ impl DiscordMockState {
     }
 
     /// Answers `thread` as a guild thread under `parent`.
-    pub(super) fn add_thread(&self, thread: u64, parent: u64) {
+    pub(in crate::services::discord) fn add_thread(&self, thread: u64, parent: u64) {
         self.threads.lock().expect("threads").insert(thread, parent);
         self.allow_channel(thread);
     }

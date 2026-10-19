@@ -3,7 +3,7 @@ use super::*;
 
 impl RoutineAgentExecutor {
     // Process, persistent and DM sessions retain their existing ownership policy.
-    async fn record_owned_fresh_session(
+    pub(super) async fn record_owned_fresh_session(
         &self,
         store: &RoutineStore,
         claimed: &ClaimedRoutineRun,
@@ -92,3 +92,6 @@ impl RoutineAgentExecutor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
