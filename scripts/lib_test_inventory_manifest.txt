@@ -7060,6 +7060,8 @@ services::discord::router::message_handler::session_strategy_lifecycle_tests::ve
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_restores_dequeued_head_without_reversing_fifo_4795
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_treats_pending_or_active_source_as_already_processing_4797
 services::discord::router::message_handler::turn_lifecycle::tests::text_intake_turn_start_waits_behind_queued_inbound
+services::discord::router::message_handler::turn_mark_admission_tests::fresh_codex_intake_marks_before_provider_input
+services::discord::router::message_handler::turn_mark_admission_tests::reused_codex_intake_has_no_admission_mark_at_provider_input
 services::discord::router::message_handler::typing_indicator::tests::broadcast_failure_stops_refresh_loop
 services::discord::router::message_handler::typing_indicator::tests::max_lifetime_stops_typing_without_terminal_signal
 services::discord::router::message_handler::typing_indicator::tests::previous_turn_completion_does_not_stop_next_turn_typing
@@ -12800,6 +12802,17 @@ services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_start
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::a_failed_later_admission_read_restores_the_host_baseline_after_a_retry
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::a_later_admission_wins_when_binding_reads_publish_in_reverse_order
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::an_eligible_mark_retries_a_transient_commit_failure_before_the_five_second_wake
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::body_claim_logs_distinguish_previous_and_current_turns_without_body_content
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::only_a_reserved_deferred_candidate_marks_and_failed_reads_clear_the_mark
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r1_fresh_turn_mark_excludes_a_completed_previous_turn_body
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r2_a_body_started_after_the_turn_mark_still_skips_the_rollout
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r3_a_previous_turn_body_in_flight_retries_then_commits_after_it_finishes
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r4_sends_are_captured_before_the_unlocked_binding_read
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r5_a_skip_baseline_supersedes_the_older_turn_mark
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::turn_mark::r6_a_reused_codex_session_does_not_mark_or_discard_legacy_history
 services::tui_o::writer::tests::actor::host_start::first_init::resume_companion_history_log_releases_actual_host_and_allows_legacy_body
 services::tui_o::writer::tests::actor::host_start::first_init::resume_companion_metadata_only_log_allows_actual_host_first_init
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once

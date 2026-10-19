@@ -324,6 +324,9 @@ pub(in crate::services::discord) fn hold_input_effect_for_tests(
 mod session_strategy_lifecycle_tests;
 
 #[cfg(all(test, unix))]
+mod turn_mark_admission_tests;
+
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
 
 mod turn_context;
