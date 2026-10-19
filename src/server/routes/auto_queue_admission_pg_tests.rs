@@ -93,17 +93,29 @@ async fn setup_pool(pg_db: &TestPostgresDb, run_status: &str) -> PgPool {
     pool
 }
 
-async fn seed_card(pool: &PgPool, card_id: &str, issue_number: i64) {
+async fn seed_card_in(pool: &PgPool, card_id: &str, issue_number: i64, status: &str) {
     sqlx::query(
         "INSERT INTO kanban_cards
             (id, title, status, assigned_agent_id, repo_id, github_issue_number)
-         VALUES ($1, $1, 'ready', 'agent-1', 'repo-1', $2)",
+         VALUES ($1, $1, $3, 'agent-1', 'repo-1', $2)",
     )
     .bind(card_id)
     .bind(issue_number)
+    .bind(status)
     .execute(pool)
     .await
     .expect("seed card");
+}
+
+async fn seed_card(pool: &PgPool, card_id: &str, issue_number: i64) {
+    seed_card_in(pool, card_id, issue_number, "ready").await;
+}
+
+/// A card the order callback accepts: the first dispatchable state of the default pipeline.
+async fn seed_orderable_card(pool: &PgPool, card_id: &str, issue_number: i64) {
+    crate::pipeline::ensure_loaded();
+    let status = crate::pipeline::get().dispatchable_states()[0].to_string();
+    seed_card_in(pool, card_id, issue_number, &status).await;
 }
 
 async fn seed_entry(pool: &PgPool, entry_id: &str, status: &str) {
@@ -267,7 +279,7 @@ async fn manual_add_waits_for_uncommitted_completion_and_refuses_pg() {
 async fn order_callback_waits_for_uncommitted_completion_and_refuses_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db, "pending").await;
-    seed_card(&pool, "card-order", 201).await;
+    seed_orderable_card(&pool, "card-order", 201).await;
     let app = test_router(pool.clone());
     let completion = uncommitted_completion(&pool).await;
     let order = spawn_request(
@@ -293,7 +305,7 @@ async fn order_callback_waits_for_uncommitted_completion_and_refuses_pg() {
 async fn completion_defers_behind_order_callback_holding_the_token_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db, "pending").await;
-    seed_card(&pool, "card-order", 202).await;
+    seed_orderable_card(&pool, "card-order", 202).await;
     let app = test_router(pool.clone());
     let mut card_holder = pool.begin().await.expect("begin card holder");
     sqlx::query("SELECT id FROM kanban_cards WHERE id = 'card-order' FOR UPDATE")
@@ -347,8 +359,8 @@ async fn completion_defers_behind_order_callback_holding_the_token_pg() {
 async fn order_callback_rolls_back_every_entry_on_insert_failure_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db, "pending").await;
-    seed_card(&pool, "card-ok", 301).await;
-    seed_card(&pool, "card-bad", 302).await;
+    seed_orderable_card(&pool, "card-ok", 301).await;
+    seed_orderable_card(&pool, "card-bad", 302).await;
     sqlx::query(
         "CREATE FUNCTION reject_bad_entry() RETURNS trigger AS $$
          BEGIN RAISE EXCEPTION 'entry rejected by test'; END $$ LANGUAGE plpgsql",
