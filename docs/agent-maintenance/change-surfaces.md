@@ -306,10 +306,10 @@ time for diagnostics; neither is a stored approval value.
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
-  | `lib_test_prepare` | none | none |
-  | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
-  | `relay_authority_mutations` | none | none |
-  | `relay_authority_targets` | `lib_test_prepare` | `${{ !cancelled() }}` |
+  | `lib_test_prepare` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
+  | `relay-authority-contract` | `changes`, `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
+  | `relay_authority_mutations` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
+  | `relay_authority_targets` | `changes`, `lib_test_prepare` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
   | `scripts` | `changes`, `lib_test_prepare` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |

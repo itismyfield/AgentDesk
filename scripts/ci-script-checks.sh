@@ -380,7 +380,7 @@ if run_check guards "Comment-only change checker self-tests"; then
 # what stops that. ci-pr.yml's changes job also runs it, through
 # scripts/ci/comment_only_gate.py, to skip the heavy test jobs.
 "$PYTHON" -m unittest tests.test_comment_only_change
-"$PYTHON" -m unittest tests.test_comment_only_ci_gate
+"$PYTHON" -m unittest tests.test_comment_only_ci_gate tests.test_rust_include_reads tests.test_rust_runtime_reads
 fi
 
 if run_check guards "Hotfile LOC ratchet guard (#3565)"; then

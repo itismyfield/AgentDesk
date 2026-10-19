@@ -359,7 +359,12 @@ until frontier.empty?
     exit 1
   end
   case job_id
-  when "scripts", "relay_authority_targets"
+  when "lib_test_prepare", "relay_authority_targets", "relay_authority_mutations"
+    unless job["if"] == "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+      warn "#{path}: required Rust consumer #{job_id} must use the verified skip gate"
+      exit 1
+    end
+  when "scripts"
     unless job["if"] == "${{ !cancelled() }}"
       warn "#{path}: required consumer #{job_id} must use !cancelled() for producer-failure fallback"
       exit 1
@@ -405,20 +410,6 @@ until frontier.empty?
 end
 unless unconditional_closure.sort == expected_unconditional_closure
   warn "#{path}: required unconditional needs closure changed; expected #{expected_unconditional_closure.inspect}, found #{unconditional_closure.sort.inspect}"
-  exit 1
-end
-
-relay_closure = []
-frontier = ["relay-authority-contract"]
-until frontier.empty?
-  job_id = frontier.shift
-  next if relay_closure.include?(job_id)
-
-  relay_closure << job_id
-  frontier.concat(Array(jobs.fetch(job_id)["needs"]))
-end
-if relay_closure.include?("changes")
-  warn "#{path}: relay-authority-contract needs closure must not include changes"
   exit 1
 end
 
@@ -803,7 +794,7 @@ artifact_env = {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact
 producer = jobs["lib_test_prepare"]
 expected_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
 expected_prepare = {"name" => "Prepare and verify lib tests", "timeout-minutes" => 45, "shell" => "bash", "env" => artifact_env.merge("BASH_ENV" => "/dev/null"), "run" => "python3 scripts/ci/lib-test-artifact.py prepare --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/ci/lib-test-artifact.py validate --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/check_test_target_integrity.py --verify-lib-inventory\ntar -C \"$ADK_LIB_TEST_ARTIFACT\" -czf \"$RUNNER_TEMP/lib-test-artifact.tar.gz\" .\n"}
-unless producer.is_a?(Hash) && producer["runs-on"] == "ubuntu-latest" && producer["timeout-minutes"] == 60 && producer["env"] == {"CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"} && %w[if needs continue-on-error].none? { |key| producer.key?(key) } && Array(producer["steps"]).first == {"uses" => "actions/checkout@v4"} && Array(producer["steps"]).count { |step| step["uses"] == "dtolnay/rust-toolchain@master" && step["with"] == {"toolchain" => "1.94.1"} && !step.key?("if") && !step.key?("continue-on-error") } == 1 && Array(producer["steps"]).count(expected_prepare) == 1 && Array(producer["steps"]).count(expected_upload) == 1
+unless producer.is_a?(Hash) && producer["runs-on"] == "ubuntu-latest" && producer["timeout-minutes"] == 60 && producer["env"] == {"CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"} && producer["needs"] == "changes" && producer["if"] == "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}" && !producer.key?("continue-on-error") && Array(producer["steps"]).first == {"uses" => "actions/checkout@v4"} && Array(producer["steps"]).count { |step| step["uses"] == "dtolnay/rust-toolchain@master" && step["with"] == {"toolchain" => "1.94.1"} && !step.key?("if") && !step.key?("continue-on-error") } == 1 && Array(producer["steps"]).count(expected_prepare) == 1 && Array(producer["steps"]).count(expected_upload) == 1
   warn "#{path}: lib_test_prepare must retain its independent build, inventory verification and upload contract"
   exit 1
 end
@@ -830,8 +821,8 @@ end
 targets = {
   "lib_test_prepare" => {
     "label" => "shared lib producer", "name" => "Prepare shared lib tests",
-    "needs" => nil, "if" => nil, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "fba9e04978f13ca39f05b3efdc90871f82ac3d2d3cc49c02af2a36aee84eb07d",
+    "needs" => "changes", "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}", "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 60, "job_sha256" => "a2d10d23b48a214512b319b684f081db3c8665cdade3bed7c3e8fdb343fcaacd",
     "cargo_steps" => {"Prepare and verify lib tests" => {"commands" => expected_prepare["run"].lines.map(&:strip), "timeout_minutes" => 45, "env" => expected_prepare["env"]}},
   },
   "check_fast_cross_os" => {
@@ -962,10 +953,10 @@ targets = {
   "relay_authority_targets" => {
     "label" => "relay-authority targets job",
     "name" => "Relay authority targets",
-    "needs" => "lib_test_prepare",
-    "if" => "${{ !cancelled() }}",
+    "needs" => %w[changes lib_test_prepare],
+    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "2f2ab2c49a1c8fee6faaccb452a8fdc86a0ce7da73be478b07edb9ba6a31c285",
+    "job_sha256" => "724964893b64cbbf45da486fdd1957fdd0e3d2655956fd80c10aab3ce57e5854",
     "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -993,10 +984,10 @@ targets = {
   "relay_authority_mutations" => {
     "label" => "relay-authority mutations job",
     "name" => "Relay authority mutations (${{ matrix.shard }})",
-    "needs" => nil,
-    "if" => nil,
+    "needs" => "changes",
+    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "cab07156ce825daeba30cc83dfb2c963cb3ca949d814d7b0b949a57433a7911c",
+    "job_sha256" => "43f7e213658325ad0454f1176bdb2673ba797c129c0acb873a8fc389faa81205",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
       "Fetch Cargo dependencies" => {
@@ -1014,10 +1005,10 @@ targets = {
   "relay-authority-contract" => {
     "label" => "relay-authority contract job",
     "name" => "relay-authority-contract",
-    "needs" => %w[relay_authority_targets relay_authority_mutations],
+    "needs" => %w[changes relay_authority_targets relay_authority_mutations],
     "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "2f9a677bab6a53fb6bcb65bbc29ba493c400551beb043ca6b6d6a9bc7e575bbe",
+    "job_sha256" => "a325e34eabb26063617a57f1587b1a09e7ba4477ef2e170767fcf86ca7e903e9",
     "job_timeout_minutes" => 10,
     "cargo_steps" => {
       "Pin required-check mirror content (#5321)" => {
@@ -1048,9 +1039,9 @@ targets = {
           "CARGO_PROFILE_DEV_DEBUG" => "0",
           "CARGO_PROFILE_TEST_DEBUG" => "0",
           "PYTHON" => "python3",
-          "CHANGED_PATHS_RESULT" => "success",
+          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
           "FILTER_NAME" => "relay_authority",
-          "FILTER_OUTPUT" => "true",
+          "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests_skip != 'true' }}",
           "UPSTREAM_JOB_NAME" => "relay_authority_targets",
           "UPSTREAM_RESULT" => "${{ needs.relay_authority_targets.result }}",
         },
@@ -1063,9 +1054,9 @@ targets = {
           "CARGO_PROFILE_DEV_DEBUG" => "0",
           "CARGO_PROFILE_TEST_DEBUG" => "0",
           "PYTHON" => "python3",
-          "CHANGED_PATHS_RESULT" => "success",
+          "CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}",
           "FILTER_NAME" => "relay_authority",
-          "FILTER_OUTPUT" => "true",
+          "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests_skip != 'true' }}",
           "UPSTREAM_JOB_NAME" => "relay_authority_mutations",
           "UPSTREAM_RESULT" => "${{ needs.relay_authority_mutations.result }}",
         },
