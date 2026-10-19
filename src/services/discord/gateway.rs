@@ -480,9 +480,8 @@ fn dispatch_post_error(
     crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
 }
 
-/// Drain non-head merged-source mappings while preserving the intervention's head mapping.
-/// Return only teardown tokens for cards with no surviving owner after rollback;
-/// keeping HTTP out of this helper lets the caller perform the guarded deletions.
+/// Drain non-head merged-source mappings, preserving the head and cards with surviving owners.
+/// Return teardown tokens so the caller performs guarded HTTP deletions.
 pub(super) async fn drain_merged_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
