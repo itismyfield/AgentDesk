@@ -8,6 +8,7 @@ fn held_and_partial_herdr_clear_reports_keep_input_discard_and_execution_separat
     ] {
         let report = ClearReport {
             execution: Some(execution),
+            transition_busy: true,
             discarded: Some([MessageId::new(7_186_401)].into()),
             ..Default::default()
         };
@@ -17,6 +18,10 @@ fn held_and_partial_herdr_clear_reports_keep_input_discard_and_execution_separat
             "{reply}"
         );
         assert!(!reply.contains(SESSION_CLEARED_RESPONSE), "{reply}");
+        assert!(
+            !reply.contains("초기화했어요"),
+            "a held or pending execution must not claim it was reset: {reply}"
+        );
         assert!(reply.contains("이전 Herdr 실행"), "{reply}");
     }
     let partial = ClearReport {
@@ -32,8 +37,22 @@ fn held_and_partial_herdr_clear_reports_keep_input_discard_and_execution_separat
         "{reply}"
     );
     assert!(
-        reply.contains("이전 Herdr 실행을 정리했어요.") && reply.contains(RETRY_FAILED),
+        !reply.contains("재시도"),
+        "an unattempted discard must not claim a retry: {reply}"
+    );
+    assert!(
+        reply.contains("이전 Herdr 실행을 정리했어요.")
+            && reply.contains("일부 정리를 완료하지 못했어요."),
         "{reply}"
+    );
+    let legacy = ClearReport {
+        transition_busy: true,
+        failed: vec!["legacy_pending_discard"],
+        ..Default::default()
+    };
+    assert_eq!(
+        legacy.warning(),
+        Some(format!("⚠️ {RETRY_FAILED} {TRANSITION_BUSY}"))
     );
     let complete = ClearReport {
         execution: Some(ExecutionCleanup::Retired),

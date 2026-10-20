@@ -1614,6 +1614,7 @@ src/
 │   │   │   │   │   └── producer_error_test_support.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
 │   │   │   │   │   ├── clear_tests.rs
+│   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   └── recheck_tests.rs
 │   │   │   │   ├── tui_followup/
 │   │   │   │   │   ├── busy_notice.rs

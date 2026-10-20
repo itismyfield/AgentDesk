@@ -293,8 +293,11 @@ fn reconnect_pass(
             candidate,
         };
         if record.state == HostedState::Retired {
-            runtime.block_on(root_replaced::recover_retired(shared, pool, row, None));
-            // Cleanup has its own recovery log; a terminal row is not a withheld Bound attach.
+            if runtime.block_on(root_replaced::recover_retired(shared, pool, row, None))
+                != Recovery::Retired
+            {
+                after.insert(row.session_id(), fresh((Reconnect::Withheld, None)));
+            }
             continue;
         }
         let result = if let Some(candidate) = root_replaced::candidate_for(row) {

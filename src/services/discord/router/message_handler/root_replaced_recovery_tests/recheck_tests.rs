@@ -20,36 +20,49 @@ pub(super) fn retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_
         !path.exists(),
         "unlink landed before the injected fsync failure"
     );
-    fault.fail(false);
     case.pass();
     assert_eq!(case.cleanups(), 2);
+    assert_eq!(fault.calls(), 2);
+    assert_eq!(
+        crate::services::discord::recovery_engine::herdr_reader::reconnect_counts().withheld,
+        1,
+        "failed Retired cleanup remains withheld in restart health"
+    );
+    fault.fail(false);
+    case.pass();
+    assert_eq!(case.cleanups(), 3);
     assert_eq!(
         fault.calls(),
-        2,
+        3,
         "Retired retry must fsync the already absent hold"
     );
+    assert_eq!(
+        crate::services::discord::recovery_engine::herdr_reader::reconnect_counts().withheld,
+        0,
+        "completed Retired cleanup clears restart withholding"
+    );
     case.pass();
-    assert_eq!(case.cleanups(), 2, "completed cache avoids another cleanup");
-    assert_eq!(fault.calls(), 2);
+    assert_eq!(case.cleanups(), 3, "completed cache avoids another cleanup");
+    assert_eq!(fault.calls(), 3);
     recovery::prune(&[]);
     case.pass();
     assert_eq!(
         case.cleanups(),
-        3,
+        4,
         "unknown process cache re-establishes durable absence once"
     );
-    assert_eq!(fault.calls(), 3);
+    assert_eq!(fault.calls(), 4);
     case.pass();
-    assert_eq!(case.cleanups(), 3);
-    assert_eq!(fault.calls(), 3);
+    assert_eq!(case.cleanups(), 4);
+    assert_eq!(fault.calls(), 4);
     crate::services::claude::herdr_turn::hold(&case.nonce).unwrap();
     case.pass();
     assert_eq!(
         case.cleanups(),
-        4,
+        5,
         "a reappearing hold invalidates Completed"
     );
-    assert_eq!(fault.calls(), 4);
+    assert_eq!(fault.calls(), 5);
     assert!(!path.exists());
     assert_eq!(case.effects(), before);
 }

@@ -559,3 +559,85 @@ fn release_clear_still_releases_the_active_turn_and_publishes_completion() {
         .unwrap();
     });
 }
+
+#[test]
+fn release_clear_preserves_a_live_injection_for_a_late_front_handback() {
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::*;
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let context = || {
+                QueuePersistenceContext::new(&ProviderKind::Claude, "release-reservation", None)
+            };
+            let item = |id: u64| Intervention {
+                author_id: UserId::new(id),
+                author_is_bot: false,
+                message_id: MessageId::new(id),
+                queued_generation: 1,
+                source_message_ids: vec![MessageId::new(id)],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: format!("unsent {id}"),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            let channel = ChannelId::new(7_186_812);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel);
+            let returning = item(7_186_881);
+            let discarded = item(7_186_882);
+            let later = item(7_186_883);
+            let ticket = match handle
+                .reserve_injection(Some(returning.message_id), None, context())
+                .await
+            {
+                ReserveOutcome::Reserved(ticket) => ticket,
+                other => panic!("actual live injection reservation control: {other:?}"),
+            };
+            assert!(handle.enqueue(discarded.clone(), context()).await.enqueued);
+            assert!(
+                handle.take_next_soft(context()).await.intervention.is_none(),
+                "the actual live reservation must hold the queued input before clear"
+            );
+            let cleared = handle.clear_or_refused(context()).await.unwrap();
+            assert!(cleared.persistence.failed.is_empty());
+            assert!(!cleared.persistence.count_unknown);
+            assert!(cleared.discarded_message_ids.contains(&discarded.message_id));
+            assert!(handle.snapshot().await.intervention_queue.is_empty());
+            assert!(handle.enqueue(later.clone(), context()).await.enqueued);
+            let exits = handle
+                .hand_back_injected_input(ticket, returning.clone(), context())
+                .await
+                .expect("the unsent input's owner must complete its actual handback");
+            assert_eq!(
+                handle
+                    .snapshot()
+                    .await
+                    .intervention_queue
+                    .iter()
+                    .map(|item| item.message_id)
+                    .collect::<Vec<_>>(),
+                vec![returning.message_id, later.message_id],
+                "Release clear must let the live reservation hand its unsent input back to the queue front"
+            );
+            assert!(exits.is_empty(), "a Release handback is not superseded");
+            let next = handle.take_next_soft(context()).await;
+            assert!(next.persistence_error.is_none());
+            assert_eq!(
+                next.intervention.map(|item| item.message_id),
+                Some(returning.message_id),
+                "the actual dequeue must select the handed-back front input"
+            );
+        });
+}

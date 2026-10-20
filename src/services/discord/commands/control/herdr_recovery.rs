@@ -25,21 +25,11 @@ pub(super) async fn clear(
     guard: Option<&OwnedMutexGuard<()>>,
     report: &mut ClearReport,
 ) -> bool {
-    let endpoint = crate::config::session_hosts::herdr_endpoint(channel.get()).is_some();
+    if crate::config::session_hosts::herdr_endpoint(channel.get()).is_none() {
+        return false;
+    }
     let Some(pool) = shared.pg_pool.as_ref() else {
-        if !endpoint {
-            return false;
-        }
-        return discard(
-            shared,
-            provider,
-            channel,
-            None,
-            None,
-            "postgres unavailable".into(),
-            report,
-        )
-        .await;
+        return false;
     };
     let key = channel.get().to_string();
     let lookup = hosted_execution::load_hosted_execution_pg(
@@ -55,21 +45,8 @@ pub(super) async fn clear(
     )
     .await;
     let row = match lookup {
-        HostedLookup::Missing => return false,
         HostedLookup::Found(row) if matches!(&row.record, HostedRecord::Known(_)) => row,
-        _ if !endpoint => return false,
-        other => {
-            return discard(
-                shared,
-                provider,
-                channel,
-                None,
-                None,
-                format!("execution lookup: {other:?}"),
-                report,
-            )
-            .await;
-        }
+        _ => return false,
     };
     let HostedRecord::Known(record) = &row.record else {
         unreachable!()
@@ -84,34 +61,11 @@ pub(super) async fn clear(
         let prepared = crate::services::discord::recovery_engine::herdr_reader::prepare_root_replaced_candidate(&row);
         let observed = match prepared {
             Ok(probe) => tokio::task::spawn_blocking(move || probe.observe()).await,
-            Err(error) => {
-                return discard(
-                    shared,
-                    provider,
-                    channel,
-                    Some(&logical),
-                    None,
-                    error,
-                    report,
-                )
-                .await;
-            }
+            Err(_) => return false,
         };
         match observed {
             Ok(Ok(Some(candidate))) => Some(candidate),
-            Ok(Ok(None)) => return false,
-            other => {
-                return discard(
-                    shared,
-                    provider,
-                    channel,
-                    Some(&logical),
-                    None,
-                    format!("RootReplaced observation: {other:?}"),
-                    report,
-                )
-                .await;
-            }
+            _ => return false,
         }
     };
     if let Some(candidate) = candidate.as_ref() {
@@ -230,29 +184,6 @@ async fn original_execution(
         Ok(None) => {}
     }
     (reason.map_or(Ok(()), Err), excluded)
-}
-
-async fn discard(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    logical: Option<&str>,
-    excluded: Option<&BTreeSet<MessageId>>,
-    reason: String,
-    report: &mut ClearReport,
-) -> bool {
-    let (_, original) = original_execution(shared, provider, channel).await;
-    discard_waiting(
-        shared,
-        provider,
-        channel,
-        logical,
-        excluded.unwrap_or(&original),
-        report,
-    )
-    .await;
-    report.execution = Some(ExecutionCleanup::Held(reason));
-    true
 }
 
 async fn discard_waiting(

@@ -225,6 +225,7 @@ src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/root_replaced_recovery_tests.rs
 src/services/discord/router/message_handler/root_replaced_recovery_tests/clear_tests.rs
+src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs
 src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs
 src/services/discord/router/message_handler/s1_entry_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
@@ -606,6 +607,7 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::live
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
@@ -2108,6 +2110,9 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_selects_old_originless_json_and_preserves_modern_pending_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_missing_pane_keeps_legacy_retirement_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_retired_without_endpoint_keeps_legacy_managed_end_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_same_root_lone_shell_keeps_legacy_retirement_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_from_another_channel_holds_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_recovers_without_releasing_its_callers_guard_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_completed_retired_cache_needs_no_pg_or_transition_pg

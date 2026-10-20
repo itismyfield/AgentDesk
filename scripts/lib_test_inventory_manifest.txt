@@ -7117,6 +7117,9 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_selects_old_originless_json_and_preserves_modern_pending_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_missing_pane_keeps_legacy_retirement_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_retired_without_endpoint_keeps_legacy_managed_end_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests::clear_same_root_lone_shell_keeps_legacy_retirement_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_from_another_channel_holds_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_recovers_without_releasing_its_callers_guard_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_completed_retired_cache_needs_no_pg_or_transition_pg
@@ -14164,6 +14167,7 @@ services::turn_orchestrator::clear_fence::tests::discarded_memory_sources_refuse
 services::turn_orchestrator::clear_fence::tests::preserve_commits_memory_despite_failed_writes_and_reports_unknown_marker_count
 services::turn_orchestrator::clear_fence::tests::preserve_discards_waiting_inputs_without_releasing_the_actual_active_turn
 services::turn_orchestrator::clear_fence::tests::preserve_reads_disk_only_waiting_ids_before_clearing_and_reports_unreadable_queue
+services::turn_orchestrator::clear_fence::tests::release_clear_preserves_a_live_injection_for_a_late_front_handback
 services::turn_orchestrator::clear_fence::tests::release_clear_still_releases_the_active_turn_and_publishes_completion
 services::turn_orchestrator::dispatch_reservation::tests::hydrate_corrupt_queue_tests::a_hydrate_over_a_non_utf8_queue_file_keeps_the_file_and_its_dispatch_marker
 services::turn_orchestrator::dispatch_reservation::tests::hydrate_corrupt_queue_tests::a_hydrate_over_a_torn_queue_file_keeps_the_file_and_its_dispatch_marker

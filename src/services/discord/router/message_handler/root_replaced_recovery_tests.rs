@@ -934,6 +934,8 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
 
 #[path = "root_replaced_recovery_tests/clear_tests.rs"]
 mod clear_tests;
+#[path = "root_replaced_recovery_tests/legacy_clear_tests.rs"]
+mod legacy_clear_tests;
 #[path = "root_replaced_recovery_tests/recheck_tests.rs"]
 mod recheck_tests;
 

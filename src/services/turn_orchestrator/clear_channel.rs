@@ -142,8 +142,11 @@ pub(super) fn clear_channel_state(
         discarded_message_ids.push(item.message_id);
         discarded_message_ids.extend(item.source_message_ids.iter().copied());
     }
-    let (injected, unknown_reservation) =
-        super::injected_inputs::discard_waiting_reservation(state, &protected);
+    let (injected, unknown_reservation) = if active == ActivePolicy::Preserve {
+        super::injected_inputs::discard_waiting_reservation(state, &protected)
+    } else {
+        (None, false)
+    };
     discarded_message_ids.extend(injected);
     let waiting: Vec<_> = discarded_message_ids
         .iter()

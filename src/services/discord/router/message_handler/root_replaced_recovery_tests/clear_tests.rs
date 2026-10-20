@@ -268,27 +268,30 @@ fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg(
 fn rr_public_clear_missing_holds_execution_but_discards_waiting_queue_pg() {
     let case = Case::launched("rr-clear-missing");
     let _intake = IntakeGate::configure(&case);
+    let mut live = (*crate::config_live_reload::current().unwrap()).clone();
+    live.runtime.herdr_terminate_enabled = Some(false);
+    crate::config_live_reload::install(live);
     let original = case.fx.record();
     let effects = case.effects();
-    let (queued, observed) = waiting(&case);
+    waiting(&case);
     case.fx.rig.show_panes(&[]);
     let report = clear(&case);
     assert!(
         report
             .reply()
-            .contains("이전 Herdr 실행은 정리하지 못했어요."),
+            .contains("이전 세션 프로세스의 종료를 확인하지 못했어요."),
         "{}",
         report.reply()
     );
     assert_eq!(
         case.fx.record(),
         original,
-        "initial Missing cannot authorize retirement"
+        "disabled legacy termination leaves the original execution unchanged"
     );
     assert_eq!(case.cleanups(), 0);
     assert!(case.hold_path().exists());
     assert_eq!(case.effects(), effects);
-    discarded(&case, queued, observed, &report);
+    legacy_discarded(&case, &report);
 }
 
 #[test]
@@ -332,19 +335,22 @@ fn rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg(
                 _ => unreachable!(),
             }
             let report = clear(&case);
-            assert!(
-                report
-                    .reply()
-                    .contains("이전 Herdr 실행은 정리하지 못했어요."),
-                "{}",
-                report.reply()
-            );
+            let expected = if matches!(change, Change::ProviderAlive) {
+                "이전 Herdr 실행은 정리하지 못했어요."
+            } else {
+                "이전 세션 프로세스의 종료를 확인하지 못했어요."
+            };
+            assert!(report.reply().contains(expected), "{}", report.reply());
             assert_eq!(case.fx.record(), original);
             assert_eq!(case.cleanups(), 0);
             assert!(case.hold_path().exists());
             assert_eq!(case.effects(), effects);
             recover_after_clear(&case, &original, &effects);
-            discarded(&case, queued, observed, &report);
+            if matches!(change, Change::ProviderAlive) {
+                discarded(&case, queued, observed, &report);
+            } else {
+                legacy_discarded(&case, &report);
+            }
         })
         .join()
         .unwrap();
@@ -690,4 +696,54 @@ fn rr_public_clear_selects_old_originless_json_and_preserves_modern_pending_pg()
     assert_eq!(case.cleanups(), 0);
     assert!(case.hold_path().exists());
     assert_eq!(case.effects(), effects);
+}
+
+fn legacy_discarded(case: &Case, report: &ClearReport) {
+    assert!(
+        report.reply().contains("대기 메시지 2건을 비웠어요."),
+        "{}",
+        report.reply()
+    );
+    let channel = ChannelId::new(CHANNEL);
+    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+        &ProviderKind::Claude,
+        &case.shared.token_hash,
+        channel,
+    );
+    assert!(disk.is_empty());
+    assert!(
+        load_channel_pending_dispatch_marker_checked(
+            &ProviderKind::Claude,
+            &case.shared.token_hash,
+            channel
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(!case.shared.catch_up_retry_pending.contains_key(&channel));
+    case.fx.rt.block_on(async {
+        assert!(
+            case.shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        let taken = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::services::discord::mailbox_take_next_automatic_intervention(
+                &case.shared,
+                &ProviderKind::Claude,
+                channel,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(taken.persistence_error.is_none());
+        assert!(
+            taken.intervention.is_none(),
+            "legacy clear discarded the selected waiting input"
+        );
+    });
 }
