@@ -463,11 +463,13 @@ fn native_idle_slash_recovery(missing: bool) {
             .is_none(),
         "idle native slash must release the zombie foreground: cancelled={} replies={:?}", token.cancelled.load(Ordering::Acquire), transport.replies.lock().unwrap()
     );
+    assert_eq!(crate::services::discord::zombie_foreground_release::cancel_backstop_test_support::finish_status(channel), Some("finished"));
+    // Judged zombie recovery uses main's QueueEligible completion; MailboxReleased is finalizer-only.
     let mut releases = 0;
     while let Ok(event) = events.try_recv() {
-        if event.phase==crate::services::discord::turn_completion_events::TurnCompletionPhase::MailboxReleased {releases+=1;}
+        if event.channel_id == channel && event.phase==crate::services::discord::turn_completion_events::TurnCompletionPhase::QueueEligible {releases+=1;}
     }
-    assert_eq!(releases, 1);
+    assert_eq!(releases, 1, "one completion for the removed zombie token");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while count.load(Ordering::SeqCst) == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
