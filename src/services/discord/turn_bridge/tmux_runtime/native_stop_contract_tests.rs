@@ -471,6 +471,17 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
                     usize::from(first.should_reply()) + usize::from(second.should_reply()),
                     1
                 );
+                let reset = discord::mailbox_cancel_active_turn(&shared, channel).await;
+                assert!(
+                    reset
+                        .token
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &token))
+                );
+                assert!(
+                    token.cancelled.load(Ordering::Acquire),
+                    "forced restart keeps its raw cancellation contract after a failed preserve stop"
+                );
             }
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
