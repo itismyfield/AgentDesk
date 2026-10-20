@@ -783,15 +783,27 @@ async fn capture_dormant(
     lease.runtime_kind = row.runtime_kind;
     lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
     if lease.hosted_source.is_none() {
-        lease.hosted_source = crate::services::tui_prompt_dedupe::hosted_source::restore(
-            provider.as_str(),
-            tmux,
-            row.channel_id,
-            &(
-                output.to_string_lossy().into_owned(),
-                row.turn_start_offset?,
-            ),
-        );
+        lease.hosted_source = row
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .zip(
+                row.hosted_execution_nonce
+                    .as_deref()
+                    .filter(|value| !value.is_empty()),
+            )
+            .and_then(|execution| {
+                crate::services::tui_prompt_dedupe::hosted_source::restore(
+                    provider.as_str(),
+                    tmux,
+                    row.channel_id,
+                    &(
+                        output.to_string_lossy().into_owned(),
+                        row.turn_start_offset?,
+                    ),
+                    execution,
+                )
+            });
     }
     let fence = AdmissionFence::capture(shared, &provider, channel, tmux, &lease, None)
         .await

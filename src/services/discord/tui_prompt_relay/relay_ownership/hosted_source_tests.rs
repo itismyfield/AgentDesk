@@ -60,10 +60,21 @@ fn an_output_source_survives_lease_and_pending_restore_without_restamping() {
             "claude",
             LOGICAL,
             CHANNEL,
-            old.captured_source.as_ref().unwrap()
+            old.captured_source.as_ref().unwrap(),
+            ("native-one", N1),
         ),
         record.hosted_source,
-        "the original captured source restores N1 even while N2 is latest"
+        "the original native session and nonce restore N1 even while N2 is latest"
+    );
+    assert!(
+        hosted_source::restore(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            old.captured_source.as_ref().unwrap(),
+            ("native-one", "unrecorded-execution"),
+        )
+        .is_none()
     );
 }
 

@@ -175,8 +175,19 @@ fn a_source_carrier_keeps_the_original_nonce_after_a_new_source_is_logged() {
         LOGICAL,
         CHANNEL,
         &(original.path.display().to_string(), 0),
+        ("native-one", N1),
     );
     assert_eq!(restored, Some(pin));
+    assert!(
+        restore(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &(original.path.display().to_string(), 0),
+            ("native-one", "unrecorded-execution"),
+        )
+        .is_none()
+    );
     assert_eq!(
         capture("claude", LOGICAL, CHANNEL, &next.path, None)
             .unwrap()
@@ -218,12 +229,23 @@ fn a_source_reused_by_two_executions_does_not_choose_the_latest_nonce() {
     let original = capture("claude", LOGICAL, CHANNEL, &source.path, None).unwrap();
     fx.recorded_execution_source(N2, &source);
     assert!(capture("claude", LOGICAL, CHANNEL, &source.path, None).is_none());
+    assert_eq!(
+        restore(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &(source.path.display().to_string(), 0),
+            ("native-one", N1),
+        ),
+        Some(original.clone())
+    );
     assert!(
         restore(
             "claude",
             LOGICAL,
             CHANNEL,
-            &(source.path.display().to_string(), 0)
+            &(source.path.display().to_string(), 0),
+            ("native-one", "unrecorded-execution"),
         )
         .is_none()
     );
@@ -234,7 +256,9 @@ fn a_source_reused_by_two_executions_does_not_choose_the_latest_nonce() {
 fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
     let fx = Fixture::new();
     let source = fx.source(N1, "native-one");
+    let original = capture("claude", LOGICAL, CHANNEL, &source.path, None).unwrap();
     fx.recorded_execution_source(N2, &source);
+    assert!(capture("claude", LOGICAL, CHANNEL, &source.path, None).is_none());
     let context = fx.context(N2, "native-one");
     let pin = capture_in_context("claude", LOGICAL, CHANNEL, &source.path, None, &context)
         .expect("the producer captured N2's original launch context");
@@ -265,6 +289,26 @@ fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
             Some(&context),
             Some(context.created_at)
         ),
+        Some(pin.clone())
+    );
+    assert_eq!(
+        restore(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &(source.path.display().to_string(), 0),
+            ("native-one", N1),
+        ),
+        Some(original)
+    );
+    assert_eq!(
+        restore(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &(source.path.display().to_string(), 0),
+            ("native-one", N2),
+        ),
         Some(pin)
     );
     assert!(
@@ -272,7 +316,8 @@ fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
             "claude",
             LOGICAL,
             CHANNEL,
-            &(source.path.display().to_string(), 0)
+            &(source.path.display().to_string(), 0),
+            ("native-one", "unrecorded-execution"),
         )
         .is_none()
     );
