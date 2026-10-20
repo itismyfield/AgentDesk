@@ -1934,7 +1934,7 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
     std::fs::write(&generation_path, b"source-a").unwrap();
     let generation = dr::current_generation_mtime_ns(session);
     let (start, end) = (0, 256);
-    let old_user_msg_id = 80_414_91100;
+    let old_user_msg_id = 8_041_491_100;
     let replacement_user_msg_id = 8_041_491_200;
     let mut delivery = delivery_with_fence_offset(
         session,

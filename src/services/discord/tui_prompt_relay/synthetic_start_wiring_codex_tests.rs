@@ -99,7 +99,7 @@ async fn a_codex_observation_resumed_after_confirmation_persists_no_start() {
     let anchor = MessageId::new(940_000_000_005_301);
     let channel_id = ChannelId::new(CHANNEL);
     let wiring = wire_tui_direct_synthetic_turn_start(
-        &shared, "codex", channel_id, &prompt, anchor, false, &decision, &mut lease,
+        &shared, channel_id, &prompt, anchor, false, &decision, &mut lease,
     );
     tokio::pin!(wiring);
     for _ in 0..8 {
@@ -130,7 +130,7 @@ async fn a_codex_observation_begun_before_the_takeover_persists_no_start_after_c
     let anchor = MessageId::new(940_000_000_005_302);
     let channel_id = ChannelId::new(CHANNEL);
     let wiring = wire_tui_direct_synthetic_turn_start(
-        &shared, "codex", channel_id, &prompt, anchor, false, &decision, &mut lease,
+        &shared, channel_id, &prompt, anchor, false, &decision, &mut lease,
     );
     tokio::pin!(wiring);
     assert!(
@@ -160,7 +160,7 @@ async fn a_codex_observation_not_yet_awaited_waits_on_the_start_lock_before_pers
     let anchor = MessageId::new(940_000_000_005_303);
     let channel_id = ChannelId::new(CHANNEL);
     let wiring = wire_tui_direct_synthetic_turn_start(
-        &shared, "codex", channel_id, &prompt, anchor, false, &decision, &mut lease,
+        &shared, channel_id, &prompt, anchor, false, &decision, &mut lease,
     );
     tokio::pin!(wiring);
     for _ in 0..8 {
@@ -193,7 +193,6 @@ async fn an_unselected_codex_observation_defers_without_waiting_on_the_start_loc
     let anchor = MessageId::new(940_000_000_005_304);
     let wiring = wire_tui_direct_synthetic_turn_start(
         &shared,
-        "codex",
         ChannelId::new(CHANNEL),
         &prompt,
         anchor,

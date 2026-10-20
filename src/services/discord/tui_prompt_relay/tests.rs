@@ -4806,14 +4806,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
 
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
-        &shared,
-        provider.as_str(),
-        channel_id,
-        &prompt,
-        anchor_id,
-        false,
-        &decision,
-        &mut lease,
+        &shared, channel_id, &prompt, anchor_id, false, &decision, &mut lease,
     )
     .await;
     assert!(
@@ -4906,7 +4899,6 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
         &shared,
-        provider.as_str(),
         channel_id,
         &prompt,
         anchor_id,

@@ -220,7 +220,7 @@ fn synthetic_bridge_handoff_fixture(
                     };
                     let mut inline_lease = lease.clone();
                     assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
-                        &shared, provider.as_str(), channel, &observed, anchor, true,
+                        &shared, channel, &observed, anchor, true,
                         &relay_observed_prompt_injected_prompt_decision(&observed.prompt),
                         &mut inline_lease,
                     ).await, "failed inline save must hand its retry to the pending worker");

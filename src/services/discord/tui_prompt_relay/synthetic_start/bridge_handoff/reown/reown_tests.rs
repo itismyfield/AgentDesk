@@ -220,7 +220,6 @@ impl Turn {
         let deferred =
             super::super::super::super::synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
                 &self.shared,
-                CLAUDE,
                 self.channel,
                 &prompt,
                 self.anchor(),
