@@ -21,6 +21,7 @@ impl crate::services::tui_o::alarm::AlarmNotifier for RestartAlarms {
     }
 }
 
+mod fresh_process_tests;
 mod fresh_scope_restart_tests;
 
 #[derive(Clone, Copy)]
@@ -28,6 +29,7 @@ enum Pending {
     Approval,
     Prepared,
     LocalRetry,
+    Idle,
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -68,6 +70,21 @@ async fn restart_case(
     pending: Pending,
     fresh: bool,
     fault: Option<fresh_scope_restart_tests::Fault>,
+) {
+    restart_with_binding(
+        pending,
+        fresh,
+        fault,
+        fresh_process_tests::BindingBoot::Existing,
+    )
+    .await;
+}
+
+async fn restart_with_binding(
+    pending: Pending,
+    fresh: bool,
+    fault: Option<fresh_scope_restart_tests::Fault>,
+    binding_boot: fresh_process_tests::BindingBoot,
 ) {
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
@@ -155,26 +172,28 @@ async fn restart_case(
     };
     let blocked_serial = channel.ledger().next_serial();
     let sent_serial = blocked_serial + 1;
-    channel
-        .append_ledger(prepared(
-            blocked_serial,
-            matches!(pending, Pending::LocalRetry).then_some(LocalRetryMark::Budget),
-        ))
-        .unwrap();
-    channel
-        .append_ledger(if matches!(pending, Pending::LocalRetry) {
-            LedgerEntry::NotFound {
-                serial: blocked_serial,
-            }
-        } else {
-            LedgerEntry::Rejected {
-                serial: blocked_serial,
-                status: 403,
-            }
-        })
-        .unwrap();
+    if !matches!(pending, Pending::Idle) {
+        channel
+            .append_ledger(prepared(
+                blocked_serial,
+                matches!(pending, Pending::LocalRetry).then_some(LocalRetryMark::Budget),
+            ))
+            .unwrap();
+        channel
+            .append_ledger(if matches!(pending, Pending::LocalRetry) {
+                LedgerEntry::NotFound {
+                    serial: blocked_serial,
+                }
+            } else {
+                LedgerEntry::Rejected {
+                    serial: blocked_serial,
+                    status: 403,
+                }
+            })
+            .unwrap();
+    }
     drop(channel);
-    if !matches!(pending, Pending::LocalRetry) {
+    if matches!(pending, Pending::Approval | Pending::Prepared) {
         store
             .record_operator_resume(
                 CANARY_CHANNEL,
@@ -223,6 +242,7 @@ async fn restart_case(
     ));
     prepared.gate.acquired();
     let readiness = host::process_readiness();
+    let saved_binding = fresh_process_tests::remove_binding(binding_boot);
     let mut hosts = host::start_managed(
         ShadowProvider::Codex,
         true,
@@ -230,8 +250,9 @@ async fn restart_case(
         || prepared,
     );
     assert_eq!(hosts.len(), 1);
+    let rehydration = fresh_process_tests::rehydrate(binding_boot, saved_binding);
     let result = std::panic::AssertUnwindSafe(async {
-        if fault.is_some() {
+        if fault.is_some() || matches!(binding_boot, fresh_process_tests::BindingBoot::Missing) {
             for _ in 0..100 {
                 assert!(
                     readiness.submission(CANARY_CHANNEL).is_none(),
@@ -254,6 +275,11 @@ async fn restart_case(
             );
             let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
             assert!(channel.ledger().piece(sent_serial).is_none());
+            assert_eq!(
+                restart_alarms.0.load(Ordering::SeqCst),
+                1,
+                "boot refusal must alarm exactly once"
+            );
             return;
         }
         for _ in 0..1000 {
@@ -299,6 +325,23 @@ async fn restart_case(
             cutover::intake_route::IntakeRoute::Gateway,
             "normal verified recovery must admit input through the existing writer gate"
         );
+        if matches!(pending, Pending::Idle) {
+            assert_eq!(
+                output.texts(),
+                prior_posts,
+                "no durable work means no replay POST"
+            );
+            assert!(
+                store
+                    .open_channel(&era, CANARY_CHANNEL)
+                    .unwrap()
+                    .unwrap()
+                    .ledger()
+                    .unresolved()
+                    .is_none()
+            );
+            return;
+        }
         if matches!(pending, Pending::LocalRetry) {
             let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
             assert!(
@@ -309,6 +352,17 @@ async fn restart_case(
                 "pending budget waits for its original due time"
             );
             assert_eq!(channel.ledger().next_serial(), sent_serial);
+            drop(channel);
+            if matches!(binding_boot, fresh_process_tests::BindingBoot::Rehydrate) {
+                fresh_process_tests::wait_retry_post(
+                    &store,
+                    &era,
+                    &output,
+                    sent_serial,
+                    &prior_posts,
+                )
+                .await;
+            }
         } else {
             eventually(
                 || {
@@ -348,6 +402,9 @@ async fn restart_case(
     })
     .catch_unwind()
     .await;
+    if let Some(rehydration) = rehydration {
+        rehydration.await.unwrap();
+    }
     hosts.pop().unwrap().stop_and_join().await.unwrap();
     if let Some(preserved) = preserved {
         preserved.assert_preserved(&store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap());
@@ -355,7 +412,7 @@ async fn restart_case(
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
-    if fault.is_none() {
+    if fault.is_none() && !matches!(binding_boot, fresh_process_tests::BindingBoot::Missing) {
         assert_eq!(
             restart_alarms.0.load(Ordering::SeqCst),
             0,

@@ -374,6 +374,52 @@ async fn unsealed_current_native_unit_holds_in_place_rescope_without_dropping_wo
     }
 }
 
+#[derive(Default)]
+struct BootNotifications(Mutex<Vec<crate::services::tui_o::alarm::NotificationAttempt>>);
+
+impl crate::services::tui_o::alarm::AlarmNotifier for BootNotifications {
+    fn notify(
+        &self,
+        _alert_channel: u64,
+        _alarm: crate::services::tui_o::alarm::AlarmNotification,
+        attempt: crate::services::tui_o::alarm::NotificationAttempt,
+    ) {
+        // Keep the real router's notification slot pending so duplicate incidents stay suppressed.
+        self.0.lock().unwrap().push(attempt);
+    }
+}
+
+#[derive(Clone)]
+struct BootHealthAlarms {
+    recorded: Alarms,
+    router: Arc<crate::services::tui_o::alarm::AlarmRouter>,
+}
+
+impl AlarmSink for BootHealthAlarms {
+    fn raise(&self, channel: u64, alarm: WriterAlarm) {
+        self.router.raise(channel, alarm.clone());
+        self.recorded.raise(channel, alarm);
+    }
+
+    fn waiting_cleared(&self, channel: u64) {
+        self.router.waiting_cleared(channel);
+        self.recorded.waiting_cleared(channel);
+    }
+
+    fn reconcile_reader_count(&self, channel: u64, count: usize) {
+        self.router.reconcile_reader_count(channel, count);
+        self.recorded.reconcile_reader_count(channel, count);
+    }
+
+    fn resume_pending(&self, channel: u64, pending: bool) {
+        self.router.resume_pending(channel, pending);
+    }
+
+    fn halt_cleared(&self, channel: u64) {
+        self.router.halt_cleared(channel);
+    }
+}
+
 async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe_lock = DedupeGuard::acquire();
@@ -484,7 +530,24 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
         stop.send_replace(true);
         assert_eq!(task.await.unwrap(), None);
         harness.gate.acquired();
-        let writer = harness.writer();
+        let health = Arc::new(crate::services::tui_o::alarm::AlarmHealth::default());
+        let notifications = Arc::new(BootNotifications::default());
+        let router = Arc::new(crate::services::tui_o::alarm::AlarmRouter::new(
+            Some(CANARY_CHANNEL + 1),
+            Some(notifications.clone()),
+            health.clone(),
+        ));
+        let cleared_before_boot = harness.alarms.cleared.load(Ordering::SeqCst);
+        let writer = ChannelWriter::new(
+            harness.channel(),
+            harness.gate.clone(),
+            harness.port.clone(),
+            harness.lease.clone(),
+            BootHealthAlarms {
+                recorded: harness.alarms.clone(),
+                router,
+            },
+        );
         let boot_selection = writer.suspension.clone();
         let (boot_stop, boot_stopped) = watch::channel(false);
         let (boot_resumed, _boot_ready) = watch::channel(false);
@@ -501,8 +564,6 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
         polls(6).await;
         let posts = harness.port.posts();
         let alarms = harness.alarms.taken();
-        boot_stop.send_replace(true);
-        assert_eq!(boot.await.unwrap(), None);
         let native_read_bytes = io.stats().read_bytes;
         assert_eq!(harness.channel().cursor(&n3), Some(&before));
         assert_eq!(
@@ -539,8 +600,82 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
             1,
             "cross-nonce bootstrap rescope must raise one preservation warning: {alarms:?}"
         );
+        assert_eq!(
+            harness.alarms.cleared.load(Ordering::SeqCst) - cleared_before_boot,
+            1,
+            "the completed boot incident must publish exactly one waiting clear while S is nonempty"
+        );
+        let waiting_reason = format!("tui_o:waiting_too_long:{CANARY_CHANNEL}");
+        assert!(
+            !health
+                .current_at(std::time::Instant::now())
+                .contains(&waiting_reason),
+            "actual AlarmHealth must clear the boot waiting reason after fresh work completes"
+        );
+        assert_eq!(notifications.0.lock().unwrap().len(), 1);
+
+        harness.gate.lost();
+        answer(&n4, "N4 ready after boot incident");
+        polls(4).await;
+        assert_eq!(harness.port.posts(), posts);
+        assert!(crate::services::tui_o::writer::actor::work_for_tests().0 > 0);
+        let notifications_before_ready = notifications.0.lock().unwrap().len();
+        tokio::time::advance(std::time::Duration::from_millis(300_001)).await;
+        boot_stop.send_replace(false);
+        polls(2).await;
+        let ready_alarms = harness.alarms.taken();
+        assert_eq!(
+            ready_alarms
+                .iter()
+                .filter(|alarm| matches!(alarm,
+                WriterAlarm::WaitingTooLong { incident, ready, .. }
+                    if incident.starts_with("ready:") && *ready > 0))
+                .count(),
+            1,
+            "later actual owed work must raise one independent ready incident: {ready_alarms:?}"
+        );
+        assert!(
+            health
+                .current_at(std::time::Instant::now())
+                .contains(&waiting_reason)
+        );
+        assert_eq!(
+            notifications.0.lock().unwrap().len() - notifications_before_ready,
+            1,
+            "a later ready incident must notify once rather than reuse the boot incident slot"
+        );
+        assert_eq!(
+            harness.alarms.cleared.load(Ordering::SeqCst) - cleared_before_boot,
+            1,
+            "the new overdue incident must stay active before its piece posts"
+        );
+        harness.gate.acquired();
+        boot_stop.send_replace(false);
+        polls(6).await;
+        assert_eq!(
+            harness
+                .port
+                .posts()
+                .iter()
+                .filter(|post| post.as_str() == "N4 ready after boot incident")
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness.alarms.cleared.load(Ordering::SeqCst) - cleared_before_boot,
+            2,
+            "the later ready incident must clear once after posting"
+        );
+        assert!(
+            !health
+                .current_at(std::time::Instant::now())
+                .contains(&waiting_reason)
+        );
+        boot_stop.send_replace(true);
+        assert_eq!(boot.await.unwrap(), None);
+        let posts = harness.port.posts();
         eprintln!(
-            "BUNDLE_BOOTSTRAP_CHARACTERIZATION old_announced=true old_owed=0 ledger_pending=0 current_scope_n4=1 old_suspended=1 fresh_body_posts=1 old_cursor_preserved=1 old_bytes_preserved=1 old_read_bytes={native_read_bytes} cross_nonce_warnings=1"
+            "BUNDLE_BOOTSTRAP_CHARACTERIZATION old_announced=true old_owed=0 ledger_pending=0 current_scope_n4=1 old_suspended=1 fresh_body_posts=1 old_cursor_preserved=1 old_bytes_preserved=1 old_read_bytes={native_read_bytes} cross_nonce_warnings=1 waiting_cleared=1 later_ready_notifications=1"
         );
 
         // The installed N4 selection is an ordinary same-nonce restart, with no new warning.

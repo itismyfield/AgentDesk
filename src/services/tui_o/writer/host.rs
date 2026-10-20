@@ -653,8 +653,8 @@ async fn host_channel<I: HostIo>(
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
-    if let Some(reason) = fresh_input::hold_metadata(&store) {
-        return hold(&alarms, channel, reason);
+    if !fresh_input::wait_metadata(&store, &alarms, &stopping).await {
+        return;
     }
     super::deliver::seed_last_posted(channel, store.ledger());
     let Some(port) = unless_stopped(&stopping, io.port()).await else {

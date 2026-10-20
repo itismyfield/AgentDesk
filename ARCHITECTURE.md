@@ -1683,6 +1683,7 @@ src/
 │   │   │   │   └── fence_tests/
 │   │   │   │       ├── b1b_fresh_launch_tests/
 │   │   │   │       │   ├── ordinary_restart_tests/
+│   │   │   │       │   │   ├── fresh_process_tests.rs
 │   │   │   │       │   │   └── fresh_scope_restart_tests.rs
 │   │   │   │       │   ├── delegated_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs

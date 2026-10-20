@@ -102,8 +102,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                             reason = "cross_nonce_boot_rescope",
                             "[tui_o] previous incarnation remains suspended"
                         );
+                        let incident = format!("cross_nonce_boot_rescope:{}", uuid::Uuid::new_v4());
+                        #[cfg(test)]
+                        let remember = !crate::services::claude_tui::source_verify::n2b_mutant(
+                            "b1b-boot-xnonce-incident",
+                        );
+                        #[cfg(not(test))]
+                        let remember = true;
+                        if remember {
+                            self.waiting.incident = Some(incident.clone());
+                        }
                         self.writer.alarm(WriterAlarm::WaitingTooLong {
-                            incident: format!("cross_nonce_boot_rescope:{}", uuid::Uuid::new_v4()),
+                            incident,
                             ready: self.owed.len(),
                             prepared: None,
                         });
