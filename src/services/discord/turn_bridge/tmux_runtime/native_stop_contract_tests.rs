@@ -277,9 +277,7 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                 running()
             };
             fx.pane(&pane);
-            if failure == "capture" {
-                fx.serve(Server::NoSocket);
-            }
+            fx.reject_capture(failure == "capture");
             let shared = discord::make_shared_data_for_tests();
             let channel = ChannelId::new(7_193_200 + n as u64);
             let (mock, ctx, server, data) = transport(&shared, channel).await;
@@ -289,8 +287,13 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                 std::fs::write(&path, "{\"type\":\"unknown\"}\n").unwrap();
             }
             start(&shared, channel, &token).await;
-            let row = inflight_row(&ProviderKind::Claude, channel, &session, false);
-            let before = file_state(&row);
+            inflight_row(&ProviderKind::Claude, channel, &session, false);
+            let mut events = shared.turn_completion_events.subscribe();
+            let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
+            let before = inflight::InflightTurnIdentity::from_state(
+                &inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                    .unwrap(),
+            );
             let mailbox = discord::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
                 &shared,
                 channel,
@@ -302,7 +305,14 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
             command(&ctx, &data, channel).await;
             assert!(!token.cancelled.load(Ordering::Acquire));
             assert!(mailbox_holds(&shared, channel, &token).await);
-            assert_eq!(file_state(&row), before);
+            let after =
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                    .expect("the running reader keeps its row");
+            assert_eq!(inflight::InflightTurnIdentity::from_state(&after), before);
+            assert!(
+                events.try_recv().is_err(),
+                "failed stop never submits a finalizer"
+            );
             assert_eq!(tombstone(channel), None);
             // The mock exposes each POST in its request history and minted-message map.
             assert_eq!(
@@ -319,10 +329,8 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                     .iter()
                     .any(|text| text.contains("[Stopped]"))
             );
-            fx.serve(Server::Live);
+            fx.reject_capture(false);
             fx.reject_escape(false);
-            std::fs::write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n").unwrap();
-            let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
             append(
                 &path,
                 serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text","text":"NATIVE_READER_CONTINUES"}]}}),

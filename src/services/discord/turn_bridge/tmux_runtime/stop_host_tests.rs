@@ -87,7 +87,7 @@ impl Fixture {
              missing) exit 127 ;;\n\
              nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac\n\
              case \"$1\" in\nsend-keys) [ -f \"$d/reject_escape\" ] && exit 1; exit 0 ;;\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
-             capture-pane) r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
+             capture-pane) [ -f \"$d/reject_capture\" ] && exit 1; r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
              [ -n \"$r\" ] && case \"$*\" in *\"-t $r -S\"*) echo 'Ready for input (type message + Enter)'; exit 0 ;; esac\n\
              [ -f \"$d/pane\" ] && {{ cat \"$d/pane\"; exit 0; }}\n\
              echo '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;\nesac\nexit 0"
@@ -147,6 +147,15 @@ impl Fixture {
     /// Makes every other pane print `text` in place of the default busy frame.
     pub(in super::super) fn pane(&self, text: &str) {
         std::fs::write(self.dir.path().join("pane"), text).unwrap();
+    }
+
+    pub(in super::super) fn reject_capture(&self, reject: bool) {
+        let path = self.dir.path().join("reject_capture");
+        if reject {
+            std::fs::write(path, "reject").unwrap();
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub(in super::super) fn reject_escape(&self, reject: bool) {
