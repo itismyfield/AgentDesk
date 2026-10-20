@@ -2,7 +2,7 @@
 //! and formatting ignored. A lexical tripwire; aliases, macros or moved readers evade it.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge};
-use crate::test_support::CommentForgery;
+use crate::test_support::{CommentForgery, rust_code_mask, rust_spans};
 
 pub(super) const RUNTIME_STORE: &str = include_str!("../../runtime_store.rs");
 
@@ -72,8 +72,8 @@ pub(super) fn binding_gaps(source: &str) -> Vec<String> {
     gaps
 }
 
-/// From the docs above the route enum through the test publication re-export: code,
-/// literals and doc comments (the provenance prose this bans), ordinary comments excluded.
+/// From the previous item's end (so the enum's docs and attributes) through the test
+/// publication re-export: code, literals and doc comments, ordinary comments excluded.
 pub(super) fn provenance_claim_gaps(source: &str) -> Vec<String> {
     let lexed = Lexed::new(source);
     let range = lexed.find(SURFACE_FIRST).and_then(|first| {
@@ -83,40 +83,31 @@ pub(super) fn provenance_claim_gaps(source: &str) -> Vec<String> {
     let Some((first, end)) = range else {
         return vec![format!("missing surface {SURFACE_FIRST}..{SURFACE_LAST}")];
     };
-    let mut start = source[..first].rfind('\n').map_or(0, |at| at + 1);
-    while start > 0 {
-        let above = source[..start - 1].rfind('\n').map_or(0, |at| at + 1);
-        let line = source[above..start - 1].trim_start();
-        if !(line.starts_with("///") || line.starts_with("#[")) {
-            break;
-        }
-        start = above;
+    let mask = rust_code_mask(source).expect("runtime store lexes");
+    let start = mask[..first].rfind([';', '{', '}']).map_or(0, |at| at + 1);
+    let mut surface = lexed.text()[start..end].to_string();
+    let comments = rust_spans(source).expect("runtime store lexes").comments;
+    for doc in comments
+        .into_iter()
+        .filter(|comment| comment.start >= start && comment.end <= end)
+        .filter(|comment| is_doc_comment(&source[comment.clone()]))
+    {
+        surface.replace_range(doc.start - start..doc.end - start, &source[doc]);
     }
-    let is_doc = |line: &str| {
-        let line = line.trim_start();
-        (line.starts_with("///") && !line.starts_with("////"))
-            || ["//!", "/**", "/*!", "*"]
-                .iter()
-                .any(|doc| line.starts_with(doc))
-    };
-    let surface = source[start..end]
-        .lines()
-        .zip(lexed.text()[start..end].lines())
-        .map(|(raw, code)| {
-            if code.trim().is_empty() && is_doc(raw) {
-                raw
-            } else {
-                code
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_ascii_lowercase();
+    let surface = surface.to_ascii_lowercase();
     SURVIVAL_WORDS
         .into_iter()
         .filter(|word| surface.contains(word))
         .map(|word| format!("provenance surface claims survival: {word}"))
         .collect()
+}
+
+/// Rust's outer and inner doc comment forms; `////`, `/***` and `/**/` are ordinary.
+fn is_doc_comment(comment: &str) -> bool {
+    (comment.starts_with("///") && !comment.starts_with("////"))
+        || comment.starts_with("//!")
+        || comment.starts_with("/*!")
+        || (comment.starts_with("/**") && !comment.starts_with("/***") && comment != "/**/")
 }
 
 #[test]
@@ -179,10 +170,25 @@ fn provenance_guard_bans_doc_and_code_claims_but_not_plain_comments() {
         (format!("    /* outer /* durable */ */\n{variant}"), 0),
         (format!("    /// Survives a crash.\n{variant}"), 2),
         (format!("{variant}\n    PersistedDurable,"), 2),
+        (format!("{variant} /// Survives a crash."), 2),
+        (format!("{variant} // Survives a crash."), 0),
+        (
+            format!("    /**\n     * Survives a\n     * crash.\n     */\n{variant}"),
+            2,
+        ),
     ];
     for (rewrite, gaps) in ways {
         let forged = RUNTIME_STORE.replacen(variant, &rewrite, 1);
         assert_ne!(forged, RUNTIME_STORE);
         assert_eq!(provenance_claim_gaps(&forged).len(), gaps, "{rewrite}");
+    }
+    let enum_doc = "/// How this process's generation was selected";
+    for (above, gaps) in [
+        ("/** Survives a crash. */", 2),
+        ("/* Survives a crash. */", 0),
+    ] {
+        let forged = RUNTIME_STORE.replacen(enum_doc, &format!("{above}\n{enum_doc}"), 1);
+        assert_ne!(forged, RUNTIME_STORE);
+        assert_eq!(provenance_claim_gaps(&forged).len(), gaps, "{above}");
     }
 }

@@ -483,7 +483,7 @@ mod minute_tick_wiring_tests {
     const ON_TICK: &str = "\"OnTick1min\"";
 
     /// Classification 2: in the policy tick's real `count % 2` block, the handoff precedes
-    /// the fire call whose own argument is exactly `"OnTick1min"` (a quoted copy is not).
+    /// the five-argument fire call whose `hook_name` (4th) is exactly `"OnTick1min"`.
     fn handoff_order_gaps(server: &str) -> Vec<String> {
         let text = strip_rust_comments(server).expect("server source lexes");
         let mask = rust_code_mask(server).expect("server source lexes");
@@ -500,7 +500,11 @@ mod minute_tick_wiring_tests {
             .map(|(at, _)| at)
             .find(|at| {
                 let open = tier.start + at + FIRE.len();
-                call_arguments(&text, &mask, open).contains(&ON_TICK)
+                let mut arguments = call_arguments(&text, &mask, open);
+                if arguments.last() == Some(&"") {
+                    arguments.pop();
+                }
+                arguments.len() == 5 && arguments[3] == ON_TICK
             });
         match (handoff, fire) {
             (Some(handoff), Some(fire)) if handoff < fire => Vec::new(),
@@ -581,6 +585,11 @@ mod minute_tick_wiring_tests {
                 "OnTick1min replaced by `{argument}` passes"
             );
         }
+        // The hook becomes OnTick30s while the label argument spells OnTick1min.
+        let tail = "\"OnTick1min\",\n                \"1min\",";
+        let relabeled = SERVER.replacen(tail, "\"OnTick30s\",\n                \"OnTick1min\",", 1);
+        assert_ne!(relabeled, SERVER);
+        assert!(!handoff_order_gaps(&relabeled).is_empty());
         let unlabeled = SERVER.replacen("// ── 1min tier", "//", 1);
         assert_eq!(handoff_order_gaps(&unlabeled), Vec::<String>::new());
     }

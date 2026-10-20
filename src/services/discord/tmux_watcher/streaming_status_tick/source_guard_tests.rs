@@ -27,10 +27,7 @@ fn tick_wiring_gaps(collector: &str, tick: &str) -> Vec<String> {
         gaps.push(format!("missing {TICK_FN}"));
         return gaps;
     };
-    let before = |first: &str, second: &str| {
-        body.find(first)
-            .is_some_and(|at| body.find_after(at + first.len(), second).is_some())
-    };
+    let before = |first: &str, second: &str| matches!((body.find(first), body.find(second)), (Some(a), Some(b)) if a < b);
     if !before(PROGRESS, PANEL) {
         gaps.push("Legacy progress must precede the panel gate".to_string());
     }
@@ -74,6 +71,20 @@ fn tick_wiring_guard_rejects_commented_and_reordered_steps() {
     for (first, second) in [(PROGRESS, PANEL), (CLEANUP, STOP)] {
         let reordered = swap(TICK, first, second);
         assert!(!tick_wiring_gaps(COLLECTOR, &reordered).is_empty());
+    }
+    // An extra rejection stop ahead of the cleanup counts; the same text as a comment does not.
+    let cleanup = TICK.find(CLEANUP).expect("cleanup argument");
+    let statement = TICK[..cleanup]
+        .rfind("let outcome =")
+        .expect("cleanup statement");
+    let early_stop = format!("{STOP} return; }}\n");
+    for (inserted, gaps) in [(early_stop.clone(), 1), (format!("// {early_stop}"), 0)] {
+        let forged = [&TICK[..statement], inserted.as_str(), &TICK[statement..]].concat();
+        assert_eq!(
+            tick_wiring_gaps(COLLECTOR, &forged).len(),
+            gaps,
+            "{inserted}"
+        );
     }
 }
 

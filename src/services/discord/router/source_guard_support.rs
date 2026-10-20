@@ -3,14 +3,18 @@
 
 use std::ops::Range;
 
-use crate::test_support::{CommentForgery, braced_item_span, rust_code_mask, strip_rust_comments};
+use crate::test_support::{
+    CommentForgery, braced_item_span, rust_code_mask, rust_spans, strip_rust_comments,
+};
 
 /// One source with comments blanked (`code`) and literals blanked too (`mask`); both
 /// keep the source's byte offsets, so a position found in one indexes the other.
+/// `literals` holds each literal token's range in those offsets.
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct Lexed {
     code: String,
     mask: String,
+    literals: Vec<Range<usize>>,
 }
 
 impl Lexed {
@@ -18,6 +22,7 @@ impl Lexed {
         Self {
             code: strip_rust_comments(source).expect("guarded source lexes"),
             mask: rust_code_mask(source).expect("guarded source lexes"),
+            literals: rust_spans(source).expect("guarded source lexes").literals,
         }
     }
 
@@ -26,18 +31,31 @@ impl Lexed {
         &self.code
     }
 
-    /// Offsets where `needle` appears as written (code as code, literals as literals); a
-    /// needle with no code byte would also match inside a raw string, so it is refused.
+    /// Offsets where `needle` appears as written: code as code, and each needle literal
+    /// as one whole literal token. A needle with no code byte is refused.
     pub(in crate::services::discord) fn find_all(&self, needle: &str) -> Vec<usize> {
         let shape = rust_code_mask(needle).expect("needle lexes on its own");
         assert!(
             !shape.trim().is_empty(),
             "needle `{needle}` has no code byte; anchor it to its call"
         );
+        let quoted = rust_spans(needle)
+            .expect("needle lexes on its own")
+            .literals;
+        let whole_token = |range: Range<usize>| {
+            self.literals
+                .binary_search_by_key(&range.start, |literal| literal.start)
+                .is_ok_and(|index| self.literals[index].end == range.end)
+        };
         self.code
             .match_indices(needle)
             .map(|(at, _)| at)
             .filter(|at| &self.mask.as_bytes()[*at..*at + needle.len()] == shape.as_bytes())
+            .filter(|at| {
+                quoted
+                    .iter()
+                    .all(|literal| whole_token(at + literal.start..at + literal.end))
+            })
             .collect()
     }
 
@@ -62,24 +80,45 @@ impl Lexed {
     }
 
     pub(in crate::services::discord) fn slice(&self, range: Range<usize>) -> Self {
+        let literals = self
+            .literals
+            .iter()
+            .filter(|literal| literal.start < range.end && literal.end > range.start)
+            .map(|literal| {
+                literal.start.max(range.start) - range.start
+                    ..literal.end.min(range.end) - range.start
+            })
+            .collect();
         Self {
             code: self.code[range.clone()].to_string(),
             mask: self.mask[range].to_string(),
+            literals,
         }
     }
 
-    /// Both views without ASCII whitespace (blanked comments included), for checks that
-    /// ignore formatting; needles must drop their whitespace the same way.
+    /// Both views without ASCII whitespace outside literals (blanked comments included),
+    /// for checks that ignore formatting; literal bytes stay exactly as written.
     pub(in crate::services::discord) fn compact(&self) -> Self {
-        let (mut code, mut mask) = (Vec::new(), Vec::new());
-        for (byte, masked) in self.code.bytes().zip(self.mask.bytes()) {
-            if !byte.is_ascii_whitespace() {
+        let mut quoted = vec![false; self.code.len()];
+        for literal in &self.literals {
+            quoted[literal.clone()].fill(true);
+        }
+        let (mut code, mut mask, mut kept) = (Vec::new(), Vec::new(), Vec::new());
+        for (at, (byte, masked)) in self.code.bytes().zip(self.mask.bytes()).enumerate() {
+            kept.push(code.len());
+            if quoted[at] || !byte.is_ascii_whitespace() {
                 code.push(byte);
                 mask.push(masked);
             }
         }
+        kept.push(code.len());
         let utf8 = |bytes| String::from_utf8(bytes).expect("dropping ASCII keeps UTF-8");
         Self {
+            literals: self
+                .literals
+                .iter()
+                .map(|literal| kept[literal.start]..kept[literal.end])
+                .collect(),
             code: utf8(code),
             mask: utf8(mask),
         }
@@ -159,5 +198,45 @@ fn literal_only_needles_fail_closed() {
     assert_eq!(
         quoted.count("msg.reply(&ctx.http, \"Use `!clear` instead.\")"),
         0
+    );
+}
+
+#[test]
+fn literal_needle_parts_match_whole_literal_tokens_only() {
+    let source = "json!({ \"prefix\\\"epoch_route\": 1 }); json!({ \"epoch_route\": 2 });\n\
+                  f(\"a\\\"x\", 1); f(\"x\", 2);\n";
+    let lexed = Lexed::new(source);
+    assert_eq!(lexed.text().matches("\"epoch_route\":").count(), 2);
+    assert_eq!(lexed.count("\"epoch_route\":"), 1);
+    assert_eq!(lexed.text().matches("\"x\",").count(), 2);
+    assert_eq!(lexed.count("\"x\","), 1);
+    assert_eq!(
+        lexed
+            .slice(source.find("f(").unwrap()..source.len())
+            .count("\"x\","),
+        1
+    );
+}
+
+#[test]
+fn compact_keeps_literal_bytes_and_drops_only_outside_whitespace() {
+    let compact = |source: &str| Lexed::new(source).compact().text().to_string();
+    let written = "observe(\n    \"clear_inflight_state_for_reconcile\", // site\n    1,\n)";
+    assert_eq!(
+        compact(written),
+        "observe(\"clear_inflight_state_for_reconcile\",1,)"
+    );
+    assert_eq!(
+        compact(written),
+        compact("observe( \"clear_inflight_state_for_reconcile\" , /* x */ 1 , )")
+    );
+    for spaced in ["for_ reconcile", "for_\treconcile"] {
+        let changed = written.replace("for_reconcile", spaced);
+        assert_ne!(compact(&changed), compact(written), "{spaced:?}");
+    }
+    let compacted = Lexed::new(written).compact();
+    assert_eq!(
+        compacted.count("\"clear_inflight_state_for_reconcile\","),
+        1
     );
 }

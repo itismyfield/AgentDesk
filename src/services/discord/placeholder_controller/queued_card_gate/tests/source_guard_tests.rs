@@ -43,8 +43,8 @@ pub(super) enum Span {
     },
 }
 
-/// The A1–A8 regions; A6/A7 used to end at a comment and a log literal and now end
-/// with the arm and `if` block that hold the gate call.
+/// The A1–A8 regions. A6 is the success arm's own block and A7 the stale-card `if` block,
+/// so prose or log text near them never bounds the region.
 pub(super) const SITES: [(&str, &str, Span); 8] = [
     (
         "A1/A2 queue-exit drain",
@@ -118,10 +118,18 @@ const EXIT_BODY: &str = "async fn teardown_exit_body(";
 const WARN: &str = "tracing::warn!";
 const DISCARD: &str = "let _ =";
 
+/// A `=>` head must open a braced arm; an expression arm would let `block` run on into the
+/// next arm's block, so it resolves to no region.
 fn nested(lexed: &Lexed, heads: &[&str]) -> Option<Lexed> {
-    heads
-        .iter()
-        .try_fold(lexed.clone(), |scope, head| scope.block(head))
+    heads.iter().try_fold(lexed.clone(), |scope, head| {
+        if head.ends_with("=>") {
+            let at = scope.find(head)? + head.len();
+            if !scope.text()[at..].trim_start().starts_with('{') {
+                return None;
+            }
+        }
+        scope.block(head)
+    })
 }
 
 fn statements(scope: &Lexed, start: &str, end: &str) -> Option<Lexed> {
@@ -312,6 +320,32 @@ fn gated_region_bounds_follow_code_not_comments_or_log_text() {
             gated_region_gaps(label, &source, span),
             Vec::<String>::new()
         );
+    }
+    // A6 as an expression arm is rejected, whether or not the next Err arm holds a gate call.
+    let (label, source, span) = SITES[5];
+    let ok = "Ok(fresh_msg_id) =>";
+    let at = source.find(ok).expect("A6 success arm");
+    let mask = crate::test_support::rust_code_mask(source).expect("intake lexes");
+    let arm = crate::test_support::braced_item_span(&mask[at..], ok).expect("A6 arm block");
+    let bare = [
+        &source[..at],
+        "Ok(fresh_msg_id) => fresh_msg_id,",
+        &source[at + arm.end..],
+    ]
+    .concat();
+    let err = "Err(error) => {";
+    let gate =
+        "queued_card_gate::release_or_rekey(shared, channel_id, existing, &[user_msg_id]).await;";
+    let gated_err = [
+        &bare[..at],
+        bare[at..]
+            .replacen(err, &format!("{err} {gate}"), 1)
+            .as_str(),
+    ]
+    .concat();
+    assert_ne!(gated_err, bare);
+    for expression_arm in [bare, gated_err] {
+        assert!(!gated_region_gaps(label, &expression_arm, span).is_empty());
     }
     let (label, source, span) = SITES[1];
     let definition = "pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_clears_with(";

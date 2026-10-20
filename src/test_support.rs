@@ -91,11 +91,17 @@ pub(crate) fn comment_out_code(source: &str, needle: &str, forgery: CommentForge
     forged
 }
 
-/// One byte per byte: blanking whole comments or literals keeps byte offsets,
-/// line breaks and UTF-8 validity, so offsets in the result index `source`.
-fn blank(source: &str, literals: bool) -> Result<String, UnterminatedSource> {
+/// Comment and literal byte ranges of a source, each list in source order; a literal
+/// range covers its prefix, quotes and suffix.
+#[derive(Debug, Default)]
+pub(crate) struct RustSpans {
+    pub(crate) comments: Vec<Range<usize>>,
+    pub(crate) literals: Vec<Range<usize>>,
+}
+
+pub(crate) fn rust_spans(source: &str) -> Result<RustSpans, UnterminatedSource> {
     let bytes = source.as_bytes();
-    let mut out = bytes.to_vec();
+    let mut spans = RustSpans::default();
     let mut index = 0;
     while index < bytes.len() {
         let (end, comment) = match bytes[index] {
@@ -127,14 +133,28 @@ fn blank(source: &str, literals: bool) -> Result<String, UnterminatedSource> {
                 continue;
             }
         };
-        if comment || literals {
-            for byte in &mut out[index..end] {
-                if *byte != b'\n' && *byte != b'\r' {
-                    *byte = b' ';
-                }
-            }
+        if comment {
+            spans.comments.push(index..end);
+        } else {
+            spans.literals.push(index..end);
         }
         index = end;
+    }
+    Ok(spans)
+}
+
+/// One byte per byte: blanking whole comments or literals keeps byte offsets,
+/// line breaks and UTF-8 validity, so offsets in the result index `source`.
+fn blank(source: &str, literals: bool) -> Result<String, UnterminatedSource> {
+    let spans = rust_spans(source)?;
+    let mut out = source.as_bytes().to_vec();
+    let quoted = if literals { &spans.literals[..] } else { &[] };
+    for range in spans.comments.iter().chain(quoted) {
+        for byte in &mut out[range.clone()] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
+        }
     }
     Ok(String::from_utf8(out).expect("blanking whole UTF-8 sequences keeps UTF-8"))
 }

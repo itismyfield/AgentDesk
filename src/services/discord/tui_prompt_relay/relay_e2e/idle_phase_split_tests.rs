@@ -80,9 +80,8 @@ fn boot_relay_gaps(boot: &str, relay: &str) -> Vec<String> {
     let mut gaps = Vec::new();
     match Lexed::new(boot).block(BOOT_FN) {
         Some(body) => {
-            let confirm = body.find(CONFIRM);
-            if !confirm.is_some_and(|at| body.find_after(at + CONFIRM.len(), RELAY_START).is_some())
-            {
+            let order = (body.find(CONFIRM), body.find(RELAY_START));
+            if !matches!(order, (Some(confirm), Some(relay)) if confirm < relay) {
                 gaps.push("boot confirmation must precede the relay start".to_string());
             }
         }
@@ -120,6 +119,23 @@ fn boot_relay_guard_rejects_commented_steps_and_counts_coded_spawns() {
     }
     let late_confirm = swap(BOOT, CONFIRM, RELAY_START);
     assert!(!boot_relay_gaps(&late_confirm, RELAY).is_empty());
+    // An extra relay start ahead of the confirmation counts; the same text as a comment does not.
+    let statement = BOOT
+        .find("let confirmed =")
+        .expect("boot confirmation statement");
+    for (early, gaps) in [
+        (RELAY_START.to_string(), 1),
+        (format!("// {RELAY_START}"), 0),
+    ] {
+        let forged = [
+            &BOOT[..statement],
+            early.as_str(),
+            "\n    ",
+            &BOOT[statement..],
+        ]
+        .concat();
+        assert_eq!(boot_relay_gaps(&forged, RELAY).len(), gaps, "{early}");
+    }
     let [claude, _] = IDLE_SPAWNS;
     let prose = RELAY.replacen(claude, &format!("{claude}\n        // {claude}"), 1);
     assert_eq!(boot_relay_gaps(BOOT, &prose), Vec::<String>::new());
