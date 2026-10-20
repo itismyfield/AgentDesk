@@ -793,7 +793,35 @@ async fn clear_and_first_input_at_tick(
         clear_persist_failure_tests::queue_len(&fixture.shared, channel).await,
         0
     );
-    let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    const SUPERSEDED_READ_LIMIT: usize = 50;
+    let mut superseded_retries = 0;
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        for read in 0..SUPERSEDED_READ_LIMIT {
+            let sample =
+                activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+            if sample.reason != "superseded" {
+                return Some(sample);
+            }
+            superseded_retries += 1;
+            if read + 1 < SUPERSEDED_READ_LIMIT {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        None
+    })
+    .await;
+    eprintln!("E51_AFTER_CLEAR superseded_retries={superseded_retries}");
+    let observed = observed
+        .expect("E51 activity remained superseded past the bounded reread timeout")
+        .expect("E51 activity remained superseded through the bounded reread limit");
+    assert_eq!(
+        (observed.activity, observed.reason),
+        if external_inventory {
+            (Activity::Unknown, "session_identity_unresolved")
+        } else {
+            (Activity::Idle, "no_session")
+        }
+    );
     let cancelled_probe = Arc::new(CancelToken::new());
     cancelled_probe.cancelled.store(true, Ordering::SeqCst);
     let clear_preflight_open =
@@ -889,16 +917,8 @@ async fn clear_and_first_input_at_tick(
     );
     if external_inventory {
         assert_eq!(underlying.unwrap(), "Hold(\"owner_unresolved\")");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Unknown, "session_identity_unresolved")
-        );
     } else {
         assert_eq!(underlying.unwrap(), "Absent(LocalInventory)");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Idle, "no_session")
-        );
     }
     let new = new.unwrap_or_else(|| {
         panic!(
