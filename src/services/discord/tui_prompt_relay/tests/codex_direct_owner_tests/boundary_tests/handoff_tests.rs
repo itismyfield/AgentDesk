@@ -1734,6 +1734,13 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
             let _bindings = dedupe::hosted_source::tests::BindingRoot::at(&root);
             let nonce = crate::services::tui_prompt_dedupe::hosted_source::tests::N1;
             let logical = "AgentDesk-codex-5845-scan";
+            crate::services::tmux_common::host_marker::record_tmux_host_marker(logical);
+            assert_eq!(
+                crate::services::tmux_common::host_marker::read_host_kind_marker(logical),
+                crate::services::tmux_common::host_marker::HostKindMarker::Known(
+                    crate::services::session_host::HostKind::Tmux
+                )
+            );
             let marker = crate::services::tmux_common::session_temp_path(logical, "spawn_nonce");
             std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
             std::fs::write(marker, nonce).unwrap();
@@ -1793,6 +1800,7 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
                 .expect("the actual idle rollout scanner carried its source");
             assert_eq!(pin.execution_nonce, nonce);
             assert_eq!(pin.source, source);
+            assert!(!pin.hosted_admission_required);
             assert_eq!(event.prompt, PROMPT3);
             assert_eq!(event.tmux_session_name, fx.codex.tmux);
             assert!(!event.steer_echo);

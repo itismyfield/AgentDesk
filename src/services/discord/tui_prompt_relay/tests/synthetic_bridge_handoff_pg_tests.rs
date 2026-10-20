@@ -137,7 +137,7 @@ fn synthetic_bridge_handoff_fixture(
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async {
+        .block_on(Box::pin(async {
             if postgres { let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::INFO).try_init(); }
             let database = if postgres {
                 Some(crate::db::auto_queue::test_support::TestPostgresDb::create().await)
@@ -764,7 +764,7 @@ fn synthetic_bridge_handoff_fixture(
                 gateway.deleted.lock().unwrap().is_empty(),
                 "no foreign anchor is deleted"
             );
-        });
+        }));
 }
 
 #[cfg(unix)]
