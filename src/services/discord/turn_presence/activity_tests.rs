@@ -552,12 +552,7 @@ fn strict_reading(probe: &Probe) -> Reading {
         CHANNEL,
         probe.target.clone(),
     );
-    Reading {
-        observed,
-        stamp,
-        watch: Some(probe.watch.clone()),
-        unbound: None,
-    }
+    Reading::bound(observed, stamp, Some(probe.watch.clone()), Some(SESSION))
 }
 
 #[test]
@@ -922,12 +917,7 @@ fn a_reading_publishes_only_while_its_watch_is_unmoved() {
             probe.target.clone(),
         );
         let watch = Some(probe.watch.clone());
-        Reading {
-            observed,
-            stamp,
-            watch,
-            unbound: None,
-        }
+        Reading::bound(observed, stamp, watch, Some(SESSION))
     };
     let fresh = read();
     assert_eq!(fresh.session(), Some(SESSION));
@@ -1702,12 +1692,7 @@ async fn s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await(
         channel.get(),
         probe.target.clone(),
     );
-    let old = Reading {
-        observed,
-        stamp,
-        watch: Some(probe.watch.clone()),
-        unbound: None,
-    };
+    let old = Reading::bound(observed, stamp, Some(probe.watch.clone()), Some(SESSION));
     assert_eq!(probe.fake.spawns.load(Ordering::SeqCst), 1);
     lock(&WATCHES).insert(channel.get(), probe.watch.clone());
     let core = shared.core.lock().await;
@@ -1729,12 +1714,7 @@ async fn s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await(
         channel.get(),
         probe.target.clone(),
     );
-    let next = Reading {
-        observed,
-        stamp,
-        watch: Some(probe.watch.clone()),
-        unbound: None,
-    };
+    let next = Reading::bound(observed, stamp, Some(probe.watch.clone()), Some(SESSION));
     let jobs = std::mem::take(&mut *lock(&probe.fake.jobs));
     assert_eq!(jobs.len(), 2);
     let mut jobs = jobs.into_iter();
@@ -1821,4 +1801,80 @@ impl HandoffMutation {
     pub(crate) fn calls(&self) -> usize {
         self.0.calls()
     }
+}
+
+/// Runs the production judge/rebuild/install path while the test owns worker completion.
+pub(in crate::services::discord) struct NoticeReaderProbe {
+    probe: Probe,
+    channel: u64,
+}
+
+impl NoticeReaderProbe {
+    pub(in crate::services::discord) fn new(channel: u64) -> Self {
+        let mut probe = Probe::new(ShadowProvider::Claude, Vec::new());
+        probe.target = Target::Bound(format!("notice-reader-{channel}"));
+        *lock(&probe.fake.events) = Err("binding log unreadable".into());
+        Self { probe, channel }
+    }
+
+    pub(in crate::services::discord) fn read(&self) -> Reading {
+        let ports: Arc<dyn Ports> = self.probe.fake.clone();
+        let (observed, stamp) = judge_presence(
+            &self.probe.watch,
+            &ports,
+            self.probe.provider,
+            self.channel,
+            self.probe.target.clone(),
+        );
+        let Target::Bound(label) = &self.probe.target else {
+            unreachable!()
+        };
+        Reading::bound(observed, stamp, Some(self.probe.watch.clone()), Some(label))
+    }
+
+    pub(in crate::services::discord) fn unreadable_seq(&self) {
+        *lock(&self.probe.fake.seq) = Err("unreadable seq".into());
+    }
+
+    pub(in crate::services::discord) fn force_retry_due(&self) {
+        let mut watch = lock(&self.probe.watch);
+        let Outcome::Unreadable { retry_at } = &mut watch.outcome else {
+            panic!("the actual reader must have installed Unreadable before retry")
+        };
+        *retry_at = Instant::now();
+    }
+
+    pub(in crate::services::discord) fn run_jobs(&self) -> usize {
+        self.probe.run_jobs()
+    }
+    pub(in crate::services::discord) fn counts(&self) -> (usize, usize) {
+        self.probe.counts()
+    }
+
+    pub(in crate::services::discord) fn pending(&self) {
+        let Target::Bound(label) = &self.probe.target else {
+            unreachable!()
+        };
+        let target = BindingTarget::Pending {
+            payload_session_id: "pending".into(),
+            payload_transcript_path: std::path::PathBuf::from("/notice-pending.jsonl"),
+        };
+        let mut binding = event(1, label, self.probe.provider, record(target));
+        binding.channel_id = self.channel;
+        *lock(&self.probe.fake.events) = Ok(vec![binding]);
+        *lock(&self.probe.fake.seq) = Ok(1);
+    }
+}
+
+pub(super) fn resumed_notice_observations(
+    root: &Path,
+) -> (NoticeObservation, usize, NoticeObservation) {
+    let (probe, path) = codex_probe(root, &[codex("task_started", "A")]);
+    assert_eq!(probe.settle(), (Activity::Busy, "open"));
+    let blocked = json!({"type":"response_item","payload":{"type":"unknown_item","id":"x"}});
+    write(&path, &[blocked, codex("turn_aborted", "B")]);
+    let resumed = strict_reading(&probe).notice_observation();
+    let jobs = probe.run_jobs();
+    let boundary = strict_reading(&probe).notice_observation();
+    (resumed, jobs, boundary)
 }

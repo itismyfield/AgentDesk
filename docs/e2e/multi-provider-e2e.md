@@ -350,6 +350,18 @@ only the status and the `ok`/`degraded` flags, never `fully_recovered` or an
 unlisted degraded reason. A failed `launchctl kickstart` fails the step. Other
 bodies keep polling until timeout and then fail with the last health summary.
 
+Unknown channels, including other cells, still fail default strict readiness.
+Public health probes request `/api/health/detail` for an Unknown waiver only
+when a `turn_presence_unknown` reason actually matches an explicit allowlist.
+That one detail body supplies the entire readiness decision; public and detail
+facts are never combined. Waiving Unknown requires complete, matching group and
+channel evidence proving every Unknown channel is outside the tested target.
+The target channel is never waived, regardless of provider, and missing,
+malformed, ambiguous, or inconsistent evidence is never waived. Herdr applies
+the same attribution check to its existing detail probe. For public probes,
+other explicit reason waivers retain public-only readiness; counter and idle
+checks can independently require detail.
+
 After every executed scenario, the driver also asserts the tested cell's
 mailbox is idle via `/api/health/detail`: `agent_turn_status=idle`,
 `queue_depth=0`, no cancel token, no inflight state, no active user message, no
@@ -358,7 +370,8 @@ tested provider/channel's on-disk pending queue and queued placeholder files
 under the runtime root are empty.
 
 Scenario steps can also run an explicit `assert_health` probe. The probe reads
-`/api/health` and, when counter caps are requested, `/api/health/detail`; it can
+`/api/health` and, for counter caps or a matching explicit Unknown waiver,
+`/api/health/detail`; it can
 require `status: healthy`, forbid degraded reason substrings such as
 `global_active_counter_out_of_bounds`, and cap `global_active` /
 `global_finalizing`. Destructive scenarios use this after the tested turn has

@@ -739,7 +739,7 @@ _health_json_deploy_nonblocking_ere() {
   # the fallback splits on one.
   # $5 joins smoke E2E and pre-existing reader alarm channel ids; only their
   # reader-count reason is accepted, and only for a deploy verdict.
-  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+|turn_presence_unknown:(claude|codex):(~|([A-Za-z0-9_.-]|%[0-9A-F]{2})+):[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[1-9][0-9]*:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:deferred_hooks_backlog:[1-9][0-9]*"

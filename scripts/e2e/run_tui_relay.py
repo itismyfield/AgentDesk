@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import herdr_restart, http_auth  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -2132,12 +2132,7 @@ def _read_health_detail(base_url: str, *, timeout: float = 5.0) -> dict[str, Any
 
 
 def _health_reason_allowed(reason: str, allowed: tuple[str, ...]) -> bool:
-    for pattern in allowed:
-        if pattern.endswith("*") and reason.startswith(pattern[:-1]):
-            return True
-        if reason == pattern:
-            return True
-    return False
+    return health_readiness.reason_allowed(reason, allowed)
 
 
 def _health_ready_violations(
@@ -2145,33 +2140,10 @@ def _health_ready_violations(
     *,
     allowed_statuses: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
+    target_channel: str | None = None,
 ) -> list[str]:
-    status = str(payload.get("status") or "").lower()
-    allowed_status_set = {s.lower() for s in allowed_statuses}
-    strict_healthy = allowed_status_set == {"healthy"}
-    violations: list[str] = []
-    if status not in allowed_status_set:
-        violations.append(f"status={status or '<missing>'}")
-    if strict_healthy and payload.get("ok") is False:
-        violations.append("ok=false")
-    if strict_healthy and payload.get("degraded") is True:
-        violations.append("degraded=true")
-    # Startup recovery is its own readiness axis; allowing degraded status does not waive it.
-    if payload.get("fully_recovered") is False:
-        violations.append("fully_recovered=false")
-
-    degraded_reasons = payload.get("degraded_reasons") or []
-    if isinstance(degraded_reasons, list):
-        blocked = [
-            str(reason)
-            for reason in degraded_reasons
-            if not _health_reason_allowed(str(reason), allowed_degraded_reasons)
-        ]
-        if blocked:
-            violations.append(f"degraded_reasons={blocked}")
-    elif degraded_reasons:
-        violations.append(f"degraded_reasons={degraded_reasons!r}")
-    return violations
+    return health_readiness.ready_violations(payload, allowed_statuses=allowed_statuses,
+        allowed_degraded_reasons=allowed_degraded_reasons, target_channel=target_channel)
 
 
 def _health_summary(
@@ -2282,7 +2254,8 @@ def _assert_health_once(
 ) -> dict[str, Any]:
     """Single health probe attempt for assert_health polling."""
 
-    status_code, health = _read_api_json(base_url, "/api/health", timeout=5)
+    status_code, health, from_detail = health_readiness.read_health(
+        _read_api_json, base_url, _as_string_tuple(options.get("allowed_degraded_reasons")))
     if not isinstance(health, dict):
         raise assertions.AssertionError(
             f"assert_health /api/health returned non-object HTTP {status_code}: "
@@ -2300,13 +2273,15 @@ def _assert_health_once(
     if "allowed_degraded_reasons" in options:
         allowed_degraded_reasons = _as_string_tuple(options.get("allowed_degraded_reasons"))
     elif forbidden_reasons and {s.lower() for s in required_statuses} != {"healthy"}:
-        allowed_degraded_reasons = tuple(str(reason) for reason in degraded_reasons)
+        allowed_degraded_reasons = tuple(str(reason) for reason in degraded_reasons
+                                        if not health_readiness.unknown_family(reason))
     else:
         allowed_degraded_reasons = ()
     violations = _health_ready_violations(
         health,
         allowed_statuses=required_statuses,
         allowed_degraded_reasons=allowed_degraded_reasons,
+        target_channel=channel_id,
     )
 
     blocked_reasons = [
@@ -2321,10 +2296,10 @@ def _assert_health_once(
     needs_detail = any(
         key in options for key in ("global_active_max", "global_finalizing_max")
     )
-    detail: dict[str, Any] | None = None
+    detail: dict[str, Any] | None = health if from_detail else None
     target_idle = None
     if needs_detail:
-        detail = _read_health_detail(base_url)
+        detail = detail if detail is not None else _read_health_detail(base_url)
         counter_payloads.insert(0, detail)
         if any(
             type(options[key]) is int and options[key] == 0
@@ -4531,6 +4506,7 @@ def wait_for_health(
     poll_interval_s: float = 2.0,
     allowed_statuses: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
+    target_channel: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_http_status: int | None = None
@@ -4540,7 +4516,7 @@ def wait_for_health(
     observation = "none"
     while time.monotonic() < deadline:
         try:
-            http_status, payload = _read_api_json(base_url, "/api/health", timeout=5)
+            http_status, payload, _ = health_readiness.read_health(_read_api_json, base_url, allowed_degraded_reasons)
             observation = "readable"
             last_http_status = http_status
             if isinstance(payload, dict):
@@ -4549,6 +4525,7 @@ def wait_for_health(
                     payload,
                     allowed_statuses=allowed_statuses,
                     allowed_degraded_reasons=allowed_degraded_reasons,
+                    target_channel=target_channel,
                 )
                 if 200 <= http_status < 300 and not last_violations:
                     return
@@ -4714,6 +4691,7 @@ def restart_dcserver_for_e2e(
         timeout_s=90,
         allowed_statuses=require_status,
         allowed_degraded_reasons=allowed_degraded_reasons,
+        target_channel=channel_id,
     )
 
 

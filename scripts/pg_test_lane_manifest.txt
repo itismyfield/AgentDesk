@@ -2364,6 +2364,7 @@ services::discord::turn_presence::activity::unbound::live::review_tests::s1e_suc
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::unbound_notice_keeps_the_canonical_nonce_and_hold_leaf_in_its_publication_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_canonical_missing_namespace_or_tuple_mismatch_keeps_hold_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_either_historical_or_canonical_live_candidate_holds_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_exact_alias_pointing_to_another_row_keeps_hold_pg

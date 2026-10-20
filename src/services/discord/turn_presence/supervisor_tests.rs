@@ -85,7 +85,11 @@ impl Drop for LiveSupervisor {
 }
 
 /// Scripted reads and recorded sends, timed from the test's start on tokio's paused clock.
+type Reader = Arc<dyn Fn(u64) -> Reading + Send + Sync>;
+
 struct Fake {
+    root: tempfile::TempDir,
+    reader: Mutex<Option<Reader>>,
     start: Instant,
     channels: Vec<u64>,
     readings: Mutex<HashMap<u64, Observed>>,
@@ -101,6 +105,8 @@ struct Fake {
     kicks: Mutex<Vec<(u64, Duration)>>,
     notices: Mutex<Vec<(u64, Duration, String)>>,
     notice_delay: Mutex<Option<Duration>>,
+    notice_error: AtomicBool,
+    notice_ok: Mutex<Vec<u64>>,
     gate_blocked: AtomicBool,
     /// When set, the mailbox answer comes from this runtime's real mailbox and disk markers.
     live_mailbox: Mutex<Option<Arc<SharedData>>>,
@@ -109,6 +115,8 @@ struct Fake {
 impl Fake {
     fn new(channels: &[u64], observed: Observed) -> Arc<Self> {
         Arc::new(Self {
+            root: tempfile::tempdir().unwrap(),
+            reader: Mutex::new(None),
             start: Instant::now(),
             channels: channels.to_vec(),
             readings: Mutex::new(channels.iter().map(|&c| (c, observed)).collect()),
@@ -124,6 +132,8 @@ impl Fake {
             kicks: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
             notice_delay: Mutex::new(None),
+            notice_error: AtomicBool::new(false),
+            notice_ok: Mutex::new(Vec::new()),
             gate_blocked: AtomicBool::new(false),
             live_mailbox: Mutex::new(None),
         })
@@ -165,6 +175,15 @@ impl Fake {
 
 #[async_trait]
 impl Effects for Fake {
+    fn notice_scope(&self, channel: u64) -> notice_store::Scope {
+        notice_store::Scope {
+            root: Some(self.root.path().to_owned()),
+            provider: "claude".into(),
+            token_hash: "test".into(),
+            channel,
+        }
+    }
+
     fn channels(&self) -> Vec<u64> {
         self.channels.clone()
     }
@@ -173,6 +192,10 @@ impl Effects for Fake {
         let delay = lock(&self.read_delay).get(&channel).copied();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
+        }
+        let reader = lock(&self.reader).clone();
+        if let Some(reader) = reader {
+            return reader(channel);
         }
         let observed = lock(&self.readings)[&channel];
         if self.overtaken.load(Ordering::SeqCst) {
@@ -220,6 +243,10 @@ impl Effects for Fake {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        if self.notice_error.load(Ordering::SeqCst) {
+            return Err("notice unavailable".into());
+        }
+        lock(&self.notice_ok).push(self.since().as_secs());
         Ok(())
     }
 
@@ -241,6 +268,40 @@ pub(crate) fn seed_presence_for_tests(channel: u64, busy: bool) {
     };
     lock(&PRESENCE).insert(channel, Arc::new(Mutex::new(presence)));
 }
+
+pub(crate) fn seed_long_unknown_for_tests(channel: u64, reason: &'static str, age_secs: u64) {
+    lock(&PRESENCE).remove(&channel);
+    let mut presence = Presence::new();
+    presence.reason = reason;
+    presence.observed_at = Some(Utc::now());
+    let owner = notices::Owner::get(notice_store::Scope {
+        root: crate::services::discord::runtime_store::runtime_root(),
+        provider: "claude".into(),
+        token_hash: "health-test".into(),
+        channel,
+    });
+    let reading = Reading::unwatched_for_tests(
+        Observed {
+            activity: Activity::Unknown,
+            reason,
+        },
+        None,
+        None,
+    );
+    owner.observe(
+        Some(reading.notice_observation()),
+        None,
+        Instant::now() - Duration::from_secs(age_secs),
+    );
+    presence.notice = Some(owner);
+    presence.activity_since = Utc::now() - chrono::Duration::seconds(age_secs as i64);
+    lock(&PRESENCE).insert(channel, Arc::new(Mutex::new(presence)));
+}
+
+#[path = "supervisor_notice_tests.rs"]
+mod notice_tests;
+#[path = "supervisor_reader_notice_tests.rs"]
+mod reader_notice_tests;
 
 /// Runs the supervisor over `fake` for the life of the returned handle.
 fn supervise(fake: &Arc<Fake>) -> tokio::task::JoinHandle<()> {
@@ -300,7 +361,14 @@ async fn a_send_overtaken_by_idle_counts_nothing_and_schedules_nothing() {
     let read = |observed| Reading::unwatched_for_tests(observed, Some("pane"), Some("/t.jsonl"));
     let mut first = None;
     for observed in [BUSY, IDLE, BUSY] {
-        let actions = apply(&mut presence, channel, now, &read(observed), false, None);
+        let actions = apply(
+            &mut presence,
+            channel,
+            now,
+            &read(observed),
+            (false, None),
+            None,
+        );
         first = first.or(actions.into_iter().find_map(|action| match action {
             Action::Typing(generation) => Some(generation),
             _ => None,
@@ -331,10 +399,9 @@ async fn a_mailbox_token_keeps_presence_from_typing() {
     assert_eq!(fake.typed_secs(channel), [TYPING_EVERY.as_secs() * 6]);
 }
 
-/// Unknown for a full minute posts one notice; it does not post again within 30 minutes, even
-/// across a recovery and a new unknown, and may once that half hour has passed.
+/// Recovery starts a fresh grace; a continuous cause then remains suppressed.
 #[tokio::test(start_paused = true)]
-async fn unknown_for_a_minute_notices_once_per_half_hour() {
+async fn unknown_for_a_minute_notices_once_per_cause_spell() {
     let channel = 6_200_004;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
@@ -346,10 +413,10 @@ async fn unknown_for_a_minute_notices_once_per_half_hour() {
     wait(10).await;
     fake.set(channel, UNKNOWN);
     wait(20 * 60).await;
-    assert_eq!(fake.notice_secs(), [60]);
+    assert_eq!(fake.notice_secs(), [60, 132]);
     wait(10 * 60).await;
     run.abort();
-    assert_eq!(fake.notice_secs(), [60, 1860]);
+    assert_eq!(fake.notice_secs(), [60, 132]);
     assert!(fake.notices()[0].1.contains("(사유: facts_halted)"));
     assert!(status(channel).unwrap()["unknown_notice"]["posted_at"].is_string());
 }
