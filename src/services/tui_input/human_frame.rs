@@ -1,5 +1,7 @@
-//! The `[User: <name> (ID: <id>) · 📱 v1 mode=<new|inject> source=<source> · <nonce>]` header on
-//! input pasted into a running turn, and its one shared reader; the older `[📱 …]` is still read.
+//! Ordinary user headers are shared by idle and injected input; the durable ledger identifies
+//! injected frames. The earlier v1 and `[📱 …]` formats remain readable.
+
+pub(crate) mod history;
 
 const USER: &str = "[User: ";
 const SCHEMA: &str = " · 📱 v1 mode=";
@@ -92,7 +94,30 @@ fn source_key(source: &str) -> String {
     key
 }
 
-/// The input as pasted into a running turn; the header ends with ` · <nonce>]` as before.
+pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
+    let prefix = format!("[User: {} (ID: {author})]", author_name(name, author));
+    let body = body.replace("\r\n", "\n").replace('\r', "\n");
+    if body.is_empty() {
+        prefix
+    } else if body.contains('\n') {
+        format!("{prefix}\n{body}")
+    } else {
+        format!("{prefix} {body}")
+    }
+}
+
+pub(crate) fn plain_inject(
+    _source: &str,
+    author: &str,
+    name: &str,
+    _id: &str,
+    body: &str,
+) -> String {
+    idle(name, author, body)
+}
+
+/// The v1 formatter remains only for reconstructing already written frames.
+
 pub(crate) fn inject(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
     let id: String = author
         .chars()
@@ -120,12 +145,32 @@ pub(crate) fn legacy_inject(source: &str, author: &str, nonce: &str, body: &str)
     )
 }
 
-/// The v1 header `text` opens with and what follows its closing bracket. The fields are read
-/// from the right, so a name that looks like metadata never supplies it.
+/// A durable-owned plain user header or a v1 header, with the bytes after its closing bracket.
+/// V1 metadata is read from the right, so a name that looks like metadata never supplies it.
 pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     let rest = text.strip_prefix(USER)?;
     let close = rest.find(']')?;
     let (inner, after) = (&rest[..close], &rest[close + 1..]);
+    if !inner.contains(SCHEMA) {
+        let (name, author) = inner.strip_suffix(')')?.rsplit_once(" (ID: ")?;
+        if name.is_empty()
+            || author.is_empty()
+            || !author.bytes().all(|b| b.is_ascii_digit())
+            || !history::known(text)
+        {
+            return None;
+        }
+        return Some((
+            Header {
+                name,
+                author,
+                mode: Mode::Inject,
+                source: "",
+                nonce: "",
+            },
+            after,
+        ));
+    }
     let (meta, nonce) = inner.rsplit_once(" · ")?;
     let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
     if nonce.len() != 8 || !nonce.bytes().all(hex) {
@@ -153,14 +198,15 @@ pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     Some((header, after))
 }
 
-/// Whether `text` opens with a v1 header that is not a well-formed new-turn one: an inject
-/// header, or a damaged header no reader may take for a new turn's prompt.
+/// Whether `text` opens with a durable-owned plain frame or an injected or damaged v1 header.
 pub(crate) fn opens_inject(text: &str) -> bool {
     let Some(rest) = text.strip_prefix(USER) else {
         return false;
     };
     let header = rest.split(']').next().unwrap_or_default();
-    header.contains(SCHEMA) && !parse(text).is_some_and(|(header, _)| header.mode == Mode::New)
+    history::known(text)
+        || header.contains(SCHEMA)
+            && !parse(text).is_some_and(|(header, _)| header.mode == Mode::New)
 }
 
 /// Whether screen rows, however Claude wrapped them, open with an inject header; whitespace is
@@ -184,6 +230,13 @@ pub(crate) fn shows_inject<S: AsRef<str>>(rows: &[S]) -> bool {
         .split(']')
         .next()
         .is_some_and(|header| header.contains(SCHEMA_FOLDED))
+        || history::screen_header(
+            &rows
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
 }
 
 /// Whether an inject header shows anywhere in the rows, as the older `[📱 ` check looked for
@@ -194,7 +247,7 @@ pub(crate) fn holds_inject<S: AsRef<str>>(rows: &[S]) -> bool {
         .flat_map(|row| row.as_ref().chars())
         .filter(|c| !c.is_whitespace())
         .collect();
-    folded.contains(SCHEMA_FOLDED)
+    folded.contains(SCHEMA_FOLDED) || history::screen_header(&folded)
 }
 
 /// A row AgentDesk opened as a Discord prompt (`[User:` …), excluding a running turn's input.

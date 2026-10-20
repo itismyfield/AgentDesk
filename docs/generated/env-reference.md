@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 125
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -49,6 +49,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
+| `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |

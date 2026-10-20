@@ -163,7 +163,7 @@ pub(crate) fn fresh_nonce() -> String {
 }
 
 /// The header line keeps the first character off `/`, `!` and `#` and names the person.
-pub(crate) use crate::services::tui_input::human_frame::inject as frame;
+pub(crate) use crate::services::tui_input::human_frame::plain_inject as frame;
 
 fn marker(nonce: &str) -> String {
     format!(" · {nonce}]")
@@ -190,21 +190,60 @@ pub(super) fn transcript_submission(
         return None;
     }
     let marker = marker(nonce);
+    let legacy = expected.is_none_or(|frame| {
+        !frame.starts_with("[User: ")
+            || frame
+                .split(']')
+                .next()
+                .is_some_and(|header| header.contains(" · 📱 v1 mode="))
+    });
+    let registered = expected.is_some_and(|frame| {
+        crate::services::tui_input::human_frame::history::registered(nonce, path, frame)
+    });
     let mut reader = std::io::BufReader::new(file);
     let mut line = Vec::new();
+    let mut position = offset;
     while reader
         .read_until(b'\n', &mut line)
         .is_ok_and(|read| read > 0)
     {
-        // A line without its newline may still be mid-write.
+        let start = position;
+        position += line.len() as u64;
         if line.ends_with(b"\n")
             && let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line)
             && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
-            && text.contains(&marker)
         {
-            return Some(
-                expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
-            );
+            if legacy && text.contains(&marker) {
+                return Some(
+                    expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
+                );
+            }
+            if registered && let Some(expected) = expected {
+                if !has_nontext && receipt::exact(&text, expected) {
+                    let kind = match record.get("type").and_then(|v| v.as_str()) {
+                        Some("queue-operation") => "enqueue",
+                        Some("attachment") => "command",
+                        _ => "user",
+                    };
+                    let row = record.get("uuid").and_then(|v| v.as_str()).or_else(|| {
+                        record
+                            .pointer("/attachment/source_uuid")
+                            .and_then(|v| v.as_str())
+                    });
+                    if let Some(confirmed) =
+                        crate::services::tui_input::human_frame::history::receipt(
+                            nonce, path, start, kind, row, expected,
+                        )
+                    {
+                        return Some(confirmed);
+                    }
+                } else if expected
+                    .split_once(']')
+                    .is_some_and(|(header, _)| text.contains(&format!("{header}]")))
+                {
+                    return Some(false);
+                }
+            }
         }
         line.clear();
     }
@@ -688,6 +727,16 @@ fn inject_locked(
     if pane.ok(&["load-buffer", "-b", &buffer, &path]).is_none() {
         return Report::not_sent(Veto::LoadFailed);
     }
+    if let Err(error) = crate::services::tui_input::human_frame::history::register(
+        ("claude", request.session, request.nonce, request.author),
+        request.transcript,
+        offset,
+        text,
+    ) {
+        tracing::warn!(%error, "busy frame ledger registration failed");
+        let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
+        return Report::not_sent(Veto::LoadFailed);
+    }
     let attempt = Attempt {
         pane,
         g0: state.generation,
@@ -700,7 +749,7 @@ fn inject_locked(
         stash,
         cursor: std::cell::Cell::new(None),
     };
-    match plan {
+    let report = match plan {
         Plan::Direct(drawn) => {
             let mut last = None;
             let outcome = paste_into_empty(&attempt, &drawn, &mut last);
@@ -717,7 +766,14 @@ fn inject_locked(
             report
         }
         Plan::Stash(draft) => stash::run(&attempt, &draft),
+    };
+    if matches!(report.outcome, Outcome::NotSent(_)) {
+        crate::services::tui_input::human_frame::history::withdraw(
+            request.nonce,
+            request.transcript,
+        );
     }
+    report
 }
 
 /// One locked attempt past the pre-paste verdict, with the frame loaded into a tmux buffer.

@@ -29,6 +29,16 @@ fn text() -> String {
     frame("iMessage", "200", "ann", NONCE, "are you there?")
 }
 
+fn v1_text() -> String {
+    crate::services::tui_input::human_frame::inject(
+        "iMessage",
+        "200",
+        "ann",
+        NONCE,
+        "are you there?",
+    )
+}
+
 // Claude draws continuation rows two columns in.
 fn screen(composer: &str, extra: &str) -> String {
     let composer = composer.replace('\n', "\n  ");
@@ -226,32 +236,33 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
     // Evidence before the offset never counts.
-    file.write_all(enqueue_record(&text()).as_bytes()).unwrap();
+    file.write_all(enqueue_record(&v1_text()).as_bytes())
+        .unwrap();
     let offset = fs::metadata(path).unwrap().len();
-    let marker_text = text();
+    let marker_text = v1_text();
     let ignored = [
         serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": marker_text}]}}),
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": marker_text}]}}),
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": marker_text}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": marker_text}),
         serde_json::json!({"type": "queue-operation", "operation": "dequeue"}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "x")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "x")}),
     ];
     for record in ignored {
         writeln!(file, "{}", real(record)).unwrap();
     }
     assert!(!transcript_carries(path, offset, NONCE));
     // A record still being written has no newline yet.
-    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", text())}});
+    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", v1_text())}});
     write!(file, "{}", real(merged)).unwrap();
     assert!(!transcript_carries(path, offset, NONCE));
     writeln!(file).unwrap();
     assert!(transcript_carries(path, offset, NONCE));
 
     for record in [
-        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", text())}}),
-        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": text()}]}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": text()}),
+        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", v1_text())}}),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": v1_text()}]}}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": v1_text()}),
     ] {
         let fresh = Fake::new();
         let offset = fs::metadata(&fresh.transcript).unwrap().len();
@@ -274,7 +285,7 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
 
 #[test]
 fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
-    let expected = text();
+    let expected = v1_text();
     for body in [
         expected.clone(),
         format!("{expected}\noperator draft X"),
@@ -311,7 +322,7 @@ fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
 
 #[test]
 fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
-    let expected = text();
+    let expected = v1_text();
     let text_block = serde_json::json!({"type": "text", "text": expected});
     let mut cases = vec![
         (serde_json::json!(expected), true),
@@ -363,7 +374,7 @@ fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
 
 #[test]
 fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
-    let expected = text();
+    let expected = v1_text();
     let fake = Fake::new();
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
@@ -376,7 +387,7 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
         serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "are you there?")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "are you there?")}),
     ] {
         writeln!(file, "{}", real(record.clone())).unwrap();
         assert_eq!(
@@ -412,7 +423,9 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
 
 #[test]
 fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
-    let framed = frame("iMessage", "200", "a]b\nc", NONCE, "/clear");
+    let framed = crate::services::tui_input::human_frame::inject(
+        "iMessage", "200", "a]b\nc", NONCE, "/clear",
+    );
     let header = "[User: a)b c (ID: 200) · 📱 v1 mode=inject source=iMessage · abcd1234]";
     assert_eq!(framed, format!("{header}\n/clear"));
 }
@@ -423,7 +436,13 @@ fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
 fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
     use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
-    let framed = frame(source, "343742347365974026", "0hbujang", NONCE, "status?");
+    let framed = crate::services::tui_input::human_frame::inject(
+        source,
+        "343742347365974026",
+        "0hbujang",
+        NONCE,
+        "status?",
+    );
     let header = framed.lines().next().unwrap();
     let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
     let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());
@@ -557,10 +576,10 @@ fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
 
 #[test]
 fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
-    let folded = "[Pasted text #1 +1 lines]".to_string();
     // A person's stash beside an empty composer needs no C-s; Claude hands it back on the submit.
     let stashed = format!("{:>58}", "› stashed");
-    for (owned, status) in [(text(), ""), (folded, ""), (text(), stashed.as_str())] {
+    for status in ["", stashed.as_str()] {
+        let owned = text();
         let fake = Fake::new();
         let empty =
             busy_empty().replace(&format!("\n\n{BORDER}"), &format!("\n{status}\n{BORDER}"));
@@ -747,7 +766,7 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_carries(&fake.transcript, 0, NONCE)
+            transcript_submission(&fake.transcript, 0, NONCE, Some(&text())) == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
@@ -772,7 +791,7 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_carries(&fake.transcript, 0, NONCE)
+            transcript_submission(&fake.transcript, 0, NONCE, Some(&text())) == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
@@ -872,4 +891,55 @@ fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
         Outcome::Unconfirmed(Unconfirmed::NotObserved)
     );
     assert_eq!(fake.keys(), (1, 1, 0));
+}
+
+#[test]
+fn identical_plain_frames_need_their_own_fresh_enqueue_and_not_a_late_command_or_user() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    fs::write(&path, "").unwrap();
+    let session = format!("receipt-{}", uuid::Uuid::new_v4());
+    let framed = frame("discord", "720102", "ann", "ca720104", "same words");
+    let register = crate::services::tui_input::human_frame::history::register;
+    register(
+        ("claude", &session, "ca720104", "720102"),
+        &path,
+        0,
+        &framed,
+    )
+    .unwrap();
+    let append = |record: serde_json::Value| {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{record}").unwrap();
+    };
+    append(
+        serde_json::json!({"type":"queue-operation", "operation":"enqueue", "uuid":"enqueue-a", "content":framed}),
+    );
+    assert_eq!(
+        transcript_submission(&path, 0, "ca720104", Some(&framed)),
+        Some(true)
+    );
+    let second = fs::metadata(&path).unwrap().len();
+    register(
+        ("claude", &session, "ca720105", "720102"),
+        &path,
+        second,
+        &framed,
+    )
+    .unwrap();
+    append(
+        serde_json::json!({"type":"attachment", "attachment":{"type":"queued_command", "commandMode":"prompt", "source_uuid":"command-a", "prompt":framed}}),
+    );
+    append(serde_json::json!({"type":"user", "uuid":"late-user-a", "message":{"content":framed}}));
+    assert_eq!(
+        transcript_submission(&path, second, "ca720105", Some(&framed)),
+        None
+    );
+    append(
+        serde_json::json!({"type":"queue-operation", "operation":"enqueue", "uuid":"enqueue-b", "content":framed}),
+    );
+    assert_eq!(
+        transcript_submission(&path, second, "ca720105", Some(&framed)),
+        Some(true)
+    );
 }

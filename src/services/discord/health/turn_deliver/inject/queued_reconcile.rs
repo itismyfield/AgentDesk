@@ -255,7 +255,7 @@ impl Want {
         // A line without its newline may still be mid-write, so the search stops before it.
         while reader.read_until(b'\n', &mut line).ok()? > 0 && line.ends_with(b"\n") {
             let text = std::str::from_utf8(&line).unwrap_or_default();
-            if text.contains(&self.source) {
+            if self.nonce.is_some() || text.contains(&self.source) {
                 first.get_or_insert(offset);
                 seen.extend(self.record(text, offset));
             }
@@ -317,7 +317,18 @@ impl Want {
             .and_then(|at| human_frame::parse(&body[at..]));
         if let Some((header, _)) = header.filter(|(header, _)| header.mode == Mode::Inject) {
             let (name, nonce) = (header.name, header.nonce);
-            let frame = busy_inject::frame(&self.source, &self.author, name, nonce, &self.text);
+            if nonce.is_empty() {
+                let id = self.nonce.as_deref()?;
+                let frame = human_frame::idle(name, &self.author, &self.text);
+                if human_frame::history::registered(id, &self.key.0, &frame)
+                    && human_frame::history::unique_attempt(id, &self.key.0, &frame)
+                    && busy_inject::exact_receipt(body, &frame)
+                {
+                    return Some(id.to_string());
+                }
+                return None;
+            }
+            let frame = human_frame::inject(&self.source, &self.author, name, nonce, &self.text);
             if header.author == self.author && busy_inject::exact_receipt(body, &frame) {
                 return Some(nonce.to_string());
             }

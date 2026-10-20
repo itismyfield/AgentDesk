@@ -140,7 +140,17 @@ async fn s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_
         let (h, b) = (queue[0].message_id, queue[1].message_id);
         fixture.unknown_head().await;
         fixture.forget_attempt();
-        fixture.append(&absorbed(&fixture.wrapped_head(h, NONCE), &now_stamp()));
+        let legacy = crate::services::tui_input::human_frame::inject(
+            &format!("discord:{}:{h}", fixture.channel),
+            "200",
+            AUTHOR_NAME,
+            NONCE,
+            "status?",
+        );
+        fixture.append(&absorbed(
+            &paste_block("b0ac", &legacy, "b0ac"),
+            &now_stamp(),
+        ));
         if !busy {
             let pad = "x".repeat(33 << 20);
             fixture.append(&format!("{{\"type\":\"progress\",\"pad\":\"{pad}\"}}"));
@@ -172,13 +182,20 @@ async fn s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_
             "busy={busy}: H was not typed"
         );
         assert!(fixture.disk()["head_injection"].is_null());
+        until("the reconciliation attempt is reported", || {
+            fixture.reconciled_rows() == 1
+        })
+        .await;
         assert_eq!(fixture.reconciled_rows(), 1, "busy={busy}");
         if busy {
             fixture.slow_check().await;
             until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
             assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
             let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-            assert!(buffer.ends_with("\ndistinct tail B"));
+            assert_eq!(
+                buffer,
+                format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B")
+            );
             fixture.assert_still_busy().await;
         } else {
             // The idle dequeue that follows takes B, and nothing was typed.
@@ -417,6 +434,10 @@ async fn s3_an_overlapping_kick_or_a_failed_write_never_consumes_twice_or_types_
     fixture.kick().await;
     assert_eq!(fixture.terminal(), [h.get()]);
     assert_eq!(fixture.queue().await[0].message_id, b);
+    until("the reconciliation attempt is reported", || {
+        fixture.reconciled_rows() == 1
+    })
+    .await;
     assert_eq!(fixture.reconciled_rows(), 1);
     assert!(fixture.pane.keys().is_empty());
 }
@@ -441,6 +462,10 @@ async fn s3_a_proof_counts_only_in_the_session_its_bound_file_is_named_for_pg() 
             fixture.bind(InjectPane::TRANSCRIPT, Some(SESSION));
             fixture.kick().await;
             assert_eq!(fixture.terminal(), [h.get()]);
+            until("the reconciliation attempt is reported", || {
+                fixture.reconciled_rows() == 1
+            })
+            .await;
             assert_eq!(fixture.reconciled_rows(), 1);
             assert!(fixture.pane.keys().is_empty(), "H was not typed");
         }

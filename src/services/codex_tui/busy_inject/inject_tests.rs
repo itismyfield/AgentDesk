@@ -227,9 +227,18 @@ fn captured_screens_read_as_shown() {
         screen::Composer::Text("person draft text".into())
     );
     let shown = screen::read(&fixture("busy_frame_v1.ansi"));
-    assert_eq!(shown.composer, screen::Composer::Text(frame_text()));
-    assert!(screen::owns(&fixture("busy_frame_v1.ansi"), &frame_text()));
-    let other = frame(SOURCE, AUTHOR, NAME, "0ther000", BODY);
+    assert_eq!(
+        shown.composer,
+        screen::Composer::Text(crate::services::tui_input::human_frame::inject(
+            SOURCE, AUTHOR, NAME, NONCE, BODY
+        ))
+    );
+    assert!(screen::owns(
+        &fixture("busy_frame_v1.ansi"),
+        &crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, NONCE, BODY)
+    ));
+    let other =
+        crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, "0ther000", BODY);
     assert!(!screen::owns(&fixture("busy_frame_v1.ansi"), &other));
     let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
     let shown = screen::read(&fixture("busy_frame.ansi"));
@@ -330,7 +339,21 @@ impl Fake {
     }
 
     fn caps(&self, names: &[&str]) {
-        let shown: Vec<String> = names.iter().map(|name| fixture(name)).collect();
+        let shown: Vec<String> = names
+            .iter()
+            .map(|name| {
+                let shown = fixture(name);
+                if *name == "busy_frame_v1.ansi" {
+                    let old = crate::services::tui_input::human_frame::inject(
+                        SOURCE, AUTHOR, NAME, NONCE, "",
+                    );
+                    let new = crate::services::tui_input::human_frame::idle(NAME, AUTHOR, "");
+                    shown.replace(old.lines().next().unwrap(), &new)
+                } else {
+                    shown
+                }
+            })
+            .collect();
         let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
         self.answers("cap", &refs);
     }
@@ -343,7 +366,13 @@ impl Fake {
     fn accept_into(&self, turn: &str) {
         fs::write(
             self.dir.path().join("on_enter"),
-            item(turn, "UserMessage", &frame_text()),
+            format!("{}\n{}\n",
+                serde_json::json!({"type":"response_item", "payload": {
+                    "type":"message", "role":"user", "content":[{"type":"input_text", "text": frame_text()}],
+                    "internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+                serde_json::json!({"type":"event_msg", "payload": {
+                    "type":"item_completed", "turn_id":turn, "item": {
+                        "type":"UserMessage", "id":"current-frame", "content":[{"type":"text", "text":frame_text()}]}}})),
         )
         .unwrap();
     }
@@ -648,4 +677,102 @@ fn unproven_roots_and_reviews_never_read_as_steerable() {
     assert_eq!(verdict(&foreign), non_steerable("t1"));
     let own = entered + &item("r1", "ExitedReviewMode", "") + &model("t1");
     assert_eq!(verdict(&own), steerable("t1"));
+}
+
+#[test]
+fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    fs::write(&path, "").unwrap();
+    let framed = frame("discord", "720103", "ann", "ca720106", "same words");
+    let session = format!("canon-{}", uuid::Uuid::new_v4());
+    let register = crate::services::tui_input::human_frame::history::register;
+    register(("codex", &session, "ca720106", "720103"), &path, 0, &framed).unwrap();
+    let response = |id: &str| serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"user", "id":id, "content":[{"type":"input_text", "text":framed}], "internal_chat_message_metadata_passthrough":{"turn_id":"target"}}});
+    let completed = |id: &str| serde_json::json!({"type":"event_msg", "payload":{"type":"item_completed", "turn_id":"target", "item":{"type":"UserMessage", "id":id, "content":[{"type":"text", "text":framed}]}}});
+    let legacy_frame = |nonce| {
+        crate::services::tui_input::human_frame::inject(
+            "discord",
+            "720103",
+            "ann",
+            nonce,
+            "same words",
+        )
+    };
+    let mut legacy = response("legacy-row");
+    legacy["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720106"));
+    fs::write(&path, format!("{legacy}\n")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720106"),
+        None,
+        "a current plain attempt cannot be confirmed by its nonce inside an old frame"
+    );
+    let mut unregistered = legacy;
+    unregistered["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720110"));
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{unregistered}").unwrap();
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720110"),
+        Some(Some("target".into())),
+        "an unregistered historical attempt keeps the legacy reader"
+    );
+    let mut opening = response("unused-response-id");
+    opening["payload"].as_object_mut().unwrap().remove("id");
+    writeln!(file, "{opening}").unwrap();
+    assert_eq!(rollout::submitted(&path, 0, "ca720106"), None);
+    writeln!(file, "{}", completed("row-a")).unwrap();
+    drop(file);
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720106"),
+        Some(Some("target".into()))
+    );
+    let second = fs::metadata(&path).unwrap().len();
+    register(
+        ("codex", &session, "ca720107", "720103"),
+        &path,
+        second,
+        &framed,
+    )
+    .unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{}", completed("row-a")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, second, "ca720107"),
+        None,
+        "a late completion keeps the first attempt's native identity"
+    );
+    for has_id in [false, true] {
+        let mut alias = response("response-alias");
+        if !has_id {
+            alias["payload"].as_object_mut().unwrap().remove("id");
+        }
+        writeln!(file, "{alias}").unwrap();
+        assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    }
+    let mut anonymous = completed("row-anonymous");
+    anonymous["payload"]["item"]
+        .as_object_mut()
+        .unwrap()
+        .remove("id");
+    writeln!(file, "{anonymous}").unwrap();
+    assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    for extra in [
+        serde_json::json!({"type":"input_image", "image_url":"unexpected.png"}),
+        serde_json::json!({"type":"tool_result", "text":""}),
+        serde_json::json!({"type":"input_text", "text":null}),
+    ] {
+        let mut mixed = completed("row-mixed");
+        mixed["payload"]["item"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(extra);
+        writeln!(file, "{mixed}").unwrap();
+        assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    }
+    writeln!(file, "{opening}").unwrap();
+    writeln!(file, "{}", completed("row-b")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, second, "ca720107"),
+        Some(Some("target".into()))
+    );
 }

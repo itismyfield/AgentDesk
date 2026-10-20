@@ -1983,6 +1983,7 @@ services::claude_tui::busy_inject::screen_tests::a_flat_paste_is_drawn_in_the_ro
 services::claude_tui::busy_inject::screen_tests::a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits
 services::claude_tui::busy_inject::screen_tests::a_paste_whose_rows_cannot_be_predicted_or_shown_whole_has_no_rows
 services::claude_tui::busy_inject::screen_tests::a_wrapped_paste_is_owned_only_in_the_rows_claude_draws
+services::claude_tui::busy_inject::screen_tests::an_attachment_arrow_wraps_one_cell_without_admitting_other_unmeasured_symbols
 services::claude_tui::busy_inject::screen_tests::only_status_rows_and_a_whole_footer_may_follow_the_box
 services::claude_tui::busy_inject::stash_tests::a_draft_beside_an_occupied_or_unreadable_stash_is_left_alone
 services::claude_tui::busy_inject::stash_tests::a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back
@@ -2020,6 +2021,7 @@ services::claude_tui::busy_inject_tests::an_inject_frame_left_in_the_composer_is
 services::claude_tui::busy_inject_tests::an_owned_draft_is_entered_once_and_confirmed_from_the_transcript
 services::claude_tui::busy_inject_tests::every_pre_paste_veto_leaves_the_pane_untouched
 services::claude_tui::busy_inject_tests::human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete
+services::claude_tui::busy_inject_tests::identical_plain_frames_need_their_own_fresh_enqueue_and_not_a_late_command_or_user
 services::claude_tui::busy_inject_tests::multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript
 services::claude_tui::busy_inject_tests::multiline_folded_paste_keeps_foreign_input_contaminated
 services::claude_tui::busy_inject_tests::scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination
@@ -3049,6 +3051,7 @@ services::codex_tui::busy_inject::inject_tests::captured_turns_read_as_enter_met
 services::codex_tui::busy_inject::inject_tests::draft_queue_and_hidden_composer_are_refused_before_the_paste
 services::codex_tui::busy_inject::inject_tests::one_enter_and_the_rollout_names_the_turn_it_joined
 services::codex_tui::busy_inject::inject_tests::only_the_rollout_confirms_and_enter_is_never_repeated
+services::codex_tui::busy_inject::inject_tests::plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt
 services::codex_tui::busy_inject::inject_tests::the_ledger_brackets_the_paste
 services::codex_tui::busy_inject::inject_tests::the_nonce_is_confirmed_only_by_a_later_user_record
 services::codex_tui::busy_inject::inject_tests::the_turn_is_rechecked_before_the_paste
@@ -4413,6 +4416,11 @@ services::discord::health::transcript_binding_stall::tests::a_superseded_binding
 services::discord::health::transcript_binding_stall::tests::a_transcript_that_grew_recently_is_healthy_even_mid_rotation
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_mended_head_clears_pending_marker_without_another_paste_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reuse_keeps_foreign_merged_rich_and_disabled_heads_queued_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::confirmed_source_blocks_late_pending_rest_marker
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
@@ -4424,7 +4432,9 @@ services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_head
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_record_still_being_written_or_a_replaced_file_proves_nothing_yet
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_recorded_paste_is_proven_by_its_own_nonce_after_its_offset_in_its_own_file
+services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_recorded_plain_frame_is_proven_only_with_its_durable_identity
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_source
+services::discord::health::turn_deliver::inject::queued_reconcile::tests::identical_plain_history_cannot_use_an_earlier_attempts_delayed_removal_chain
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::the_proof_session_is_the_one_the_transcript_file_is_named_for
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
@@ -6776,8 +6786,11 @@ services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknow
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_queue_error_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_recent_resend_duplicate_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::silences_already_queued_source_id_duplicate_notice
+services::discord::router::intake_gate::busy_inject::payload_tests::attachment_only_input_has_no_empty_trailing_chunk_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::bundle_handback_preserves_the_original_durable_reference_and_source_count
+services::discord::router::intake_gate::busy_inject::payload_tests::excess_upload_records_fail_closed_before_injection
 services::discord::router::intake_gate::busy_inject::payload_tests::failed_download_existing_error_never_reaches_injection
+services::discord::router::intake_gate::busy_inject::payload_tests::idle_bundle_precheck_never_reads_storage_or_retains_files_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::incomplete_uploads_and_unresolved_voice_never_attempt_pane_input
 services::discord::router::intake_gate::busy_inject::payload_tests::multiline_input_chunks_match_normal_turn_and_confirm_native_padding_pg
 services::discord::router::intake_gate::busy_inject::payload_tests::multiple_attachment_input_chunks_match_normal_turn_and_confirm_pg
@@ -7157,6 +7170,7 @@ services::discord::router::message_handler::session_strategy_lifecycle_tests::ve
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_restores_dequeued_head_without_reversing_fifo_4795
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_treats_pending_or_active_source_as_already_processing_4797
 services::discord::router::message_handler::turn_context::tests::input_chunks_preserve_plain_reply_and_upload_order
+services::discord::router::message_handler::turn_context::tests::normal_attachment_only_turn_keeps_its_nonempty_author_chunk
 services::discord::router::message_handler::turn_context::tests::normal_turn_context_preserves_existing_author_and_context_bytes
 services::discord::router::message_handler::turn_lifecycle::tests::text_intake_turn_start_waits_behind_queued_inbound
 services::discord::router::message_handler::turn_mark_admission_tests::fresh_codex_intake_marks_before_provider_input
@@ -12445,8 +12459,12 @@ services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_current_thread_runt
 services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_current_thread_timeout_kills_and_reaps
 services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_pending_drop_still_runs_deadline_cleanup
 services::tui_input::bounded_tmux_tests::bounded_tmux_timeout_kills_descendants_before_reaping_live_or_exited_leader
+services::tui_input::human_frame::history::tests::codex_receipt_identity_selects_each_identical_attempt_and_replays_its_own_entry
+services::tui_input::human_frame::history::tests::durable_frame_replay_is_injected_and_headerless_human_is_not
+services::tui_input::human_frame::history::tests::unreadable_ledger_defers_plain_user_frames_and_leaves_headerless_humans_alone
 services::tui_input::human_frame_tests::a_name_or_source_cannot_forge_the_header
 services::tui_input::human_frame_tests::an_inject_frame_opens_like_the_idle_header_and_reads_back
+services::tui_input::human_frame_tests::busy_header_bytes_equal_idle_for_one_line_and_multiline
 services::tui_input::human_frame_tests::only_a_whole_v1_header_parses_and_a_damaged_one_stays_inject
 services::tui_input::human_frame_tests::pane_line_readers_keep_an_inject_line_a_draft
 services::tui_input::input_key_tests::discord_key_namespace_boundaries

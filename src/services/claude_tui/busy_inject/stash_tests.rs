@@ -42,13 +42,14 @@ mod environment_tests {
             tui.put("attached", "4");
             let session = tui.session();
             let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+            let nonce = tui.next_nonce();
             let request = Request {
                 session: &session,
                 transcript: &tui.transcript,
                 source: "iMessage",
                 author: "200",
                 name: "ann",
-                nonce: NONCE,
+                nonce: &nonce,
                 text: TEXT,
             };
             let got = inject_report(&pane, &request, channel, &FAST);
@@ -199,7 +200,7 @@ capture-pane)
   esac
   [ -f "$d/human.$n" ] && . "$d/human.$n"
   ;;
-load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
+load-buffer) for last do :; done; cp "$last" "$d/buffer"; printf '%s\n' "${4#agentdesk-busy-inject-}" > "$d/nonce" ;;
 if-shell)
   a=$(cat "$d/attached"); l=$(cat "$d/last"); ok=1
   expected=$(printf '%s' "$6" | sed -n 's/.*session_attached},\([0-9]*\)}.*/\1/p')
@@ -298,16 +299,23 @@ impl Tui {
         format!("stash-{name}")
     }
 
+    fn next_nonce(&self) -> String {
+        let nonce = fresh_nonce();
+        self.put("attempt.nonce", &nonce);
+        nonce
+    }
+
     fn run_text(&self, text: &str, timing: &Timing) -> Report {
         let session = self.session();
         let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
+        let nonce = self.next_nonce();
         let request = Request {
             session: &session,
             transcript: &self.transcript,
             source: "iMessage",
             author: "200",
             name: "ann",
-            nonce: NONCE,
+            nonce: &nonce,
             text,
         };
         inject_gated(&pane, &request, timing, true)
@@ -335,7 +343,18 @@ impl Tui {
     }
 
     fn taken(&self) -> bool {
-        transcript_carries(&self.transcript, 0, NONCE)
+        let Some(frame) = self.get("buffer") else {
+            return false;
+        };
+        fs::read_to_string(&self.transcript)
+            .unwrap()
+            .lines()
+            .skip(2)
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|record| human_input_text(&record, false))
+            .filter(|(text, _)| receipt::exact(text, &frame))
+            .count()
+            == 1
     }
 
     /// Every submission the fake recorded, as the composer held it at Enter.
@@ -409,13 +428,14 @@ fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
     tui.put("attached", "4");
     let session = tui.session();
     let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+    let nonce = tui.next_nonce();
     let request = Request {
         session: &session,
         transcript: &tui.transcript,
         source: "iMessage",
         author: "200",
         name: "ann",
-        nonce: NONCE,
+        nonce: &nonce,
         text: TEXT,
     };
     assert_eq!(
@@ -884,7 +904,7 @@ fn a_frame_that_would_fold_or_wrap_leaves_the_draft_alone() {
     let unowned = Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
     assert_eq!(tui.run(), report(unowned, DraftState::Unknown));
     assert_eq!(tui.applied(), ["C-s", "paste"]);
-    let folded = "[Pasted text #1 +1 lines]".to_string();
+    let folded = format!("[Pasted text #1 +{} lines]", framed().matches('\n').count());
     assert_eq!(tui.drafts(), (folded, Some("human draft A".to_string())));
 }
 

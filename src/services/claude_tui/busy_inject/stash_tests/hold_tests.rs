@@ -189,13 +189,14 @@ fn relay(tui: &Tui, text: &str, blind: bool) -> (StatusCode, serde_json::Value) 
 fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
     let session = tui.session();
     let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+    let nonce = tui.next_nonce();
     let request = Request {
         session: &session,
         transcript: &tui.transcript,
         source: "iMessage",
         author: "200",
         name: "ann",
-        nonce: NONCE,
+        nonce: &nonce,
         text: TEXT,
     };
     match listed {
@@ -364,6 +365,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
     let tui = Tui::new("human draft A");
     let restored = report(Outcome::Injected, DraftState::RestoredObserved);
     assert_eq!(tui.run(), restored);
+    let first_nonce = tui.get("attempt.nonce").unwrap();
     tui.put("head", IDLE_HEAD);
     let (ended, calls) = warm_follow_up(&tui, &tui.capture());
     assert_requeued(&ended, &calls);
@@ -373,6 +375,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 
     tui.put("head", WORKING_HEAD);
     assert_eq!(tui.run_text("again", &FAST), restored);
+    assert_ne!(tui.get("attempt.nonce").unwrap(), first_nonce);
     let again = frame("iMessage", "200", "ann", NONCE, "again");
     assert_eq!(tui.records(), [framed(), again]);
     assert_eq!(tui.drafts(), ("human draft A".to_string(), None));

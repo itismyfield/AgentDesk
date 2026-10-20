@@ -361,6 +361,7 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/turn_deliver/inject/catch_up_race_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'

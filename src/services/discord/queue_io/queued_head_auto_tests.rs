@@ -47,7 +47,16 @@ impl Fixture {
 
     /// Bodies the pane's transcript acknowledged, in order.
     fn receipts(&self) -> Vec<String> {
-        let body = |record: String| record.split_once('\n').unwrap().1.to_string();
+        let body = |record: String| {
+            let (header, after) = crate::services::tui_input::human_frame::parse(&record)
+                .expect("a receipt contains the owned author header");
+            assert_eq!((header.name, header.author), (AUTHOR_NAME, "200"));
+            after
+                .strip_prefix(' ')
+                .or_else(|| after.strip_prefix('\n'))
+                .expect("one header/body separator")
+                .to_string()
+        };
         self.pane.records().into_iter().map(body).collect()
     }
 

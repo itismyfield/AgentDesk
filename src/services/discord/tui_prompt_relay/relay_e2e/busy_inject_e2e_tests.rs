@@ -178,18 +178,17 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
         let buffer = busy.pane.read("buffer").unwrap_or_default();
         busy.rt.finish().await;
         let shown = nick.or(global_name).unwrap();
-        let header = format!("[User: {shown} (ID: {USER_ID}) · 📱 v1 mode=inject source=");
-        assert!(buffer.starts_with(&header), "{buffer}");
+        assert_eq!(buffer, format!("[User: {shown} (ID: {USER_ID})] status?"));
     }
     let busy = busy().await;
     let rt = &busy.rt;
     let message = fresh_id();
     rt.h.deliver_user_message(message, "status?").await.unwrap();
-    let header = format!(
-        "[User: queue-user (ID: {USER_ID}) · 📱 v1 mode=inject source=discord:{CHANNEL_ID}:{message} · "
-    );
     let buffer = busy.pane.read("buffer").unwrap_or_default();
-    assert!(buffer.starts_with(&header), "{buffer}");
+    assert_eq!(
+        buffer,
+        format!("[User: queue-user (ID: {USER_ID})] status?")
+    );
     let observed = (
         busy.pane.keys(),
         rt.marks(message),
