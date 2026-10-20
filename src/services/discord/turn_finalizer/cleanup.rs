@@ -455,8 +455,7 @@ pub(super) async fn already_finalized_active_state(
         capture.publish_release(shared, key);
         capture.finish
     } else {
-        // No episode evidence: release only the same id's token; its row is never adopted.
-        super::episode::warn_no_episode_evidence(provider, key, "already_finalized");
+        super::episode::clear_same_id_row(provider, key);
         super::super::mailbox_finish_turn_if_matches(
             shared,
             provider,

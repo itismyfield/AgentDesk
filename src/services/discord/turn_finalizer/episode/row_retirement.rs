@@ -170,6 +170,32 @@ pub(in crate::services::discord::turn_finalizer) fn warn_no_episode_evidence(
     );
 }
 
+/// Without episode evidence the compensation keeps its same-id row clear; name a row it kept.
+pub(in crate::services::discord::turn_finalizer) fn clear_same_id_row(
+    provider: &ProviderKind,
+    key: TurnKey,
+) {
+    let channel_id = key.channel_id.get();
+    let outcome = super::super::super::inflight::clear_inflight_state_if_matches(
+        provider,
+        channel_id,
+        key.user_msg_id,
+    );
+    if !matches!(
+        outcome,
+        GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing
+    ) {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id,
+            user_msg_id = key.user_msg_id,
+            gate = "cas",
+            reason = ?outcome,
+            "episode_row_cleanup_skipped: same-id clear without episode evidence kept the row"
+        );
+    }
+}
+
 fn nonce_fingerprint(nonce: Option<&str>) -> String {
     let digest = episode_fingerprint(nonce);
     digest[..4]

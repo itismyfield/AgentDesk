@@ -5,7 +5,7 @@ mod row_retirement;
 #[cfg(test)]
 mod row_retirement_tests;
 pub(in crate::services::discord) use row_retirement::RuntimeWitness;
-pub(super) use row_retirement::warn_no_episode_evidence;
+pub(super) use row_retirement::{clear_same_id_row, warn_no_episode_evidence};
 
 pub(super) fn episode_fingerprint(nonce: Option<&str>) -> [u8; 32] {
     nonce
