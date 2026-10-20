@@ -2,8 +2,10 @@
 use super::*;
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
 
-// A new head retains the prior wake timestamp; allow the normal wake and two observation ticks.
+// After observed A cleanup, allow two actual recovery wakes and two ticks of scheduling slack.
+const RECOVERY_WAKE_LIMIT: usize = 2;
 const RECOVERY_LIMIT: Duration = LiveSupervisor::SUPERVISOR_WAKE_EVERY
+    .saturating_mul(RECOVERY_WAKE_LIMIT as u32)
     .saturating_add(LiveSupervisor::SUPERVISOR_TICK.saturating_mul(2));
 const RECOVERY_TICK_LIMIT: usize =
     (RECOVERY_LIMIT.as_nanos() / LiveSupervisor::SUPERVISOR_TICK.as_nanos()) as usize + 1;
@@ -138,6 +140,17 @@ fn log_has(logs: &LogSink, message: &str, reason: &str) -> bool {
         .any(|line| line.contains(message) && line.contains(reason))
 }
 
+fn superseded_holds(logs: &LogSink, offset: usize) -> usize {
+    let bytes = logs.0.lock().unwrap_or_else(|error| error.into_inner());
+    String::from_utf8_lossy(&bytes[offset..])
+        .lines()
+        .filter(|line| {
+            line.contains("[turn_presence] dequeue_held")
+                && (line.contains("reason=\"superseded\"") || line.contains("reason=superseded"))
+        })
+        .count()
+}
+
 struct FailureLogs(LogSink);
 
 impl Drop for FailureLogs {
@@ -145,6 +158,7 @@ impl Drop for FailureLogs {
         if !std::thread::panicking() {
             return;
         }
+        eprintln!("A2_R8_SUPERSEDED holds={}", superseded_holds(&self.0, 0));
         let bytes = self.0.0.lock().unwrap_or_else(|error| error.into_inner());
         let markers = [
             "[turn_presence] dequeue_held",
@@ -581,9 +595,14 @@ impl Drop for PeriodicCompletionFence {
     }
 }
 
+type LateRecoveryFence =
+    Arc<std::sync::Mutex<Option<(tokio::time::Instant, tokio::sync::OwnedMutexGuard<()>)>>>;
+
 struct RecoveryDriver {
     task: Option<tokio::task::JoinHandle<()>>,
     ticks: Arc<AtomicUsize>,
+    wakes: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    late_release: LateRecoveryFence,
 }
 
 impl RecoveryDriver {
@@ -592,7 +611,12 @@ impl RecoveryDriver {
         let ticks = Arc::new(AtomicUsize::new(1));
         let counted = ticks.clone();
         let first_wake = supervisor.last_kick_at().unwrap();
+        let wakes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = wakes.clone();
+        let late_release: LateRecoveryFence = Arc::new(std::sync::Mutex::new(None));
+        let delayed = late_release.clone();
         let task = tokio::spawn(async move {
+            let mut previous = first_wake;
             let period = LiveSupervisor::SUPERVISOR_TICK;
             let mut interval =
                 tokio::time::interval_at(tokio::time::Instant::now() + period, period);
@@ -603,13 +627,50 @@ impl RecoveryDriver {
                 if !wake_mutant("a2-periodic-wake-removed") {
                     supervisor.tick().await;
                 }
+                if let Some(at) = supervisor.last_kick_at().filter(|at| *at != previous) {
+                    previous = at;
+                    let mut seen = observed.lock().unwrap();
+                    seen.push(at);
+                    let mut release = delayed.lock().unwrap();
+                    if release.as_ref().is_some_and(|(anchor, _)| {
+                        seen.iter().filter(|wake| **wake >= *anchor).count() > RECOVERY_WAKE_LIMIT
+                    }) {
+                        drop(release.take());
+                        eprintln!("A2_R8_LATE_B release_at_wake=3 native_kick=true");
+                    }
+                }
                 trace_supervisor_tick(&supervisor, tick, first_wake);
             }
         });
         Self {
             task: Some(task),
             ticks,
+            wakes,
+            late_release,
         }
+    }
+
+    fn wakes_after(&self, anchor: tokio::time::Instant) -> usize {
+        self.wakes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|wake| **wake >= anchor)
+            .count()
+    }
+
+    fn delay_until_third_wake(
+        &self,
+        anchor: tokio::time::Instant,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) {
+        assert!(
+            self.late_release
+                .lock()
+                .unwrap()
+                .replace((anchor, guard))
+                .is_none()
+        );
     }
 
     async fn stop(mut self) -> usize {
@@ -754,9 +815,50 @@ async fn supervisor_drains_pair(
     if let Some(fence) = completion_fence.as_mut() {
         fence.release_after_a(fixture, logs, b).await;
     }
-    let remaining =
-        (first_wake + RECOVERY_LIMIT).saturating_duration_since(tokio::time::Instant::now());
-    ledger.push(second.wait_with_limit(fixture, b, remaining).await);
+    until(async || {
+        inflight::load_inflight_state_read_only_result(&fixture.provider, fixture.rig.channel.get())
+            .is_ok_and(|row| row.is_none_or(|row| row.user_msg_id == b))
+    })
+    .await;
+    let a_cleared = tokio::time::Instant::now();
+    let ticks_at_cleanup = driver.ticks.load(Ordering::SeqCst);
+    if wake_mutant("a2-unbounded-recovery") {
+        let guard = fixture
+            .rig
+            .shared
+            .session_transition_lock(fixture.rig.channel)
+            .lock_owned()
+            .await;
+        driver.delay_until_third_wake(a_cleared, guard);
+        let thread = (&mut second.entered)
+            .await
+            .expect("the delayed B provider must actually enter");
+        assert_ne!(thread, std::thread::current().id());
+        assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
+        let row = inflight::load_inflight_state_read_only_result(
+            &fixture.provider,
+            fixture.rig.channel.get(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.user_msg_id, b);
+        ledger.push(row.user_msg_id);
+    } else {
+        let remaining =
+            (a_cleared + RECOVERY_LIMIT).saturating_duration_since(tokio::time::Instant::now());
+        ledger.push(second.wait_with_limit(fixture, b, remaining).await);
+    }
+    let recovery_wakes = driver.wakes_after(a_cleared);
+    let a_cleared_to_b = a_cleared.elapsed();
+    eprintln!(
+        "A2_R8_WAKE_BOUND actual_b_entered=1 recovery_wakes={recovery_wakes} limit={RECOVERY_WAKE_LIMIT} a_cleared_to_b_ms={}",
+        a_cleared_to_b.as_millis()
+    );
+    assert!(
+        recovery_wakes <= RECOVERY_WAKE_LIMIT,
+        "B must enter within two actual supervisor recovery wakes after observed A cleanup: {recovery_wakes}"
+    );
+    assert!(a_cleared_to_b <= RECOVERY_LIMIT);
     let carriers = observed_carriers(logs, fixture.rig.channel, completion_offset);
     let direct = String::from_utf8_lossy(&logs.0.lock().unwrap()[completion_offset..])
         .contains("Processing next queued command");
@@ -801,10 +903,10 @@ async fn supervisor_drains_pair(
     if periodic_only {
         assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
         assert_eq!(supervisor.woken_head(), Some(b));
-        assert_eq!(supervisor.state()["kickoffs_total"], 2);
+        assert_eq!(supervisor.state()["kickoffs_total"], 1 + recovery_wakes);
+        assert!((1..=RECOVERY_WAKE_LIMIT).contains(&recovery_wakes));
         assert_eq!(supervisor.state()["generation"], baseline["generation"]);
     }
-    assert!(b_after_a_kick <= RECOVERY_LIMIT);
     assert!(
         kick_observed_after(
             logs,
@@ -824,21 +926,23 @@ async fn supervisor_drains_pair(
     second.finish();
     fixture.assert_finished().await;
     let recovery_ticks = driver.stop().await;
+    let cleanup_ticks = recovery_ticks.saturating_sub(ticks_at_cleanup);
     let drained = began.elapsed();
+    let recovery_drain = a_cleared.elapsed();
     assert!(
-        drained <= RECOVERY_LIMIT,
-        "{label}: final drain exceeded the supervisor wake interval and two ticks: {drained:?}"
+        recovery_drain <= RECOVERY_LIMIT,
+        "{label}: drain exceeded two recovery wakes and two ticks after observed A cleanup: {recovery_drain:?}"
     );
     assert!(
-        recovery_ticks <= RECOVERY_TICK_LIMIT,
-        "{label}: recovery used {recovery_ticks} real ticks"
+        cleanup_ticks <= RECOVERY_TICK_LIMIT,
+        "{label}: recovery used {cleanup_ticks} real ticks after observed A cleanup"
     );
     assert_eq!(ledger, [a, b]);
     assert_eq!(ledger.iter().filter(|id| **id == a).count(), 1);
     assert_eq!(ledger.iter().filter(|id| **id == b).count(), 1);
     assert_eq!(guard.0.load(Ordering::SeqCst), 0);
     eprintln!(
-        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks={} recovery_ticks={recovery_ticks} tick_ms={} supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={}",
+        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks={} recovery_ticks={recovery_ticks} tick_ms={} supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={} recovery_drain_ms={}",
         guard.0.load(Ordering::SeqCst),
         1 + recovery_ticks,
         LiveSupervisor::SUPERVISOR_TICK.as_millis(),
@@ -846,15 +950,19 @@ async fn supervisor_drains_pair(
         first_entry.as_millis(),
         drained.as_millis(),
         RECOVERY_LIMIT.as_millis(),
+        recovery_drain.as_millis(),
     );
     eprintln!(
-        "A2_S3_B_RECOVERY case={label} a_entered=1 no_early_b=1 wake_every_ms={} tick_ms={} bound_ms={} b_after_a_kick_ms={} b_entry_ms={} periodic_wake_ms={}",
+        "A2_S3_B_RECOVERY case={label} a_entered=1 no_early_b=1 wake_every_ms={} tick_ms={} bound_ms={} b_after_a_kick_ms={} b_entry_ms={} periodic_wake_ms={} a_cleared_to_b_ms={} recovery_wakes={recovery_wakes} recovery_wake_limit={RECOVERY_WAKE_LIMIT} superseded_holds={} recovery_superseded_holds={}",
         LiveSupervisor::SUPERVISOR_WAKE_EVERY.as_millis(),
         LiveSupervisor::SUPERVISOR_TICK.as_millis(),
         RECOVERY_LIMIT.as_millis(),
         b_after_a_kick.as_millis(),
         b_entry.as_millis(),
         periodic_wake.as_millis(),
+        a_cleared_to_b.as_millis(),
+        superseded_holds(logs, 0),
+        superseded_holds(logs, completion_offset),
     );
 }
 
