@@ -13,6 +13,8 @@ use std::sync::{Arc, OnceLock};
 use crate::server::routes::AppState;
 use crate::services::git::GitCommand;
 
+pub(crate) mod auto_queue_add;
+
 pub(crate) fn run_async<F>(future: F) -> Result<(), String>
 where
     F: Future<Output = Result<(), String>>,
@@ -1356,34 +1358,34 @@ pub(crate) async fn cmd_auto_queue_add(
         };
 
         if let Some(existing_run_id) = existing_run_id {
-            let run_status = sqlx::query_scalar::<_, String>(
-                "SELECT status FROM auto_queue_runs WHERE id = $1",
-            )
-            .bind(&existing_run_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("load postgres auto-queue run status: {e}"))?;
+            let run_status =
+                sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+                    .bind(&existing_run_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| format!("load postgres auto-queue run status: {e}"))?;
             if run_id.is_some() || matches!(run_status.as_deref(), Some("active")) {
-                let issue_number = issue_number.ok_or_else(|| {
-                    format!("card '{card_id}' has no linked GitHub issue number")
-                })?;
-                let (status, Json(mut value)) = match crate::server::routes::auto_queue::add_run_entry(
-                    State(state.clone()),
-                    Path(existing_run_id.clone()),
-                    Json(crate::server::routes::auto_queue::AddRunEntryBody {
-                        issue_number,
-                        batch_phase: Some(phase.unwrap_or(0)),
-                        thread_group,
-                    }),
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => error.into_json_response(),
-                };
+                let issue_number = issue_number
+                    .ok_or_else(|| format!("card '{card_id}' has no linked GitHub issue number"))?;
+                let (status, Json(mut value)) =
+                    match crate::server::routes::auto_queue::add_run_entry(
+                        State(state.clone()),
+                        Path(existing_run_id.clone()),
+                        Json(crate::server::routes::auto_queue::AddRunEntryBody {
+                            issue_number,
+                            batch_phase: Some(phase.unwrap_or(0)),
+                            thread_group,
+                        }),
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => error.into_json_response(),
+                    };
                 if !status.is_success() {
-                    return Err(extract_error_message(&value)
-                        .unwrap_or_else(|| format!("auto-queue add failed ({})", status.as_u16())));
+                    return Err(extract_error_message(&value).unwrap_or_else(|| {
+                        format!("auto-queue add failed ({})", status.as_u16())
+                    }));
                 }
                 if let Some(priority_rank) = priority {
                     if let Some(entry_id) = value
@@ -1410,9 +1412,14 @@ pub(crate) async fn cmd_auto_queue_add(
                         if update_status.is_success() {
                             value = update_value;
                         } else {
-                            return Err(extract_error_message(&update_value).unwrap_or_else(|| {
-                                format!("auto-queue priority update failed ({})", update_status.as_u16())
-                            }));
+                            return Err(extract_error_message(&update_value).unwrap_or_else(
+                                || {
+                                    format!(
+                                        "auto-queue priority update failed ({})",
+                                        update_status.as_u16()
+                                    )
+                                },
+                            ));
                         }
                     }
                 }
@@ -1420,103 +1427,19 @@ pub(crate) async fn cmd_auto_queue_add(
             }
         }
 
-        let run_id = {
-            let created_run_id = uuid::Uuid::new_v4().to_string();
-            sqlx::query(
-                "INSERT INTO auto_queue_runs (
-                     id, repo, agent_id, status, ai_model, ai_rationale, max_concurrent_threads, thread_group_count
-                 )
-                 VALUES ($1, $2, $3, 'pending', 'manual-cli', 'agentdesk auto-queue add', 1, 1)",
-            )
-            .bind(&created_run_id)
-            .bind(&repo_id)
-            .bind(&effective_agent)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("create postgres auto-queue run: {e}"))?;
-            created_run_id
-        };
-
-        let already_queued = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                 SELECT 1 FROM auto_queue_entries
-                 WHERE run_id = $1 AND kanban_card_id = $2 AND status IN ('pending', 'dispatched')
-             )",
+        auto_queue_add::add_card_to_new_run_pg(
+            pool,
+            &auto_queue_add::NewRunEntry {
+                repo_id: repo_id.as_deref(),
+                agent_id: &effective_agent,
+                card_id: &card_id,
+                card_status: &card_status,
+                priority,
+                thread_group,
+                phase,
+            },
         )
-        .bind(&run_id)
-        .bind(&card_id)
-        .fetch_one(pool)
         .await
-        .unwrap_or(false);
-        if already_queued {
-            return Ok(json!({
-                "ok": true,
-                "already_queued": true,
-                "run_id": run_id,
-                "card_id": card_id,
-            }));
-        }
-
-        let has_active_dispatch = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                 SELECT 1 FROM task_dispatches
-                 WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')
-             )",
-        )
-        .bind(&card_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
-        if has_active_dispatch {
-            return Err(format!(
-                "card {card_id} already has an active dispatch and cannot be queued again"
-            ));
-        }
-
-        let effective_thread_group = thread_group.unwrap_or(0);
-        let next_rank = if let Some(priority) = priority {
-            priority
-        } else {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT (COALESCE(MAX(priority_rank), -1) + 1)::BIGINT
-                 FROM auto_queue_entries
-                 WHERE run_id = $1
-                   AND COALESCE(thread_group, 0) = $2",
-            )
-            .bind(&run_id)
-            .bind(effective_thread_group)
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0)
-        };
-        let entry_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO auto_queue_entries (
-                 id, run_id, kanban_card_id, agent_id, priority_rank, thread_group, batch_phase, reason
-             )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(&entry_id)
-        .bind(&run_id)
-        .bind(&card_id)
-        .bind(&effective_agent)
-        .bind(next_rank)
-        .bind(effective_thread_group)
-        .bind(phase.unwrap_or(0))
-        .bind(format!("manual CLI add from status {card_status}"))
-        .execute(pool)
-        .await
-        .map_err(|e| format!("insert postgres auto-queue entry: {e}"))?;
-
-        Ok(json!({
-            "ok": true,
-            "run_id": run_id,
-            "entry_id": entry_id,
-            "card_id": card_id,
-            "priority_rank": next_rank,
-            "thread_group": effective_thread_group,
-            "batch_phase": phase.unwrap_or(0),
-        }))
     })
     .await
 }

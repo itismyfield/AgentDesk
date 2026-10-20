@@ -18,7 +18,7 @@ fn migrate_apply_keeps_disk_secrets_and_adds_the_imported_agent() {
     }]}});
     std::fs::write(source.join("openclaw.json"), openclaw.to_string()).unwrap();
 
-    cmd_migrate_openclaw(OpenClawMigrateArgs {
+    let mut args = OpenClawMigrateArgs {
         root_path: Some(source.display().to_string()),
         agentdesk_root: Some(runtime_root.display().to_string()),
         agent_ids: vec!["alpha".to_string()],
@@ -39,10 +39,25 @@ fn migrate_apply_keeps_disk_secrets_and_adds_the_imported_agent() {
         no_prompts: true,
         tool_policy_mode: "report".to_string(),
         discord_token_mode: "report".to_string(),
-    })
-    .unwrap();
+    };
+    let resolved =
+        resolve_source_root(args.root_path.as_deref(), temp.path(), Some(&runtime_root)).unwrap();
+    let mut overwrite_plan = build_import_plan(&resolved, &args, Some(&runtime_root)).unwrap();
+    cmd_migrate_openclaw(args.clone()).unwrap();
 
     assert_secrets_on_disk(&yaml_path);
-    let saved = crate::config::load_from_path(&yaml_path).unwrap();
+    let mut saved = crate::config::load_from_path(&yaml_path).unwrap();
     assert!(saved.agents.iter().any(|agent| agent.name == "Alpha"));
+    saved.agents[0].memory_group = Some("existing-group".into());
+    saved.agents[0].name = "Changed before overwrite".into();
+    crate::config::save_to_path(&yaml_path, &saved).unwrap();
+    args.overwrite = true;
+    overwrite_plan.audit_root = Some(temp.path().join("overwrite-audit").display().to_string());
+    apply_import_plan(&overwrite_plan, &resolved, &args, &runtime_root).unwrap();
+    let overwritten = crate::config::load_from_path(&yaml_path).unwrap();
+    assert!(
+        overwritten.agents[0].memory_group.is_none(),
+        "overwrite replaces optional fields with imported defaults"
+    );
+    assert_secrets_on_disk(&yaml_path);
 }

@@ -10,13 +10,14 @@ use super::*;
 mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
-
+mod legacy_summary;
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
 pub(super) async fn run_completion_postlude(
     ctx: CompletionPostludeContext,
     state: CompletionPostludeState,
 ) {
+    let summary = legacy_summary::Completion::capture(&ctx, &state);
     let shared_owned = ctx.shared_owned;
     let gateway = ctx.gateway;
     let channel_id = ctx.channel_id;
@@ -98,21 +99,10 @@ pub(super) async fn run_completion_postlude(
     .requiring_captured_actor(is_external_input_tui_direct);
     let completion_r0 = ownership.read("completion_r0").await;
     let mut status_panel_completion_committed = true;
-    if status_panel_terminal_committed
-        && bridge_should_emit_completion
-        && (single_message_panel_footer_mode
-            || bridge_should_complete_separate_status_panel(
-                shared_owned.ui.status_panel_v2_enabled,
-            ))
-    {
-        // #2849: before rendering the completed panel, backfill exact final
-        // context usage when the live StatusUpdates never carried it (e.g.
-        // silent/background turns). resolve_exact_completion_usage prefers
-        // the live accumulated snapshot, else re-parses the output JSONL the
-        // same way persisted analytics does, and returns None when no exact
-        // usage exists — so we never fabricate or reuse stale numbers.
-        // It is a no-op for the same values and gated to context_window_tokens != 0.
-        if completion_r0.permits_channel_effects() && shared_owned.ui.status_panel_v2_enabled {
+    if status_panel_terminal_committed && bridge_should_emit_completion {
+        // Exact usage also feeds the summary when no panel is rendered.
+        // Missing usage is not filled from an earlier turn.
+        if completion_r0.permits_channel_effects() {
             let context_provider_session_id = new_raw_provider_session_id
                 .as_deref()
                 .or(new_session_id.as_deref())
@@ -145,7 +135,7 @@ pub(super) async fn run_completion_postlude(
         let indicator =
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
         let (terminal_projection_settled, committed) =
-            followup_requeue::TerminalProjectionSettled::after(
+            followup_requeue::TerminalProjectionSettled::after(summary.complete(
                 complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
                     gateway.as_ref(),
@@ -165,7 +155,13 @@ pub(super) async fn run_completion_postlude(
                     completion_r0.permits_channel_effects(),
                     provider_failure,
                 ),
-            )
+                async {
+                    ownership
+                        .read("completion_summary")
+                        .await
+                        .permits_channel_effects()
+                },
+            ))
             .await;
         status_panel_completion_committed = committed;
         terminal_projection_settled.release_completion_admission(

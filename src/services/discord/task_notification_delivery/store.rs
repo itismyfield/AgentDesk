@@ -1,6 +1,8 @@
 //! PostgreSQL-backed task-card state and lease authority (#4055).
 
 mod card_claim;
+mod retired_metadata;
+pub(super) use retired_metadata::claim_retired_metadata;
 mod missing_card_replacement;
 mod response_chunks;
 mod response_fence;
@@ -24,8 +26,10 @@ use retention::cleanup_old_rows_pg;
 #[cfg(test)]
 pub(super) use retention::cleanup_old_rows_pg_checked;
 
+#[cfg(test)]
+pub(super) use missing_card_replacement::claim_missing_card_replacement;
 pub(super) use missing_card_replacement::{
-    MissingCardReplacementClaim, claim_missing_card_replacement,
+    MissingCardReplacementClaim, claim_missing_card_replacement_without_metadata,
 };
 use terminal_footer::record_footer_only_pg;
 

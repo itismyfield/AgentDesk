@@ -471,7 +471,7 @@ async fn source_read_trace(current_proof: bool) {
             after.captured_through,
             std::fs::metadata(&reader.path).unwrap().len()
         );
-        assert_eq!(f.io.port.posts(), [text]);
+        assert_eq!(f.io.port.posts(), [text, "-# ✅ 완료"]);
         let channel = owner
             .open_channel(&era, f.launch.episode.channel_id)
             .unwrap()
@@ -487,7 +487,7 @@ async fn source_read_trace(current_proof: bool) {
                     ))
                 ))
                 .count(),
-            1
+            2
         );
     } else {
         assert_eq!(

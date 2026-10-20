@@ -8,7 +8,7 @@ fn streaming_status_and_tmux_placeholder_suppression_unicode_units() {
         let status = "한".repeat(size);
         let rendered = build_streaming_placeholder_text("본문", &status);
         assert!(discord_message_units(&rendered) <= limit);
-        assert_eq!(rendered, format!("\n\n{status}"));
+        assert_eq!(rendered, "⠋ 계속 처리 중");
     }
     for status in ["한".repeat(2001), "\u{1f680}".repeat(1001)] {
         let rendered = build_streaming_placeholder_text("본문", &status);

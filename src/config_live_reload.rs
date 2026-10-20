@@ -648,7 +648,6 @@ mod tests {
             },
         }
     }
-
     fn test_agent_with_claude_channel(
         channel_id: &str,
         tui_hosting: Option<bool>,
@@ -678,6 +677,7 @@ mod tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 

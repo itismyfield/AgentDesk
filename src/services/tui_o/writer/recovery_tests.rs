@@ -787,7 +787,7 @@ async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
         [WriterAlarm::SchemaBlocked { .. }]
     ));
     assert_eq!(harness.port.posts(), ["first"]);
-    assert!(excluded_keys(&harness).is_empty());
+    assert_eq!(excluded_keys(&harness), ["m1:0#turn"]);
     // As in the stopped production store, the cursor has captured every row the writer stopped on.
     let cursor = harness.channel().cursors().next().unwrap().captured_through;
     assert_eq!(cursor, std::fs::metadata(&path).unwrap().len());
@@ -801,9 +801,9 @@ async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
     append(&path, &row("m5", "live"));
     polls(3).await;
     assert!(!task.is_finished(), "the actor keeps running");
-    let posts = ["first", "after", "while stopped", "live"];
+    let posts = ["first", "-# ▸ Bash  ?", "after", "while stopped", "live"];
     assert_eq!(harness.port.posts(), posts);
-    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    assert_eq!(excluded_keys(&harness), ["m1:0#turn", "m2:2"]);
     let current = segments(&harness).pop().unwrap();
     assert!(
         !stopped.contains(&current),
@@ -814,7 +814,7 @@ async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
     let (stop, task) = spawn(harness.writer());
     polls(3).await;
     assert_eq!(harness.port.posts(), posts);
-    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    assert_eq!(excluded_keys(&harness), ["m1:0#turn", "m2:2"]);
     assert_eq!(harness.alarms.taken(), []);
     halt(stop, task).await;
 }

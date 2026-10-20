@@ -14,7 +14,7 @@ mod placeholder_tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    async fn exercise(fail: bool) -> (Vec<String>, Vec<(String, String, String)>) {
+    pub(super) async fn exercise(fail: bool) -> (Vec<String>, Vec<(String, String, String)>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let recorded = calls.clone();
         let app = Router::new().route("/{*path}", any(move |method: Method, uri: Uri, body: Bytes| {
@@ -26,7 +26,7 @@ mod placeholder_tests {
                     return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":50035,"message":"injected failure after effect"})));
                 }
                 (StatusCode::OK, Json(serde_json::json!({
-                    "id":"99","channel_id":"7","content":"...",
+                    "id":"99","channel_id":"7","content":"⠋ 계속 처리 중",
                     "author":{"id":"1","username":"bot","discriminator":"0001","avatar":null},
                     "timestamp":"2026-10-10T00:00:00+00:00","edited_timestamp":null,
                     "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
@@ -61,7 +61,7 @@ mod placeholder_tests {
         (result, calls)
     }
 
-    fn runtime() -> tokio::runtime::Runtime {
+    pub(super) fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -84,10 +84,10 @@ mod placeholder_tests {
             assert_eq!(results[0].starts_with("Ok("), !fail, "{results:?}");
             assert_eq!(results[1], (!fail).to_string());
             let post: serde_json::Value = serde_json::from_str(&calls[0].2).unwrap();
-            assert_eq!(post["content"], "...");
+            assert_eq!(post["content"], "⠋ 계속 처리 중");
             assert_eq!(post["message_reference"]["message_id"], "8");
             let patch: serde_json::Value = serde_json::from_str(&calls[1].2).unwrap();
-            assert_eq!(patch["content"], "...");
+            assert_eq!(patch["content"], "⠋ 계속 처리 중");
         }
     }
 
@@ -129,6 +129,10 @@ mod placeholder_tests {
     }
 }
 
+#[cfg(test)]
+#[path = "intake_placeholder_retirement_tests.rs"]
+mod intake_placeholder_retirement_tests;
+
 /// #3082 part B: only queued-turn notices wait behind an in-flight answer
 /// flush. The bounded barrier is shared by the intake placeholder helper.
 pub(super) async fn await_answer_flush_if_queued_notice(
@@ -161,7 +165,8 @@ pub(in crate::services::discord) async fn edit_intake_placeholder(
     channel_id: ChannelId,
     message_id: MessageId,
 ) -> Result<(), ClassifiedOutboundEditError> {
-    edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await
+    let placeholder = super::super::formatting::build_processing_status_block("⠋");
+    edit_outbound_message_classified(http, shared, channel_id, message_id, &placeholder).await
 }
 
 pub(in crate::services::discord) async fn send_intake_placeholder(
@@ -176,7 +181,8 @@ pub(in crate::services::discord) async fn send_intake_placeholder(
         .await;
 
     let client = SerenityTurnOutboundClient { http, shared };
-    let mut msg = gateway_outbound_message(channel_id, "...");
+    let placeholder = super::super::formatting::build_processing_status_block("⠋");
+    let mut msg = gateway_outbound_message(channel_id, &placeholder);
     if let Some((reference_channel, reference_message)) = reference {
         msg = msg.with_reference(OutboundReferenceContext::reply_to(
             reference_channel,

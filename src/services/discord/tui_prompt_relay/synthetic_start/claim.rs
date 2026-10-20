@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "intake_placeholder_retirement_tests.rs"]
+mod intake_placeholder_retirement_tests;
+
 #[derive(Clone, Copy)]
 pub(super) struct SyntheticClaimIdentity<'a> {
     pub(super) shared: &'a Arc<SharedData>,
@@ -272,7 +276,8 @@ pub(in crate::services::discord) fn build_tui_direct_synthetic_inflight_state(
         None,
         start_offset,
     );
-    state.current_msg_len = "...".len();
+    state.current_msg_len =
+        super::super::super::formatting::build_processing_status_block("⠋").len();
     state.session_key = lease.session_key.clone();
     state.external_turn_id = lease.turn_id.clone();
     state.runtime_kind = lease.runtime_kind;

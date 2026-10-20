@@ -55,7 +55,13 @@ fn channel(
 
 /// The hook records the prompt, the loop scans past it, the observer claims, and the answer
 /// lands: the claimed row's repair tail delivers it.
-async fn hook_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u64) {
+async fn hook_first(
+    shared: &Arc<SharedData>,
+    requests: &Requests,
+    codex: &CodexChannel,
+    anchor: u64,
+    split_tick: bool,
+) {
     crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
         "codex",
         &codex.tmux,
@@ -78,7 +84,7 @@ async fn hook_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u64)
     );
     let lease = codex.lease(shared);
     assert!(codex.claim(shared, anchor, &lease).await.claimed);
-    append(&codex.rollout, &answer_lines());
+    append_answer(requests, codex, split_tick).await;
 }
 
 /// The loop publishes the rollout prompt, the observer claims it, and the loop's own tail
@@ -123,37 +129,14 @@ async fn delivered(requests: &Requests, codex: &CodexChannel) {
     );
 }
 
-/// One final answer edit on the channel's claimed anchor, from one tail.
-fn delivered_once(requests: &Requests, codex: &CodexChannel, anchor: u64) {
-    let sent = deliveries(requests, codex.channel);
-    let finals = sent.iter().filter(|(_, _, body)| content(body) == RESPONSE);
-    assert_eq!(
-        finals.count(),
-        1,
-        "one answer edit on {}: {sent:?}",
-        codex.tmux
-    );
-    assert_eq!(content(&sent.last().expect("final edit").2), RESPONSE);
-    let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
-    for (method, path, _) in &sent {
-        assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
-    }
-    // When the answer and the turn end reach the bridge in separate passes, its first-answer
-    // fast lane edits the same anchor once with the answer above the status line.
-    assert!(sent.len() <= 2, "one answer edit: {sent:?}");
-    let (_, _, last) = sent.last().expect("answer edit");
-    assert_eq!(content(last), RESPONSE, "the answer edit is the last");
-    if let [(_, _, progress), _] = sent.as_slice() {
-        assert!(
-            content(progress).starts_with(&format!("{RESPONSE}\n\n")),
-            "only the answer's progress edit precedes it: {sent:?}"
-        );
-    }
+/// One settled answer on the claimed anchor, followed by one summary, from one tail.
+async fn delivered_once(requests: &Requests, codex: &CodexChannel, anchor: u64) {
+    assert_settled_answer(requests, codex, anchor).await;
     assert_eq!(tail_starts(codex.channel), 1, "one tail for {}", codex.tmux);
 }
 
 /// Runs B's two direct turns, after a replaced runtime A when `replaced`, else with B alone.
-async fn run(root: &Path, replaced: bool) -> (Output, Output) {
+async fn run(root: &Path, replaced: bool, split_tick: bool) -> (Output, Output) {
     enable_session_bound_delivery();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let frames = Arc::new(AtomicUsize::new(0));
@@ -180,7 +163,7 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         *super::super::super::codex_idle_rollout::CAPTURE_PAUSE
             .lock()
             .unwrap() = Some((parked.channel.get(), entered.clone(), resume.clone()));
-        hook_first(&shared_a, parked, 7_632_520_301_001).await;
+        hook_first(&shared_a, &requests, parked, 7_632_520_301_001, false).await;
         tokio::time::timeout(Duration::from_secs(15), entered.notified())
             .await
             .expect("A's tail reaches bridge capture");
@@ -193,7 +176,7 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         resume.notify_one();
         delivered(&requests, parked).await;
     }
-    hook_first(&shared_b, &b_hook, 7_632_520_401_001).await;
+    hook_first(&shared_b, &requests, &b_hook, 7_632_520_401_001, split_tick).await;
     delivered(&requests, &b_hook).await;
     rollout_first(&shared_b, &b_rollout, 7_632_520_402_001).await;
     delivered(&requests, &b_rollout).await;
@@ -209,10 +192,10 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         );
     }
     if let Some(parked) = &parked {
-        delivered_once(&requests, parked, 7_632_520_301_001);
+        delivered_once(&requests, parked, 7_632_520_301_001).await;
     }
-    delivered_once(&requests, &b_hook, 7_632_520_401_001);
-    delivered_once(&requests, &b_rollout, 7_632_520_402_001);
+    delivered_once(&requests, &b_hook, 7_632_520_401_001).await;
+    delivered_once(&requests, &b_rollout, 7_632_520_402_001).await;
     assert_eq!(
         frames.load(Ordering::SeqCst),
         0,
@@ -233,7 +216,7 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
     outputs
 }
 
-fn scenario(replaced: bool) -> (Output, Output) {
+fn scenario(replaced: bool, split_tick: bool) -> (Output, Output) {
     let root = tempfile::tempdir().expect("isolated root");
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -243,7 +226,7 @@ fn scenario(replaced: bool) -> (Output, Output) {
         .enable_all()
         .build()
         .expect("runtime")
-        .block_on(run(root.path(), replaced))
+        .block_on(run(root.path(), replaced, split_tick))
 }
 
 // After B replaces A, both B tails deliver to channels only B routes, A's in-flight answer goes
@@ -256,13 +239,16 @@ fn a_replaced_runtime_relays_through_its_own_routing_and_output() {
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let alone = scenario(false);
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
-    let replaced = scenario(true);
-    assert_eq!(
-        replaced, alone,
-        "B's output and cursors are those of B alone"
-    );
+    for split_tick in [true, false] {
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let alone = scenario(false, split_tick);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let replaced = scenario(true, split_tick);
+        assert_eq!(
+            replaced, alone,
+            "B's output and cursors are those of B alone (split_tick={split_tick})"
+        );
+    }
 }
 
 // Recovery cannot post for a Codex TUI row yet (no pane-ready fallback), so a stale runtime there

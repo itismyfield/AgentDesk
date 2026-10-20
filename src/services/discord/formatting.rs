@@ -41,6 +41,7 @@ mod rollback_journal;
 
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::message_ids_from_receipts;
+#[cfg(test)]
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback_returning_receipts;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
@@ -208,6 +209,9 @@ pub(super) use self::streaming_status::{
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
+pub(crate) use super::placeholder_live_events::tool_summary::{
+    class as tool_class, safe_tool_summary,
+};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;
@@ -258,7 +262,7 @@ pub(in crate::services::discord) use self::replace_long_message::{
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {
-        use super::replace_long_message_raw_deferred as _;
+        let _ = super::replace_long_message_raw_deferred;
     }
 }
 

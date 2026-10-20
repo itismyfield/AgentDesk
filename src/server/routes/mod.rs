@@ -79,6 +79,9 @@ pub mod voice_config;
 mod auto_queue_preflight_harness_tests;
 
 #[cfg(test)]
+mod auto_queue_admission_pg_tests;
+
+#[cfg(test)]
 mod auto_queue_lifecycle_pg_tests;
 
 use axum::{

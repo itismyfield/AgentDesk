@@ -6,6 +6,7 @@ mod writes;
 use sqlx::{Postgres, Row as SqlxRow, Transaction};
 
 use super::phase_gates::PhaseGateSaveResult;
+use super::run_admission::{BLOCKER_ADMITTING_RUN_STATUSES, admit_run_writer_on_pg_tx};
 use super::run_status::is_live_run_status;
 
 /// Runs owning dispatch `td`. The context arm uses the migration `json_extract(text, text)`
@@ -222,8 +223,8 @@ async fn phase_gate_source_runs_on_pg_tx(
     .map_err(|error| format!("load phase-gate owners for run {run_id} phase {phase}: {error}"))
 }
 
-/// Save one (run, phase) gate state. With dispatches it locks the target and current gate-owner
-/// runs, then the dispatch rows, and re-reads the owners so a save that waited sees them.
+/// Save one (run, phase) gate state under the target run token (plus gate-owner runs and dispatch
+/// rows when it carries dispatches); a pending/failed gate is a blocker a completed run refuses.
 pub(crate) async fn publish_phase_gate_state_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -232,7 +233,9 @@ pub(crate) async fn publish_phase_gate_state_on_pg_tx(
     dispatch_ids: &[String],
 ) -> Result<PhaseGateSaveResult, String> {
     let mut persisted = Vec::new();
-    if !dispatch_ids.is_empty() {
+    if dispatch_ids.is_empty() {
+        lock_owner_runs_on_pg_tx(tx, &[run_id.to_string()]).await?;
+    } else {
         let sources = phase_gate_source_runs_on_pg_tx(tx, run_id, phase, dispatch_ids).await?;
         let mut owner_runs = vec![run_id.to_string()];
         owner_runs.extend(sources.into_iter().map(|(_, source)| source));
@@ -282,6 +285,10 @@ pub(crate) async fn publish_phase_gate_state_on_pg_tx(
                 "auto-queue run {run_id} is not live: refusing to attach live dispatch {dispatch_id} to its phase gate"
             ));
         }
+    }
+    if matches!(state.status.as_str(), "pending" | "failed") {
+        let action = format!("save a {} phase gate for phase {phase}", state.status);
+        admit_run_writer_on_pg_tx(tx, run_id, BLOCKER_ADMITTING_RUN_STATUSES, &action).await?;
     }
 
     super::phase_gates::lock_phase_gate_state_on_pg_tx(tx, run_id, phase).await?;

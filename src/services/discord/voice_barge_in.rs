@@ -2432,7 +2432,6 @@ mod tests {
         assert!(!prompt.contains("ADK_VOICE_TRANSCRIPT"));
         assert!(!prompt.contains("ADK_VOICE_HANDOFF_BACKGROUND"));
     }
-
     fn test_agent(provider: &str) -> crate::config::AgentDef {
         crate::config::AgentDef {
             id: "project-agentdesk".to_string(),
@@ -2454,6 +2453,7 @@ mod tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 

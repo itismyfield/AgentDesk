@@ -131,8 +131,9 @@ fn footer_mode_skips_recovery_status_panel_completion_for_stale_persisted_id() {
         recovery_status_panel::completion_target_for_flags(true, true, &snapshot, Some(&persisted));
 
     assert_eq!(
-        target, None,
-        "footer mode must not edit or SendFallback a separate recovery panel; the stale id is left for sweeper reclaim"
+        target,
+        Some(Some(super::MessageId::new(4004))),
+        "retirement completes the same-turn persisted panel in place without requesting SendFallback"
     );
 }
 
@@ -160,9 +161,8 @@ fn flag_off_recovery_none_target_still_requests_send_fallback() {
     let target = recovery_status_panel::completion_target_for_flags(false, true, &snapshot, None);
 
     assert_eq!(
-        target,
-        Some(None),
-        "flag-off v2 recovery preserves the SendFallback rollback behavior when no status_message_id was persisted"
+        target, None,
+        "retired recovery without a persisted panel must not request SendFallback"
     );
 }
 

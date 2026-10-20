@@ -39,7 +39,7 @@ struct SessionAnchors {
     snapshot: AnchorSnapshot,
 }
 
-type AnchorCacheKey = (String, u64, String);
+type AnchorCacheKey = (String, u64, String, Option<String>);
 static SESSION_ANCHORS: LazyLock<Mutex<HashMap<AnchorCacheKey, SessionAnchors>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -212,6 +212,7 @@ pub(crate) async fn load_session_anchor_prompt(
         provider.as_str().to_owned(),
         channel_id,
         current_path.to_owned(),
+        settings.memory_group.clone(),
     );
     if let Some(snapshot) = cached_snapshot(
         &mut SESSION_ANCHORS.lock().unwrap_or_else(|p| p.into_inner()),
@@ -246,6 +247,8 @@ pub(crate) async fn load_session_anchor_prompt(
         .unwrap_or(UNBOUND_MEMORY_ROLE_ID);
     let workspace = if let Some(workspace) = config.workspace_override.as_ref() {
         workspace.clone()
+    } else if let Some(group) = settings.memory_group.as_ref() {
+        group.clone()
     } else {
         let path = current_path.to_owned();
         tokio::task::spawn_blocking(move || project_workspace(&path))
@@ -385,7 +388,7 @@ mod tests {
 
     #[test]
     fn anchor_snapshot_survives_followup_and_refreshes_on_clear_or_replacement() {
-        let key = ("claude".to_owned(), 1, "project".to_owned());
+        let key = ("claude".to_owned(), 1, "project".to_owned(), None);
         let original = extract_anchor_snapshot(&payload("persistent")).unwrap();
         let mut cache = HashMap::new();
         cache.insert(
@@ -494,6 +497,7 @@ mod tests {
             memento_fallback: false,
             recall_timeout_ms: 1000,
             capture_timeout_ms: 1000,
+            memory_group: None,
         });
         let config = MementoRuntimeConfig {
             endpoint,

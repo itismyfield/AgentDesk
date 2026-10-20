@@ -10,7 +10,7 @@ fn tool_key(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(super) fn class(name: &str) -> &'static str {
+pub(crate) fn class(name: &str) -> &'static str {
     let key = tool_key(name);
     if key.starts_with("mcp__") {
         return "MCP";
@@ -657,7 +657,7 @@ fn patch_summary(input: &str, cwd: Option<&str>) -> Option<String> {
     Some(format!("{path} (+{added} −{removed})"))
 }
 
-pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
+pub(crate) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
     if input.len() > 262_144 {
         return None;
     }

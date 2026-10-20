@@ -5,24 +5,28 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use super::deliver::{ChannelWriter, Step};
-use super::pieces::{Derived, OwedWork};
+use super::pieces::{Derived, OwedWork, TOOL_CALL_CARD};
 use super::rotation::Owe;
 use super::rotation::provenance::origin;
 use super::{AlarmSink, DeliveryLease, DiscordPort};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify};
-use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, SourceId, UnitKey};
+use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, SourceId, UnitKey, UnitKind};
 use crate::services::tui_o::store::codex_provenance::Sidecar;
 use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome};
 use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 use crate::services::tui_o::store::{ChannelStore, StoreError};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
 
+type Coordinate = (SourceId, Range<u64>);
+
 pub(crate) struct OwedLog {
     channel: u64,
     provider: ShadowProvider,
     pub work: Vec<OwedWork>,
     /// Every source and range a unit key was owed from, a repeat that derived nothing included.
-    pub associations: BTreeMap<UnitKey, Vec<(SourceId, Range<u64>)>>,
+    pub associations: BTreeMap<UnitKey, Vec<Coordinate>>,
+    pending_card_members: Vec<UnitKey>,
+    card_members: BTreeMap<UnitKey, Vec<UnitKey>>,
 }
 
 impl OwedLog {
@@ -33,7 +37,27 @@ impl OwedLog {
             provider,
             work,
             associations,
+            pending_card_members: Vec::new(),
+            card_members: BTreeMap::new(),
         }
+    }
+
+    fn card_coordinates(&self, key: &UnitKey) -> Vec<Coordinate> {
+        let Some(members) = self.card_members.get(key) else {
+            return Vec::new();
+        };
+        let coordinates: Option<Vec<_>> = members
+            .iter()
+            .map(|member| {
+                let candidates = self.associations.get(member)?;
+                let first = candidates.first()?;
+                candidates
+                    .iter()
+                    .all(|candidate| candidate == first)
+                    .then(|| first.clone())
+            })
+            .collect();
+        coordinates.unwrap_or_default()
     }
 }
 
@@ -54,13 +78,47 @@ impl Owe for OwedLog {
                 self.associations.entry(key).or_default().push(association);
             }
         }
-        self.work
-            .extend(derived.into_iter().map(|derived| OwedWork {
+        for derived in derived {
+            if let Derived::Excluded { unit_key, reason } = &derived
+                && unit_key.kind == UnitKind::Tool
+                && reason == TOOL_CALL_CARD
+            {
+                self.pending_card_members.push(unit_key.clone());
+            }
+            if let Some(key) = card_key(&derived) {
+                let mut members = std::mem::take(&mut self.pending_card_members);
+                if !members.last().is_some_and(|member| {
+                    member.channel_id == key.channel_id
+                        && member.provider == key.provider
+                        && key.native_key.strip_suffix("#card") == Some(member.native_key.as_str())
+                }) {
+                    members.clear();
+                }
+                self.card_members.insert(key.clone(), members);
+            }
+            // A closing prompt or another source cannot lend its origin to earlier tools.
+            let (source, range) = card_key(&derived)
+                .and_then(|key| self.card_coordinates(key).last().cloned())
+                .unwrap_or_else(|| (source.clone(), range.clone()));
+            self.work.push(OwedWork {
                 derived,
-                source: source.clone(),
-                range: range.clone(),
+                source,
+                range,
                 origin: None,
-            }));
+            });
+        }
+    }
+}
+
+fn card_key(derived: &Derived) -> Option<&UnitKey> {
+    match derived {
+        Derived::Piece(piece)
+            if piece.unit_key.kind == UnitKind::Tool
+                && piece.unit_key.native_key.ends_with("#card") =>
+        {
+            Some(&piece.unit_key)
+        }
+        _ => None,
     }
 }
 
@@ -78,11 +136,23 @@ thread_local! {
     pub(crate) static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Reads the sidecar, then each work's source spool once, matching records to work by their
-/// original coordinates; origins change only after every source was read.
+#[cfg(test)]
 pub(crate) fn reevaluate(
     store: &mut ChannelStore,
     work: &mut [OwedWork],
+) -> Result<Reevaluation, StoreError> {
+    let coordinates = work
+        .iter()
+        .map(|item| vec![(item.source.clone(), item.range.clone())])
+        .collect::<Vec<_>>();
+    reevaluate_at(store, work, &coordinates)
+}
+
+/// Every required native record must share one closed span; an empty set remains Unknown.
+fn reevaluate_at(
+    store: &mut ChannelStore,
+    work: &mut [OwedWork],
+    coordinates: &[Vec<Coordinate>],
 ) -> Result<Reevaluation, StoreError> {
     let snapshot = match store.codex_provenance() {
         Sidecar::Present(snapshot) => snapshot,
@@ -90,23 +160,31 @@ pub(crate) fn reevaluate(
         Sidecar::Unavailable(reason) => return Ok(demote(work, Reevaluation::Unavailable(reason))),
     };
     // Sources in the order work first names them, each with its ranges indexed to work.
-    type WorkByRange = HashMap<(u64, u64), Vec<usize>>;
+    type WorkByRange = HashMap<(u64, u64), Vec<(usize, usize)>>;
     let mut by_source: Vec<(SourceId, WorkByRange)> = Vec::new();
-    for (at, item) in work.iter().enumerate() {
-        let slot = match by_source
-            .iter()
-            .position(|(source, _)| *source == item.source)
-        {
-            Some(slot) => slot,
-            None => {
-                by_source.push((item.source.clone(), HashMap::new()));
-                by_source.len() - 1
-            }
-        };
-        let range = (item.range.start, item.range.end);
-        by_source[slot].1.entry(range).or_default().push(at);
+    for (at, members) in coordinates.iter().enumerate() {
+        for (member, (source, range)) in members.iter().enumerate() {
+            let slot = match by_source
+                .iter()
+                .position(|(candidate, _)| candidate == source)
+            {
+                Some(slot) => slot,
+                None => {
+                    by_source.push((source.clone(), HashMap::new()));
+                    by_source.len() - 1
+                }
+            };
+            by_source[slot]
+                .1
+                .entry((range.start, range.end))
+                .or_default()
+                .push((at, member));
+        }
     }
-    let mut found = vec![None; work.len()];
+    let mut found = coordinates
+        .iter()
+        .map(|members| vec![None; members.len()])
+        .collect::<Vec<_>>();
     for (source, ranges) in &by_source {
         let scanned = store.for_each_frame(source, |frame| {
             let SpoolFrame::Record(record) = frame else {
@@ -114,12 +192,12 @@ pub(crate) fn reevaluate(
             };
             #[cfg(test)]
             PROBES.with(|probes| probes.set(probes.get() + 1));
-            for &at in ranges
+            for &(at, member) in ranges
                 .get(&(record.start, record.end))
                 .into_iter()
                 .flatten()
             {
-                found[at] = origin(&snapshot, source, &record);
+                found[at][member] = origin(&snapshot, source, &record);
             }
         });
         if let Err(error) = scanned {
@@ -127,9 +205,16 @@ pub(crate) fn reevaluate(
             return Err(error);
         }
     }
-    let attributed = found.iter().flatten().count();
-    for (item, origin) in work.iter_mut().zip(found) {
-        item.origin = origin;
+    let mut attributed = 0;
+    for (item, origins) in work.iter_mut().zip(found) {
+        item.origin = origins.last().cloned().flatten().filter(|last| {
+            origins.iter().all(|origin| {
+                origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.span == last.span)
+            })
+        });
+        attributed += usize::from(item.origin.is_some());
     }
     Ok(Reevaluation::Present { attributed })
 }
@@ -167,7 +252,24 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
     writer: &mut ChannelWriter<P, L, A>,
     log: &mut OwedLog,
 ) {
-    if reevaluate(writer.store(), &mut log.work).is_err() {
+    let coordinates = log
+        .work
+        .iter()
+        .map(|work| {
+            card_key(&work.derived)
+                .map(|key| log.card_coordinates(key))
+                .unwrap_or_else(|| vec![(work.source.clone(), work.range.clone())])
+        })
+        .collect::<Vec<_>>();
+    for (work, members) in log.work.iter_mut().zip(&coordinates) {
+        if card_key(&work.derived).is_some()
+            && let Some((source, range)) = members.last()
+        {
+            work.source = source.clone();
+            work.range = range.clone();
+        }
+    }
+    if reevaluate_at(writer.store(), &mut log.work, &coordinates).is_err() {
         return;
     }
     let (mut held_units, mut held_episodes) = (HashSet::new(), HashSet::new());
@@ -198,6 +300,9 @@ pub(crate) async fn deliver_owed<P: DiscordPort, L: DeliveryLease, A: AlarmSink>
         };
         match step {
             Step::Done if acked(writer.store().ledger(), &log.work[at].derived) => {
+                if let Some(key) = card_key(&log.work[at].derived) {
+                    log.card_members.remove(key);
+                }
                 log.work.remove(at);
                 continue;
             }

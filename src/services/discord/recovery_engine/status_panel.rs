@@ -10,11 +10,14 @@ pub(super) fn completion_target(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<Option<MessageId>> {
-    if !single_message_panel::separate_status_panel_enabled(status_panel_v2_enabled) {
+    if !status_panel_v2_enabled
+        || (!super::super::footer_retirement::retired()
+            && !single_message_panel::separate_status_panel_enabled(status_panel_v2_enabled))
+    {
         return None;
     }
     let persisted = inflight::load_inflight_state(provider, channel_id.get());
-    Some(message_id_for_completion(state, persisted.as_ref()))
+    retired_completion_target(message_id_for_completion(state, persisted.as_ref()))
 }
 
 #[cfg(test)]
@@ -24,13 +27,24 @@ pub(super) fn completion_target_for_flags(
     state: &inflight::InflightTurnState,
     persisted: Option<&inflight::InflightTurnState>,
 ) -> Option<Option<MessageId>> {
-    if !single_message_panel::separate_status_panel_enabled_for_flags(
-        single_message_panel_enabled_flag,
-        status_panel_v2_enabled,
-    ) {
+    if !status_panel_v2_enabled
+        || (!super::super::footer_retirement::retired()
+            && !single_message_panel::separate_status_panel_enabled_for_flags(
+                single_message_panel_enabled_flag,
+                status_panel_v2_enabled,
+            ))
+    {
         return None;
     }
-    Some(message_id_for_completion(state, persisted))
+    retired_completion_target(message_id_for_completion(state, persisted))
+}
+
+fn retired_completion_target(message_id: Option<MessageId>) -> Option<Option<MessageId>> {
+    if super::super::footer_retirement::retired() && message_id.is_none() {
+        None
+    } else {
+        Some(message_id)
+    }
 }
 
 pub(super) fn message_id_for_completion(
@@ -70,3 +84,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "turn_summary_recovery_tests.rs"]
+mod turn_summary_recovery_tests;
