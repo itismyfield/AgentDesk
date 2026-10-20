@@ -89,6 +89,10 @@ impl Pane {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Mirror the host evidence published by the production tmux launch.
         tc::host_marker::record_tmux_host_marker(&tmux);
+        assert_eq!(
+            tc::host_marker::read_host_kind_marker(&tmux),
+            tc::host_marker::HostKindMarker::Known(crate::services::session_host::HostKind::Tmux)
+        );
         let context = BindingContext {
             schema: 1,
             provider: "claude".into(),
