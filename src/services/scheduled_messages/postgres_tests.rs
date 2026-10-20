@@ -1669,3 +1669,110 @@ async fn postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes() {
+    let (pg_db, pool) =
+        create_test_pool("agentdesk_smsg_image_handoff", "loaded image handoff").await;
+    let message = insert_due_push_message(&pool).await;
+    let bytes = b"\x89PNG\r\n\x1a\n\0\xffhandoff snapshot";
+    sqlx::query("UPDATE scheduled_messages SET image_filename='snapshot.png',image_content_type='image/png',image_data=$1 WHERE id=$2")
+        .bind(&bytes[..]).bind(&message.id).execute(&pool).await.unwrap();
+    let fire = claim_one(&pool, "loaded-image-handoff").await;
+    sqlx::query("UPDATE scheduled_messages SET image_data=$1 WHERE id=$2")
+        .bind(&b"changed definition after claim"[..])
+        .bind(&message.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut unloaded = fire.clone();
+    unloaded.message = db::list_scheduled_messages_pg(
+        &pool,
+        &db::ListFilters {
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|row| row.id == message.id)
+    .unwrap();
+    assert!(
+        unloaded
+            .message
+            .image_attachment
+            .as_ref()
+            .unwrap()
+            .data
+            .is_none()
+    );
+    let error = push_handoff::commit(&pool, &unloaded, Utc::now())
+        .await
+        .expect_err("metadata-only image must fail closed at outbox handoff");
+    assert!(matches!(
+        error,
+        push_handoff::PushHandoffError::Invalid("scheduled image bytes are not loaded")
+    ));
+    let mut no_discord = fire.clone();
+    no_discord.message.target_channel_id = None;
+    no_discord.message.provider_targets =
+        Some(json!({"kakao":{"accountId":"default","friendUuids":[],"sendToSelf":true}}));
+    assert!(
+        matches!(
+            push_handoff::commit(&pool, &no_discord, Utc::now()).await,
+            Err(push_handoff::PushHandoffError::Invalid(
+                "image attachment requires a Discord target"
+            ))
+        ),
+        "image handoff must not discard bytes into a provider-only text delivery"
+    );
+    let external: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_external_delivery_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(external, 0);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "unloaded handoff must not write a text-only outbox row"
+    );
+    assert_eq!(
+        push_handoff::commit(&pool, &fire, Utc::now())
+            .await
+            .unwrap(),
+        push_handoff::PushHandoffOutcome::Committed
+    );
+    let stored: (String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT attachment_filename,attachment_content_type,attachment_data FROM message_outbox",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "snapshot.png");
+    assert_eq!(stored.1, "image/png");
+    assert_eq!(
+        stored.2, bytes,
+        "handoff must preserve the loaded snapshot bytes"
+    );
+    assert_eq!(
+        push_handoff::commit(&pool, &fire, Utc::now())
+            .await
+            .unwrap(),
+        push_handoff::PushHandoffOutcome::Canceled
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "handoff replay must preserve the original durable row"
+    );
+    pool.close().await;
+    pg_db.drop().await;
+}

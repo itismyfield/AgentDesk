@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::ClaimedFire;
 use crate::services::message_outbox::{
-    OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
+    OutboxAttachment, OutboxMessage, enqueue_outbox_pg_with_attachment_on_tx,
 };
 
 use super::external_delivery::{ExternalHandoffError, enqueue_for_message_tx};
@@ -70,6 +70,17 @@ pub(super) async fn commit(
     now: DateTime<Utc>,
 ) -> Result<PushHandoffOutcome, PushHandoffError> {
     let message = &fire.message;
+    let attachment = message
+        .image_attachment
+        .as_ref()
+        .map(OutboxAttachment::try_from)
+        .transpose()
+        .map_err(|_| PushHandoffError::Invalid("scheduled image bytes are not loaded"))?;
+    if attachment.is_some() && message.target_channel_id.is_none() {
+        return Err(PushHandoffError::Invalid(
+            "image attachment requires a Discord target",
+        ));
+    }
     if message.target_channel_id.is_none() && message.provider_targets.is_none() {
         return Err(PushHandoffError::Invalid("no delivery target"));
     }
@@ -103,7 +114,7 @@ pub(super) async fn commit(
             fire.fire_scheduled_at.timestamp_micros()
         );
         discord_outbox_id = Some(
-            enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
+            enqueue_outbox_pg_with_attachment_on_tx(
                 &mut tx,
                 OutboxMessage {
                     target: &target,
@@ -113,6 +124,7 @@ pub(super) async fn commit(
                     reason_code: Some(&reason_code),
                     session_key: None,
                 },
+                attachment,
             )
             .await
             .map_err(|error| PushHandoffError::Transient(anyhow::Error::new(error)))?,
