@@ -214,6 +214,7 @@ cli::utils::memento_hook_install_tests::install_is_idempotent_and_preserves_oper
 cli::utils::memento_hook_install_tests::install_replaces_stale_memento_command_on_re_run
 cli::utils::memento_hook_install_tests::uninstall_removes_only_memento_entries
 cli::utils::reset_tmux_host_tests::reset_tmux_leaves_another_hosts_session_running
+config::agent_memory::tests::memory_group_parsing_and_round_trip_preserve_old_formats
 config::cluster_role::tests::role_aliases_round_trip_to_canonical_configuration
 config::cluster_role::tests::unknown_role_cannot_silently_participate_in_hub_election
 config::cluster_semaphore_config_tests::cluster_intake_routing_parses_defaults_and_yaml_fields
@@ -3436,6 +3437,7 @@ services::discord::agent_handoff::tests::handoff_turn_target_resolves_channel_pr
 services::discord::agent_handoff::tests::reply_route_is_ignored_when_reply_not_expected
 services::discord::agent_handoff::tests::required_reply_to_routable_requester_keeps_send_to_agent
 services::discord::agent_handoff::tests::required_reply_to_unroutable_requester_avoids_send_to_agent
+services::discord::agentdesk_config::memory_tests::memory_group_reaches_channel_voice_dm_and_meeting_bindings
 services::discord::agentdesk_config::worktree_isolation_policy_tests::resolve_policy_compares_agent_provider_to_effective_channel_provider_by_default
 services::discord::agentdesk_config::worktree_isolation_policy_tests::resolve_policy_reads_channel_override_by_default
 services::discord::agentdesk_config::worktree_isolation_policy_tests::temp_root_panic_restores_absent_environment
@@ -5884,12 +5886,13 @@ services::discord::prompt_builder::dispatch_contract_tests::empty_filtered_share
 services::discord::prompt_builder::dispatch_contract_tests::file_backed_shared_rules_obey_prompt_section_dedupe
 services::discord::prompt_builder::dispatch_contract_tests::foreign_workspace_full_prompt_omits_repo_relative_doc_paths
 services::discord::prompt_builder::dispatch_contract_tests::fresh_codex_turn_receives_provider_portable_memento_contract
-services::discord::prompt_builder::dispatch_contract_tests::full_memento_prompt_carries_tool_feedback_contract
 services::discord::prompt_builder::dispatch_contract_tests::full_prompt_manifest_records_shared_knowledge_and_longterm_catalog
 services::discord::prompt_builder::dispatch_contract_tests::implementation_and_rework_render_one_pr_merge_contract_for_every_merge_strategy_mode_input
 services::discord::prompt_builder::dispatch_contract_tests::issue_4310_role_and_sak_layers_survive_memento_health_changes
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_agentdesk_prompt_has_single_policy_owner
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_prompt_policy_contract
+services::discord::prompt_builder::dispatch_contract_tests::memory_scope_tests::full_memento_prompt_carries_tool_feedback_contract
+services::discord::prompt_builder::dispatch_contract_tests::memory_scope_tests::memory_group_full_dispatch_prompt_uses_role_scoped_group
 services::discord::prompt_builder::dispatch_contract_tests::parent_plan_context_is_rendered_into_the_current_task_section
 services::discord::prompt_builder::dispatch_contract_tests::parent_plan_is_truncated_when_oversized
 services::discord::prompt_builder::dispatch_contract_tests::phase_gate_contract_requires_verdict_and_checks
@@ -5919,6 +5922,8 @@ services::discord::prompt_builder::memory_guidance::tests::family_memento_guidan
 services::discord::prompt_builder::memory_guidance::tests::foreign_workspace_memento_omits_memory_scope_but_keeps_feedback_contract
 services::discord::prompt_builder::memory_guidance::tests::full_memento_guidance_carries_scope_hint_without_recall_ownership
 services::discord::prompt_builder::memory_guidance::tests::memento_fallback_yields_hold_permanent_writes_guidance
+services::discord::prompt_builder::memory_guidance::tests::memory_group_absent_hint_preserves_legacy_bytes
+services::discord::prompt_builder::memory_guidance::tests::memory_group_hint_has_three_tiers_without_legacy_private_workspace
 services::discord::prompt_builder::memory_guidance::tests::non_full_file_profile_suppresses_guidance
 services::discord::prompt_builder::memory_guidance::tests::non_full_memento_profiles_suppress_guidance
 services::discord::prompt_builder::section_dedupe::tests::distinct_content_each_records
@@ -6900,6 +6905,8 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_absent_hint_preserves_main_bytes
+services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_reaches_binding_and_three_tier_hint
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
@@ -11186,6 +11193,19 @@ services::memory::memento::anchor::tests::anchor_snapshot_survives_followup_and_
 services::memory::memento::anchor::tests::anchor_snapshot_timeout_and_mcp_failure_have_distinct_safe_reasons
 services::memory::memento::anchor::tests::anchor_snapshot_timeout_budget_covers_initialization_and_respects_longer_settings
 services::memory::memento::anchor::tests::anchor_snapshot_workspace_follows_git_common_dir_for_worktrees
+services::memory::memento::scope::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
+services::memory::memento::scope::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
+services::memory::memento::scope_tests::memory_group_absent_anchor_preserves_git_workspace_and_cache
+services::memory::memento::scope_tests::memory_group_absent_automatic_paths_preserve_legacy_workspace
+services::memory::memento::scope_tests::memory_group_anchor_cache_tracks_group_changes
+services::memory::memento::scope_tests::memory_group_anchor_uses_shared_group_and_keeps_session_cache
+services::memory::memento::scope_tests::memory_group_api_shape_absent_group_keeps_omitted_agent_id
+services::memory::memento::scope_tests::memory_group_api_shape_explicit_shared_agent_id_stays_default
+services::memory::memento::scope_tests::memory_group_api_shape_explicit_workspace_keeps_shared_default
+services::memory::memento::scope_tests::memory_group_api_shape_implicit_remember_defaults_to_private_role
+services::memory::memento::scope_tests::memory_group_automatic_remember_and_recall_use_group
+services::memory::memento::scope_tests::memory_group_meeting_participant_settings_win_over_host_channel
+services::memory::memento::scope_tests::memory_group_override_stays_first_for_automatic_and_anchor_paths
 services::memory::memento::static_slice_cache_tests::automatic_turn_capture_and_transcript_reflect_never_reach_memento_writers
 services::memory::memento::static_slice_cache_tests::build_static_slice_cache_key_omits_user_text_and_dispatch_profile
 services::memory::memento::static_slice_cache_tests::elide_static_slice_first_call_keeps_full_text
@@ -11193,8 +11213,6 @@ services::memory::memento::static_slice_cache_tests::elide_static_slice_keeps_ba
 services::memory::memento::static_slice_cache_tests::elide_static_slice_re_emits_when_content_drifts
 services::memory::memento::static_slice_cache_tests::elide_static_slice_second_call_replaces_with_pointer_when_unchanged
 services::memory::memento::static_slice_cache_tests::static_slice_split_separates_ranked_and_core_from_dynamic
-services::memory::memento::workspace_scope_tests::memento_workspace_from_channel_workspace_uses_path_basename
-services::memory::memento::workspace_scope_tests::unbound_memento_workspace_falls_back_to_channel_scope
 services::memory::memento::writer_tests::ambiguous_write_error_is_neither_replayed_nor_reported_as_success
 services::memory::memento::writer_tests::concurrent_same_fact_never_dispatches_twice
 services::memory::memento::writer_tests::connection_failure_releases_claim_for_same_new_fact

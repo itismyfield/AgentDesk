@@ -99,6 +99,7 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
+│   ├── agent_memory.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
 │   ├── late_live_reload_tests.rs
@@ -1351,6 +1352,7 @@ src/
 │   │   │   ├── layer_rendering.rs
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
+│   │   │   ├── memory_scope_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
@@ -2344,6 +2346,7 @@ src/
 │   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
+│   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
@@ -2582,6 +2585,8 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_scope.rs
+│   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── memento_transport.rs
 │   │   ├── memento_writer_guard.rs

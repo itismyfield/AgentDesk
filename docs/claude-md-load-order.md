@@ -19,35 +19,29 @@ Claude Code concatenates matching `CLAUDE.md` content into its instruction strea
    - In this repo the file is 12 lines and simply delegates to [`docs/source-of-truth.md`](source-of-truth.md). It deliberately does not re-encode operational paths.
    - Edit: this file, for repo-local agent instructions only. All operational path mappings belong in `source-of-truth.md`.
 
-3. **Workspace (per-agent)** — `~/.adk/release/config/workspace-claude-md/<agent>.md`
-   - Operator-managed. Not git-tracked. Propagated into each agent's workspace at bootstrap as the agent's cwd-local `CLAUDE.md`.
-   - Scope: per-agent workspace anchors (project paths, shared memory pointers, per-agent skill folder conventions).
-   - Edit: the file under `~/.adk/release/config/workspace-claude-md/<agent>.md`. Edits made inside a live agent worktree are lost on re-bootstrap.
-
-4. **Downstream workspace** — e.g. `~/CookingHeart/CLAUDE.md`
+3. **Downstream workspace** — e.g. `~/CookingHeart/CLAUDE.md`
    - Only applies when Claude Code is launched from that workspace (i.e. not from the AgentDesk repo). Each workspace owns its own contract.
    - Edit: the file in the target workspace repo directly.
 
 ### Agent-specific layer (optional)
 
-A layer for `<agent>/CLAUDE.md` inside an agent worktree exists only if the operator places it there. In the current release layout, per-agent workspace CLAUDE content is sourced from layer 3 (`workspace-claude-md/<agent>.md`) and copied into the workspace, so there is no separate fifth file to maintain. Treat any stray `CLAUDE.md` found inside an agent worktree as a bootstrap artifact derived from layer 3.
+A workspace-local `CLAUDE.md` applies when it actually exists in the working directory hierarchy. AgentDesk has no loader for the archived per-agent CLAUDE/MEMORY directories in `config/memories/archive/`; they are not active instruction layers.
 
 ## ADK-affecting layers
 
 For an agent running under AgentDesk the layers that actually affect behavior are, in order:
 
 - Layer 1 (`~/.claude/CLAUDE.md`) — always.
-- Layer 3 (`workspace-claude-md/<agent>.md`) — always, via bootstrap.
 - Layer 2 (`<repo>/CLAUDE.md`) — only when the agent is working inside the AgentDesk repo itself (i.e. campaign worktrees, release promotions). For agents working on CookingHeart or similar downstream repos, layer 2 is the workspace CLAUDE.md of that repo instead.
 
-Layer 4 is out of AgentDesk's scope — it belongs to the downstream workspace's own contract.
+Layer 3 is out of AgentDesk's scope — it belongs to the downstream workspace's own contract.
 
 ## Deduplication rule
 
 If the same instruction appears in more than one layer, keep it in the most-specific layer that needs it and remove it from the broader layers. Concretely:
 
 - Agent-identity content (role name, responsibilities, tool preferences) belongs in the per-agent prompt (`~/.adk/release/config/agents/<role>.prompt.md`, optionally mirrored from `~/ObsidianVault/RemoteVault/adk-config/agents/<role>.prompt.md`) — not in any `CLAUDE.md`.
-- Project paths and workspace bootstrap live in layer 3 (`workspace-claude-md/<agent>.md`).
+- Project-specific instructions live in the target workspace repository’s own `CLAUDE.md`.
 - Repo-wide edit rules live in layer 2 (`<repo>/CLAUDE.md`).
 - Personal Claude Code preferences live in layer 1 (`~/.claude/CLAUDE.md`).
 
@@ -55,5 +49,5 @@ When removing a duplicate, leave a one-line commit note pointing at the survivin
 
 ## Related
 
-- [`source-of-truth.md`](source-of-truth.md) — canonical edit paths for all config, prompt, and memory surfaces, including the three CLAUDE.md rows (`~/.claude/CLAUDE.md`, repo `CLAUDE.md`, `workspace-claude-md/<agent>.md`).
+- [`source-of-truth.md`](source-of-truth.md) — canonical edit paths for all config, prompt, and memory surfaces, including global, repo, and downstream workspace CLAUDE.md files.
 - `scripts/archive-config-backups.sh` — archives legacy config snapshots (`*.pre-*`, `*.bak`, `*.migrated`) into `~/.adk/release/config/.backups/YYYY-MM-DD/`. Run during config cleanup; never leave snapshots beside canonical files.
