@@ -2727,10 +2727,16 @@ src/
 │   │   └── trusted_target.rs
 │   ├── session_host/
 │   │   ├── herdr/
+│   │   │   ├── managed_config/
+│   │   │   │   ├── path.rs
+│   │   │   │   └── publication.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
+│   │   │   ├── managed_config.rs
+│   │   │   ├── managed_config_real_tests.rs
+│   │   │   ├── managed_config_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
