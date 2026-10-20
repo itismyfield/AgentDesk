@@ -103,6 +103,13 @@ impl HerdrFrame {
                 return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
             }
             fresh.tui_terminal_kind = Some(self.kind);
+            // The bridge ends on this kind before any runtime handoff, so the row names its TUI
+            // here: the body's owner is judged from it.
+            fresh.runtime_kind = fresh.runtime_kind.or(match self.provider {
+                ProviderKind::Claude => Some(RuntimeHandoffKind::ClaudeTui),
+                ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
+                _ => None,
+            });
             let persisted = persist_under_lock_with_snapshot(
                 &root,
                 &path,
@@ -118,9 +125,48 @@ impl HerdrFrame {
             }
             baseline.clone_from(&persisted);
             local.tui_terminal_kind = persisted.tui_terminal_kind;
+            local.runtime_kind = persisted.runtime_kind;
             local.save_generation = persisted.save_generation;
             Ok(self.kind)
         })
+    }
+}
+
+#[cfg(unix)]
+impl InflightTurnState {
+    /// Takes a drain restart's authority only while the locked row is still this admitted episode
+    /// under that drain marker; the marker is consumed in the same write and its row returned.
+    pub(in crate::services::discord) fn take_drain_restart(
+        &self,
+        provider: &ProviderKind,
+        current_generation: u64,
+    ) -> Option<InflightTurnState> {
+        use crate::services::discord::{InflightRestartMode, inflight};
+        let root = inflight_runtime_root()?;
+        let path = inflight_state_path(&root, provider, self.channel_id);
+        let _lock = lock_inflight_state_path(&path).ok()?;
+        let expected = InflightTurnIdentity::from_state(self);
+        let caller = "recovery::herdr_admitted_restart::take_drain_restart";
+        let read = read_inflight_state_for_guarded_write;
+        let mut fresh = read(&path, provider, self.channel_id, &expected, caller).ok()?;
+        let drain = fresh.restart_mode == Some(InflightRestartMode::DrainRestart);
+        if !drain
+            || self.turn_nonce.as_deref().is_none_or(str::is_empty)
+            || fresh.turn_nonce != self.turn_nonce
+            || fresh.tui_terminal_kind.is_none()
+            || fresh.tui_terminal_kind != self.tui_terminal_kind
+            || fresh.save_generation != self.save_generation
+            || inflight::row_is_current_generation(&fresh, current_generation)
+            || fresh.rebind_origin
+            || fresh.herdr_before_start_stop.is_some()
+            || !expected.matches_state(&fresh)
+            || !inflight::InflightEpisodePin::from_state(self).matches_state(&fresh)
+        {
+            return None;
+        }
+        fresh.readopted_from_inflight = true;
+        fresh.clear_restart_mode();
+        persist_under_lock_with_snapshot(&root, &path, &fresh, caller).ok()?
     }
 }
 

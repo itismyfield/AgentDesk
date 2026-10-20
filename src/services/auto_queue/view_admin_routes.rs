@@ -217,6 +217,12 @@ pub(super) async fn update_entry_with_pg(
                     })),
                 ));
             }
+            Err(error) if error.contains("refusing to reopen") => {
+                return Err(auto_queue_json_error(
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": error})),
+                ));
+            }
             Err(error) => {
                 return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,

@@ -198,13 +198,12 @@ fn herdr_hold_source(
 fn herdr_hold_source(
     inflight_state: Option<&crate::services::discord::inflight::InflightTurnState>,
 ) -> Option<(String, String, bool)> {
-    if !crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-    {
-        return None;
-    }
-    let state = inflight_state?;
+    use crate::services::provider::cancel_token_claude_interrupt as interrupt;
+    let state = inflight_state.filter(|_| interrupt::herdr_stop_settlement_available())?;
     let name = state.tmux_session_name.clone()?;
-    if !crate::services::discord::turn_bridge::herdr_marked(&name) {
+    // Only a turn this process indexed is held; a prior process's row keeps the ordinary backstop.
+    let indexed = interrupt::herdr_turn_indexed(&name, state.turn_nonce.as_deref()?);
+    if !indexed || !crate::services::discord::turn_bridge::herdr_marked(&name) {
         return None;
     }
     // No recorded transcript proves no end: the turn stays held.
@@ -448,25 +447,22 @@ mod tests {
         .await;
     }
 
-    /// With no live watcher a Herdr turn is terminal only on its transcript's terminal, at the
-    /// natural deadline too; without settlement or a Herdr marker the deadline still concedes.
+    /// With no live watcher this process's Herdr turn is terminal only on its transcript's terminal,
+    /// at the deadline too; without settlement, a marker or a live turn the deadline still concedes.
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn herdr_turn_without_watcher_ends_only_on_its_transcript() {
         use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
         super::super::tests::with_isolated_runtime_root(|| async move {
             let shared = Arc::new(crate::services::discord::make_shared_data_for_tests());
-            let entropy = chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .unwrap_or_default()
-                .unsigned_abs();
-            let channel = ChannelId::new(50_340_025u64.saturating_add(entropy % 1_000_000));
-            let session = format!("AgentDesk-claude-backstop-herdr-{}", entropy % 1_000_000);
+            let n = u64::from(std::process::id());
+            let channel = ChannelId::new(50_340_025u64.saturating_add(n % 1_000_000));
+            let session = format!("AgentDesk-claude-backstop-herdr-{n}");
             let transcript = std::env::temp_dir().join(format!("{session}.jsonl"));
             let busy = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n";
             let done = "{\"type\":\"result\",\"result\":\"done\",\"session_id\":\"s\"}\n";
-            let path = transcript.to_str().unwrap().to_string();
-            let state = crate::services::discord::inflight::InflightTurnState::new(
+            let (path, token) = (transcript.to_str().unwrap().to_string(), CancelToken::new());
+            let mut state = crate::services::discord::inflight::InflightTurnState::new(
                 ProviderKind::Claude,
                 channel.get(),
                 None,
@@ -480,6 +476,7 @@ mod tests {
                 None,
                 0,
             );
+            state.turn_nonce = token.turn_nonce().map(str::to_owned);
             crate::services::discord::inflight::save_inflight_state(&state).unwrap();
             let marker = crate::services::tmux_common::session_temp_path(&session, "host_kind");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
@@ -498,10 +495,11 @@ mod tests {
                 "a tmux turn without a watcher concedes at the deadline"
             );
             std::fs::write(&marker, "herdr").unwrap();
-            assert!(
-                !terminal(true),
-                "a running Herdr turn is not ended by the deadline"
-            );
+            assert!(terminal(true), "an unindexed prior row concedes");
+            let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner("1");
+            owner.logical_key = session.clone();
+            let _live = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
+            assert!(!terminal(true), "a live Herdr turn outlasts the deadline");
             assert!(!terminal(false));
             HERDR_SETTLEMENT_OVERRIDE.set(false);
             let unsettled = terminal(true);

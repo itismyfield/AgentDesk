@@ -162,7 +162,7 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
         )
         .await
         {
-            QueuedCardDisposition::Preserved { .. } => {
+            QueuedCardDisposition::Preserved { .. } | QueuedCardDisposition::Unmeasured => {
                 preserved += 1;
                 continue;
             }

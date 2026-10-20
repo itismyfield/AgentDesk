@@ -86,6 +86,7 @@ fn owner_of(disposition: QueuedCardDisposition, what: &str) -> MessageId {
     match disposition {
         QueuedCardDisposition::Preserved { owner } => owner,
         QueuedCardDisposition::Released(_) => panic!("{what} must not be released"),
+        QueuedCardDisposition::Unmeasured => panic!("{what} must be measured"),
     }
 }
 

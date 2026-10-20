@@ -1341,9 +1341,8 @@ pub(super) async fn handle_text_message(
                 Ok(fresh_msg_id) => {
                     // Fresh anchor is live; tear down the buried queued card. Delete
                     // failure is NON-fatal — never abort the turn over a lingering card.
-                    // #5035 (A6): the buried card may still stand for OTHER waiting
-                    // entries, so the teardown (and the detach it carries) runs only
-                    // on a gate release. The hint is just the dequeued head.
+                    // The buried card may still stand for other waiting entries, so it is
+                    // torn down (with its detach) only on a gate release; hint = dequeued head.
                     let stale_disposition = match queued_card_gate::release_or_rekey(
                         shared,
                         channel_id,
@@ -1367,6 +1366,7 @@ pub(super) async fn handle_text_message(
                             );
                             "preserved"
                         }
+                        QueuedCardDisposition::Unmeasured => "unmeasured",
                     };
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(

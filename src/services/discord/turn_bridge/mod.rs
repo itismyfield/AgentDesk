@@ -1,5 +1,5 @@
 mod activity_heartbeat;
-mod before_start_stop;
+pub(in crate::services::discord) mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;

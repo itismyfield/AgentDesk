@@ -48,6 +48,14 @@ pub(super) async fn enqueue_entries_into_existing_run_with_pg(
         .begin()
         .await
         .map_err(|err| format!("begin enqueue transaction: {err}"))?;
+    // The route's active check is advisory; this re-check under the run token is authoritative.
+    crate::db::auto_queue::run_admission::admit_run_writer_on_pg_tx(
+        &mut tx,
+        run_id,
+        &["active"],
+        "add entries",
+    )
+    .await?;
 
     let existing_live_cards: HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT kanban_card_id

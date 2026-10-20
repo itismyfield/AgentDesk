@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use super::model::{
     ControlPlane, ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrErrorBody, HerdrObservation,
-    HerdrPane, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
+    HerdrPane, HerdrReadFormat, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
 };
 use super::observe::RestoreUnverified;
 use super::provenance::StartIdentity;
@@ -207,6 +207,15 @@ pub(crate) fn working_dir_result(
 
 /// `scroll_back` < 0 asks for that many unwrapped history lines, capped.
 pub(crate) fn capture_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
+    read_request(pane_id, scroll_back, None)
+}
+
+/// The same read with the screen's SGR styling kept; Herdr keeps it only for `format: ansi`.
+pub(crate) fn capture_ansi_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
+    read_request(pane_id, scroll_back, Some(HerdrReadFormat::Ansi))
+}
+
+fn read_request(pane_id: &str, scroll_back: i32, format: Option<HerdrReadFormat>) -> HerdrRequest {
     let (source, lines) = if scroll_back < 0 {
         let lines = scroll_back.unsigned_abs().min(CAPTURE_MAX_LINES);
         (HerdrReadSource::RecentUnwrapped, Some(lines))
@@ -217,7 +226,8 @@ pub(crate) fn capture_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
         pane_id: pane_id.to_string(),
         source,
         lines,
-        strip_ansi: true,
+        strip_ansi: format.is_none(),
+        format,
     }
 }
 
