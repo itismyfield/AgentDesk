@@ -75,24 +75,6 @@ fn terminate(base: &str, body: &Value) -> Result<(), String> {
     ))
 }
 
-pub(crate) fn confirmed_ended(
-    record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
-    reading: &crate::services::session_host::PaneReading,
-) -> bool {
-    use crate::services::session_host::{PaneProvider, PaneReading};
-    match reading {
-        PaneReading::Missing => true,
-        PaneReading::Present {
-            root,
-            provider: PaneProvider::Exited,
-        } => record
-            .expected
-            .as_ref()
-            .is_some_and(|expected| expected.root == *root),
-        PaneReading::Present { .. } | PaneReading::Unreadable(_) => false,
-    }
-}
-
 #[cfg(unix)]
 mod node {
     use serde_json::{Value, json};
@@ -113,7 +95,7 @@ mod node {
         /// No live Herdr row of this channel on this node, or more than one.
         NoRow(&'static str),
         ProviderRunning,
-        /// The pane was not read as gone or as its own shell alone; it may still run something.
+        /// The pane was not read as one its execution has left; it may still run something.
         Unproven(&'static str),
         /// The row changed after it was read, or the transition was refused.
         Changed(String),
@@ -191,6 +173,21 @@ mod node {
         Some(read.unwrap_or_else(|error| PaneReading::Unreadable(error.to_string())))
     }
 
+    /// As `read_pane`, with whether that reading shows `record`'s execution ended.
+    async fn read_end(record: &HostedExecution) -> Option<(PaneReading, bool)> {
+        let view = herdr_endpoints().view(record)?;
+        let record = record.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let reading = view.read_execution();
+            let ended = view.ended(&record, &reading);
+            (reading, ended)
+        });
+        Some(
+            read.await
+                .unwrap_or_else(|error| (PaneReading::Unreadable(error.to_string()), false)),
+        )
+    }
+
     fn known(row: &HostedObservation) -> Option<&HostedExecution> {
         match &row.record {
             HostedRecord::Known(record) => Some(record),
@@ -198,8 +195,8 @@ mod node {
         }
     }
 
-    /// Retires `channel`'s execution only when its pane reads as gone, or as the recorded root shell
-    /// with no provider; then that execution's hold, and only that one, is released.
+    /// Retires `channel`'s execution only when its pane reads as gone, or as a lone shell that is
+    /// its recorded root or outlived both recorded processes; then only that execution's hold goes.
     pub(crate) async fn retire(pool: &PgPool, channel: u64) -> Result<Retired, RetireRefusal> {
         let node = local_node()?;
         let rows = list_local_herdr_rows_pg(pool, &node, LIVE)
@@ -219,13 +216,13 @@ mod node {
             }
         };
         let record = known(row).ok_or(RetireRefusal::NoRow("unreadable record"))?;
-        let Some(reading) = read_pane(record).await else {
+        let Some((reading, ended)) = read_end(record).await else {
             return Err(match record.location {
                 None => RetireRefusal::Unproven("no recorded pane"),
                 Some(_) => RetireRefusal::NoLocalEndpoint,
             });
         };
-        retire_on_reading(pool, row, record, &reading).await
+        retire_on_reading(pool, row, record, &reading, ended).await
     }
 
     /// The channel's execution an earlier retire already wrote Retired, whose hold that retire
@@ -257,14 +254,15 @@ mod node {
         })
     }
 
-    /// The retire decision on one reading; the hold goes only after the row's CAS wrote Retired.
+    /// The retire decision on one reading and whether it shows the execution ended; the hold goes
+    /// only after the row's CAS wrote Retired.
     pub(crate) async fn retire_on_reading(
         pool: &PgPool,
         row: &HostedObservation,
         record: &HostedExecution,
         reading: &PaneReading,
+        ended: bool,
     ) -> Result<Retired, RetireRefusal> {
-        let ended = super::confirmed_ended(record, reading);
         if !ended {
             return Err(match reading {
                 PaneReading::Present {

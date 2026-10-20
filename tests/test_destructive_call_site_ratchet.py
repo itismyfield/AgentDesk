@@ -8,8 +8,9 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +92,14 @@ class SourceContractTests(unittest.TestCase):
     def test_ci_wiring_runs_scanner(self) -> None:
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
+
+    def test_ci_wiring_checks_baseline_against_head(self) -> None:
+        wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check\n'
+            "git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json\n",
+            wiring,
+        )
 
     def test_fs_unlink_ratchet_allows_decreases_and_blocks_growth(self) -> None:
         path = "src/services/probe.rs"
@@ -580,6 +589,7 @@ fn test_only_turbofish() { std::fs::remove_file::<&Path>(test_path); }
             write(root, "src/services/probe.rs", "std::fs::remove_file::<&Path>(path);\n")
             baseline = {
                 "schema_version": 1,
+                "measured_at_sha": "a" * 40,
                 "categories": {category: {"files": {}} for category in ratchet.CATEGORIES},
             }
             write(root, ratchet.BASELINE_PATH.as_posix(), json.dumps(baseline))
@@ -632,6 +642,98 @@ fn probe() {
         self.assertEqual(loaded, counts)
         self.assertEqual(payload["measured_at_sha"], "a" * 40)
         self.assertEqual(payload["comment"], ratchet.WARNING)
+
+    def test_repin_preserves_registry_context_without_changing_counts(self) -> None:
+        expected = (
+            "Measured production external removals are 3/5/4/2 (total 14). "
+            "The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, "
+            "which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked "
+            "is classified as direct channel remove, not remove_tmux_session_locked."
+        )
+        for values in ((10, 2, 3, 2), (1, 0, 0, 0)):
+            with self.subTest(subcounts=values), tempfile.TemporaryDirectory() as tmp:
+                counts = empty_counts()
+                counts["registry_remove"] = {"src/services/discord/a.rs": sum(values)}
+                subcounts = dict(zip(ratchet.REGISTRY_PATTERNS, values))
+                path = Path(tmp) / "baseline.json"
+                ratchet.write_baseline(path, counts, subcounts, "a" * 40)
+                loaded, payload = ratchet.load_baseline(path)
+                self.assertEqual(loaded, counts)
+                self.assertEqual(payload["categories"]["registry_remove"].get("comment"), expected)
+
+    def _write_baseline_cli(self, root: Path, sha: str) -> str:
+        git = mock.Mock(stdout=sha + "\n")
+        with mock.patch.object(ratchet.subprocess, "run", return_value=git):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(ratchet.main(["--write-baseline"], repo_root=root), 0)
+        return output.getvalue()
+
+    def test_write_baseline_unchanged_snapshot_preserves_measurement_and_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/discord/probe.rs", "shared.tmux_watchers.remove(&channel);\n")
+            self._write_baseline_cli(root, "a" * 40)
+            path = root / ratchet.BASELINE_PATH
+            before = path.read_bytes()
+            output = self._write_baseline_cli(root, "b" * 40)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(ratchet.load_baseline(path)[1]["measured_at_sha"], "a" * 40)
+            self.assertIn("at " + "a" * 40 + ":", output)
+
+    def test_write_baseline_changed_context_repins_without_changing_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/discord/probe.rs", "shared.tmux_watchers.remove(&channel);\n")
+            self._write_baseline_cli(root, "a" * 40)
+            path = root / ratchet.BASELINE_PATH
+            before, payload = ratchet.load_baseline(path)
+            payload["categories"]["registry_remove"]["comment"] = "Outdated context."
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self._write_baseline_cli(root, "b" * 40)
+            after, payload = ratchet.load_baseline(path)
+            self.assertEqual(after, before)
+            self.assertEqual(payload["measured_at_sha"], "b" * 40)
+            comment = payload["categories"]["registry_remove"].get("comment")
+            self.assertIsInstance(comment, str)
+            self.assertNotEqual(comment, "Outdated context.")
+
+    def test_write_baseline_changed_counts_repins_only_the_observed_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rel = "src/services/discord/probe.rs"
+            write(root, rel, "shared.tmux_watchers.remove(&channel);\n")
+            self._write_baseline_cli(root, "a" * 40)
+            path = root / ratchet.BASELINE_PATH
+            before, _ = ratchet.load_baseline(path)
+            write(root, rel, "shared.tmux_watchers.remove(&channel);\ncancel.store(true, Ordering::Release);\n")
+            self._write_baseline_cli(root, "b" * 40)
+            after, payload = ratchet.load_baseline(path)
+            self.assertEqual(payload["measured_at_sha"], "b" * 40)
+            self.assertEqual(after["watcher_cancel"], {rel: 1})
+            self.assertEqual(after["registry_remove"], {rel: 1})
+            self.assertEqual(
+                {category: counts for category, counts in after.items() if category != "watcher_cancel"},
+                {category: counts for category, counts in before.items() if category != "watcher_cancel"},
+            )
+
+    def test_baseline_requires_full_lowercase_hex_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baseline.json"
+            payload = copy.deepcopy(json.loads((ROOT / ratchet.BASELINE_PATH).read_text()))
+            for invalid in ("", "a" * 39, "a" * 41, "g" * 40, "A" * 40, "a" * 40 + "\n", None, 123):
+                with self.subTest(sha=invalid):
+                    payload["measured_at_sha"] = invalid
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(ratchet.RatchetError, "measured_at_sha"):
+                        ratchet.load_baseline(path)
+            del payload["measured_at_sha"]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ratchet.RatchetError, "measured_at_sha"):
+                ratchet.load_baseline(path)
+            payload["measured_at_sha"] = "0123456789abcdef" * 2 + "01234567"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(ratchet.load_baseline(path)[1]["measured_at_sha"], payload["measured_at_sha"])
 
 
 if __name__ == "__main__":

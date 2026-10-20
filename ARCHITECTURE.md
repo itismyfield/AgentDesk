@@ -1104,6 +1104,8 @@ src/
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
+│   │   │   ├── unbound_owners/
+│   │   │   │   └── tests.rs
 │   │   │   ├── watcher_respawn/
 │   │   │   │   ├── absence_state.rs
 │   │   │   │   ├── claude_original_tests.rs
@@ -1133,6 +1135,7 @@ src/
 │   │   │   ├── test_support.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
+│   │   │   ├── unbound_owners.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── host_teardown_gate/
@@ -1902,7 +1905,10 @@ src/
 │   │   │   ├── utf8_chunk_decoder.rs
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tmux_watcher_registry/
+│   │   │   ├── owner_observation/
+│   │   │   │   └── tests.rs
 │   │   │   ├── fences.rs
+│   │   │   ├── owner_observation.rs
 │   │   │   └── session_binding.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
@@ -2242,17 +2248,32 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
+│   │   │   │   │   ├── canonical_target.rs
+│   │   │   │   │   ├── clear_owner_race_tests.rs
+│   │   │   │   │   ├── collection_publication_tests.rs
+│   │   │   │   │   ├── cross_runtime_owner_e2e_tests.rs
+│   │   │   │   │   ├── cross_runtime_owners.rs
+│   │   │   │   │   ├── cross_runtime_owners_tests.rs
 │   │   │   │   │   ├── dormancy_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_owner_nonce_tests.rs
 │   │   │   │   │   ├── live_owner_tests.rs
+│   │   │   │   │   ├── live_ownership.rs
+│   │   │   │   │   ├── live_publication.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   ├── midread_owner_tests.rs
+│   │   │   │   │   ├── newlive_ownership_file_tests.rs
+│   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
+│   │   │   │   │   ├── routine_registered_receipt_tests.rs
+│   │   │   │   │   ├── stale_binding_tests.rs
+│   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -2694,8 +2715,11 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── owned_session/
+│   │   │   │   └── tests.rs
 │   │   │   ├── execution.rs
 │   │   │   ├── launch.rs
+│   │   │   ├── owned_session.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/

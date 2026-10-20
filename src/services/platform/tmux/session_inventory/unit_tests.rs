@@ -461,6 +461,30 @@ fn u_inventory_no_server_control() {
 }
 static NAMESPACES: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<u64, PathBuf>>> =
     std::sync::LazyLock::new(Default::default);
+static CHANNEL_COMMANDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+pub(crate) struct ChannelCommand(u64, PathBuf);
+impl ChannelCommand {
+    pub(crate) fn new(channel: u64, executable: PathBuf) -> Self {
+        assert!(
+            CHANNEL_COMMANDS
+                .lock()
+                .unwrap()
+                .insert(channel, executable.clone())
+                .is_none()
+        );
+        Self(channel, executable)
+    }
+}
+impl Drop for ChannelCommand {
+    fn drop(&mut self) {
+        assert_eq!(
+            CHANNEL_COMMANDS.lock().unwrap().remove(&self.0),
+            Some(self.1.clone())
+        );
+    }
+}
 pub(crate) struct ChannelNamespace(u64, PathBuf);
 impl ChannelNamespace {
     pub(crate) fn new(channel: u64, socket: PathBuf) -> Self {
@@ -494,6 +518,9 @@ fn namespace_command(socket: &Path) -> Command {
     command
 }
 pub(super) fn channel_command(channel: u64) -> Option<(Command, Option<PathBuf>)> {
+    if let Some(executable) = CHANNEL_COMMANDS.lock().unwrap().get(&channel).cloned() {
+        return Some((Command::new(executable), None));
+    }
     let socket = NAMESPACES.lock().unwrap().get(&channel).cloned()?;
     Some((namespace_command(&socket), Some(socket)))
 }

@@ -5,6 +5,9 @@ use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "collection_publication_tests.rs"]
+mod collection_publication_tests;
+
 pub(in crate::services::discord::turn_presence::activity) struct Rig {
     pub(in crate::services::discord::turn_presence::activity) shared: Arc<SharedData>,
     pub(in crate::services::discord::turn_presence::activity) channel: ChannelId,
@@ -18,58 +21,6 @@ pub(in crate::services::discord::turn_presence::activity) struct Rig {
     _live: crate::config_live_reload::TestLiveGuard,
 }
 impl Rig {
-    pub(in crate::services::discord::turn_presence::activity) async fn new(
-        id: u64,
-        hosted: bool,
-        retired: bool,
-    ) -> Self {
-        let live = crate::config_live_reload::test_live_guard(
-            crate::config::test_env_lock::acquire_shared_test_env_lock(),
-        );
-        let root = tempfile::tempdir().unwrap();
-        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
-        let root_env = set("AGENTDESK_ROOT_DIR", root.path());
-        let namespace = set("TMUX_TMPDIR", root.path());
-        let target = [(id, "test-node")];
-        let hosts = crate::config::session_hosts::force_for_test(
-            Some("test-node"),
-            if hosted { &target } else { &[] },
-        );
-        let mut config: Config = serde_yaml::from_str(&format!("server: {{}}\ncluster: {{instance_id: test-node}}\nagents:\n  - id: fixture\n    name: fixture\n    provider: claude\n    channels:\n      claude: {{id: '{id}', name: s1e-{id}, runtime: tui}}\n")).unwrap();
-        config.session_hosts =
-            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
-        crate::config_live_reload::install(config.clone());
-        let config_path = crate::runtime_layout::config_file_path(root.path());
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        let db = TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
-        let channel = ChannelId::new(id);
-        crate::services::discord::host_defer_gate::tests::map_channel(
-            &shared,
-            channel,
-            &format!("s1e-{id}"),
-        )
-        .await;
-        let binding = BindingRoot::enter(root.path());
-        let rig = Self {
-            shared,
-            channel,
-            config,
-            root,
-            _binding: binding,
-            _hosts: hosts,
-            _live: live,
-            _namespace: namespace,
-            _root_env: root_env,
-            _db: db,
-        };
-        if retired {
-            rig.seed_retired().await;
-        }
-        rig
-    }
     fn name(&self) -> String {
         ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", self.channel))
     }

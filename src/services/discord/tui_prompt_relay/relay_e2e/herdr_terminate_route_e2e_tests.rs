@@ -1,5 +1,5 @@
-//! A terminate request dropped while its close is in flight: the detached run still retires and
-//! settles the captured turn, and the message queued meanwhile starts once on Herdr.
+//! A terminate request dropped while its close is in flight still retires and settles, and the
+//! queued message starts on Herdr once; after a restored shell's retire, input launches anew.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -256,6 +256,120 @@ async fn scenario(rig: herdr::P11TerminationRig) {
             .any(|(reply_to, _)| *reply_to == Some(queued.get())),
         "the started turn answers the queued message: {:?}",
         harness.messages()
+    );
+    drop(harness);
+    pool.close().await;
+    database.drop().await;
+}
+
+#[test]
+fn act_restored_shell_retire_then_next_input_launches_a_new_pane_pg() {
+    let path = concat!(
+        module_path!(),
+        "::act_restored_shell_retire_then_next_input_launches_a_new_pane_pg"
+    );
+    if !herdr::in_child(path, CHANNEL_ID) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(CHANNEL_ID);
+    let install = rig.thread_installer();
+    install();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap()
+        .block_on(restored(rig));
+}
+
+/// The pane a restarted Herdr restored as another shell is retired without a close; the next
+/// message creates one new workspace and types only into its pane, under a new nonce.
+async fn restored(rig: herdr::P11TerminationRig) {
+    use crate::services::discord::herdr_terminate::{
+        OperatorTerminate, TerminationResult, terminate_explicit_herdr,
+    };
+    let mut database = None;
+    let harness = RelayE2eHarness::start_bound_on(async {
+        let fixture = TestPostgresDb::create().await;
+        let pool = fixture.connect_and_migrate().await;
+        database = Some(fixture);
+        pool
+    })
+    .await;
+    let database = database.expect("an isolated PostgreSQL database");
+    let pool = harness.shared.pg_pool.clone().expect("PG-backed runtime");
+    let (shared, channel) = (harness.shared.clone(), harness.channel_id);
+    harness.answer_placeholders_immediately();
+    harness.cache_relay_transport();
+    shared.restart.reconcile_done.store(true, Ordering::SeqCst);
+    let mut core = shared.core.lock().await;
+    let session = core
+        .sessions
+        .get_mut(&channel)
+        .expect("bound fixture channel");
+    session.channel_name.replace("p11-m2-herdr".into());
+    drop(core);
+    std::mem::forget(
+        crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:1".into(),
+        ),
+    );
+    let (store, era) =
+        crate::services::herdr_launch::o_store_for_test(harness.root.path(), &[CHANNEL_ID]);
+    let mut seeded = store.open_channel(&era, CHANNEL_ID).unwrap().unwrap();
+    seeded.set_binding_checkpoint(3).unwrap();
+    let provider = ProviderKind::Claude;
+    let session_key = crate::services::discord::adk_session::build_adk_session_key(
+        &shared, channel, &provider, None,
+    )
+    .await
+    .expect("a namespaced session key");
+    let bound = herdr::HostedState::Bound;
+    let _switches = rig
+        .bind(&pool, &shared.token_hash, &session_key, bound)
+        .await;
+    rig.restore_shell();
+
+    let request = OperatorTerminate {
+        session_key: session_key.clone(),
+        execution_nonce: herdr::EXECUTION.into(),
+    };
+    let result = terminate_explicit_herdr(request, shared.clone(), &pool).await;
+    assert_eq!(result, TerminationResult::Retired);
+    assert!(rig.writes().is_empty(), "the restored shell is not closed");
+
+    let next = recent_message_id(721);
+    let event = serenity::FullEvent::Message {
+        new_message: user_message(next.get(), QUEUED),
+    };
+    let intake = super::boxed_intake(&harness.ctx, &event, &harness.clone_data()).await;
+    assert!(intake.is_ok(), "{intake:?}");
+    let started = wait_until(START_WAIT, || {
+        let writes = rig.writes();
+        Box::pin(async move {
+            writes
+                .iter()
+                .any(|(method, pane)| method == "pane.send_input" && pane == herdr::LAUNCHED_PANE)
+        })
+    })
+    .await;
+    assert!(started, "no Herdr start: {:?}", rig.writes());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let writes = rig.writes();
+    let count = |wanted: &str| writes.iter().filter(|(method, _)| method == wanted).count();
+    assert_eq!(count("workspace.create"), 1, "{writes:?}");
+    assert_eq!(
+        writes.len(),
+        2,
+        "one launch and its command only: {writes:?}"
+    );
+    assert!(!writes.iter().any(|(_, pane)| pane == "w1-1"), "{writes:?}");
+    let (_, nonce) = herdr::row(&pool, &session_key).await.expect("the new row");
+    assert_ne!(
+        nonce,
+        herdr::EXECUTION,
+        "the launch records a new execution"
     );
     drop(harness);
     pool.close().await;

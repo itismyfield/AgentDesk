@@ -658,12 +658,11 @@ pub(super) async fn handle_no_result_exits(
                     Ok(result) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
-                            "  [{ts}] ⚠ watcher marked post-work Ready-for-input stall as failed for {} / dispatch {} (card={:?}, card_marked={}, human_alert_sent={})",
+                            "  [{ts}] ⚠ watcher marked post-work Ready-for-input stall as failed for {} / dispatch {} (card={:?}, card_marked={})",
                             tmux_session_name,
                             dispatch_id,
                             result.card_id,
-                            result.card_marked,
-                            result.human_alert_sent
+                            result.card_marked
                         );
                         // Skip rebind-origin (synthetic, no real user
                         // message) and user_msg_id == 0 (a TUI-direct turn

@@ -31,6 +31,7 @@ enum Origin {
     Core,
     Fallback,
     Binding(u64),
+    Canonical,
     Inflight,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +535,7 @@ mod dormancy_tests;
 #[path = "unbound/unit_tests.rs"]
 mod tests;
 
+mod cross_runtime_owners;
 pub(super) mod herdr_bound;
 pub(super) mod hold_leaf;
 pub(super) mod live;

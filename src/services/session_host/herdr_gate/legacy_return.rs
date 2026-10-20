@@ -69,7 +69,7 @@ impl RetiredEnd {
         pane: PaneReading,
         os: &dyn ProcessOs,
     ) -> Result<Self, ReturnEndRefusal> {
-        if !crate::cli::herdr::confirmed_ended(record, &pane) {
+        if !confirmed_ended(os, record, &pane) {
             return Err(ReturnEndRefusal::PaneUnverified);
         }
         let expected = record
