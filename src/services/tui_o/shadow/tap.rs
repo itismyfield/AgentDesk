@@ -13,9 +13,6 @@ pub struct TuiOConfig {
     pub alert_channel_id: Option<u64>,
     #[serde(skip_serializing_if = "RepostConfig::is_default")]
     pub repost: RepostConfig,
-    /// Codex history adoption at boot. Off (the default) installs no observation runtime.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub codex_history_adoption: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
