@@ -1,3 +1,6 @@
+#[cfg(unix)]
+mod health_response;
+
 use super::WatchdogMode;
 use super::driver;
 use super::policy::{Decision, Reason, WatchdogPolicy, WatchdogState};

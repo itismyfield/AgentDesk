@@ -8,7 +8,7 @@ use axum::routing::any;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ManualOutboundDeliveryId, send_resolved_manual_message_with_client_and_nonce_rollout};
+use super::{ManualOutboundDeliveryId, send_resolved_manual_message};
 use crate::services::discord::outbound::send_gate::production_manual_outbound_client;
 use crate::services::discord::outbound::{OutboundDeduper, outbound_fingerprint};
 
@@ -45,7 +45,7 @@ fn discord_user_json() -> Value {
     })
 }
 
-fn discord_message_json(id: u64, content: &str) -> Value {
+pub(super) fn discord_message_json(id: u64, content: &str) -> Value {
     json!({
         "id": id.to_string(),
         "channel_id": CHANNEL_ID.to_string(),
@@ -142,23 +142,29 @@ async fn production_serenity_inline_path_serializes_canonical_durable_row_nonces
         // Discord's bounded recent-nonce retention window; it does not claim
         // indefinite deduplication across an arbitrarily late restart.
         let dedup = OutboundDeduper::new();
-        let result = send_resolved_manual_message_with_client_and_nonce_rollout(
+        let result = send_resolved_manual_message(
             client,
             &dedup,
-            CHANNEL_ID,
-            &format!("channel:{CHANNEL_ID}"),
-            content,
-            source,
-            "notify",
-            None,
-            Some(ManualOutboundDeliveryId {
-                correlation_id: &correlation_id,
-                semantic_event_id: &semantic_event_id,
-            }),
-            None,
-            false,
-            None,
-            enabled,
+            super::ResolvedManualMessage {
+                channel_id_raw: CHANNEL_ID,
+                target: &format!("channel:{CHANNEL_ID}"),
+                pg_pool: None,
+                record_transcript: false,
+                transcript_source_label: None,
+                notification: super::ManualNotification {
+                    channel_id: &(CHANNEL_ID).to_string(),
+                    content,
+                    source,
+                    bot: "notify",
+                    summary: None,
+                    delivery_id: Some(ManualOutboundDeliveryId {
+                        correlation_id: &correlation_id,
+                        semantic_event_id: &semantic_event_id,
+                    }),
+                    headless_nonce_enabled: enabled,
+                    attachment: None,
+                },
+            },
         )
         .await;
         assert_eq!(result.0, "200 OK");

@@ -8,8 +8,8 @@ use serenity::ChannelId;
 use sqlx::PgPool;
 
 use super::manual_delivery::{
-    ManualOutboundDeliveryId, SerenityManualOutboundClient,
-    send_resolved_manual_message_with_client,
+    ManualNotification, ManualOutboundDeliveryId, ResolvedManualMessage,
+    SerenityManualOutboundClient, send_authorized_manual_message,
 };
 use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
@@ -129,6 +129,8 @@ pub(crate) struct ManualOutboundOptions {
     /// delivery-id namespace and inline Discord nonce rollout. This is
     /// intentionally independent from unbound-channel authorization.
     pub(crate) trusted_internal_outbox: bool,
+    pub(crate) image_attachment:
+        Option<std::sync::Arc<crate::services::message_outbox::StoredOutboxAttachment>>,
     pub(crate) record_transcript: bool,
     pub(crate) transcript_source_label: Option<String>,
 }
@@ -194,6 +196,12 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
                 "error": "delivery_id correlation namespace is reserved"
             })
             .to_string(),
+        );
+    }
+    if options.image_attachment.is_some() && !options.trusted_internal_outbox {
+        return (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"binary attachment requires trusted outbox"}"#.to_string(),
         );
     }
     if content.is_empty() {
@@ -359,20 +367,27 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
     };
 
     let outbound_client = production_manual_outbound_client(http);
-    send_resolved_manual_message_with_client(
+    send_authorized_manual_message(
         &outbound_client,
         shared_outbound_deduper(),
-        channel_id_raw,
-        target,
-        content,
-        source,
-        bot,
-        summary,
-        delivery_id,
-        pg_pool,
-        options.record_transcript,
-        options.transcript_source_label.as_deref(),
-        options.trusted_internal_outbox,
+        ResolvedManualMessage {
+            channel_id_raw,
+            target,
+            pg_pool,
+            record_transcript: options.record_transcript,
+            transcript_source_label: options.transcript_source_label.as_deref(),
+            notification: ManualNotification {
+                channel_id: &channel_id_raw.to_string(),
+                content,
+                bot,
+                source,
+                summary,
+                delivery_id,
+                headless_nonce_enabled: false,
+                attachment: None,
+            },
+        },
+        &options,
     )
     .await
 }
@@ -667,3 +682,6 @@ agents:
         assert_eq!(SendCallerClass::from_header("attacker"), None);
     }
 }
+
+#[cfg(test)]
+pub(crate) use super::manual_delivery::image_delivery_tests::deliver_options_on_wire;

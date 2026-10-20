@@ -1,23 +1,10 @@
 //! DB-backed health diagnostics shared by the health API routes.
 //!
-//! Every Postgres await on the public `GET /api/health` path, which the
-//! self-watchdog probes, runs under
-//! [`ProbedPool`](crate::services::hang_forensics::ProbedPool) so a kill line can
-//! say whether the handler was inside one. Acquires per request, one per `sqlx`
-//! executor call (count calls, not functions, and re-derive before trusting this):
-//!
-//! | await site                             | acquires | reached when                     |
-//! |----------------------------------------|----------|----------------------------------|
-//! | `probe_server_up`                      | 1        | always                           |
-//! | `load_dispatch_outbox_stats_pg`        | 4        | always                           |
-//! | `load_auto_queue_cleanup_backlog_pg`   | 2        | always                           |
-//! | `load_config_audit_report_pg`          | 1        | always                           |
-//! | `load_pipeline_override_report_pg`     | 1        | always                           |
-//! | `load_dispatch_gate_runtime_overrides` | 1        | a `health_registry` (dcserver)   |
-//! | `is_recent_cluster_worker`             | 1        | …and a standby with no providers |
-//!
-//! Counts assume every query succeeds (an error ends that loader early). Each acquire can wait
-//! 10s against a 5s probe, so a slow database, not a deadlock, is the likeliest kill cause.
+//! Every Postgres await here runs under [`ProbedPool`](crate::services::hang_forensics::ProbedPool),
+//! so a watchdog kill line can say whether the health handler was inside one.
+
+//! Acquires per request, one per executor call: SELECT 1, outbox, cleanup and kv_meta always, the
+//! audit on detail, then detail mailbox sessions or the standby worker lookup; N=6 at most.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -113,45 +100,13 @@ pub async fn load_auto_queue_cleanup_backlog(
         return Some(injected);
     }
     let pg_pool = ProbedPool::wrap(pg_pool)?;
-    match load_auto_queue_cleanup_backlog_pg(pg_pool).await {
+    match request_batch::load_auto_queue_cleanup_backlog_pg(pg_pool).await {
         Ok(backlog) => Some(backlog),
         Err(error) => {
             tracing::warn!("[health] failed to load auto_queue_run_cleanup_tasks backlog: {error}");
             None
         }
     }
-}
-
-pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
-    probed: ProbedPool<'_>,
-) -> Result<AutoQueueCleanupBacklog, String> {
-    let dead_lettered = probed
-        .probe(
-            |pool| {
-                crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(
-                    pool,
-                )
-            },
-            Result::is_ok,
-        )
-        .await?;
-    let pending = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
-         WHERE dead_lettered_at IS NULL",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
-    Ok(AutoQueueCleanupBacklog {
-        pending,
-        dead_lettered,
-    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,64 +131,13 @@ pub async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
         .is_ok()
 }
 
-pub async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
-    let pg_pool = ProbedPool::wrap(pg_pool)?;
-    let raw = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("config_audit_report")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-pub async fn load_pipeline_override_report_pg(
-    pg_pool: Option<&PgPool>,
-) -> Option<serde_json::Value> {
-    let pg_pool = ProbedPool::wrap(pg_pool)?;
-    let raw = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("pipeline_override_health_report")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-pub async fn load_dispatch_gate_runtime_overrides(
-    pg_pool: Option<&PgPool>,
-) -> (Option<bool>, Option<u64>) {
-    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
-        return (None, None);
-    };
-    let runtime_config = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("runtime-config")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let (enabled, danger, _stale) =
-        crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref());
-    (enabled, danger)
+/// The config audit, pipeline override and runtime-config rows in one read; no pool or a
+/// failed read gives every value `None`.
+pub(crate) async fn load_health_kv_meta(pg_pool: Option<&PgPool>) -> HealthKvMeta {
+    match ProbedPool::wrap(pg_pool) {
+        Some(pg_pool) => request_batch::load_health_kv_meta(pg_pool).await,
+        None => HealthKvMeta::default(),
+    }
 }
 
 pub async fn is_recent_cluster_worker(
@@ -273,7 +177,14 @@ pub async fn is_recent_cluster_worker(
         == Some("worker")
 }
 
+#[cfg(test)]
+#[path = "health_diagnostics/pg_wire_proxy_tests.rs"]
+pub(crate) mod pg_wire_proxy;
+mod request_batch;
 mod session_state;
+#[cfg(test)]
+pub(crate) use request_batch::load_auto_queue_cleanup_backlog_pg;
+pub(crate) use request_batch::{HealthKvMeta, SessionLookups};
 
 pub async fn load_channel_session_state(
     pg_pool: Option<&PgPool>,
@@ -321,9 +232,37 @@ pub async fn mark_channel_sessions_disconnected(
     Err("postgres pool unavailable".to_string())
 }
 
-pub async fn enrich_mailbox_session_state(json: &mut serde_json::Value, pg_pool: Option<&PgPool>) {
+/// The mailbox channels of a detail body, as [`enrich_mailbox_sessions`] reads them.
+pub(crate) fn mailbox_session_channels(json: &serde_json::Value) -> Vec<u64> {
+    session_state::mailbox_channels(json)
+}
+
+/// The latest session row of every channel in one read.
+pub(crate) async fn load_mailbox_session_states(
+    pg_pool: Option<&PgPool>,
+    channels: &[u64],
+) -> SessionLookups {
+    match ProbedPool::wrap(pg_pool) {
+        Some(pg_pool) => request_batch::load_channel_session_states(pg_pool, channels).await,
+        None => channels
+            .iter()
+            .map(|channel| (*channel, Err("postgres pool unavailable".to_string())))
+            .collect(),
+    }
+}
+
+/// Writes each mailbox row's session fields, or its `session_lookup_error`, from `lookups`.
+pub(crate) async fn enrich_mailbox_sessions(
+    json: &mut serde_json::Value,
+    lookups: &SessionLookups,
+) {
     session_state::enrich_with(json, |channel_id| {
-        load_channel_session_state(pg_pool, channel_id)
+        std::future::ready(
+            lookups
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or_else(|| Err("session lookup missing for channel".to_string())),
+        )
     })
     .await;
 }
@@ -424,82 +363,12 @@ fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
 
 pub async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<DispatchOutboxStats> {
     if let Some(pg_pool) = ProbedPool::wrap(pg_pool) {
-        if let Some(stats) = load_dispatch_outbox_stats_pg(pg_pool).await {
+        if let Some(stats) = request_batch::load_dispatch_outbox_stats_pg(pg_pool).await {
             return Some(stats);
         }
         tracing::warn!("[health] failed to load dispatch_outbox stats from PostgreSQL");
     }
     None
-}
-
-/// Four sequential acquires: the largest block of database work on the public
-/// health path, so the likeliest place for the handler to be when the watchdog kills.
-async fn load_dispatch_outbox_stats_pg(probed: ProbedPool<'_>) -> Option<DispatchOutboxStats> {
-    let pending = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-    let retrying = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-    .ok()?;
-    let failed = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-    let oldest_pending_age = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COALESCE(
-                     CAST(
-                         EXTRACT(
-                             EPOCH FROM (NOW() - MIN(COALESCE(next_attempt_at, created_at)))
-                         ) AS BIGINT
-                     ),
-                     0
-                 )
-                 FROM dispatch_outbox
-                 WHERE status = 'pending'
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-
-    Some(DispatchOutboxStats {
-        pending,
-        retrying,
-        permanent_failures: failed,
-        oldest_pending_age,
-    })
 }
 
 pub async fn load_failed_dispatch_outbox_rows(
@@ -662,35 +531,27 @@ mod tests {
             }};
         }
 
-        // The public `GET /api/health` path from the module table.
+        // The `GET /api/health` path from the module table.
         assert_bracketed!("probe_server_up", 1, super::probe_server_up(Some(&pool)));
-        // 1, not 4: the first failed `.ok()?` returns early. The other three are
-        // covered by construction: `load_dispatch_outbox_stats_pg` only sees a `ProbedPool`.
         assert_bracketed!(
             "load_dispatch_outbox_stats",
             1,
             super::load_dispatch_outbox_stats(Some(&pool))
         );
-        // 1, not 2: the first `?` returns early.
         assert_bracketed!(
             "load_auto_queue_cleanup_backlog",
             1,
             super::load_auto_queue_cleanup_backlog(Some(&pool))
         );
         assert_bracketed!(
-            "load_config_audit_report_pg",
+            "load_health_kv_meta",
             1,
-            super::load_config_audit_report_pg(Some(&pool))
+            super::load_health_kv_meta(Some(&pool))
         );
         assert_bracketed!(
-            "load_pipeline_override_report_pg",
+            "load_mailbox_session_states",
             1,
-            super::load_pipeline_override_report_pg(Some(&pool))
-        );
-        assert_bracketed!(
-            "load_dispatch_gate_runtime_overrides",
-            1,
-            super::load_dispatch_gate_runtime_overrides(Some(&pool))
+            super::load_mailbox_session_states(Some(&pool), &[7, 7, 8])
         );
         assert_bracketed!(
             "is_recent_cluster_worker",

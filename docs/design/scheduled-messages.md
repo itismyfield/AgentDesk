@@ -516,3 +516,52 @@ API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정
   primary를 owner channel로 사용하고 target을 turn/relay channel로 사용한다.
 - push_raw 강등 시 대상 채널이 없으면 `agent:<id>` outbox 타깃(에이전트 기본 채널)
   으로 보낸다.
+
+
+## Optional push image
+
+`imageAttachment` accepts one object with `filename`, `contentType`, and `dataBase64`.
+The data uses canonical standard base64 with padding. Decoded bytes must be 1 byte
+through 8 MiB and have a PNG, JPEG, GIF, or WebP signature matching both the MIME
+and filename extension (`png`, `jpg`/`jpeg`, `gif`, `webp`). Filenames are at most
+128 ASCII bytes, start with an alphanumeric character, and contain only
+alphanumerics, dots, underscores, and hyphens. Unknown attachment fields fail.
+
+Images require push delivery and a Discord target. `providerTargets` cannot be
+combined with an image. The canonical body must be nonempty and fit Discord's
+2000 UTF-16 units after the Discord mention prefix is rendered. Create and PATCH
+validation failures return 400; rollout unavailability returns 503. PATCH omission
+preserves the attachment, `null` clears the complete triplet, and an object replaces
+it. List, detail, create, PATCH and dedupe-conflict responses contain metadata only;
+base64 and raw bytes are never returned. Only the two scheduled create/PATCH
+routes accept JSON bodies up to 12 MiB; oversize bodies return 413.
+
+### Image rollout and delivery
+
+Image creation and fire require both `scheduled_messages.image_consumer_v1` and
+`message_outbox.image_consumer_v1` on every registered worker, with at least two
+registered nodes. Offline members remain in this conservative gate: stopping an
+old MacBook or Mac mini cannot enable the feature. Before enabling production,
+the coordinator verifies that both intended nodes remain registered and run the
+new binary. Stale or retired registry members keep the gate closed; this feature
+does not delete them or change their status. No operational setting is changed
+by the implementation lane.
+
+A migration adds transaction-local consumer guards to scheduled and outbox claim
+updates, using the existing scheduled mention mechanism. An old binary cannot
+claim an image as text, including a stale outbox reclaim after a capability check.
+Text-only claims retain their existing behavior. Outbox batches load at most one
+image, and retry bookkeeping shares its buffer. The claimed definition snapshot
+is preserved through durable handoff and the authorized binary upload.
+
+Image uploads reuse the durable outbox row identity and Discord nonce enforcement.
+Discord only retains recent nonce identities; this is not an unlimited exactly-once
+guarantee. Before manually redriving a failed image, inspect the Discord channel
+for an already accepted post. No new redrive authority or force flag is introduced.
+
+A successful lease-owned sent UPDATE clears the outbox attachment triplet while
+preserving the permanent dedupe sentinel. Failed outbox bytes remain available
+for existing redrive and seven-day whole-row GC. The retention pass clears all
+three definition image columns only for terminal one-shot definitions whose
+`updated_at` is strictly older than seven days. Recurring, scheduled, firing, and
+boundary/newer definitions keep their bytes. Dry-run reports candidates only.
