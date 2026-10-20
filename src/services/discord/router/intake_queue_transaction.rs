@@ -1,3 +1,5 @@
+mod queue_payload;
+
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -346,18 +348,7 @@ where
     let source = request.source;
     let author_class = request.author_class;
     let options = request.options;
-    let has_voice_announcement = request.intervention.voice_announcement.is_some();
-    let mut intervention = request.intervention;
-    if has_voice_announcement {
-        // Do not expose a queued item that can be replayed as already accepted
-        // before the durable one-shot claim runs. The queued dispatch path
-        // re-enters handle_text_message with the original readable announce
-        // text, which resolves and consumes the durable PG row at processing
-        // time. Keeping voice items standalone preserves message-id ownership
-        // and avoids mixing two voice prompts into one queue head.
-        intervention.voice_announcement = None;
-        intervention.merge_consecutive = false;
-    }
+    let intervention = request.intervention.for_queue();
     let mailbox_outcome = effects.enqueue_soft_intervention(intervention).await;
 
     let status = classify_mailbox_outcome(&mailbox_outcome);

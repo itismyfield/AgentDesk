@@ -155,6 +155,11 @@ impl Fixture {
         let refused = refuse_reads.clone();
         let names = Arc::new(std::sync::Mutex::new(("answer", 200)));
         let named = names.clone();
+        let queue_path = runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join("claude")
+            .join(&shared.token_hash)
+            .join(format!("{channel}.json"));
         let rest_app = Router::new().route("/gateway", axum::routing::get(
             |ws: axum::extract::ws::WebSocketUpgrade| async {
                 ws.on_upgrade(|mut socket| async move {
@@ -163,9 +168,26 @@ impl Fixture {
             },
         )).fallback(move |method: Method, uri: axum::http::Uri| {
             let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
+            let queue_path = queue_path.clone();
             let (lookup, writer) = *named.lock().unwrap();
             async move {
             use axum::response::IntoResponse;
+            if method == Method::DELETE
+                && let Some((message, reaction)) = uri.path()
+                    .strip_prefix(&format!("/api/v10/channels/{channel}/messages/"))
+                    .and_then(|tail| tail.split_once("/reactions/"))
+                && reaction.strip_suffix("/@me").is_some_and(|emoji| !emoji.is_empty() && !emoji.contains('/'))
+            {
+                let message = message.parse::<u64>().expect("reaction source id");
+                let disk: Value = serde_json::from_slice(&std::fs::read(&queue_path).unwrap()).unwrap();
+                let committed = disk["terminal_identities"].as_array().is_some_and(|identities| {
+                    identities.iter().any(|identity| identity["sources"].as_array().is_some_and(|sources| {
+                        sources.iter().any(|source| source["message_id"].as_u64() == Some(message))
+                    }))
+                });
+                assert!(committed, "queued reaction cannot be removed before its source consume commits: {uri}");
+                return StatusCode::NO_CONTENT.into_response();
+            }
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
             let user = |id: &str| json!({"id": id, "username": "s2b username",
                 "global_name": "s2b global", "discriminator": "0", "avatar": null});
@@ -617,12 +639,11 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     assert!(fixture.pane.transcript_recorded_the_paste());
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
     let (header, text) = crate::services::tui_input::human_frame::parse(&buffer).unwrap();
+    assert_eq!(text, " status?", "the owner must paste the original H body");
     assert_eq!(
-        text, "\nstatus?",
-        "the owner must paste the original H body"
+        (header.name, header.source, header.nonce),
+        (AUTHOR_NAME, "", "")
     );
-    let source = format!("discord:{}:{}", fixture.channel, before[0].message_id);
-    assert_eq!((header.name, header.source), (AUTHOR_NAME, source.as_str()));
     assert_eq!(
         header.author, "200",
         "H's author must not become holder A's author"
@@ -630,6 +651,13 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     assert_eq!(
         header.mode,
         crate::services::tui_input::human_frame::Mode::Inject
+    );
+    assert!(
+        crate::services::tui_input::human_frame::history::registered(
+            &fixture.pane.nonce().expect("hidden attempt id"),
+            &fixture.pane.path(InjectPane::TRANSCRIPT),
+            &buffer,
+        )
     );
     let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
@@ -692,12 +720,10 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     assert!(fixture.pane.transcript_recorded_the_paste());
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    let (header, text) = buffer.split_once('\n').unwrap();
-    assert_eq!(text, before[0].text);
-    assert!(header.starts_with(&format!(
-        "[User: {AUTHOR_NAME} (ID: 200) · 📱 v1 mode=inject source=discord:{}:{} · ",
-        fixture.channel, before[0].message_id
-    )));
+    assert_eq!(
+        buffer,
+        format!("[User: {AUTHOR_NAME} (ID: 200)] {}", before[0].text)
+    );
     assert!(!buffer.contains("distinct tail B"));
     let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
@@ -811,7 +837,7 @@ async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_blo
     fixture.kick().await;
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    assert!(buffer.ends_with("\nstatus?"));
+    assert_eq!(buffer, format!("[User: {AUTHOR_NAME} (ID: 200)] status?"));
     let disk = fixture.disk();
     assert!(disk["head_injection"].is_null(), "{disk}");
     let after = fixture.queue().await;
@@ -826,7 +852,10 @@ async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_blo
         ["paste-buffer", "send-keys", "paste-buffer", "send-keys"]
     );
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    assert!(buffer.ends_with("\ndistinct tail B"));
+    assert_eq!(
+        buffer,
+        format!("[User: {AUTHOR_NAME} (ID: 200)] distinct tail B")
+    );
     assert!(fixture.queue().await.is_empty());
     let disk = fixture.disk();
     assert!(disk["head_injection"].is_null(), "{disk}");
@@ -1333,7 +1362,7 @@ async fn a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg() {
         assert_eq!(body["delivery"], "injected", "{body}");
         assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
         let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-        assert!(buffer.ends_with("\nC after parked"), "{buffer}");
+        assert_eq!(buffer, "[User: imessage:200 (ID: 200)] C after parked");
         let after: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
         assert_eq!(after, queued);
         assert_eq!(

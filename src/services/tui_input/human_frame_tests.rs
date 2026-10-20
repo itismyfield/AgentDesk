@@ -116,3 +116,21 @@ fn pane_line_readers_keep_an_inject_line_a_draft() {
     assert!(budget(&inject_line).is_some());
     assert_eq!(budget("❯ [User: ann (ID: 1)] hi"), None);
 }
+
+#[test]
+fn busy_header_bytes_equal_idle_for_one_line_and_multiline() {
+    let frame = crate::services::claude_tui::busy_inject::frame;
+    for (body, expected) in [
+        ("one line", "[User: ann (ID: 200)] one line"),
+        ("one\ntwo", "[User: ann (ID: 200)]\none\ntwo"),
+        (
+            "one\r\ntwo\rthree",
+            "[User: ann (ID: 200)]\none\ntwo\nthree",
+        ),
+    ] {
+        assert_eq!(
+            frame("discord:7:9", "200", "ann", "abcdef12", body).as_bytes(),
+            expected.as_bytes()
+        );
+    }
+}

@@ -169,6 +169,15 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
         (None, Some("Won Chang")),
     ] {
         let busy = busy().await;
+        assert!(
+            crate::services::discord::mailbox_snapshot(
+                &busy.rt.h.shared,
+                ChannelId::new(CHANNEL_ID)
+            )
+            .await
+            .cancel_token
+            .is_none()
+        );
         let message = fresh_id();
         let mut sent = user_message(message, "status?");
         sent.author.global_name = global_name.map(str::to_string);
@@ -178,18 +187,17 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
         let buffer = busy.pane.read("buffer").unwrap_or_default();
         busy.rt.finish().await;
         let shown = nick.or(global_name).unwrap();
-        let header = format!("[User: {shown} (ID: {USER_ID}) · 📱 v1 mode=inject source=");
-        assert!(buffer.starts_with(&header), "{buffer}");
+        assert_eq!(buffer, format!("[User: {shown} (ID: {USER_ID})] status?"));
     }
     let busy = busy().await;
     let rt = &busy.rt;
     let message = fresh_id();
     rt.h.deliver_user_message(message, "status?").await.unwrap();
-    let header = format!(
-        "[User: queue-user (ID: {USER_ID}) · 📱 v1 mode=inject source=discord:{CHANNEL_ID}:{message} · "
-    );
     let buffer = busy.pane.read("buffer").unwrap_or_default();
-    assert!(buffer.starts_with(&header), "{buffer}");
+    assert_eq!(
+        buffer,
+        format!("[User: queue-user (ID: {USER_ID})] status?")
+    );
     let observed = (
         busy.pane.keys(),
         rt.marks(message),
@@ -743,6 +751,12 @@ async fn deliver_from_announce(rt: &Runtime, message: u64, text: &str) {
 async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let busy = busy_with_announce().await;
     let rt = &busy.rt;
+    assert!(
+        crate::services::discord::mailbox_snapshot(&rt.h.shared, ChannelId::new(CHANNEL_ID))
+            .await
+            .cancel_token
+            .is_none()
+    );
     let message = fresh_id();
     deliver_from_announce(rt, message, "status?").await;
     let observed = (

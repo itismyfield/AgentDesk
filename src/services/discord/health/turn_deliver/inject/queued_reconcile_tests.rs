@@ -42,7 +42,7 @@ fn wrap(frame: String, wrapped: bool) -> String {
 fn prompt(nonce: &str, wrapped: bool) -> String {
     let source = format!("discord:{CHANNEL}:{HEAD}");
     wrap(
-        busy_inject::frame(&source, "200", "ann", nonce, "status?"),
+        human_frame::inject(&source, "200", "ann", nonce, "status?"),
         wrapped,
     )
 }
@@ -555,7 +555,7 @@ fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_so
 
     let v1 = |author: &str, name: &str, source: &str| {
         wrap(
-            busy_inject::frame(source, author, name, NONCE, "status?"),
+            human_frame::inject(source, author, name, NONCE, "status?"),
             true,
         )
     };
@@ -569,4 +569,105 @@ fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_so
     assert_eq!(proven(v1("200", "ann", &other)), None, "another source");
     let fresh = v1("200", "ann", &source).replace("mode=inject", "mode=new");
     assert_eq!(proven(fresh), None, "a new turn's header");
+}
+
+#[test]
+fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for wrapped in [false, true] {
+        let transcript = Transcript::new(&[]);
+        let offset = std::fs::metadata(&transcript.path).unwrap().len();
+        let frame = human_frame::idle("ann", "200", "status?");
+        assert!(!frame.contains(&format!("discord:{CHANNEL}:{HEAD}")));
+        human_frame::history::register(
+            ("claude", "AgentDesk-claude-test", NONCE, "200"),
+            &transcript.path,
+            offset,
+            &frame,
+        )
+        .unwrap();
+        for record in chain_of(wrap(frame, wrapped), NONCE, BEFORE) {
+            transcript.write(&format!("{record}\n"));
+        }
+        let proof = transcript
+            .want(
+                &[HEAD],
+                "status?",
+                Some(recorded(&transcript, NONCE, offset)),
+            )
+            .unwrap()
+            .search()
+            .expect("plain recorded frame must be scanned without a visible source");
+        assert_eq!(proof.nonce, NONCE);
+        assert_eq!(proof.offset, offset);
+        assert!(
+            transcript.legacy().is_none(),
+            "an unnamed head cannot claim a plain frame"
+        );
+        assert!(
+            transcript
+                .want(
+                    &[HEAD],
+                    "status?",
+                    Some(recorded(&transcript, "0f0f0f0f", offset)),
+                )
+                .unwrap()
+                .search()
+                .is_none(),
+            "a different hidden identity cannot claim the same bytes"
+        );
+    }
+}
+
+#[test]
+fn identical_plain_history_cannot_use_an_earlier_attempts_delayed_removal_chain() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let transcript = Transcript::new(&[]);
+    let offset = std::fs::metadata(&transcript.path).unwrap().len();
+    let frame = human_frame::idle("ann", "200", "status?");
+    let first = chain_of(frame.clone(), NONCE, AFTER);
+    human_frame::history::register(
+        ("claude", "AgentDesk-claude-test", NONCE, "200"),
+        &transcript.path,
+        offset,
+        &frame,
+    )
+    .unwrap();
+    transcript.write(&format!("{}\n", first[0]));
+    assert_eq!(
+        human_frame::history::receipt(
+            NONCE,
+            &transcript.path,
+            offset,
+            "enqueue",
+            Some("first-enqueue"),
+            &frame,
+        ),
+        Some(true)
+    );
+    let second = std::fs::metadata(&transcript.path).unwrap().len();
+    let second_nonce = "1e1e1e1e";
+    human_frame::history::register(
+        ("claude", "AgentDesk-claude-test", second_nonce, "200"),
+        &transcript.path,
+        second,
+        &frame,
+    )
+    .unwrap();
+    let second_chain = chain_of(frame, second_nonce, AFTER);
+    for record in [&second_chain[0], &first[1], &first[2]] {
+        transcript.write(&format!("{record}\n"));
+    }
+    assert!(
+        transcript
+            .want(
+                &[HEAD],
+                "status?",
+                Some(recorded(&transcript, second_nonce, second)),
+            )
+            .unwrap()
+            .search()
+            .is_none(),
+        "the second enqueue plus the first removal and command do not prove the second input"
+    );
 }
