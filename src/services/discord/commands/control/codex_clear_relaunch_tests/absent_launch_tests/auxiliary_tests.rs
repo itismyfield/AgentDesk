@@ -436,6 +436,12 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
     } else {
         target_missing(&fixture, true);
     }
+    if foreign_no_core == Some(true) {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+    }
     let _foreign_owners = match foreign_no_core {
         Some(no_core) => Some(joint_owner_tests::install_positive(&mut fixture, no_core).await),
         None => None,
@@ -461,7 +467,9 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
                 .iter()
                 .all(|effect| !call.starts_with(effect))
         }));
-        eprintln!("BUNDLE_OWNER_DRAIN started=0 dequeue=0 provider_effects=0 fifo_preserved=1");
+        eprintln!(
+            "BUNDLE_OWNER_DRAIN started=0 fifo_advanced=0 provider_effects=0 fifo_preserved=1"
+        );
     }
     assert!(
         started,

@@ -183,6 +183,63 @@ async fn make_binding_only(fixture: &CanaryFixture) {
             None
         )
     );
+    assert_eq!(
+        crate::services::discord::settings::resolve_workspace(channel, None).as_deref(),
+        fixture.root.path().to_str(),
+        "binding-only admission must retain its exact private workspace"
+    );
+    assert!(
+        crate::services::discord::adk_session::registered_channel_fallback_name(
+            channel,
+            &ProviderKind::Codex,
+        )
+        .is_none(),
+        "binding-only admission must derive its canonical name without a fallback"
+    );
+    let registry = fixture.shared.health_registry.upgrade().unwrap();
+    let mut hashes = registry.registered_token_hashes(&ProviderKind::Codex).await;
+    hashes.push(fixture.shared.token_hash.clone());
+    hashes.sort();
+    hashes.dedup();
+    let derived = crate::services::discord::host_key_derivation::derive_channel_session_name(
+        fixture.shared.pg_pool.as_ref().unwrap(),
+        &hashes,
+        &ProviderKind::Codex,
+        CANARY_CHANNEL,
+    )
+    .await
+    .unwrap_or_else(|reason| panic!("binding-only canonical name was not resolved: {reason:?}"));
+    assert_eq!(derived, CANARY_TMUX);
+    let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let unbound =
+        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
+            .await;
+    eprintln!(
+        "BUNDLE_NO_CORE_PRECONDITIONS canonical_name={derived} activity={observed:?} unbound={unbound:?}"
+    );
+    assert_eq!(
+        observed.activity,
+        activity::Activity::Idle,
+        "binding-only exact foreign ownership must prove idle: {observed:?}; {unbound:?}"
+    );
+    assert!(
+        !crate::services::discord::host_defer_gate::nameless_channel_deferred(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            CANARY_CHANNEL,
+        )
+        .await,
+        "binding-only canonical row must pass the nameless host gate"
+    );
+    assert!(
+        !crate::services::discord::router::hosted_tui_promote_readiness_blocked(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+        )
+        .await,
+        "binding-only exact absence must pass hosted launch readiness"
+    );
 }
 
 pub(super) async fn assert_bridge_once(
