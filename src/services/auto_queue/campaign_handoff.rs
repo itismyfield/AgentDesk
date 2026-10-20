@@ -471,20 +471,72 @@ mod tests;
 
 #[cfg(test)]
 mod minute_tick_wiring_tests {
+    use crate::test_support::{
+        CommentForgery, braced_item_span, rust_code_mask, strip_rust_comments,
+    };
+
+    const SERVER: &str = include_str!("../../server/mod.rs");
+    const TICK_LOOP: &str = "async fn policy_tick_loop(";
+    const MINUTE_TIER: &str = "if count % 2 == 0 {";
+    const HANDOFF: &str = "hand_off_auto_campaigns_pg(";
+    const ON_TICK: &str = "\"OnTick1min\"";
+
+    /// Classification 2: the 1min tier is the real `count % 2` block of the policy tick
+    /// (not a section comment); the handoff call precedes the `"OnTick1min"` literal there.
+    fn handoff_order_gaps(server: &str) -> Vec<String> {
+        let text = strip_rust_comments(server).expect("server source lexes");
+        let mask = rust_code_mask(server).expect("server source lexes");
+        let Some(tick) = braced_item_span(&mask, TICK_LOOP) else {
+            return vec![format!("missing {TICK_LOOP}")];
+        };
+        let Some(tier) = braced_item_span(&mask[tick.clone()], MINUTE_TIER) else {
+            return vec![format!("missing the 1min tier `{MINUTE_TIER}`")];
+        };
+        let tier = tick.start + tier.start..tick.start + tier.end;
+        let handoff = mask[tier.clone()].find(HANDOFF);
+        let on_tick = text[tier.clone()]
+            .match_indices(ON_TICK)
+            .map(|(at, _)| at)
+            .find(|at| mask[tier.start + at..][..ON_TICK.len()].trim().is_empty());
+        match (handoff, on_tick) {
+            (Some(handoff), Some(on_tick)) if handoff < on_tick => Vec::new(),
+            found => vec![format!("handoff → OnTick1min order broken: {found:?}")],
+        }
+    }
+
     /// The minute tick hands off before OnTick1min, which catches cards GitHub sync closed.
     #[test]
     fn the_minute_tick_hands_off_campaigns_before_the_auto_queue_tick() {
-        let server = include_str!("../../server/mod.rs");
-        let tier = server
-            .split("// ── 1min tier")
-            .nth(1)
-            .expect("the policy tick has a 1min tier");
-        let handoff = tier
-            .find("hand_off_auto_campaigns_pg(")
-            .expect("the 1min tier hands off campaigns");
-        let tick = tier
-            .find("\"OnTick1min\"")
-            .expect("the 1min tier fires OnTick1min");
-        assert!(handoff < tick, "the handoff runs before OnTick1min");
+        assert_eq!(handoff_order_gaps(SERVER), Vec::<String>::new());
+    }
+
+    #[test]
+    fn handoff_order_guard_rejects_commented_and_reordered_steps() {
+        for needle in [TICK_LOOP, MINUTE_TIER, HANDOFF, ON_TICK] {
+            for forgery in CommentForgery::ALL {
+                let forged = crate::test_support::comment_out_code(SERVER, needle, forgery);
+                assert!(
+                    !handoff_order_gaps(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        // Same calls, swapped: the handoff now follows the OnTick1min fire.
+        let call = SERVER.find(HANDOFF).expect("handoff call");
+        let fire = call + SERVER[call..].find(ON_TICK).expect("OnTick1min fire");
+        let swapped = [
+            &SERVER[..call],
+            ON_TICK,
+            &SERVER[call + HANDOFF.len()..fire],
+            HANDOFF,
+            &SERVER[fire + ON_TICK.len()..],
+        ]
+        .concat();
+        assert!(
+            !handoff_order_gaps(&swapped).is_empty(),
+            "reordered tier passes"
+        );
+        let unlabeled = SERVER.replacen("// ── 1min tier", "//", 1);
+        assert_eq!(handoff_order_gaps(&unlabeled), Vec::<String>::new());
     }
 }

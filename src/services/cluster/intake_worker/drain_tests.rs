@@ -59,25 +59,55 @@ fn nonfinal_tick_does_not_complete_drain() {
     assert!(poll_drain(waiter.as_mut()).is_ready());
 }
 
+const INTAKE_WORKER: &str = include_str!("../intake_worker.rs");
+const WAIT: &str = "pub(crate) async fn wait_until_drained(";
+const REGISTER: &str = "let notified = self.drained.notified();";
+const CHECK: &str = "self.active_ticks.load(Ordering::SeqCst)";
+
+/// Lexical order tripwire, not a runtime interleaving proof or Rust parser: in the code
+/// mask of the real `wait_until_drained`, registration precedes the active-tick check.
+fn drain_order_gaps(source: &str) -> Vec<String> {
+    let mask = crate::test_support::rust_code_mask(source).expect("intake worker lexes");
+    let Some(span) = crate::test_support::braced_item_span(&mask, WAIT) else {
+        return vec![format!("missing {WAIT}")];
+    };
+    let body = &mask[span];
+    match (body.find(REGISTER), body.find(CHECK)) {
+        (Some(register), Some(check)) if register < check => Vec::new(),
+        found => vec![format!(
+            "register before checking: broadcast has no permit {found:?}"
+        )],
+    }
+}
+
 #[test]
 fn drain_registers_before_checking_active_ticks() {
-    // Lexical order tripwire, not a runtime interleaving proof or Rust parser.
-    let source = include_str!("../intake_worker.rs");
-    let start = source
-        .find("pub(crate) async fn wait_until_drained(")
-        .unwrap();
-    let end = source[start..]
-        .find("\npub(crate) struct IntakeWorkerTickGuard")
-        .unwrap();
-    let body = &source[start..start + end];
-    let register = body
-        .find("let notified = self.drained.notified();")
-        .unwrap();
-    let check = body
-        .find("self.active_ticks.load(Ordering::SeqCst)")
-        .unwrap();
+    assert_eq!(drain_order_gaps(INTAKE_WORKER), Vec::<String>::new());
+}
+
+#[test]
+fn drain_order_guard_rejects_commented_and_reordered_steps() {
+    for needle in [WAIT, REGISTER, CHECK] {
+        for forgery in crate::test_support::CommentForgery::ALL {
+            let forged = crate::test_support::comment_out_code(INTAKE_WORKER, needle, forgery);
+            assert!(
+                !drain_order_gaps(&forged).is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    let register = INTAKE_WORKER.find(REGISTER).expect("registration");
+    let check = register + INTAKE_WORKER[register..].find(CHECK).expect("tick check");
+    let swapped = [
+        &INTAKE_WORKER[..register],
+        CHECK,
+        &INTAKE_WORKER[register + REGISTER.len()..check],
+        REGISTER,
+        &INTAKE_WORKER[check + CHECK.len()..],
+    ]
+    .concat();
     assert!(
-        register < check,
-        "register before checking: broadcast has no permit"
+        !drain_order_gaps(&swapped).is_empty(),
+        "reordered drain passes"
     );
 }
