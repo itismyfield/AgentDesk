@@ -621,3 +621,50 @@ async fn doctor_session_lookup_timeout_never_posts_repair() {
     drop(proxy);
     db.drop().await;
 }
+
+/// A snapshot read that did not answer leaves its row out of `mailboxes`, so the active count is
+/// withheld as a warning; a complete reading's excess and every row's own finding still fail.
+#[test]
+fn unanswered_snapshot_read_withholds_only_the_active_count() {
+    let failure = |read: &str| {
+        json!([{"provider": "discord", "channel_id": 43, "read": read,
+            "observation_failure": "unreachable"}])
+    };
+    let row_failure = (Fail, "mailbox_busy_without_active_turn");
+    let excess = (Fail, "global_active_without_active_turn");
+    let withheld = (Warn, "mailbox_observation_unavailable");
+    for (failures, complete, expected) in [
+        (
+            Some(failure("snapshot")),
+            Some(false),
+            vec![row_failure, withheld],
+        ),
+        (Some(failure("snapshot")), None, vec![row_failure, withheld]),
+        (None, Some(false), vec![row_failure, withheld]),
+        (Some(json!({})), None, vec![row_failure, withheld]),
+        // A failed second read keeps its row, so the count is still complete.
+        (
+            Some(failure("reconfirm")),
+            Some(true),
+            vec![row_failure, excess],
+        ),
+        (None, Some(true), vec![row_failure, excess]),
+        // A dcserver predating both fields.
+        (None, None, vec![row_failure, excess]),
+    ] {
+        let mut body = fixture();
+        body["global_active"] = json!(2);
+        replace(&mut body, "mailbox_observation_failures", failures);
+        replace(
+            &mut body["providers"][0],
+            "runtime_state_complete",
+            complete.map(Value::from),
+        );
+        let checks = check_mailbox_consistency(&snapshot(body.clone()));
+        let actual: Vec<_> = checks
+            .iter()
+            .map(|check| (check.status, check.id))
+            .collect();
+        assert_eq!(actual, expected, "{body}");
+    }
+}

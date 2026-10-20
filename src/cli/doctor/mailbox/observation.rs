@@ -107,21 +107,56 @@ pub(crate) fn classify_mailbox_snapshot(snapshot: &Value) -> Option<MailboxFindi
     }
 }
 
+fn observation_unavailable(issue: FieldIssue, evidence: Value) -> MailboxFinding {
+    let mut finding = unavailable(&Value::Null, issue);
+    finding.evidence = evidence;
+    finding.id = "mailbox_observation_unavailable";
+    finding
+}
+
+/// A snapshot read that did not answer leaves its channel out of `mailboxes`, which then
+/// undercounts `global_active`; a failed later read keeps its row and does not count here.
+fn unread_rows(body: &Value) -> Option<FieldIssue> {
+    let field = "mailbox_observation_failures";
+    let unread = match body.get(field) {
+        None => false,
+        Some(Value::Array(failures)) => failures
+            .iter()
+            .any(|failure| failure.get("read").and_then(Value::as_str) == Some("snapshot")),
+        Some(value) => return Some(FieldIssue::new(field, Some(value), "array")),
+    };
+    let incomplete = body
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|provider| provider.get("runtime_state_complete") == Some(&Value::Bool(false)));
+    (unread || incomplete).then(|| {
+        let mut issue = FieldIssue::new("mailboxes", body.get("mailboxes"), "every actor read");
+        issue.code = "incomplete";
+        issue
+    })
+}
+
 pub(crate) fn classify_mailbox_findings(body: &Value) -> Vec<MailboxFinding> {
     let Some(value) = body.get("mailboxes") else {
         return Vec::new();
     };
     let Some(mailboxes) = value.as_array() else {
         let issue = FieldIssue::new("mailboxes", Some(value), "array");
-        let mut finding = unavailable(&Value::Null, issue.clone());
-        finding.evidence = json!({"measurement_issue": issue});
-        finding.id = "mailbox_observation_unavailable";
-        return vec![finding];
+        let evidence = json!({"measurement_issue": issue});
+        return vec![observation_unavailable(issue, evidence)];
     };
     let mut findings: Vec<_> = mailboxes
         .iter()
         .filter_map(classify_mailbox_snapshot)
         .collect();
+    if let Some(issue) = unread_rows(body) {
+        let evidence = json!({"measurement_issue": issue,
+            "mailbox_observation_failures": body.get("mailbox_observation_failures")});
+        findings.push(observation_unavailable(issue, evidence));
+        return findings;
+    }
     let aggregate = (|| -> Measurement<(usize, usize)> {
         let global = count(body, "global_active")?;
         let mut actual = 0;
