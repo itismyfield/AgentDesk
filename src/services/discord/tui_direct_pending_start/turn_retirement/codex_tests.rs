@@ -79,6 +79,7 @@ fn save_row(channel: u64, terminal: bool) -> PathBuf {
 fn pending(channel: u64) -> TuiDirectPendingStart {
     TuiDirectPendingStart {
         hosted_source: None,
+        hosted_source_checked: false,
         provider: "codex".into(),
         channel_id: channel,
         tmux_session_name: "codex-takeover-fixture".into(),
