@@ -244,6 +244,22 @@ fn mutate_at(
     now_ms: u64,
     mutate: impl FnOnce(&mut CompletedTurnLedger),
 ) -> Result<(), String> {
+    mutate_at_with_sync(
+        path,
+        now_ms,
+        mutate,
+        runtime_store::fsync_parent_dir,
+        runtime_store::PARENT_DIR_FSYNC_FLUSHES,
+    )
+}
+
+fn mutate_at_with_sync(
+    path: &Path,
+    now_ms: u64,
+    mutate: impl FnOnce(&mut CompletedTurnLedger),
+    _sync: impl FnOnce(&Path) -> std::io::Result<()>,
+    _flushes: bool,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -269,22 +285,46 @@ fn append_at(
     turn_nonce: Option<&str>,
     committed_at_epoch_ms: u64,
 ) -> Result<(), String> {
+    append_at_with_sync(
+        path,
+        user_msg_id,
+        turn_nonce,
+        committed_at_epoch_ms,
+        runtime_store::fsync_parent_dir,
+        runtime_store::PARENT_DIR_FSYNC_FLUSHES,
+    )
+}
+
+fn append_at_with_sync(
+    path: &Path,
+    user_msg_id: u64,
+    turn_nonce: Option<&str>,
+    committed_at_epoch_ms: u64,
+    sync: impl FnOnce(&Path) -> std::io::Result<()>,
+    flushes: bool,
+) -> Result<(), String> {
     if user_msg_id == 0 {
         return Ok(());
     }
     let turn_nonce = turn_nonce
         .filter(|nonce| !nonce.is_empty())
         .map(str::to_owned);
-    mutate_at(path, committed_at_epoch_ms, |ledger| {
-        ledger
-            .entries
-            .retain(|entry| entry.user_msg_id != user_msg_id || entry.turn_nonce != turn_nonce);
-        ledger.entries.push(CompletedTurnEntry {
-            user_msg_id,
-            committed_at_epoch_ms,
-            turn_nonce,
-        });
-    })
+    mutate_at_with_sync(
+        path,
+        committed_at_epoch_ms,
+        |ledger| {
+            ledger
+                .entries
+                .retain(|entry| entry.user_msg_id != user_msg_id || entry.turn_nonce != turn_nonce);
+            ledger.entries.push(CompletedTurnEntry {
+                user_msg_id,
+                committed_at_epoch_ms,
+                turn_nonce,
+            });
+        },
+        sync,
+        flushes,
+    )
 }
 
 fn record_alias_at(
