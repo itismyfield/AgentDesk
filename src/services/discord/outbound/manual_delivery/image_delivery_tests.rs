@@ -104,7 +104,18 @@ async fn send_image(
     correlation: &str,
     semantic: &str,
 ) -> (&'static str, String) {
-    send_resolved_manual_message(
+    let options = super::super::send_gate::ManualOutboundOptions {
+        trusted_internal_outbox: true,
+        image_attachment: Some(Arc::new(
+            crate::services::message_outbox::StoredOutboxAttachment {
+                filename: image.filename.to_owned(),
+                content_type: image.content_type.to_owned(),
+                data: image.data.to_vec(),
+            },
+        )),
+        ..Default::default()
+    };
+    send_authorized_manual_message(
         client,
         dedup,
         ResolvedManualMessage {
@@ -124,9 +135,10 @@ async fn send_image(
                     semantic_event_id: semantic,
                 }),
                 headless_nonce_enabled: false,
-                attachment: Some(image),
+                attachment: None,
             },
         },
+        &options,
     )
     .await
 }

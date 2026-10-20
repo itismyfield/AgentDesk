@@ -32,7 +32,8 @@ mod discord_units_tests;
 mod headless_nonce;
 mod resolved;
 pub(super) use resolved::{
-    ManualNotification, ResolvedManualMessage, send_resolved_manual_message,
+    ManualNotification, ResolvedManualMessage, send_authorized_manual_message,
+    send_resolved_manual_message,
 };
 mod image_delivery;
 #[cfg(test)]
@@ -47,6 +48,7 @@ fn manual_delivery_log_emoji(bot: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundClient>(
     client: &C,

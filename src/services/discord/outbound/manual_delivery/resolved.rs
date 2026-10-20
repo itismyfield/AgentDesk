@@ -97,3 +97,21 @@ pub(in crate::services::discord::outbound) async fn send_resolved_manual_message
         }
     }
 }
+
+pub(in crate::services::discord::outbound) async fn send_authorized_manual_message<
+    'a,
+    C: ManualOutboundClient,
+>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    mut request: ResolvedManualMessage<'a>,
+    options: &'a super::super::send_gate::ManualOutboundOptions,
+) -> (&'static str, String) {
+    request.notification.attachment = options
+        .image_attachment
+        .as_deref()
+        .map(|image| image.borrowed());
+    request.notification.headless_nonce_enabled = options.image_attachment.is_none()
+        && headless_nonce::headless_discord_nonce_enabled(options.trusted_internal_outbox);
+    send_resolved_manual_message(client, dedup, request).await
+}

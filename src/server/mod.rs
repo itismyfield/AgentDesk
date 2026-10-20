@@ -2293,7 +2293,7 @@ async fn mark_message_outbox_sent_pg(
         "UPDATE message_outbox
             SET status = 'sent',
                 sent_at = NOW(),
-                error = NULL,
+                error = NULL, attachment_filename = NULL, attachment_content_type = NULL, attachment_data = NULL,
                 retry_count = 0,
                 next_attempt_at = NULL,
                 claimed_at = NULL,

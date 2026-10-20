@@ -358,3 +358,81 @@ async fn outbox_image_constraints_reject_partial_and_oversized_rows_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn image_prod_options_and_sent_cleanup_preserve_sentinel_pg() {
+    let (db, pool) = image_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+    let id =
+        enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("sent-cleanup"), Some(image()))
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    let claimed = claim_pending_message_outbox_batch_pg(&pool, "image-options").await;
+    assert_eq!(claimed.len(), 1);
+    let row = &claimed[0];
+    let expected = row.attachment.as_ref().unwrap().as_ref().unwrap();
+    let options = outbox_actionable_delivery::delivery_options(row).unwrap();
+    assert!(
+        options
+            .image_attachment
+            .as_ref()
+            .is_some_and(|image| Arc::ptr_eq(image, expected)),
+        "prod delivery options must preserve the claimed image Arc"
+    );
+    assert!(options.trusted_internal_outbox);
+    assert!(
+        mark_message_outbox_sent_pg(&pool, id, "stale-owner", row.claimed_at)
+            .await
+            .is_err()
+    );
+    let before: bool =
+        sqlx::query_scalar("SELECT attachment_data IS NOT NULL FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(before, "stale lease must retain image bytes");
+    mark_message_outbox_sent_pg(&pool, id, &row.claim_owner, row.claimed_at)
+        .await
+        .unwrap();
+    let cleared: bool = sqlx::query_scalar("SELECT status='sent' AND attachment_filename IS NULL AND attachment_content_type IS NULL AND attachment_data IS NULL AND dedupe_key IS NOT NULL AND dedupe_expires_at IS NULL FROM message_outbox WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    assert!(
+        cleared,
+        "sent image must clear its triplet and retain the permanent dedupe sentinel"
+    );
+    let repeated =
+        enqueue_outbox_pg_returning_id_with_persistent_dedupe(&pool, message("sent-cleanup"))
+            .await
+            .unwrap();
+    assert_eq!(id, repeated);
+    let mut tx = pool.begin().await.unwrap();
+    let failed_id =
+        enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("failed-preserve"), Some(image()))
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE message_outbox SET retry_count=100 WHERE id=$1")
+        .bind(failed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        drain_message_outbox_batch_once(&pool, Some("failed-image"), |_| async {
+            ("500 Internal Server Error".into(), "retry exhausted".into())
+        })
+        .await,
+        1
+    );
+    let retained: bool = sqlx::query_scalar(
+        "SELECT status='failed' AND attachment_data=$2 FROM message_outbox WHERE id=$1",
+    )
+    .bind(failed_id)
+    .bind(image().data)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retained, "failed image must keep bytes for redrive");
+    pool.close().await;
+    db.drop().await;
+}

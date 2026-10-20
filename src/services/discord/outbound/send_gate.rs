@@ -8,8 +8,8 @@ use serenity::ChannelId;
 use sqlx::PgPool;
 
 use super::manual_delivery::{
-    ManualOutboundDeliveryId, SerenityManualOutboundClient,
-    send_resolved_manual_message_with_client,
+    ManualNotification, ManualOutboundDeliveryId, ResolvedManualMessage,
+    SerenityManualOutboundClient, send_authorized_manual_message,
 };
 use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
@@ -367,47 +367,27 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
     };
 
     let outbound_client = production_manual_outbound_client(http);
-    if let Some(attachment) = &options.image_attachment {
-        use super::manual_delivery::{
-            ManualNotification, ResolvedManualMessage, send_resolved_manual_message,
-        };
-        return send_resolved_manual_message(
-            &outbound_client,
-            shared_outbound_deduper(),
-            ResolvedManualMessage {
-                channel_id_raw,
-                target,
-                pg_pool,
-                record_transcript: options.record_transcript,
-                transcript_source_label: options.transcript_source_label.as_deref(),
-                notification: ManualNotification {
-                    channel_id: &channel_id_raw.to_string(),
-                    content,
-                    bot,
-                    source,
-                    summary,
-                    delivery_id,
-                    headless_nonce_enabled: false,
-                    attachment: Some(attachment.borrowed()),
-                },
-            },
-        )
-        .await;
-    }
-    send_resolved_manual_message_with_client(
+    send_authorized_manual_message(
         &outbound_client,
         shared_outbound_deduper(),
-        channel_id_raw,
-        target,
-        content,
-        source,
-        bot,
-        summary,
-        delivery_id,
-        pg_pool,
-        options.record_transcript,
-        options.transcript_source_label.as_deref(),
-        options.trusted_internal_outbox,
+        ResolvedManualMessage {
+            channel_id_raw,
+            target,
+            pg_pool,
+            record_transcript: options.record_transcript,
+            transcript_source_label: options.transcript_source_label.as_deref(),
+            notification: ManualNotification {
+                channel_id: &channel_id_raw.to_string(),
+                content,
+                bot,
+                source,
+                summary,
+                delivery_id,
+                headless_nonce_enabled: false,
+                attachment: None,
+            },
+        },
+        &options,
     )
     .await
 }

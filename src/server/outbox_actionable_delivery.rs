@@ -33,14 +33,26 @@ fn delivery_content(content: &str, source: &str, reason_code: Option<&str>) -> S
     }
 }
 
+pub(super) fn delivery_options(
+    row: &PendingMessageOutboxRow,
+) -> Result<crate::services::discord::health::ManualOutboundOptions, &'static str> {
+    let attachment = row.attachment.clone()?;
+    Ok(crate::services::discord::health::ManualOutboundOptions {
+        allow_unbound_internal_channel: true,
+        trusted_internal_outbox: true,
+        image_attachment: attachment,
+        ..Default::default()
+    })
+}
+
 async fn deliver_with_bot(
     registry: &HealthRegistry,
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,
     bot: &str,
 ) -> (&'static str, String) {
-    let attachment = match &row.attachment {
-        Ok(attachment) => attachment.clone(),
+    let options = match delivery_options(row) {
+        Ok(options) => options,
         Err(error) => return ("400 Bad Request", error.to_string()),
     };
     let (correlation_id, semantic_event_id) = row.delivery_ids();
@@ -57,12 +69,7 @@ async fn deliver_with_bot(
             correlation_id: &correlation_id,
             semantic_event_id: &semantic_event_id,
         }),
-        crate::services::discord::health::ManualOutboundOptions {
-            allow_unbound_internal_channel: true,
-            trusted_internal_outbox: true,
-            image_attachment: attachment,
-            ..Default::default()
-        },
+        options,
     )
     .await
 }
