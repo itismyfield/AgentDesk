@@ -7,7 +7,7 @@ use serde::Serialize;
 #[cfg(unix)]
 mod relay_probe;
 // The per-channel assembly lives in a child so this registered giant does not grow.
-mod health_observation;
+pub(super) mod health_observation;
 
 use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::{MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations};
@@ -237,6 +237,10 @@ pub struct DiscordHealthSnapshot {
     mailboxes: Vec<MailboxHealthSnapshot>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     queue_park_observation_failures: Vec<super::mailbox::QueueParkObservationFailureSnapshot>,
+    /// Mailbox reads that did not answer by the deadline; their channels are not in `mailboxes`
+    /// as idle.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mailbox_observation_failures: Vec<health_observation::MailboxReadFailure>,
 }
 
 impl DiscordHealthSnapshot {
@@ -558,11 +562,12 @@ async fn watcher_state_snapshot_for_shared(
         session.inflight_state_present,
     )
     .await;
-    let relay_thread_proof = health_observation::relay_thread_proof_for_channel(
+    let (relay_thread_proof, _) = health_observation::relay_thread_proof_for_channel(
         &shared,
         provider_kind.as_ref(),
         channel,
         mailbox_has_cancel_token || session.inflight_state_present || session.attached,
+        None,
     )
     .await;
     let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
@@ -731,6 +736,15 @@ pub(super) async fn build_health_snapshot_with_options(
     registry: &HealthRegistry,
     options: HealthSnapshotOptions,
 ) -> DiscordHealthSnapshot {
+    build_health_snapshot_until(registry, options, health_observation::caller_deadline()).await
+}
+
+/// The snapshot whose mailbox reads all end by `deadline`.
+async fn build_health_snapshot_until(
+    registry: &HealthRegistry,
+    options: HealthSnapshotOptions,
+    deadline: tokio::time::Instant,
+) -> DiscordHealthSnapshot {
     let HealthSnapshotOptions {
         include_mailbox_details,
         mut tmux,
@@ -755,6 +769,7 @@ pub(super) async fn build_health_snapshot_with_options(
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
     let mut failures = Vec::new();
+    let mut read_failures = Vec::new();
     let mut provider_active_turns = 0usize;
     // Read the authority switch once per snapshot. Structural polarity is a
     // no-op, so the public build skips channel observation entirely (#5736).
@@ -773,15 +788,27 @@ pub(super) async fn build_health_snapshot_with_options(
         fully_recovered = false;
     }
 
-    for entry in providers.iter() {
-        let provider_probe = provider_probe::probe_provider(entry).await;
+    let first_reads =
+        health_observation::first_reads(&providers, include_mailbox_details, deadline).await;
+    for (entry, observations) in providers.iter().zip(&first_reads) {
+        let provider_probe = provider_probe::probe_provider(entry, observations);
 
         deferred_hooks += provider_probe.deferred_hooks;
         queue_depth += provider_probe.queue_depth;
         watcher_count += provider_probe.watcher_count;
         recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
         let provider_kind = ProviderKind::from_str(&entry.name);
-        let park = ParkObservations::observe(entry, include_mailbox_details, &mut failures).await;
+        let park = ParkObservations::from_observations(
+            entry,
+            include_mailbox_details,
+            observations,
+            &mut failures,
+        );
+        health_observation::record_first_read_failures(
+            &entry.name,
+            observations,
+            &mut read_failures,
+        );
         let observed_mailboxes = observe_channels
             .then_some(&provider_probe.mailbox_snapshots)
             .into_iter()
@@ -797,15 +824,19 @@ pub(super) async fn build_health_snapshot_with_options(
                 composite_governs_polarity,
                 #[cfg(unix)]
                 o_owned_channels: &o_owned_channels,
+                deadline,
             },
             observed_mailboxes,
             &mut tmux,
             health_observation::Sinks {
+                #[cfg(unix)]
                 degraded_reasons: &mut degraded_reasons,
                 #[cfg(unix)]
                 expired_relay_ledgers: &mut expired_relay_ledgers,
+                #[cfg(unix)]
                 status: &mut status,
                 mailbox_entries: &mut mailbox_entries,
+                read_failures: &mut read_failures,
             },
         )
         .await;
@@ -820,6 +851,11 @@ pub(super) async fn build_health_snapshot_with_options(
         provider_entries.push(provider_probe.snapshot);
     }
 
+    health_observation::degrade_on_read_failures(
+        &mut read_failures,
+        &mut status,
+        &mut degraded_reasons,
+    );
     let global_active = if let Some(p) = providers.first() {
         p.shared
             .restart
@@ -874,6 +910,7 @@ pub(super) async fn build_health_snapshot_with_options(
         providers: provider_entries,
         mailboxes: tmux.with_process_presence(mailbox_entries).await,
         queue_park_observation_failures: failures,
+        mailbox_observation_failures: read_failures,
     }
 }
 

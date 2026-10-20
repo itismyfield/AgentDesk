@@ -1,9 +1,15 @@
-//! The per-channel half of the health snapshot: each mailbox the provider probe observed,
-//! enriched with its session, relay proof and relay verdict.
+//! The mailbox half of the health snapshot. Every actor read ends by the request's deadline,
+//! and a read that did not answer is reported, never taken as an idle mailbox.
 
+#[cfg(unix)]
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::time::Duration;
 
+use futures::future::join_all;
 use poise::serenity_prelude::ChannelId;
+use serde::Serialize;
+use tokio::time::{Instant, timeout_at};
 
 use super::super::mailbox::{
     MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations,
@@ -14,7 +20,7 @@ use super::super::reachability::composite::{
 };
 use super::super::redaction;
 use super::super::session_enrichment::{
-    self, ExecutorWitness, SessionEnrichment, TmuxObservationBudget,
+    self, ExecutorWitness, HealthSnapshotOptions, SessionEnrichment, TmuxObservationBudget,
 };
 use super::super::stall_verdict;
 use super::super::unpaired_active_token::{
@@ -24,13 +30,109 @@ use super::super::{HealthRegistry, ProviderEntry};
 #[cfg(unix)]
 use super::relay_probe::relay_verdict_probe_operands;
 use super::{
-    HealthStatus, RelayThreadProofSnapshot, last_outbound_activity_ms,
+    DiscordHealthSnapshot, HealthStatus, RelayThreadProofSnapshot, last_outbound_activity_ms,
     relay_active_turn_from_inflight, trace_relay_health_classification,
 };
 use crate::services::discord::relay_health::{FrontierProvenanceReport, RelayStallClassifier};
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
+use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, MailboxObservationFailure};
+
+/// One provider's first mailbox reads, keyed by channel.
+pub(super) type Observations =
+    HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>>;
+
+/// The first reads end this soon at the latest, so the reads after them keep some of the deadline.
+const FIRST_READS_CAP: Duration = Duration::from_secs(1);
+
+/// The mailbox-read deadline of a snapshot whose caller carries none.
+const UNBOUNDED_CALLER_BUDGET: Duration = Duration::from_millis(1_500);
+
+/// The degraded reason for a snapshot in which some actor read did not answer.
+const MAILBOX_SNAPSHOT_UNAVAILABLE: &str = "mailbox_snapshot_unavailable";
+
+pub(super) fn caller_deadline() -> Instant {
+    Instant::now() + UNBOUNDED_CALLER_BUDGET
+}
+
+/// A mailbox read that did not answer; its channel gets no idle snapshot or proof from it.
+#[derive(Debug, Serialize)]
+pub(super) struct MailboxReadFailure {
+    provider: String,
+    channel_id: u64,
+    read: &'static str,
+    observation_failure: &'static str,
+}
+
+impl MailboxReadFailure {
+    fn new(provider: &str, channel: ChannelId, read: &'static str) -> Self {
+        Self {
+            provider: provider.to_string(),
+            channel_id: channel.get(),
+            read,
+            observation_failure: MailboxObservationFailure::Unreachable.as_str(),
+        }
+    }
+}
+
+impl HealthRegistry {
+    /// The health snapshot whose mailbox reads all end by `deadline`, the request's own.
+    pub(crate) async fn health_snapshot_by(
+        &self,
+        include_details: bool,
+        deadline: Instant,
+    ) -> DiscordHealthSnapshot {
+        let options = HealthSnapshotOptions::new(include_details);
+        super::build_health_snapshot_until(self, options, deadline).await
+    }
+}
+
+/// Every provider's first mailbox reads, all started together.
+pub(super) async fn first_reads(
+    providers: &[ProviderEntry],
+    include_details: bool,
+    deadline: Instant,
+) -> Vec<Observations> {
+    let end = deadline.min(Instant::now() + FIRST_READS_CAP);
+    join_all(providers.iter().map(|entry| {
+        let shared = entry.shared.as_ref();
+        // Park-tracked channels with no actor come back Missing for the park projection.
+        let tracked = ProviderKind::from_str(&entry.name)
+            .filter(|_| include_details)
+            .map(|_| shared.queue_park_ledger.tracked_channels())
+            .unwrap_or_default();
+        shared.mailboxes.try_snapshot_all_for_health(tracked, end)
+    }))
+    .await
+}
+
+/// Names each channel whose first read did not answer.
+pub(super) fn record_first_read_failures(
+    provider: &str,
+    observations: &Observations,
+    failures: &mut Vec<MailboxReadFailure>,
+) {
+    for (channel, observation) in observations {
+        if let Err(MailboxObservationFailure::Unreachable) = observation {
+            failures.push(MailboxReadFailure::new(provider, *channel, "snapshot"));
+        }
+    }
+}
+
+/// Any unanswered read degrades the snapshot once; the failures list names the channels.
+pub(super) fn degrade_on_read_failures(
+    failures: &mut [MailboxReadFailure],
+    status: &mut HealthStatus,
+    degraded_reasons: &mut Vec<String>,
+) {
+    failures.sort_by(|a, b| {
+        (&a.provider, a.channel_id, a.read).cmp(&(&b.provider, b.channel_id, b.read))
+    });
+    if !failures.is_empty() {
+        *status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(MAILBOX_SNAPSHOT_UNAVAILABLE.to_string());
+    }
+}
 
 /// What one provider's channel pass reads besides the mailbox snapshots.
 pub(super) struct ChannelPass<'a> {
@@ -43,15 +145,19 @@ pub(super) struct ChannelPass<'a> {
     pub(super) composite_governs_polarity: bool,
     #[cfg(unix)]
     pub(super) o_owned_channels: &'a BTreeSet<u64>,
+    pub(super) deadline: Instant,
 }
 
 /// The snapshot-wide values the channel pass adds to.
 pub(super) struct Sinks<'a> {
+    #[cfg(unix)]
     pub(super) degraded_reasons: &'a mut Vec<String>,
     #[cfg(unix)]
     pub(super) expired_relay_ledgers: &'a mut Vec<String>,
+    #[cfg(unix)]
     pub(super) status: &'a mut HealthStatus,
     pub(super) mailbox_entries: &'a mut Vec<MailboxHealthSnapshot>,
+    pub(super) read_failures: &'a mut Vec<MailboxReadFailure>,
 }
 
 pub(super) async fn channel_entries<'s>(
@@ -70,14 +176,20 @@ pub(super) async fn channel_entries<'s>(
         composite_governs_polarity,
         #[cfg(unix)]
         o_owned_channels,
+        deadline,
     } = pass;
     let Sinks {
+        #[cfg(unix)]
         degraded_reasons,
         #[cfg(unix)]
         expired_relay_ledgers,
+        #[cfg(unix)]
         status,
         mailbox_entries,
+        read_failures,
     } = sinks;
+    // Session and tmux reads keep channel order: they share one tmux budget.
+    let mut loaded = Vec::new();
     for (channel_id, snapshot) in observed_mailboxes {
         let channel = *channel_id;
         let session = SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
@@ -87,33 +199,41 @@ pub(super) async fn channel_entries<'s>(
         // it is unchanged; what is new is that the ledger TTL below can
         // tell "no session" from "no answer".
         let executor_witness = session.tmux_session_witness_within(tmux).await;
+        loaded.push((channel, snapshot, session, executor_witness));
+    }
+    // The thread-proof and reconfirm reads of every channel run together, each cut at the deadline.
+    let second = join_all(loaded.iter().map(|(channel, snapshot, session, _)| {
+        second_reads(
+            entry,
+            provider_kind.as_ref(),
+            *channel,
+            snapshot,
+            session,
+            deadline,
+        )
+    }))
+    .await;
+    for ((channel, snapshot, session, executor_witness), second) in loaded.into_iter().zip(second) {
+        let SecondReads {
+            relay_thread_proof,
+            unpaired_active_token_reconfirmed,
+            unanswered,
+        } = second;
+        for read in unanswered {
+            read_failures.push(MailboxReadFailure::new(&entry.name, channel, read));
+        }
         let tmux_present = matches!(executor_witness, ExecutorWitness::Present);
         let desynced = session.desynced(tmux_present, session.watcher_attached);
         let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
         let queue_depth = snapshot.intervention_queue.len();
         let mailbox_active_user_msg_id =
             redaction::visible_serenity_message_id(snapshot.active_user_message_id);
-        let relay_thread_proof = relay_thread_proof_for_channel(
-            &entry.shared,
-            provider_kind.as_ref(),
-            channel,
-            mailbox_has_cancel_token || session.inflight_state_present || session.watcher_attached,
-        )
-        .await;
         // Resolved before `relay_thread_proof` is folded into the relay
         // health snapshot below; the coordinate LOOKUP it feeds is
         // detail-only and stays behind the payload gate (#5736).
         let counterpart_channel_id = relay_thread_proof.counterpart_channel_id(channel.get());
         let active_turn =
             relay_active_turn_from_inflight(mailbox_has_cancel_token, session.inflight.as_ref());
-        let unpaired_active_token_reconfirmed = unpaired_active_token::reconfirm(
-            &entry.shared,
-            provider_kind.as_ref(),
-            channel,
-            snapshot,
-            session.inflight_state_present,
-        )
-        .await;
         let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
             provider: entry.name.clone(),
             channel_id: channel.get(),
@@ -261,12 +381,76 @@ pub(super) async fn channel_entries<'s>(
     }
 }
 
+/// What the fresh reads after a channel's first read found, and which of them did not answer.
+struct SecondReads {
+    relay_thread_proof: RelayThreadProofSnapshot,
+    unpaired_active_token_reconfirmed: bool,
+    unanswered: Vec<&'static str>,
+}
+
+/// The paired thread's read and the unpaired-token reconfirm, both fresh and both ending by
+/// `deadline`. A reconfirm that did not answer confirms nothing.
+async fn second_reads(
+    entry: &ProviderEntry,
+    provider: Option<&ProviderKind>,
+    channel: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+    session: &SessionEnrichment,
+    deadline: Instant,
+) -> SecondReads {
+    let live = snapshot.cancel_token.is_some()
+        || session.inflight_state_present
+        || session.watcher_attached;
+    let reconfirm = unpaired_active_token::reconfirm(
+        &entry.shared,
+        provider,
+        channel,
+        snapshot,
+        session.inflight_state_present,
+    );
+    let ((relay_thread_proof, thread_failure), reconfirmed) = tokio::join!(
+        relay_thread_proof_for_channel(&entry.shared, provider, channel, live, Some(deadline)),
+        timeout_at(deadline, reconfirm),
+    );
+    let mut unanswered = Vec::new();
+    if thread_failure.is_some() {
+        unanswered.push("thread_proof");
+    }
+    if reconfirmed.is_err() {
+        unanswered.push("reconfirm");
+    }
+    SecondReads {
+        relay_thread_proof,
+        unpaired_active_token_reconfirmed: reconfirmed.unwrap_or(false),
+        unanswered,
+    }
+}
+
+/// A fresh read of `channel`'s actor ending by `deadline`; a channel with no actor reads idle.
+async fn read_by(
+    shared: &SharedData,
+    channel: ChannelId,
+    deadline: Instant,
+) -> Result<ChannelMailboxSnapshot, MailboxObservationFailure> {
+    let Some(handle) = shared.mailbox_peek(channel) else {
+        return Ok(ChannelMailboxSnapshot::no_actor(channel));
+    };
+    timeout_at(deadline, handle.try_snapshot())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(MailboxObservationFailure::Unreachable)
+}
+
+/// The channel's parent/thread proof. With a `deadline` the thread read ends by it, and an
+/// unanswered read is returned instead of marking the proof stale.
 pub(super) async fn relay_thread_proof_for_channel(
     shared: &SharedData,
     provider: Option<&ProviderKind>,
     channel_id: ChannelId,
     current_channel_has_live_evidence: bool,
-) -> RelayThreadProofSnapshot {
+    deadline: Option<Instant>,
+) -> (RelayThreadProofSnapshot, Option<MailboxObservationFailure>) {
     let thread_channel_id = shared
         .dispatch
         .thread_parents
@@ -278,27 +462,49 @@ pub(super) async fn relay_thread_proof_for_channel(
         .iter()
         .find_map(|entry| (*entry.value() == channel_id).then_some(entry.key().get()));
 
+    let mut unanswered = None;
     let child_has_live_evidence = match thread_channel_id {
         Some(thread_id) => {
             let thread_channel = ChannelId::new(thread_id);
-            let thread_mailbox = discord::mailbox_snapshot(shared, thread_channel).await;
+            let thread_mailbox = match deadline {
+                Some(deadline) => read_by(shared, thread_channel, deadline).await,
+                None => Ok(discord::mailbox_snapshot(shared, thread_channel).await),
+            };
             // #5736: read-only — see `SessionEnrichment::load`. This probe exists
             // to answer "does the paired thread show live evidence", never to
             // rewrite the row it reads.
             let thread_inflight = provider.and_then(|provider| {
                 discord::inflight::load_inflight_state_read_only(provider, thread_id)
             });
-            thread_mailbox.cancel_token.is_some()
-                || thread_inflight.is_some()
-                || shared.tmux_watchers.contains_key(&thread_channel)
+            match thread_mailbox {
+                Ok(thread_mailbox) => {
+                    thread_mailbox.cancel_token.is_some()
+                        || thread_inflight.is_some()
+                        || shared.tmux_watchers.contains_key(&thread_channel)
+                }
+                // An unanswered read proves nothing either way, so it cannot make the proof stale.
+                Err(failure) => {
+                    unanswered = Some(failure);
+                    true
+                }
+            }
         }
         None => false,
     };
 
-    RelayThreadProofSnapshot {
+    let proof = RelayThreadProofSnapshot {
         parent_channel_id,
         thread_channel_id,
         stale_thread_proof: thread_channel_id.is_some_and(|_| !child_has_live_evidence)
             || parent_channel_id.is_some_and(|_| !current_channel_has_live_evidence),
-    }
+    };
+    (proof, unanswered)
 }
+
+#[cfg(all(test, unix))]
+#[path = "health_observation_tests.rs"]
+mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "health_observation_pg_tests.rs"]
+pub(in crate::services::discord::health) mod pg_tests;

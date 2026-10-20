@@ -12,11 +12,8 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
         return assemble(state, detailed, initial, None).await;
     };
     let snapshot = async {
-        let snapshot = if detailed {
-            health::build_health_snapshot(registry).await
-        } else {
-            health::build_public_health_snapshot(registry).await
-        };
+        // The mailbox reads end by the same deadline as the database reads.
+        let snapshot = registry.health_snapshot_by(detailed, deadline).await;
         let status = snapshot.status();
         (
             status,
