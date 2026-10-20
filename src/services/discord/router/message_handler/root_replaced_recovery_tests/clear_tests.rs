@@ -241,6 +241,11 @@ fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg(
         effects,
         "public recovery clear has no pane mutation"
     );
+    crate::services::claude::herdr_turn::hold(&case.nonce).unwrap();
+    assert!(
+        case.hold_path().exists(),
+        "the same Retired N1 needs cleanup again"
+    );
     let repeated = clear(&case);
     assert!(
         !repeated.reply().contains("정리하지 못했어요"),
@@ -248,6 +253,10 @@ fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg(
         repeated.reply()
     );
     assert_eq!(case.fx.row(), Some(HostedState::Retired));
+    assert!(
+        !case.hold_path().exists(),
+        "repeated Retired clear durably clears the same N1 hold"
+    );
     assert_eq!(
         case.effects(),
         effects,
