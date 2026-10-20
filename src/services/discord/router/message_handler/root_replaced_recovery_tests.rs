@@ -48,13 +48,56 @@ impl IntakeGate {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
         crate::config_live_reload::install(config);
-        case.fx.rt.block_on(
+        case.fx.rt.block_on(async {
+            use crate::db::dispatched_session_canonical_identity::{
+                CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
+            };
+            use crate::db::dispatched_sessions::hosted_execution::{
+                HostedLookupKey, load_hosted_execution_pg,
+            };
+            let primary = super::super::session_key(&case.fx.owner);
+            let local = crate::services::discord::adk_session::build_namespaced_session_key(
+                &case.shared.token_hash,
+                &ProviderKind::Claude,
+                case.fx.logical(),
+            );
+            let before =
+                load_hosted_execution_pg(&case.fx.pool, HostedLookupKey::SessionKey(&primary))
+                    .await;
+            let channel = CHANNEL.to_string();
+            let mut params = canonical_fixture::params(&local, &channel);
+            params.instance_id = Some(NODE);
+            let outcome = upsert_hook_session_with_identity_pg(
+                &case.fx.pool,
+                params,
+                Some(CanonicalSessionIdentity {
+                    kind: SessionIdentityKind::DiscordChannel,
+                    discord_token_hash: TOKEN,
+                    channel_id: &channel,
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(!outcome.inserted);
+            assert_eq!(outcome.session_key, primary);
+            assert_eq!(
+                load_hosted_execution_pg(&case.fx.pool, HostedLookupKey::SessionKey(&local)).await,
+                before,
+                "the intake hostname alias must preserve the full original hosted row"
+            );
+            assert_eq!(
+                load_hosted_execution_pg(&case.fx.pool, HostedLookupKey::SessionKey(&primary))
+                    .await,
+                before,
+                "the fixture primary key and hosted row remain unchanged"
+            );
             crate::services::discord::host_defer_gate::tests::map_channel(
                 &case.shared,
                 ChannelId::new(CHANNEL),
                 name,
-            ),
-        );
+            )
+            .await;
+        });
         gate
     }
 }
