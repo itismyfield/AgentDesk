@@ -777,7 +777,8 @@ mod tests {
 
     #[test]
     fn invariant_claude_model_catalog_global_test_state_uses_canonical_lock_scope() {
-        source_guard_tests::invariant_claude_model_catalog_global_test_state_uses_canonical_lock_scope();
+        use source_guard_tests::{CLAUDE, refresh_state_lock_gaps};
+        assert_eq!(refresh_state_lock_gaps(CLAUDE), Vec::<String>::new());
     }
 
     #[test]

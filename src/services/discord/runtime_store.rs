@@ -1379,7 +1379,8 @@ mod generation_allocation_tests {
             GenerationAllocationRoute::ParentSyncFailed,
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        source_guard_tests::production_once_cell_is_declared();
+        use source_guard_tests::{RUNTIME_STORE, once_cell_gaps};
+        assert_eq!(once_cell_gaps(RUNTIME_STORE), Vec::<String>::new());
     }
 
     /// Bounded lexical architecture pin for the literal `cfg(not(test))` reader block.
@@ -1387,7 +1388,8 @@ mod generation_allocation_tests {
     /// semantic coverage for aliases, macros, or a reader moved outside these source bounds.
     #[test]
     fn production_binding_lexically_returns_the_stored_allocation_whole() {
-        source_guard_tests::production_binding_lexically_returns_the_stored_allocation_whole();
+        use source_guard_tests::{RUNTIME_STORE, binding_gaps};
+        assert_eq!(binding_gaps(RUNTIME_STORE), Vec::<String>::new());
     }
 
     #[test]
@@ -1555,7 +1557,8 @@ mod generation_allocation_tests {
     /// Lexical tripwire only: synonyms, moved text, and rewrites remain review work.
     #[test]
     fn epoch_provenance_surface_makes_no_survival_claim() {
-        source_guard_tests::epoch_provenance_surface_makes_no_survival_claim();
+        use source_guard_tests::{RUNTIME_STORE, provenance_claim_gaps};
+        assert_eq!(provenance_claim_gaps(RUNTIME_STORE), Vec::<String>::new());
     }
 }
 

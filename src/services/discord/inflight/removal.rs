@@ -1196,7 +1196,11 @@ mod loader_gate_observation_tests {
     /// route-complete execution test above is the semantic proof.
     #[test]
     fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
-        source_guard_tests::observation_labels_and_allocation_only_evaluation_api_are_exact();
+        use source_guard_tests::{REAPER, REMOVAL, SCOPED, loader_gate_gaps};
+        assert_eq!(
+            loader_gate_gaps(REMOVAL, SCOPED, REAPER),
+            Vec::<String>::new()
+        );
     }
 }
 
