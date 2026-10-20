@@ -525,6 +525,10 @@ fn release_clear_still_releases_the_active_turn_and_publishes_completion() {
         assert!(result.removed_token.is_some());
         assert!(handle.snapshot().await.cancel_token.is_none());
         assert!(handle.snapshot().await.intervention_queue.is_empty());
+        assert!(
+            handle.enqueue(item(872), context()).await.enqueued,
+            "legacy Release keeps a newly observed, unprocessed input rereadable"
+        );
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
             registry.turn_finished(channel).wait(),

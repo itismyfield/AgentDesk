@@ -150,7 +150,9 @@ pub(super) fn clear_channel_state(
         .copied()
         .filter(|id| !protected.contains(id))
         .collect();
-    state.remint_fence.note_discarded(&waiting);
+    if active == ActivePolicy::Preserve {
+        state.remint_fence.note_discarded(&waiting);
+    }
     if active == ActivePolicy::Preserve {
         discarded_message_ids = waiting;
     }
