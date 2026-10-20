@@ -6,7 +6,7 @@
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::{DEFINITION_COLUMNS, NewScheduledMessage, ScheduledMessageRow};
+use super::{DEFINITION_COLUMNS, LIST_IMAGE_COLUMNS, NewScheduledMessage, ScheduledMessageRow};
 
 pub async fn insert_scheduled_message_pg(
     pool: &PgPool,
@@ -33,10 +33,10 @@ pub async fn insert_scheduled_message_tx(
              agent_instruction, on_agent_failure, scheduled_at, schedule, timezone,
              expires_at, source, created_by, dedupe_key, provider_targets,
              provider_target_summary, context_strategy, context_snapshot_id,
-             on_context_failure)
+             on_context_failure, image_filename, image_content_type, image_data)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22)
-         RETURNING {DEFINITION_COLUMNS}"
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25)
+         RETURNING {DEFINITION_COLUMNS}, {LIST_IMAGE_COLUMNS}"
     )))
     .bind(&id)
     .bind(&new.content)
@@ -60,6 +60,9 @@ pub async fn insert_scheduled_message_tx(
     .bind(&new.context_strategy)
     .bind(&new.context_snapshot_id)
     .bind(&new.on_context_failure)
+    .bind(new.image_attachment.as_ref().map(|image| image.filename.as_str()))
+    .bind(new.image_attachment.as_ref().map(|image| image.content_type.as_str()))
+    .bind(new.image_attachment.as_ref().map(|image| image.data.as_slice()))
     .fetch_one(&mut **tx)
     .await
 }

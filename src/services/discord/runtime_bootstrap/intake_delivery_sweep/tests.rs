@@ -497,3 +497,156 @@ async fn concurrent_sweep_once_calls_have_one_terminal_winner_pg() {
     assert_eq!(status(&pool, id).await, U);
     finish(db, pool).await;
 }
+
+#[tokio::test]
+async fn sweep_records_absent_basis_and_drains_fence_pg() {
+    let (db, pool) = setup().await;
+    let now = Utc::now();
+    let mut ids = Vec::new();
+    for (label, row_status) in [("spawned", S), ("dispatched", D)] {
+        for basis in ["no_session_row", "no_turn_active_row", "stale_heartbeat"] {
+            let key = format!("basis-{label}-{basis}");
+            ids.push((
+                seed_clocked(&pool, &key, row_status, now - Duration::hours(2)).await,
+                basis,
+            ));
+            if basis != "no_session_row" {
+                // A fresh idle row must be excluded; a stale active row must be measured.
+                let heartbeat = if basis == "no_turn_active_row" {
+                    now
+                } else {
+                    now - Duration::hours(2)
+                };
+                seed_inflight(&pool, &key, Some(heartbeat), None).await;
+                if basis == "no_turn_active_row" {
+                    sqlx::query("UPDATE public.sessions SET status='idle' WHERE channel_id=$1")
+                        .bind(&key)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let writer = TestLogWriter {
+        buffer: buffer.clone(),
+    };
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::callsite::rebuild_interest_cache();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
+    drop(guard);
+    let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        (stats.settled, stats.skipped_live, stats.skipped_ambiguous),
+        (6, 0, 0)
+    );
+    for (id, basis) in ids {
+        assert_eq!(status(&pool, id).await, U);
+        for phase in ["preflight", "cas"] {
+            let observations = logs
+                .lines()
+                .filter(|line| {
+                    line.split_whitespace()
+                        .any(|field| field == format!("outbox_id={id}"))
+                        && line.contains(&format!("absent_basis=\"{basis}\""))
+                        && line.contains(&format!("phase=\"{phase}\""))
+                })
+                .count();
+            assert_eq!(
+                observations, 1,
+                "both paths must record the row's absent basis; id={id}, basis={basis}, phase={phase}, logs={logs}"
+            );
+        }
+    }
+    finish(db, pool).await;
+}
+
+#[tokio::test]
+async fn sweep_liveness_scope_and_boundaries_match_cas_pg() {
+    let (db, pool) = setup().await;
+    let now = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    let cutoff = cutoffs(now);
+    let cases = [
+        (
+            "fresh",
+            Some(cutoff.heartbeat_fresh),
+            None,
+            LiveSignal::Live,
+        ),
+        ("null", None, None, LiveSignal::Ambiguous),
+        (
+            "absence-equal",
+            Some(cutoff.spawned),
+            None,
+            LiveSignal::Ambiguous,
+        ),
+        (
+            "stale",
+            Some(cutoff.spawned - Duration::seconds(1)),
+            None,
+            LiveSignal::Absent,
+        ),
+        (
+            "idle-fresh",
+            Some(cutoff.spawned - Duration::seconds(1)),
+            Some(false),
+            LiveSignal::Absent,
+        ),
+        (
+            "active-fresh",
+            Some(cutoff.spawned - Duration::seconds(1)),
+            Some(true),
+            LiveSignal::Live,
+        ),
+    ];
+    for row_status in [S, D] {
+        for (label, heartbeat, extra_active, expected) in cases {
+            let key = format!("scope-{}-{label}", row_status.as_str());
+            let id = seed_clocked(&pool, &key, row_status, now - Duration::hours(2)).await;
+            seed_inflight(&pool, &key, heartbeat, None).await;
+            if let Some(active) = extra_active {
+                sqlx::query(
+                    "INSERT INTO public.sessions(session_key,channel_id,status,last_heartbeat)
+                     VALUES($1,$2,$3,$4)",
+                )
+                .bind(format!("extra-{key}"))
+                .bind(&key)
+                .bind(if active { "turn_active" } else { "idle" })
+                .bind(now)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                live_signal(&pool, id, cutoff.heartbeat_fresh, cutoff.spawned)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            let mut tx = pool.begin().await.unwrap();
+            let settled = if row_status == S {
+                settle_spawned_unknown(&mut tx, id, cutoff.spawned, cutoff.heartbeat_fresh)
+                    .await
+                    .unwrap()
+            } else {
+                settle_dispatched_unknown(&mut tx, id, cutoff.dispatched, cutoff.heartbeat_fresh)
+                    .await
+                    .unwrap()
+            };
+            tx.commit().await.unwrap();
+            assert_eq!(settled, expected == LiveSignal::Absent, "{key}");
+            assert_eq!(
+                status(&pool, id).await,
+                if settled { U } else { row_status }
+            );
+        }
+    }
+    finish(db, pool).await;
+}

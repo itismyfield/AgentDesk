@@ -33,9 +33,18 @@ mod anchor;
 pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_prompt};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
+#[path = "memento_scope.rs"]
+mod scope;
+#[cfg(test)]
+#[path = "memento_scope_tests.rs"]
+mod scope_tests;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
+pub(crate) use scope::{
+    resolve_memento_agent_id, resolve_memento_workspace, resolve_memento_workspace_for_channel,
+    sanitize_memento_workspace_segment,
+};
 
 #[derive(Clone, Debug)]
 struct CachedMcpSession {
@@ -157,7 +166,10 @@ impl MementoBackend {
             role_id,
             channel_id,
             channel_name,
-            config.workspace_override.as_deref(),
+            config
+                .workspace_override
+                .as_deref()
+                .or(self.settings.memory_group.as_deref()),
         )
     }
 
@@ -373,6 +385,13 @@ impl MementoBackend {
                     .to_string(),
             );
         }
+        let agent_id = scope::resolve_remember_agent_id(
+            agent_id,
+            global,
+            workspace.as_deref(),
+            channel_id,
+            channel_name.as_deref(),
+        );
         let resolved_workspace = if global {
             None
         } else {
@@ -383,7 +402,10 @@ impl MementoBackend {
                             UNBOUND_MEMORY_ROLE_ID,
                             channel_id,
                             channel_name.as_deref(),
-                            config.workspace_override.as_deref(),
+                            config
+                                .workspace_override
+                                .as_deref()
+                                .or(self.settings.memory_group.as_deref()),
                         )
                     })
                     .or_else(|| config.workspace_override.clone())
@@ -544,104 +566,6 @@ fn extract_tool_result(payload: &Value, tool_name: &str) -> Result<ToolCallResul
     })
 }
 
-pub(crate) fn resolve_memento_workspace(
-    role_id: &str,
-    channel_id: u64,
-    workspace_override: Option<&str>,
-) -> String {
-    resolve_memento_workspace_for_channel(role_id, channel_id, None, workspace_override)
-}
-
-pub(crate) fn resolve_memento_workspace_for_channel(
-    role_id: &str,
-    channel_id: u64,
-    channel_name: Option<&str>,
-    workspace_override: Option<&str>,
-) -> String {
-    if let Some(workspace) = workspace_override
-        .map(str::trim)
-        .filter(|workspace| !workspace.is_empty())
-    {
-        return workspace.to_string();
-    }
-
-    if channel_id != 0 {
-        if let Some(workspace) = crate::services::discord::settings::resolve_workspace(
-            ChannelId::new(channel_id),
-            channel_name,
-        )
-        .and_then(|workspace| memento_workspace_from_channel_workspace(&workspace))
-        {
-            return workspace;
-        }
-    }
-
-    let role_id = role_id.trim();
-    if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
-        tracing::warn!(
-            channel_id,
-            "memento workspace fallback used for unregistered channel"
-        );
-        return format!("channel-{channel_id}");
-    }
-
-    format!("agentdesk-{}", sanitize_memento_workspace_segment(role_id))
-}
-
-fn memento_workspace_from_channel_workspace(workspace: &str) -> Option<String> {
-    let trimmed = workspace.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let candidate = if trimmed.contains('/') || trimmed.contains('\\') {
-        Path::new(trimmed)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(trimmed)
-    } else {
-        trimmed
-    };
-    let sanitized = sanitize_memento_workspace_segment(candidate);
-    if sanitized == "default" {
-        return None;
-    }
-    if sanitized == "agentdesk" || sanitized.starts_with("agentdesk-") {
-        Some(sanitized)
-    } else {
-        Some(format!("agentdesk-{sanitized}"))
-    }
-}
-
-pub(crate) fn resolve_memento_agent_id(role_id: &str, channel_id: u64) -> String {
-    let role_id = role_id.trim();
-    if role_id.is_empty() || role_id == UNBOUND_MEMORY_ROLE_ID {
-        return format!("agentdesk-channel-{channel_id}");
-    }
-    role_id.to_string()
-}
-
-pub(crate) fn sanitize_memento_workspace_segment(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    let mut last_was_dash = false;
-
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
-            sanitized.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash {
-            sanitized.push('-');
-            last_was_dash = true;
-        }
-    }
-
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "default".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -654,35 +578,6 @@ fn insert_optional_arg(args: &mut Map<String, Value>, key: &str, value: Option<S
         return;
     };
     args.insert(key.to_string(), json!(value));
-}
-
-#[cfg(test)]
-mod workspace_scope_tests {
-    use super::*;
-
-    #[test]
-    fn memento_workspace_from_channel_workspace_uses_path_basename() {
-        assert_eq!(
-            memento_workspace_from_channel_workspace("~/.adk/release/workspaces/agentdesk"),
-            Some("agentdesk".to_string())
-        );
-        assert_eq!(
-            memento_workspace_from_channel_workspace("~/.adk/release/workspaces/project-agentdesk"),
-            Some("agentdesk-project-agentdesk".to_string())
-        );
-        assert_eq!(
-            memento_workspace_from_channel_workspace("Project AgentDesk"),
-            Some("agentdesk-project-agentdesk".to_string())
-        );
-    }
-
-    #[test]
-    fn unbound_memento_workspace_falls_back_to_channel_scope() {
-        assert_eq!(
-            resolve_memento_workspace_for_channel(UNBOUND_MEMORY_ROLE_ID, 4242, None, None),
-            "channel-4242"
-        );
-    }
 }
 
 fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> &str {

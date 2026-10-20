@@ -93,7 +93,20 @@ pub(super) fn proactive_memory_guidance_with(
                 .map(sanitize_memento_workspace_segment)
                 .unwrap_or_else(|| "default".to_string());
             let agent_workspace = resolve_memento_workspace(role_id, channel_id.get(), None);
-            let agent_id = resolve_memento_agent_id(role_id, channel_id.get());
+            let scope_hint = if let Some(group) = role_binding
+                .and_then(|binding| binding.memory.memory_group.as_deref())
+                .or(settings.memory_group.as_deref())
+            {
+                format!(
+                    "read=`workspace={group}, agentId={agent_id}`; default write (private)=`workspace={group}, agentId={agent_id}`; group shared=`workspace={group}, agentId=default`; global=`agentId=default` (omit workspace).",
+                    agent_id = resolve_memento_agent_id(role_id, channel_id.get())
+                )
+            } else {
+                format!(
+                    "project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.",
+                    agent_id = resolve_memento_agent_id(role_id, channel_id.get())
+                )
+            };
             // #4314: `docs/memory-scope.md` is an AgentDesk repo-relative path.
             // Only reference it when the agent's workspace actually is an
             // AgentDesk checkout — otherwise it points at a nonexistent file.
@@ -110,7 +123,7 @@ pub(super) fn proactive_memory_guidance_with(
                 "`recall` MCP tool",
                 "`remember` MCP tool",
                 format!(
-                    "\n- scope hints: project=`workspace={workspace_scope}, agentId=default`; agent-private=`workspace={agent_workspace}, agentId={agent_id}`.{memory_policy_line}\n\
+                    "\n- scope hints: {scope_hint}{memory_policy_line}\n\
                      - feedback contract: in the same turn you use `recall`/`context` results, call `mcp__memento__tool_feedback` once (required: `tool_name`, `relevant`, `sufficient`; when the response carries `_meta.searchEventId`, also pass it as `search_event_id` — recommended).{deferred_tool_instruction}"
                 ),
             )
@@ -132,6 +145,54 @@ pub(super) fn proactive_memory_guidance_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group_guidance(group: Option<&str>) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+        let mut config = serde_yaml::to_value(crate::config::Config::default()).unwrap();
+        config["agents"] = serde_yaml::from_str(&format!(
+            "- id: ch-td\n  name: Test\n  channels:\n    claude:\n      id: '4242'\n      workspace: /fixture/ch-td\n{}",
+            group.map(|g| format!("  memory_group: '{g}'\n")).unwrap_or_default(),
+        )).unwrap();
+        let path = crate::runtime_layout::config_file_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+        let mut binding =
+            crate::services::discord::settings::resolve_role_binding(ChannelId::new(4242), None)
+                .unwrap();
+        binding.memory.backend = MemoryBackendKind::Memento;
+        proactive_memory_guidance_with(
+            Some(&binding.memory),
+            "/fixture/ch-td",
+            ChannelId::new(4242),
+            Some(&binding),
+            DispatchProfile::Full,
+            true,
+            false,
+            |_| false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn memory_group_hint_has_three_tiers_without_legacy_private_workspace() {
+        let guidance = group_guidance(Some("cookingheart"));
+        assert!(guidance.contains("scope hints: read=`workspace=cookingheart, agentId=ch-td`; default write (private)=`workspace=cookingheart, agentId=ch-td`; group shared=`workspace=cookingheart, agentId=default`; global=`agentId=default` (omit workspace)."), "{guidance}");
+        assert!(!guidance.contains("agent-private="));
+        assert!(!guidance.contains("agentdesk-ch-td"));
+    }
+
+    #[test]
+    fn memory_group_absent_hint_preserves_legacy_bytes() {
+        let guidance = group_guidance(None);
+        assert_eq!(
+            guidance
+                .lines()
+                .find(|line| line.starts_with("- scope hints:"))
+                .unwrap(),
+            "- scope hints: project=`workspace=ch-td, agentId=default`; agent-private=`workspace=agentdesk-ch-td, agentId=ch-td`."
+        );
+    }
 
     fn file_settings(memento_fallback: bool) -> ResolvedMemorySettings {
         ResolvedMemorySettings {
