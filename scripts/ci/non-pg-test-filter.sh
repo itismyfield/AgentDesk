@@ -218,7 +218,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
   --skip services::dispatches::wait_queue::tests
-  --skip services::health_diagnostics::request_batch::tests
   --skip services::herdr_launch::tests
   --skip services::maintenance::jobs::db_retention::tests
   --skip services::message_outbox_circuit_authority_tests

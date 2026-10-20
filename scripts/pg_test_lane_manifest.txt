@@ -299,7 +299,7 @@ src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/outbox_queue_replay_tests.rs
 src/services/dispatches/wait_queue.rs
-src/services/health_diagnostics/request_batch_tests.rs
+src/services/health_diagnostics/request_batch_pg_tests.rs
 src/services/herdr_launch_tests.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/maintenance/jobs/worktree_orphan_sweep.rs
@@ -667,7 +667,7 @@ services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::outbox_queue::replay_hold_tests
 services::dispatches::wait_queue::tests
-services::health_diagnostics::request_batch::tests
+services::health_diagnostics::request_batch::pg_tests
 services::herdr_launch::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
@@ -2400,7 +2400,7 @@ services::dispatches::outbox_queue::replay_hold_tests::replay_hold_dormant_batch
 services::dispatches::outbox_queue::replay_hold_tests::replay_hold_old_notify_and_followup_never_call_notifier_but_status_reaction_does_pg
 services::dispatches::outbox_queue::replay_hold_tests::replay_hold_unreadable_batch_gate_fails_closed_without_spending_retry_budget_pg
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
-services::health_diagnostics::request_batch::tests::health_batch_queries_preserve_main_semantics
+services::health_diagnostics::request_batch::pg_tests::health_batch_queries_preserve_main_semantics
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_keeps_a_pending_that_names_a_pane_after_an_unsent_create_pg

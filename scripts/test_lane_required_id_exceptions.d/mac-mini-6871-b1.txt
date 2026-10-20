@@ -1,0 +1,1 @@
+services::health_diagnostics::pg_wire_proxy | helper-module | #6871 | expires=2027-10-20 | proxies the health tests' PostgreSQL wire with a fixed delay, a statement record and stalls; it holds no test of its own

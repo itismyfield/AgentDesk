@@ -2520,6 +2520,7 @@ src/
 │   ├── health_diagnostics/
 │   │   ├── pg_wire_proxy_tests.rs
 │   │   ├── request_batch.rs
+│   │   ├── request_batch_pg_tests.rs
 │   │   ├── request_batch_tests.rs
 │   │   └── session_state.rs
 │   ├── imsg_reply/

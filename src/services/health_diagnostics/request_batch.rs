@@ -200,5 +200,8 @@ pub(super) fn map_session_rows<R>(
 }
 
 #[cfg(test)]
+#[path = "request_batch_pg_tests.rs"]
+mod pg_tests;
+#[cfg(test)]
 #[path = "request_batch_tests.rs"]
 mod tests;
