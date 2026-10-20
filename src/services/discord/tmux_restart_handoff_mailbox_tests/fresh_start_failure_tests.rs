@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use crate::services::agent_protocol::StreamMessage;
+use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
@@ -160,6 +160,27 @@ impl Drop for FreshTmuxProbe {
     }
 }
 
+/// The hook endpoint a Claude TUI launch needs, published under the lock the endpoint tests
+/// share; the endpoint is withdrawn before the lock is released.
+struct PublishedEndpoint {
+    _endpoint: crate::services::claude_tui::hook_server::HookEndpointGuard,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Needs the shared env lock already held, the order the other endpoint users take.
+fn published_endpoint() -> PublishedEndpoint {
+    let lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".to_string(),
+    );
+    PublishedEndpoint {
+        _endpoint: endpoint,
+        _lock: lock,
+    }
+}
+
 struct Outcome {
     holder: Option<Arc<CancelToken>>,
     active_message: Option<MessageId>,
@@ -167,13 +188,25 @@ struct Outcome {
     global_active: usize,
     calls: Vec<String>,
     exit_reason: String,
+    /// The durable row's bytes when a successor saved it and after the bridge exited.
+    successor_row: Option<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+/// How far a successor got between A's teardown and A's bridge settlement.
+#[derive(Clone, Copy, Debug)]
+enum Successor {
+    /// B holds the mailbox but has not saved its row yet, so A's row is still on disk.
+    Admitted,
+    /// B also saved its own row for the same message.
+    RowSaved,
 }
 
 /// Runs episode A's fresh turn to its failure and its bridge to its exit. `successor`, when
-/// given, replaces A in the mailbox after the provider returned and before the bridge settles.
+/// given, replaces A in the mailbox after the provider returned and before the bridge settles,
+/// and at `RowSaved` also saves its own row.
 async fn run_case(
     channel_raw: u64,
-    successor: Option<Arc<CancelToken>>,
+    successor: Option<(Arc<CancelToken>, Successor)>,
 ) -> (Arc<CancelToken>, Outcome) {
     let tmux = FakeTmux::install(NAME);
     tmux.mark_missing();
@@ -200,6 +233,8 @@ async fn run_case(
         0,
     );
     row.turn_nonce = a.turn_nonce().map(str::to_owned);
+    // Intake stamps the prelaunch kind of a Claude TUI turn before saving its row.
+    row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
     let message = MessageId::new(MESSAGE);
     let started = crate::services::discord::mailbox_try_start_turn(
         &shared,
@@ -221,7 +256,17 @@ async fn run_case(
     )
     .await;
     crate::services::discord::inflight::save_inflight_state(&row).unwrap();
-
+    let saved = crate::services::discord::inflight::load_inflight_state(&provider, channel_raw);
+    assert_eq!(
+        saved.and_then(|saved| saved.runtime_kind),
+        Some(RuntimeHandoffKind::ClaudeTui)
+    );
+    let row_path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel_raw,
+    );
+    let started_at = row.started_at.clone();
     let mut bridge = bridge_context(row);
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     bridge.completion_tx = Some(completion_tx);
@@ -242,18 +287,47 @@ async fn run_case(
     let reason_path = crate::services::tmux_common::session_temp_path(NAME, "exit_reason");
     let exit_reason = std::fs::read_to_string(reason_path).unwrap_or_default();
 
-    if let Some(next) = successor {
+    let mut successor_saved = None;
+    if let Some((next, stage)) = &successor {
         crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
         crate::services::discord::saturating_decrement_global_active(&shared);
         let started = crate::services::discord::mailbox_try_start_turn(
             &shared,
             channel,
-            next,
+            next.clone(),
             UserId::new(1),
             message,
         );
         assert!(started.await);
         crate::services::discord::increment_global_active(&shared, "successor_admission");
+        if matches!(stage, Successor::RowSaved) {
+            // A successor starts after A's launch failed, so its row's start second differs.
+            let second = || chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while second() == started_at && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let mut successor_row = InflightTurnState::new(
+                ProviderKind::Claude,
+                channel_raw,
+                None,
+                1,
+                MESSAGE,
+                19,
+                "hello".to_string(),
+                None,
+                Some(NAME.to_string()),
+                None,
+                None,
+                0,
+            );
+            successor_row.turn_nonce = next.turn_nonce().map(str::to_owned);
+            successor_row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            assert_ne!(successor_row.started_at, started_at);
+            // The successor's row replaces A's on the same message, under its own nonce.
+            crate::services::discord::inflight::save_inflight_state(&successor_row).unwrap();
+            successor_saved = Some(std::fs::read(&row_path).unwrap());
+        }
     }
     let frame =
         crate::services::discord::router::message_handler::producer_error_frame(channel_raw, error);
@@ -276,6 +350,19 @@ async fn run_case(
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
     }
+    // The bridge task holds A's token until its last cleanup ran; a mailbox still holding A
+    // keeps one more reference, which the token assertions then report.
+    let mailbox_holds_a = snapshot
+        .cancel_token
+        .take()
+        .is_some_and(|token| Arc::ptr_eq(&token, &a));
+    let exited = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(&a) > 1 + usize::from(mailbox_holds_a)
+        && std::time::Instant::now() < exited
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
     let outcome = Outcome {
         holder: snapshot.cancel_token.clone(),
         active_message: snapshot.active_user_message_id,
@@ -283,6 +370,7 @@ async fn run_case(
         global_active: shared.restart.global_active.load(Ordering::Relaxed),
         calls,
         exit_reason,
+        successor_row: successor_saved.map(|saved| (saved, std::fs::read(&row_path).ok())),
     };
     crate::services::tmux_common::cleanup_session_temp_files(NAME);
     (a, outcome)
@@ -308,9 +396,7 @@ fn assert_torn_down(outcome: &Outcome) {
 async fn a_failed_fresh_start_releases_its_mailbox_episode_and_keeps_the_queue() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
-        "http://127.0.0.1:9".to_string(),
-    );
+    let _endpoint = published_endpoint();
     let (a, outcome) = run_case(6_333_511, None).await;
     assert_torn_down(&outcome);
     assert!(outcome.holder.is_none(), "A's token is released");
@@ -324,29 +410,45 @@ async fn a_failed_fresh_start_releases_its_mailbox_episode_and_keeps_the_queue()
 }
 
 /// A successor that took the channel between the failed start's teardown and its bridge's
-/// settlement keeps its token, message and active slot.
+/// settlement keeps its token, message and active slot, and, once saved, its durable row.
 #[tokio::test(flavor = "current_thread")]
 async fn a_failed_fresh_start_leaves_a_successor_episode_untouched() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
-        "http://127.0.0.1:9".to_string(),
-    );
-    let b = Arc::new(CancelToken::new());
-    let (_, outcome) = run_case(6_333_512, Some(b.clone())).await;
-    assert_torn_down(&outcome);
-    assert!(
-        outcome
-            .holder
-            .as_ref()
-            .is_some_and(|token| Arc::ptr_eq(token, &b)),
-        "B keeps the channel"
-    );
-    assert_eq!(outcome.active_message, Some(MessageId::new(MESSAGE)));
-    assert!(!b.cancelled.load(Ordering::Relaxed));
-    assert_eq!(
-        outcome.global_active, 2,
-        "B's and the other channel's slots stay"
-    );
-    assert_eq!(outcome.queued, 1);
+    let _endpoint = published_endpoint();
+    for (channel, stage) in [
+        (6_333_512, Successor::Admitted),
+        (6_333_513, Successor::RowSaved),
+    ] {
+        let b = Arc::new(CancelToken::new());
+        let (_, outcome) = run_case(channel, Some((b.clone(), stage))).await;
+        assert_torn_down(&outcome);
+        assert!(
+            outcome
+                .holder
+                .as_ref()
+                .is_some_and(|token| Arc::ptr_eq(token, &b)),
+            "{stage:?}: B keeps the channel: holder {:?}, message {:?}",
+            outcome.holder.as_ref().map(|token| token.turn_nonce()),
+            outcome.active_message
+        );
+        assert_eq!(
+            outcome.active_message,
+            Some(MessageId::new(MESSAGE)),
+            "{stage:?}"
+        );
+        assert!(!b.cancelled.load(Ordering::Relaxed), "{stage:?}");
+        assert_eq!(
+            outcome.global_active, 2,
+            "{stage:?}: B's and the other channel's slots stay"
+        );
+        assert_eq!(outcome.queued, 1, "{stage:?}");
+        match (stage, outcome.successor_row) {
+            (Successor::RowSaved, Some((saved, after))) => {
+                assert_eq!(after.as_ref(), Some(&saved), "B's durable row is untouched");
+            }
+            (Successor::Admitted, None) => {}
+            (stage, row) => panic!("{stage:?}: successor row saved = {}", row.is_some()),
+        }
+    }
 }
