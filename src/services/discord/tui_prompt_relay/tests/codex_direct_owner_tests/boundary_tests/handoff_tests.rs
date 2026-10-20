@@ -490,7 +490,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
     );
     let anchor = fx.anchor_of(STEER_ANSWER);
     fx.assert_answer(STEER_ANSWER, anchor);
-    assert_eq!(fx.completed_turns(), 1);
+    assert_eq!(fx.wait_completed_turns().await, 1);
     if let Some(row) = admitted_row.as_ref() {
         assert!(
             wait_for(Duration::from_secs(5), || !native_receipts(
@@ -1220,7 +1220,7 @@ async fn codex_6903_main_writer_first_complete(root: PathBuf, writer_first: bool
     );
     let anchor = fx.anchor_of(STEER_ANSWER);
     fx.assert_answer(STEER_ANSWER, anchor);
-    assert_eq!(fx.completed_turns(), 1);
+    assert_eq!(fx.wait_completed_turns().await, 1);
     let receipts = native_receipts(fx.codex.channel.get());
     assert_eq!(receipts.len(), 1);
     let record = crate::services::discord::outbound::delivery_record::read_record(
@@ -2309,7 +2309,7 @@ async fn markerless_saved_custody(root: PathBuf, custody: bool) {
                 .await
                 .is_empty()
         );
-        assert_eq!(fx.completed_turns(), 1);
+        assert_eq!(fx.wait_completed_turns().await, 1);
     } else {
         fx.polls(3).await;
         assert!(

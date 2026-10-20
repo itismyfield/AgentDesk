@@ -16,6 +16,7 @@ struct Fixture {
     lease: ExternalInputRelayLease,
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_nonce_pinned_tmux_input_keeps_the_non_herdr_production_claim_available() {
     use dedupe::hosted_source::tests::{CHANNEL, Fixture as SourceFixture, LOGICAL, N1};
@@ -350,6 +351,7 @@ async fn failed_existing_actor_readoption_preserves_the_original_actor_and_saved
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn old_unpinned_known_tmux_pending_still_claims_its_captured_source() {
     use crate::services::discord::tui_direct_pending_start as pending;

@@ -314,6 +314,20 @@ impl Fixture {
         turns
     }
 
+    /// An observed HTTP body precedes finalization; wait for the turn's completion signal.
+    async fn wait_completed_turns(&mut self) -> usize {
+        let mut completed = 0;
+        assert!(
+            wait_for(Duration::from_secs(5), || {
+                completed += self.completed_turns();
+                completed > 0
+            })
+            .await,
+            "the delivered answer must complete its owning turn"
+        );
+        completed + self.completed_turns()
+    }
+
     /// The answer only edits `anchor` (streaming edits included) and its last edit's JSON
     /// content is exactly `text`.
     fn assert_answer(&self, text: &str, anchor: u64) {
