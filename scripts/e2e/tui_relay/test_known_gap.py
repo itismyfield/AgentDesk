@@ -23,6 +23,16 @@ BINDING = dict(scenario="E-22", cell="claude-tui", channel_id=gap.CHANNEL_ID,
 YAML = Path(__file__).resolve().parents[3] / "tests/e2e/tui_relay/scenarios/E-22-tool-use-text-completeness.yaml"
 
 
+def compatibility_scenario():
+    """Historical preview/retry captures exercise the retained old-chrome API."""
+    scenario = yaml.safe_load(YAML.read_text())
+    scenario["assertions"] = [spec for spec in scenario["assertions"]
+                              if not ({"no_status_chrome", "completion_per_turn"} & spec.keys())]
+    scenario["assertions"].insert(9, {"completion_chrome_after_body": {
+        "body_marker": gap.MARKERS[-1], "required": True}})
+    return scenario
+
+
 def row(mid, content, *, edited=None, author=gap.BOT_ID):
     return {"id": str(mid), "content": content, "channel_id": gap.CHANNEL_ID,
             "author": {"id": author, "bot": True}, "type": 0,
@@ -138,7 +148,7 @@ class E22KnownGapContract(unittest.TestCase):
              patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
              patch.object(assertions.Window, "mark_prompt_sent", mark):
             try:
-                record = driver.run_one_cell(scenario=yaml.safe_load(YAML.read_text()), cell="claude-tui",
+                record = driver.run_one_cell(scenario=compatibility_scenario(), cell="claude-tui",
                     channel_id=gap.CHANNEL_ID, client=discord.DiscordClient("http://offline.invalid"),
                     run_id=RUN, dry_run=False, args=Namespace(queue_runtime_root="/offline-denied"))
             except driver.ScenarioStepAssertionError as error:
@@ -194,7 +204,7 @@ class E22KnownGapContract(unittest.TestCase):
 
     def test_normal_rechecks_revalidate_every_prior_assertion_and_report(self):
         prefix = []
-        for spec in yaml.safe_load(YAML.read_text())["assertions"]:
+        for spec in compatibility_scenario()["assertions"]:
             if "no_duplicate_marker_with_known_gap" in spec:
                 break
             prefix.append(spec)
@@ -266,7 +276,7 @@ class E22KnownGapContract(unittest.TestCase):
         with self.assertRaises(assertions.AssertionError):
             assertions.no_duplicate_marker(window, marker=gap.PRE)
         record["provider_hold_states"] = [{"ok_marker": gap.PRE, "ok_marker_seen": True}]
-        for spec in yaml.safe_load(YAML.read_text())["assertions"]:
+        for spec in compatibility_scenario()["assertions"]:
             driver.run_assertion(spec, window=window, record=record, run_id=RUN)
         result = {"assertions": []}
         driver._merge_record_into_result(result, record)

@@ -215,7 +215,10 @@ async fn exercise_actor(alternate_owner: bool) {
         }
         polls(6).await;
         if alternate_owner {
-            assert_eq!(harness.port.posts(), ["alternate legacy output"]);
+            assert_eq!(
+                harness.port.posts(),
+                ["alternate legacy output", "-# ✅ 완료"]
+            );
             assert!(harness.channel().cursor(&source).unwrap().captured_through > before);
         } else {
             assert!(harness.port.posts().is_empty());

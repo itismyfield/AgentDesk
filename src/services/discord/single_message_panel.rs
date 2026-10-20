@@ -56,14 +56,15 @@ pub(in crate::services::discord) fn footer_mode_enabled(
     single_message_panel_enabled: bool,
     status_panel_v2_enabled: bool,
 ) -> bool {
-    single_message_panel_enabled && status_panel_v2_enabled
+    !super::footer_retirement::retired() && single_message_panel_enabled && status_panel_v2_enabled
 }
 
 pub(in crate::services::discord) fn separate_status_panel_enabled_for_flags(
     single_message_panel_enabled: bool,
     status_panel_v2_enabled: bool,
 ) -> bool {
-    status_panel_v2_enabled
+    !super::footer_retirement::retired()
+        && status_panel_v2_enabled
         && !footer_mode_enabled(single_message_panel_enabled, status_panel_v2_enabled)
 }
 

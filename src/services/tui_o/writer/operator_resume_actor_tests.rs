@@ -86,12 +86,19 @@ async fn operator_resume_middle_piece_and_following_output_survive_actor_restart
         let (stop, task) = spawn_as(harness.writer(), provider);
         polls(3).await;
         let sent = harness.port.posts();
-        let successful = [&sent[0..1], &sent[2..]].concat();
-        assert_eq!(
-            successful.concat(),
-            format!("{body}following unit"),
-            "{provider:?}"
-        );
+        let mut expected: Vec<_> = crate::services::discord::formatting::split_for_shadow(&body)
+            .into_iter()
+            .map(|(payload, _)| payload)
+            .collect();
+        if provider == ShadowProvider::Codex {
+            expected.push("-# ✅ 완료".into());
+        }
+        expected.push("following unit".into());
+        if provider == ShadowProvider::Codex {
+            expected.push("-# ✅ 완료".into());
+        }
+        expected.insert(1, rejected.payload.clone());
+        assert_eq!(sent, expected, "{provider:?}");
         assert_eq!(sent[1], rejected.payload);
         assert_eq!(sent[2], rejected.payload);
         let channel = harness.channel();
@@ -108,13 +115,17 @@ async fn operator_resume_middle_piece_and_following_output_survive_actor_restart
         );
         assert!(channel.ledger().violation().is_none());
         halt(stop, task).await;
-        let count = sent.len();
         let (stop, task) = spawn_as(harness.writer(), provider);
         polls(2).await;
-        assert_eq!(harness.port.posts().len(), count);
+        assert_eq!(harness.port.posts(), sent);
         append(&path, &native(provider, "new", "new output"));
         polls(3).await;
-        assert_eq!(harness.port.posts().last().unwrap(), "new output");
+        let mut expected = sent;
+        expected.push("new output".into());
+        if provider == ShadowProvider::Codex {
+            expected.push("-# ✅ 완료".into());
+        }
+        assert_eq!(harness.port.posts(), expected);
         halt(stop, task).await;
     }
 }

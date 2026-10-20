@@ -9,9 +9,12 @@ mod card_render;
 mod footer_only_marker;
 mod gateway;
 mod response_chunks;
+mod retired_metadata;
 mod store;
 mod terminal_identity;
 
+#[cfg(test)]
+mod footer_retirement_tests;
 #[cfg(test)]
 mod tests;
 
@@ -33,6 +36,8 @@ pub(in crate::services::discord) use response_chunks::{
     DiscordResponseChunkTransport, ResponseChunkDeliveryError, claim_at_post,
     send_task_response_chunks_with_card_repair,
 };
+use retired_metadata::ensure_card_with_metadata;
+pub(in crate::services::discord) use retired_metadata::replace_confirmed_missing_card;
 
 use self::store::{CardClaim, ClaimedCard, StoreIntent};
 pub(super) use self::store::{
@@ -675,35 +680,18 @@ pub(in crate::services::discord) async fn ensure_card_with_shared(
     event: &TaskCardEvent,
     intent: EnsureIntent,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
-    let provider = crate::services::provider::ProviderKind::from_str(&event.scope.provider);
-    let inflight = provider.as_ref().and_then(|provider| {
-        super::inflight::load_inflight_state(provider, event.scope.channel_id)
-            .filter(|state| state.tmux_session_name.as_deref() == Some(&event.scope.session_key))
-    });
-    let metadata = match provider.as_ref() {
-        Some(provider) => Some(
-            super::completion_footer_metadata::load_completion_footer_metadata(
-                shared,
-                provider,
-                0,
-                inflight.as_ref().map(|state| state.started_at.as_str()),
-            )
-            .await,
-        ),
-        None => None,
-    };
     ensure_card_with_metadata(
         shared.pg_pool.as_ref(),
         clients,
         transport,
         event,
         intent,
-        metadata.as_ref(),
+        None,
     )
     .await
 }
 
-async fn ensure_card_with_metadata<T: TaskCardTransport>(
+async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
     pool: Option<&PgPool>,
     clients: &CardDeliveryClients,
     transport: &T,
@@ -764,7 +752,7 @@ async fn ensure_card_with_metadata<T: TaskCardTransport>(
 /// required response reference. The old message id is an exact CAS input: a
 /// concurrent worker that already installed a replacement returns that card
 /// instead of issuing another POST.
-pub(in crate::services::discord) async fn replace_confirmed_missing_card<T: TaskCardTransport>(
+async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
     pool: Option<&PgPool>,
     clients: &CardDeliveryClients,
     transport: &T,
@@ -772,9 +760,14 @@ pub(in crate::services::discord) async fn replace_confirmed_missing_card<T: Task
     missing_message_id: u64,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
     for attempt in 0..20 {
-        let claim = store::claim_missing_card_replacement(pool, &event.scope, missing_message_id)
-            .await
-            .map_err(CardEnsureError::Store)?;
+        let claim = store::claim_missing_card_replacement_without_metadata(
+            pool,
+            &event.scope,
+            missing_message_id,
+            &event.payload,
+        )
+        .await
+        .map_err(CardEnsureError::Store)?;
         match claim {
             store::MissingCardReplacementClaim::Existing {
                 message_id,

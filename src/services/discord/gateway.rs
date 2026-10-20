@@ -59,6 +59,15 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>>;
 
+    /// Terminal notices consume their caller's latch before attempting delivery.
+    fn send_notice_once<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        TurnGateway::send_message(self, channel_id, content)
+    }
+
     fn send_long_message_with_rollback<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -142,9 +151,7 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>;
 
-    /// Attempt only the edit phase of a replace. An edit failure is returned as a
-    /// typed outcome so a range owner can revalidate durable delivery authority
-    /// before deciding whether a fresh fallback POST is still allowed.
+    /// Return typed edit failures so the range owner can revalidate authority before fallback.
     fn replace_message_deferred<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -165,20 +172,8 @@ pub(super) trait TurnGateway: Send + Sync {
         user_text: &'a str,
     ) -> GatewayFuture<'a, ()>;
 
-    /// #2452 H6 graduation: variant of `schedule_retry_with_history` that
-    /// returns a `oneshot::Sender<()>` to the caller via the
-    /// `completion_tx` parameter; the implementor MUST signal completion
-    /// (success OR failure) on this channel when scheduling has finished
-    /// so the caller can release any pending-retry lockout immediately
-    /// instead of waiting on a fixed wall-clock timer.
-    ///
-    /// Default implementation delegates to `schedule_retry_with_history`
-    /// and immediately drops `completion_tx`, which causes the
-    /// `recv().await` on the matching `oneshot::Receiver` to resolve with
-    /// `Err(RecvError)` — semantically equivalent to "completion signal
-    /// arrived" for the lockout-release path. Implementors that can
-    /// observe the actual retry-turn completion edge should override this
-    /// to send `()` only after the retry truly completes.
+    /// Signal completion after scheduling so pending-retry lockout can end immediately.
+    /// Override when the actual retry-turn completion can be observed.
     fn schedule_retry_with_history_with_completion<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -193,8 +188,7 @@ pub(super) trait TurnGateway: Send + Sync {
         })
     }
 
-    /// Hands a protected request's exact retry to its next start and reports whether that start
-    /// took it; a gateway without a start path refuses, and the request stays held.
+    /// Hand off the exact protected retry; refuse without a start path so it stays held.
     fn schedule_exact_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -229,8 +223,7 @@ pub(super) trait TurnGateway: Send + Sync {
 
     fn can_chain_locally(&self) -> bool;
 
-    /// REST delivery does not require a Gateway connection. Worker turns can
-    /// edit their own placeholder while queue admission stays with the leader.
+    /// REST can edit a worker's placeholder while the leader owns queue admission.
     fn can_deliver_directly(&self) -> bool {
         self.can_chain_locally()
     }
@@ -487,18 +480,8 @@ fn dispatch_post_error(
     crate::services::dispatches::discord_delivery::DispatchMessagePostError::new(kind, detail)
 }
 
-/// codex review P2 (#1332 follow-up): drain the `queued_placeholders` /
-/// `placeholder_controller` bookkeeping for every non-head source message id
-/// of a merged intervention. The dispatch path uses `intervention.message_id`
-/// (the merged tail) as the Active card, so the head id's mapping must be
-/// preserved here — only the *other* source ids leak. Returns the placeholder
-/// Discord message ids whose visible cards the caller should delete (kept as
-/// a return value to keep the helper independent of `serenity::Http` so the
-/// test harness can invoke it without a real Discord client).
-///
-/// #5035 (A4/A5): a non-head source id losing its mapping does not make the card
-/// unowned — a rollback can leave a *surviving* entry owning it, so each drained
-/// card is gated and only released ones come back, as teardown tokens.
+/// Drain non-head merged-source mappings, preserving the head and cards with surviving owners.
+/// Return teardown tokens so the caller performs guarded HTTP deletions.
 pub(super) async fn drain_merged_queued_placeholders(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -570,6 +553,21 @@ fn next_headless_message_id() -> MessageId {
 }
 
 impl TurnGateway for DiscordGateway {
+    fn send_notice_once<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(
+            super::outbound::confirmation::send_terminal_notice_http_once(
+                &self.http,
+                &self.shared,
+                channel_id,
+                content,
+            ),
+        )
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -709,11 +707,8 @@ impl TurnGateway for DiscordGateway {
                 user_text,
             )
             .await;
-            // #2452 H6: explicit release path — once scheduling has
-            // resolved, drop the dedup lockout immediately so a
-            // subsequent stale-resume detection on the same channel can
-            // schedule another retry without waiting on the 30s sleep
-            // fallback inside `auto_retry_with_history`.
+            // Release after scheduling so stale-resume detection need not wait for the timer.
+            // The completion signal releases this turn's pending-retry lockout.
             release_retry_pending(channel_id);
             let _ = completion_tx.send(());
         })

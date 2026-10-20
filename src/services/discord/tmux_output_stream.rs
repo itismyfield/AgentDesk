@@ -7,7 +7,6 @@ pub(in crate::services::discord) struct WatcherToolState {
     pub current_tool_line: Option<String>,
     /// Previous distinct tool/thinking status for 2-line trail rendering.
     pub prev_tool_status: Option<String>,
-    /// Whether we are currently inside a thinking block
     pub in_thinking: bool,
     /// Whether any tool_use block has been seen in this turn
     pub any_tool_used: bool,
@@ -23,6 +22,7 @@ pub(in crate::services::discord) struct WatcherToolState {
     status_events: Vec<StatusEvent>,
     codex_rollout: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
     native_codex_enabled: bool,
+    pub summary_outcome: crate::services::discord::turn_end_summary::WatcherOutcome,
 }
 
 impl WatcherToolState {
@@ -39,6 +39,7 @@ impl WatcherToolState {
             status_events: Vec::new(),
             codex_rollout: Default::default(),
             native_codex_enabled: false,
+            summary_outcome: Default::default(),
         }
     }
 
@@ -202,9 +203,7 @@ pub(in crate::services::discord) use native_codex::{
     is_native_codex_payload, read_native_codex_state, watcher_source_witness,
 };
 
-/// Process buffered lines for the tmux watcher.
-/// Extracts text content, tracks tool status, and detects result events.
-/// Returns true if a "result" event was found.
+/// Process buffered watcher lines, tracking text, tools, and terminal events.
 pub(in crate::services::discord) fn process_watcher_lines(
     buffer: &mut String,
     state: &mut StreamLineState,
@@ -279,6 +278,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 }
                 continue;
             }
+            tool_state.summary_outcome.observe(&val);
             if event_type == "user" && watcher_user_event_is_prompt_boundary(&val) {
                 if outcome.soft_terminal_candidate || !full_response.trim().is_empty() {
                     if !outcome.soft_terminal_candidate {

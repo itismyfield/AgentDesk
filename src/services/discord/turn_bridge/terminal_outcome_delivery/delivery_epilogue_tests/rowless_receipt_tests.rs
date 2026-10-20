@@ -1,5 +1,6 @@
 //! Drive the production terminal boundary with a real source file and receipt.
 
+use super::recovery_retry_guard_tests as summary_assertions;
 use super::*;
 
 mod o_after_done_chain_tests;
@@ -1185,10 +1186,9 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
                 .await
             );
         }
-        assert_eq!(driver.completed_publications(), 1);
+        summary_assertions::assert_terminal_publications(&driver, !replace_actor);
     }
 }
-
 /// Custody parked before O owned the channel follows its real destination on resume: an
 /// O-owned destination settles without posting, and an unknown selected kind keeps the record.
 #[tokio::test]
@@ -1380,7 +1380,6 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
     let owned = [(channel, ClaudeTui)];
     let _o = test_override::force_channels(&owned[..usize::from(o_channel)]);
     let _posted = deliver::forget_posted_for_tests(channel);
-
     let (ctx, state) = driver.parts();
     let output = run(ctx, state).await;
     assert!(output.terminal_delivery_committed);
@@ -1400,6 +1399,7 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
         .map(|o| o.call)
         .collect();
     let panel = singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
+    summary_assertions::assert_panel_completion_publications(&driver, o_channel);
     (panel, calls)
 }
 
@@ -1417,5 +1417,5 @@ async fn the_postlude_completes_an_o_panel_in_place_below_which_o_posts_later() 
 async fn the_postlude_completes_a_legacy_panel_in_place_whatever_o_posts_later() {
     let (panel, calls) = complete_then_late_o_body(false).await;
     assert_eq!(panel, Some(KEPT_PANEL));
-    assert_eq!(calls, [DriverCall::Edit]);
+    assert_eq!(calls, [DriverCall::Edit, DriverCall::Send]);
 }

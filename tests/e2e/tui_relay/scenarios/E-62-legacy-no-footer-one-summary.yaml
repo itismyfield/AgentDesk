@@ -1,0 +1,27 @@
+id: E-62
+title: Legacy 채널 footer 0과 턴 요약 정확히 1
+agent_mode: real_live
+coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
+cells: [claude-pipe, claude-tui]
+isolation: required
+durable_delivery_probe: true
+notes: |
+  Deployment-coordinator live acceptance only. Select an existing non-O Legacy
+  channel; this scenario does not reconfigure a channel. An evaluated Legacy
+  receipt is required, so running it on O cannot be reported as Legacy PASS.
+steps:
+  - send_discord_prompt: "Reply with exactly [E2E:E62:{run_id}:BODY]."
+  - wait_for_discord_text: "[E2E:E62:{run_id}:BODY]"
+    timeout_s: 240
+assertions:
+  - text_present: "[E2E:E62:{run_id}:BODY]"
+  - no_duplicate_marker: "[E2E:E62:{run_id}:BODY]"
+  - no_status_chrome: true
+  - completion_per_turn:
+      exact: 1
+      marker: "[E2E:E62:{run_id}:BODY]"
+  - turn_summary_after_body:
+      body_marker: "[E2E:E62:{run_id}:BODY]"
+      header: "-# ✅"
+      output_owner: legacy

@@ -454,6 +454,13 @@ async fn repeated_whole_ledger_failures_never_spend_an_unposted_piece() {
 /// to append with `keep`; the halt that follows names nothing.
 async fn posted_then_unrecorded(keep: Keep) {
     let scene = Scene::hosted().await;
+    // Keep the injected append failure on Prepared, after the turn's opening mark is durable.
+    scene.say("primed", "");
+    polls(3).await;
+    assert_eq!(
+        scene.harness.channel().ledger().summary_turn_marks().len(),
+        1
+    );
     let first = fault::plant(&scene.ledger(), At::Append(Keep::All), StorageFull, Some(1));
     let (ledger, armed) = (scene.ledger(), Arc::new(Mutex::new(None)));
     let arming = Arc::clone(&armed);
@@ -489,6 +496,13 @@ async fn a_withdrawn_piece_whose_post_went_out_is_settled_from_history_not_withd
 /// The unposted entry's withdrawal or the spool recovery after it fails once at `at`.
 async fn withdrawal_fails_once(at: At, under: fn(&Scene) -> PathBuf, withdrawn: usize) {
     let scene = Scene::hosted().await;
+    // Keep the injected append failure on Prepared, after the turn's opening mark is durable.
+    scene.say("primed", "");
+    polls(3).await;
+    assert_eq!(
+        scene.harness.channel().ledger().summary_turn_marks().len(),
+        1
+    );
     let first = fault::plant(&scene.ledger(), At::Append(Keep::All), StorageFull, Some(1));
     let failing = fault::plant(&under(&scene), at, Interrupted, Some(1));
     scene.say("p1", "p1");

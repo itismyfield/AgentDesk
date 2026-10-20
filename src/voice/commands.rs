@@ -563,6 +563,7 @@ mod tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 

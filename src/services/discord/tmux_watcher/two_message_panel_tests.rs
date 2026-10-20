@@ -1,8 +1,8 @@
 //! Tests for the watcher-side two-message status panel (#3805 P2 PR-C/D, #4860).
 
 use super::*;
+use crate::services::discord::footer_retirement::legacy_for_test;
 use std::sync::Arc;
-
 #[test]
 fn creation_gate_off_is_byte_identical_true_regardless_of_answer() {
     // OFF: the block runs exactly as today whether or not the answer exists.
@@ -115,7 +115,7 @@ fn reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays() {
     managed.tmux_session_name = Some("AgentDesk-claude-a".to_string());
     managed.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
     managed.turn_source = crate::services::discord::inflight::TurnSource::Managed;
-
+    let _legacy = legacy_for_test();
     assert!(!watcher_two_message_should_reanchor_panel_on_rollover(
         true,
         true,
@@ -423,24 +423,24 @@ async fn exercise_status_panel_ledger_failure_4891(watcher_tail: bool) {
             effects.iter().filter(|(m, _)| *m == Method::DELETE).count(),
             0
         );
-        if action == "already" {
+        if action != "edit" {
             assert!(
                 effects.is_empty(),
-                "already committed must not send or edit"
+                "committed panels and retired fallbacks must not send or edit"
             );
         } else {
             assert_eq!(effects.len(), 1);
-            assert_eq!(
-                effects[0].0,
-                if action == "send" {
-                    Method::POST
-                } else {
-                    Method::PATCH
-                }
-            );
+            assert_eq!(effects[0].0, Method::PATCH);
             assert!(effects[0].1["content"].as_str().unwrap().contains("완료"));
         }
-        assert!(text.contains("완료"));
+        if action == "send" {
+            assert!(
+                text.is_empty(),
+                "retired fallback must leave cached text untouched"
+            );
+        } else {
+            assert!(text.contains("완료"));
+        }
     }
     server.abort();
 }

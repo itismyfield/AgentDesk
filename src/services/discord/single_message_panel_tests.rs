@@ -195,7 +195,7 @@ fn single_message_panel_flag_rejects_documented_optout_values() {
 
 #[test]
 fn footer_mode_requires_both_flags() {
-    assert!(super::footer_mode_enabled(true, true));
+    assert!(!super::footer_mode_enabled(true, true));
     assert!(!super::footer_mode_enabled(true, false));
     assert!(!super::footer_mode_enabled(false, true));
 }
@@ -589,8 +589,8 @@ fn streaming_placeholder_counts_supplementary_utf16_units_5178() {
     let rendered = super::super::formatting::build_streaming_placeholder_text(&body, "status");
     assert_eq!(
         super::super::formatting::discord_message_units(&rendered),
-        1_989,
-        "rendered placeholder uses 1981 body units plus the 8-unit footer"
+        1_981,
+        "retired placeholder preserves 1981 body units without the 8-unit footer"
     );
     assert!(rendered.starts_with('…'));
 }
@@ -732,7 +732,7 @@ fn footer_rollover_reservation_is_bound_by_panel_budget_s3() {
     assert!(footer_chars <= max_footer_chars);
     assert_eq!(plan.split_at, expected_body_budget);
     assert!(plan.split_at >= minimum_body_budget);
-    assert!(plan.display_snapshot.ends_with(&footer));
+    assert!(!plan.display_snapshot.ends_with(&footer));
 }
 
 #[test]
@@ -745,14 +745,11 @@ fn footer_rollover_seed_carries_merged_header_but_frozen_chunk_does_not() {
         .expect("body should roll over after reserving the footer");
     let seed = super::super::formatting::build_streaming_placeholder_text("", &status_block);
 
-    assert!(seed.starts_with("-# ⠸ 진행 중 — Claude (<t:1700000000:R>)"));
-    assert!(seed.contains("-# Tools\n-# └ cargo test --lib single_message_panel"));
+    assert_eq!(seed, "⠋ 계속 처리 중");
+    assert!(!seed.contains("-# Tools\n-# └ cargo test --lib single_message_panel"));
     assert!(!plan.frozen_chunk.contains("진행 중 — Claude"));
     assert!(!plan.frozen_chunk.contains("-# Tools\n-# └ cargo test"));
-    assert!(
-        plan.display_snapshot
-            .ends_with(&format!("\n\n{status_block}"))
-    );
+    assert!(!plan.display_snapshot.contains(&status_block));
 }
 
 #[test]
@@ -2219,7 +2216,7 @@ fn footer_status_block_stays_within_discord_limit() {
         super::super::formatting::build_streaming_placeholder_text("body", &status_block);
 
     assert!(rendered.len() <= DISCORD_MSG_LIMIT);
-    assert!(rendered.contains("\n\n"));
+    assert_eq!(rendered, "body");
 }
 
 // ---- codex round-1 High-b: tail-anchored reclaim detection ----

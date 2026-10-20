@@ -1,4 +1,6 @@
 use super::*;
+#[path = "tool_card_fork_tests.rs"]
+mod tool_cards;
 use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom};
 
 fn prompt(uuid: &str, text: &str) -> Vec<u8> {
