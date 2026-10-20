@@ -1,3 +1,4 @@
+use super::super::Fixture;
 use super::*;
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced as recovery;
@@ -94,6 +95,10 @@ struct Case {
 impl Case {
     fn launched(tag: &str) -> Self {
         let mut fx = Fixture::new(tag, None);
+        let _: &crate::db::auto_queue::test_support::TestPostgresDb = fx
+            .db
+            .as_ref()
+            .expect("the recovery fixture owns a PostgreSQL database");
         fx.owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
         let launcher = Arc::new(Launcher::default());

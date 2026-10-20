@@ -213,6 +213,7 @@ src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_te
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
+src/services/discord/router/message_handler/root_replaced_recovery_tests.rs
 src/services/discord/router/message_handler/s1_entry_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
@@ -580,6 +581,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests
@@ -2038,6 +2040,16 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_taken_from_another_source_is_not_restored_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_active_or_inflight_appearing_after_first_proof_is_preserved_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_missing_pane_requires_a_prior_root_replaced_candidate_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_new_provider_after_first_proof_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_nonce_replacement_before_cas_preserves_n2_and_old_hold_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_observation_read_failure_after_first_proof_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_provider_alive_after_first_proof_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_recorded_root_alive_after_first_proof_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg

@@ -613,16 +613,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_active_or_inflight_appearing_after_first_proof_is_preserved_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_missing_pane_requires_a_prior_root_replaced_candidate_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_new_provider_after_first_proof_holds_without_cleanup_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_nonce_replacement_before_cas_preserves_n2_and_old_hold_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_observation_read_failure_after_first_proof_holds_without_cleanup_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_provider_alive_after_first_proof_holds_without_cleanup_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_recorded_root_alive_after_first_proof_holds_without_cleanup_pg
-  services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg
   services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
   services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
