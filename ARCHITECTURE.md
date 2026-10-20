@@ -963,6 +963,8 @@ src/
 │   │   │   │   ├── codex_clear_relaunch_tests.rs
 │   │   │   │   ├── codex_clear_retirement_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
+│   │   │   │   ├── herdr_recovery.rs
+│   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
@@ -1544,6 +1546,7 @@ src/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
+│   │   │   │   │   ├── clear_discard_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
@@ -1609,7 +1612,11 @@ src/
 │   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   └── producer_error_test_support.rs
+│   │   │   │   ├── root_replaced_recovery_tests/
+│   │   │   │   │   ├── clear_tests.rs
+│   │   │   │   │   └── recheck_tests.rs
 │   │   │   │   ├── tui_followup/
+│   │   │   │   │   ├── busy_notice.rs
 │   │   │   │   │   ├── codex_observation.rs
 │   │   │   │   │   └── nameless_gate.rs
 │   │   │   │   ├── attachments.rs
@@ -1943,6 +1950,10 @@ src/
 │   │   │   ├── tombstone.rs
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
+│   │   │   ├── state/
+│   │   │   │   ├── clear_waiting/
+│   │   │   │   │   └── clear_waiting_tests.rs
+│   │   │   │   └── clear_waiting.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   └── retire_tests.rs
@@ -2023,6 +2034,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
 │   │   │   │   │   ├── boundary_tests/
+│   │   │   │   │   │   ├── completion_wait_tests.rs
 │   │   │   │   │   │   ├── handoff_tests.rs
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
@@ -3225,6 +3237,8 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── clear_fence/
+│   │   │   └── clear_fence_tests.rs
 │   │   ├── dispatch_reservation/
 │   │   │   ├── tests/
 │   │   │   │   ├── hydrate_corrupt_queue_tests.rs
@@ -3243,6 +3257,7 @@ src/
 │   │   ├── active_source_dedup.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
+│   │   ├── clear_fence.rs
 │   │   ├── clear_trust_tests.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs

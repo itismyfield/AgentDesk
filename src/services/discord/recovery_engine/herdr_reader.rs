@@ -8,10 +8,14 @@ use tokio::runtime::Handle;
 
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
-    NoHerdrEndpoint,
+    NoHerdrEndpoint, reconcile_hosted,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedObservation, HostedRecord, HostedState, LIVE, list_local_herdr_rows_pg,
+    HostedExecution, HostedLookup, HostedObservation, HostedRecord, HostedState,
+    list_local_herdr_rows_pg,
+};
+use crate::services::discord::herdr_terminate::root_replaced::{
+    self, Recovery, RootReplacedCandidate,
 };
 use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
@@ -69,6 +73,41 @@ impl HerdrExecutionReader for SocketHerdrReader {
     }
 }
 
+/// Captures the exact registered reader before its blocking observation moves to another thread.
+pub(in crate::services::discord) struct RootReplacedProbe {
+    row: HostedObservation,
+    reader: SocketHerdrReader,
+}
+pub(in crate::services::discord) fn prepare_root_replaced_candidate(
+    row: &HostedObservation,
+) -> Result<RootReplacedProbe, String> {
+    let HostedRecord::Known(record) = &row.record else {
+        return Err("unknown execution".into());
+    };
+    if record.state != HostedState::Bound {
+        return Err("execution is not Bound".into());
+    }
+    let reader = SocketHerdrReader::of(record).ok_or("registered target unavailable")?;
+    Ok(RootReplacedProbe {
+        row: row.clone(),
+        reader,
+    })
+}
+impl RootReplacedProbe {
+    pub(in crate::services::discord) fn observe(
+        self,
+    ) -> Result<Option<RootReplacedCandidate>, String> {
+        let verdict = reconcile_hosted(&HostedLookup::Found(self.row.clone()), &self.reader);
+        if verdict.admits_reconnect() {
+            return Ok(None);
+        }
+        let attach = HerdrSourceAttach::Refused(verdict);
+        RootReplacedCandidate::from_refusal(&self.row, &attach)
+            .map(Some)
+            .ok_or_else(|| format!("pane does not prove RootReplaced: {attach:?}"))
+    }
+}
+
 /// One row's result in the restart pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reconnect {
@@ -113,7 +152,7 @@ struct RowResult {
     read_by_codex: bool,
     nonce: String,
     reconnect: Reconnect,
-    original: Option<HostedExecution>,
+    candidate: Option<RootReplacedCandidate>,
 }
 
 type Results = BTreeMap<i64, RowResult>;
@@ -174,19 +213,19 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
 ) {
-    reconnect_pass(None, pool, provider);
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool.cloned());
+    reconnect_restarted_herdr_with_shared(&shared, provider);
 }
 
 pub(in crate::services::discord) fn reconnect_restarted_herdr_with_shared(
     shared: &std::sync::Arc<crate::services::discord::SharedData>,
     provider: &ProviderKind,
 ) {
-    reconnect_pass(Some(shared), shared.pg_pool.as_ref(), provider);
+    reconnect_pass(shared, provider);
 }
 
 fn reconnect_pass(
-    shared: Option<&std::sync::Arc<crate::services::discord::SharedData>>,
-    pool: Option<&PgPool>,
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
     provider: &ProviderKind,
 ) {
     let codex = *provider == ProviderKind::Codex;
@@ -202,7 +241,7 @@ fn reconnect_pass(
     let holds = crate::services::claude::herdr_turn::input_holds().map(|holds| holds.len());
     with_pass(|pass| pass.holds = Some(holds));
     let (Some(pool), Some(node), Ok(runtime)) = (
-        pool,
+        shared.pg_pool.as_ref(),
         crate::config::session_hosts::local_node(),
         Handle::try_current(),
     ) else {
@@ -211,11 +250,7 @@ fn reconnect_pass(
     let rows = match runtime.block_on(list_local_herdr_rows_pg(
         pool,
         &node,
-        if shared.is_some() {
-            &["pending", "bound", "retired"]
-        } else {
-            LIVE
-        },
+        &["pending", "bound", "retired"],
     )) {
         Ok(rows) => rows,
         Err(error) => {
@@ -223,9 +258,7 @@ fn reconnect_pass(
             return;
         }
     };
-    if shared.is_some() {
-        crate::services::discord::herdr_terminate::root_replaced::prune(&rows);
-    }
+    root_replaced::prune(&rows);
     let before = with_pass(|pass| pass.results.clone());
     let mut after = BTreeMap::new();
     for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
@@ -236,7 +269,7 @@ fn reconnect_pass(
                     read_by_codex: codex,
                     nonce: String::new(),
                     reconnect: Reconnect::Unknown,
-                    original: None,
+                    candidate: None,
                 };
                 after.insert(row.session_id(), unknown);
                 continue;
@@ -246,17 +279,23 @@ fn reconnect_pass(
         let seen = before
             .get(&row.session_id())
             .filter(|seen| seen.nonce == nonce);
-        let fresh = |reconnect| RowResult {
+        let fresh = |(reconnect, candidate)| RowResult {
             read_by_codex: codex,
             nonce: nonce.clone(),
             reconnect,
-            original: Some(record.clone()),
+            candidate,
         };
-        let result = if record.state == HostedState::Retired
-            || seen.is_some_and(|seen| {
-                seen.reconnect == Reconnect::RootReplaced && seen.original.as_ref() == Some(record)
-            }) {
-            fresh(Reconnect::RootReplaced)
+        if record.state == HostedState::Retired {
+            runtime.block_on(root_replaced::recover_retired(shared, pool, row, None));
+            // Cleanup has its own recovery log; a terminal row is not a withheld Bound attach.
+            continue;
+        }
+        let result = if let Some(seen) = seen.filter(|seen| {
+            seen.candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.matches(row))
+        }) {
+            seen.clone()
         } else {
             match seen {
                 Some(seen) if seen.reconnect.settled() => seen.clone(),
@@ -271,13 +310,11 @@ fn reconnect_pass(
                 )),
             }
         };
-        if result.reconnect == Reconnect::RootReplaced
-            && let Some(shared) = shared
+        if let Some(candidate) = &result.candidate
+            && runtime.block_on(root_replaced::recover(shared, pool, candidate, None))
+                == Recovery::Retired
         {
-            use crate::services::discord::herdr_terminate::root_replaced::{Recovery, recover};
-            if runtime.block_on(recover(shared, pool, row)) == Recovery::Retired {
-                continue;
-            }
+            continue;
         }
         after.insert(row.session_id(), result);
     }
@@ -295,41 +332,37 @@ fn reconnect_unless_pending(
     runtime: &Handle,
     pool: &PgPool,
     record: &HostedExecution,
-    shared: Option<&std::sync::Arc<crate::services::discord::SharedData>>,
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
     row: &HostedObservation,
-) -> Reconnect {
+) -> (Reconnect, Option<RootReplacedCandidate>) {
     if record.state == HostedState::Pending {
-        return Reconnect::Pending;
+        return (Reconnect::Pending, None);
     }
-    #[cfg(test)]
-    ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
     runtime.block_on(async {
-        let _transition = if let Some(shared) = shared {
-            let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
-                return Reconnect::Unknown;
-            };
-            if channel == 0 {
-                return Reconnect::Unknown;
-            }
-            let Ok(lease) =
-                crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
-                    shared,
-                    crate::services::discord::ChannelId::new(channel),
-                )
-            else {
-                return Reconnect::Withheld;
-            };
-            if crate::services::discord::herdr_terminate::root_replaced::current(pool, row)
-                .await
-                .is_err()
-            {
-                return Reconnect::Withheld;
-            }
-            Some(lease)
-        } else {
-            None
+        let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
+            return (Reconnect::Unknown, None);
         };
-        Reconnect::of(&reconnect(pool, record).await)
+        if channel == 0 {
+            return (Reconnect::Unknown, None);
+        }
+        let Ok(_transition) =
+            crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
+                shared,
+                crate::services::discord::ChannelId::new(channel),
+            )
+        else {
+            return (Reconnect::Withheld, None);
+        };
+        if root_replaced::current(pool, row).await.is_err() {
+            return (Reconnect::Withheld, None);
+        }
+        #[cfg(test)]
+        ATTACHES.with(|attaches| attaches.set(attaches.get() + 1));
+        let attached = reconnect(pool, record).await;
+        (
+            Reconnect::of(&attached),
+            RootReplacedCandidate::from_refusal(row, &attached),
+        )
     })
 }
 

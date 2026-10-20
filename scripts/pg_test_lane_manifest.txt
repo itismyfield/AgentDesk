@@ -224,6 +224,8 @@ src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
 src/services/discord/router/message_handler/root_replaced_recovery_tests.rs
+src/services/discord/router/message_handler/root_replaced_recovery_tests/clear_tests.rs
+src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs
 src/services/discord/router/message_handler/s1_entry_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
@@ -603,6 +605,8 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests
@@ -2097,6 +2101,19 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_clear_pending_taken_from_another_source_is_not_restored_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::a_restart_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_failed_queue_publish_reports_partial_even_after_retirement_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_missing_holds_execution_but_discards_waiting_queue_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_nonce_replacement_keeps_successor_and_discards_only_q_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_preserves_original_actor_and_inflight_while_discarding_q_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_selects_old_originless_json_and_preserves_modern_pending_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests::rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_from_another_channel_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_borrowed_transition_recovers_without_releasing_its_callers_guard_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_completed_retired_cache_needs_no_pg_or_transition_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_final_current_change_after_second_proof_never_attempts_cas_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_final_quiet_change_after_second_proof_never_attempts_cas_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests::rr_initial_missing_cannot_construct_a_candidate_or_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_active_or_inflight_appearing_after_first_proof_is_preserved_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_missing_pane_requires_a_prior_root_replaced_candidate_pg
@@ -2106,7 +2123,6 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_provider_alive_after_first_proof_holds_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_recorded_root_alive_after_first_proof_holds_without_cleanup_pg
-services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg

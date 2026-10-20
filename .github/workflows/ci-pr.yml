@@ -437,6 +437,8 @@ jobs:
               - 'src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
               - 'src/services/discord/router/message_handler/root_replaced_recovery_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/clear_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs'
               - 'src/services/discord/router/message_handler/s1_entry_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'

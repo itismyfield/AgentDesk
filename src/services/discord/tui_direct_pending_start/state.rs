@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+mod clear_waiting;
+pub(in crate::services::discord) use clear_waiting::discard_legacy_waiting;
+pub(super) use clear_waiting::take_retired;
+
 use super::super::{SharedData, inflight, runtime_store, tui_direct_abort_marker, turn_finalizer};
 
 /// Conservative poll interval for the wait predicate.
@@ -330,6 +334,9 @@ pub(in crate::services::discord) fn persist(record: &TuiDirectPendingStart) -> R
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    if clear_waiting::cleared(&record.key()) {
+        return Err("pending input superseded by clear".into());
+    }
     mark_present(record.key());
     write_record(record)?;
     Ok(())
@@ -377,17 +384,6 @@ pub(in crate::services::discord) fn retire_completed(
 }
 
 /// The record's turn already finished; its worker exits without claiming or retrying.
-pub(super) fn take_retired(record: &TuiDirectPendingStart) -> bool {
-    let key = record.key();
-    let was_retired = retired().remove(&key);
-    if was_retired {
-        tracing::info!(
-            ?key,
-            "tui_direct_pending_start: retired record's worker exits"
-        );
-    }
-    was_retired
-}
 
 /// Save a claim's row only while its pending start is not retired (`Ok(false)` otherwise).
 pub(in crate::services::discord) fn save_row_unless_retired(
@@ -397,7 +393,7 @@ pub(in crate::services::discord) fn save_row_unless_retired(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let key = (state.provider.clone(), state.channel_id, state.user_msg_id);
-    if retired().contains(&key) {
+    if retired().contains(&key) || clear_waiting::cleared(&key) {
         return Ok(false);
     }
     inflight::save_inflight_state_if_absent(state)
@@ -408,7 +404,7 @@ pub(super) fn update_claim_attempt_count(record: &mut TuiDirectPendingStart, cla
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if retired().contains(&record.key()) {
+    if retired().contains(&record.key()) || clear_waiting::cleared(&record.key()) {
         return;
     }
     if let Err(error) = write_record(record) {

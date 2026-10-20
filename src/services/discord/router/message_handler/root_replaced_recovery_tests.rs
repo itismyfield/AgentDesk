@@ -6,7 +6,6 @@ use crate::services::discord::herdr_terminate::root_replaced as recovery;
 use crate::services::discord::recovery_engine::herdr_reader::{
     ATTACHES, reconnect_restarted_herdr_with_shared,
 };
-use crate::services::herdr_launch::tests::retired_durability_tests::SyncFault;
 use crate::services::session_host::herdr_socket_rig_tests::{PROVIDER, SHELL};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -181,6 +180,8 @@ impl Case {
         recovery::CLEANUPS.with(|count| count.set(0));
         recovery::BEFORE_CAS.with(|slot| slot.borrow_mut().take());
         recovery::AFTER_CAS.with(|slot| slot.borrow_mut().take());
+        recovery::AFTER_FINAL_PROOF.with(|slot| slot.borrow_mut().take());
+        recovery::CAS_ATTEMPTS.with(|count| count.set(0));
         ATTACHES.with(|count| count.set(0));
         Self {
             fx,
@@ -244,6 +245,8 @@ impl Drop for Case {
     fn drop(&mut self) {
         recovery::BEFORE_CAS.with(|slot| slot.borrow_mut().take());
         recovery::AFTER_CAS.with(|slot| slot.borrow_mut().take());
+        recovery::AFTER_FINAL_PROOF.with(|slot| slot.borrow_mut().take());
+        recovery::CAS_ATTEMPTS.with(|count| count.set(0));
     }
 }
 
@@ -556,6 +559,9 @@ enum Change {
 }
 
 fn refuses_change(change: Change, tag: &str) {
+    refuses_change_at(change, tag, false);
+}
+fn refuses_change_at(change: Change, tag: &str, after_final_proof: bool) {
     let case = Case::launched(tag);
     let before = case.effects();
     let old = case.fx.record();
@@ -565,7 +571,12 @@ fn refuses_change(change: Change, tag: &str) {
     let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
     let probe_shared = case.shared.clone();
     let target = case.target();
-    recovery::BEFORE_CAS.with(|slot| {
+    let probe = if after_final_proof {
+        &recovery::AFTER_FINAL_PROOF
+    } else {
+        &recovery::BEFORE_CAS
+    };
+    probe.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move || {
             Box::pin(async move {
                 stage_tx.send(()).unwrap();
@@ -687,6 +698,13 @@ fn refuses_change(change: Change, tag: &str) {
         mutation.join().unwrap()
     });
     assert!(reached.load(Ordering::SeqCst));
+    if after_final_proof {
+        assert_eq!(
+            recovery::CAS_ATTEMPTS.with(std::cell::Cell::get),
+            0,
+            "final current and quiet checks must reject the changed execution before CAS"
+        );
+    }
     if matches!(change, Change::Nonce) {
         assert_eq!(case.fx.record(), HostedRecord::Known(changed));
     } else {
@@ -914,57 +932,14 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
     }
 }
 
+#[path = "root_replaced_recovery_tests/clear_tests.rs"]
+mod clear_tests;
+#[path = "root_replaced_recovery_tests/recheck_tests.rs"]
+mod recheck_tests;
+
 #[test]
 fn rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg() {
-    let case = Case::launched("rr-cache");
-    let path = case.hold_path();
-    let fault = SyncFault::new(&path);
-    fault.fail(true);
-    let before = case.effects();
-    case.pass();
-    assert_eq!(case.fx.row(), Some(HostedState::Retired));
-    assert_eq!(case.cleanups(), 1);
-    assert_eq!(
-        fault.calls(),
-        1,
-        "real hold unlink reached the production fsync hook"
-    );
-    assert!(
-        !path.exists(),
-        "unlink landed before the injected fsync failure"
-    );
-    fault.fail(false);
-    case.pass();
-    assert_eq!(case.cleanups(), 2);
-    assert_eq!(
-        fault.calls(),
-        2,
-        "Retired retry must fsync the already absent hold"
-    );
-    case.pass();
-    assert_eq!(case.cleanups(), 2, "completed cache avoids another cleanup");
-    assert_eq!(fault.calls(), 2);
-    recovery::prune(&[]);
-    case.pass();
-    assert_eq!(
-        case.cleanups(),
-        3,
-        "unknown process cache re-establishes durable absence once"
-    );
-    assert_eq!(fault.calls(), 3);
-    case.pass();
-    assert_eq!(case.cleanups(), 3);
-    assert_eq!(fault.calls(), 3);
-    crate::services::claude::herdr_turn::hold(&case.nonce).unwrap();
-    case.pass();
-    assert_eq!(
-        case.cleanups(),
-        4,
-        "a reappearing hold invalidates Completed"
-    );
-    assert_eq!(fault.calls(), 4);
-    assert!(!path.exists());
-    assert_eq!(case.effects(), before);
+    recheck_tests::retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries();
 }
 
 #[test]

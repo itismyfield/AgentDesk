@@ -4,7 +4,12 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
 use crate::services::cluster::channel_home::{CommandPermit, admit_command, command_worker_scope};
+use crate::services::discord::recovery_engine::host_reconcile::HostReconcile;
 use crate::services::discord::session_transition::SessionTransitionLease;
+use crate::services::discord::tmux::execution_identity::herdr_observation::{
+    HerdrExecutionMatch, HerdrMismatch,
+};
+use crate::services::discord::tui_prompt_relay::herdr_source::HerdrSourceAttach;
 use crate::services::herdr_launch::retired_hold::{self, RetiredHoldOutcome};
 use crate::services::tui_prompt_dedupe as dedupe;
 use std::collections::BTreeMap;
@@ -14,6 +19,23 @@ pub(crate) enum Recovery {
     Held(String),
     RetiredCleanupPending(String),
     Retired,
+}
+/// An exact RootReplaced refusal for one complete Bound observation; Missing cannot construct it.
+#[derive(Clone, Debug)]
+pub(crate) struct RootReplacedCandidate(HostedObservation);
+impl RootReplacedCandidate {
+    pub(crate) fn from_refusal(
+        row: &HostedObservation,
+        attach: &HerdrSourceAttach,
+    ) -> Option<Self> {
+        matches!((&row.record, attach),
+            (HostedRecord::Known(record), HerdrSourceAttach::Refused(HostReconcile::Herdr(
+                HerdrExecutionMatch::Mismatch(HerdrMismatch::RootReplaced)))) if record.state == HostedState::Bound
+        ).then(|| Self(row.clone()))
+    }
+    pub(crate) fn matches(&self, row: &HostedObservation) -> bool {
+        self.0 == *row
+    }
 }
 #[derive(Clone)]
 struct Cached {
@@ -27,6 +49,10 @@ static CACHE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, Cached>>> =
 thread_local! {
     static CACHE: std::cell::RefCell<BTreeMap<i64, Cached>> = const { std::cell::RefCell::new(BTreeMap::new()) };
     pub(crate) static BEFORE_CAS: ProbeSlot = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_FINAL_PROOF: ProbeSlot = const { std::cell::RefCell::new(None) };
+    pub(crate) static CAS_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CURRENT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static TRANSITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static AFTER_CAS: ProbeSlot = const { std::cell::RefCell::new(None) };
     pub(crate) static CLEANUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -106,6 +132,8 @@ fn local(
     Ok((provider, ChannelId::new(channel)))
 }
 pub(crate) async fn current(pool: &PgPool, row: &HostedObservation) -> Result<(), String> {
+    #[cfg(test)]
+    CURRENT_READS.with(|count| count.set(count.get() + 1));
     let HostedRecord::Known(record) = &row.record else {
         return Err("unknown record".into());
     };
@@ -178,13 +206,66 @@ async fn quiet(
     }
     Ok(())
 }
-/// The sequential restart pass identified this Bound nonce as RootReplaced, or selected Retired cleanup.
 pub(crate) async fn recover(
     shared: &Arc<SharedData>,
     pool: &PgPool,
-    row: &HostedObservation,
+    candidate: &RootReplacedCandidate,
+    transition: Option<&SessionTransitionLease<'_>>,
 ) -> Recovery {
-    let result = recover_inner(shared, pool, row).await;
+    recover_report(shared, pool, &candidate.0, transition).await
+}
+pub(crate) async fn recover_retired(
+    shared: &Arc<SharedData>,
+    pool: &PgPool,
+    row: &HostedObservation,
+    transition: Option<&SessionTransitionLease<'_>>,
+) -> Recovery {
+    let HostedRecord::Known(record) = &row.record else {
+        return Recovery::Held("unknown retired execution".into());
+    };
+    if record.state != HostedState::Retired {
+        return Recovery::Held("execution is not Retired".into());
+    }
+    // A completed exact row with no hold has no remaining mutation to authorize.
+    if transition.is_none()
+        && cache(|entries| {
+            entries
+                .get(&row.session_id())
+                .is_some_and(|old| old.row == *row && old.result == Recovery::Retired)
+        })
+        && matches!(
+            crate::services::claude::herdr_turn::input_held(&record.execution_nonce),
+            Ok(false)
+        )
+    {
+        return Recovery::Retired;
+    }
+    recover_report(shared, pool, row, transition).await
+}
+fn transition<'a>(
+    shared: &'a SharedData,
+    channel: ChannelId,
+    borrowed: Option<&SessionTransitionLease<'_>>,
+) -> Result<Option<SessionTransitionLease<'a>>, String> {
+    #[cfg(test)]
+    TRANSITIONS.with(|count| count.set(count.get() + 1));
+    if let Some(lease) = borrowed {
+        return lease
+            .matches(shared, channel)
+            .then_some(None)
+            .ok_or("borrowed transition differs".into());
+    }
+    SessionTransitionLease::try_acquire(shared, channel)
+        .map(Some)
+        .map_err(|_| "transition busy".into())
+}
+async fn recover_report(
+    shared: &Arc<SharedData>,
+    pool: &PgPool,
+    row: &HostedObservation,
+    transition: Option<&SessionTransitionLease<'_>>,
+) -> Recovery {
+    let result = recover_inner(shared, pool, row, transition).await;
     let reported_retired = cache(|entries| {
         entries
             .get(&row.session_id())
@@ -207,6 +288,7 @@ async fn recover_inner(
     shared: &Arc<SharedData>,
     pool: &PgPool,
     row: &HostedObservation,
+    borrowed: Option<&SessionTransitionLease<'_>>,
 ) -> Recovery {
     let held = Recovery::Held;
     if !shared
@@ -231,24 +313,15 @@ async fn recover_inner(
         return held(e);
     }
     if record.state == HostedState::Retired {
-        let Ok(_transition) = SessionTransitionLease::try_acquire(shared, channel) else {
-            return held("transition busy".into());
+        let _transition = match transition(shared, channel, borrowed) {
+            Ok(lease) => lease,
+            Err(why) => return held(why),
         };
         if let Err(e) = current(pool, row).await {
             return held(e);
         }
         if let Err(e) = quiet(shared, &provider, channel, &record.owner.logical_key).await {
             return held(e);
-        }
-        let complete = cache(|entries| {
-            entries
-                .get(&row.session_id())
-                .is_some_and(|old| old.row == *row && old.result == Recovery::Retired)
-        });
-        match crate::services::claude::herdr_turn::input_held(&record.execution_nonce) {
-            Ok(false) if complete => return Recovery::Retired,
-            Err(e) => return Recovery::RetiredCleanupPending(e),
-            _ => {}
         }
         return cleanup(shared, &provider, row, record, permit).await;
     }
@@ -270,8 +343,9 @@ async fn recover_inner(
         Ok(Ok(proof)) => proof,
         other => return held(format!("initial strict proof: {other:?}")),
     };
-    let Ok(_transition) = SessionTransitionLease::try_acquire(shared, channel) else {
-        return held("transition busy".into());
+    let _transition = match transition(shared, channel, borrowed) {
+        Ok(lease) => lease,
+        Err(why) => return held(why),
     };
     let fence = match target.termination_fence() {
         Ok(fence) => fence,
@@ -292,6 +366,8 @@ async fn recover_inner(
         })
         .await
         .map_err(|e| e.to_string())??;
+        #[cfg(test)]
+        run_probe(&AFTER_FINAL_PROOF).await;
         current(pool, row).await?;
         quiet(shared, &provider, channel, &record.owner.logical_key).await
     }
@@ -301,6 +377,8 @@ async fn recover_inner(
         return held(e);
     }
     // Once CAS is attempted, its result may be uncertain: the nonce never reopens.
+    #[cfg(test)]
+    CAS_ATTEMPTS.with(|count| count.set(count.get() + 1));
     if let Err(e) = retire_confirmed(pool, row, record).await {
         return held(format!("{e:?}"));
     }

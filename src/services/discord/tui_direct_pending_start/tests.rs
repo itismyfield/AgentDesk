@@ -5,7 +5,7 @@ use super::*;
 /// / drives `run_worker` mutates them, so concurrent tests would stomp each
 /// other (e.g. one test's `reset_present_for_tests` clearing another's gate).
 /// Serialize all such tests on this module-local lock.
-fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }

@@ -70,8 +70,29 @@ impl ChannelMailboxHandle {
         &self,
         persistence: QueuePersistenceContext,
     ) -> Result<ClearChannelResult, MailboxRefusal> {
-        self.request_verdict(|reply| ChannelMailboxMsg::Clear { persistence, reply })
+        self.clear_with_policy(persistence, super::clear_channel::ActivePolicy::Release)
             .await
+    }
+
+    pub(crate) async fn discard_waiting_or_refused(
+        &self,
+        persistence: QueuePersistenceContext,
+    ) -> Result<ClearChannelResult, MailboxRefusal> {
+        self.clear_with_policy(persistence, super::clear_channel::ActivePolicy::Preserve)
+            .await
+    }
+
+    async fn clear_with_policy(
+        &self,
+        persistence: QueuePersistenceContext,
+        active: super::clear_channel::ActivePolicy,
+    ) -> Result<ClearChannelResult, MailboxRefusal> {
+        self.request_verdict(|reply| ChannelMailboxMsg::Clear {
+            persistence,
+            active,
+            reply,
+        })
+        .await
     }
 
     pub(crate) async fn hydrate_pending_queue_from_disk_or_refused(

@@ -41,6 +41,9 @@ pub(super) fn kickoff_refusal(
     candidate: &CancelToken,
     user_message_id: Option<MessageId>,
 ) -> Option<RecoveryKickoffResult> {
+    if user_message_id.is_some_and(|id| state.remint_fence.refuses_discarded(&[id])) {
+        return Some(RecoveryKickoffResult::Unavailable);
+    }
     let occupant = state.cancel_token.as_deref()?;
     Some(occupied_kickoff_outcome(
         state,

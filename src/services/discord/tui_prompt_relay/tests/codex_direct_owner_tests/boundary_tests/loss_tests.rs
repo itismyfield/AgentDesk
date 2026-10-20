@@ -76,7 +76,7 @@ fn codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete() {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, anchor);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
