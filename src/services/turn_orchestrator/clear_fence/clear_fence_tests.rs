@@ -376,7 +376,12 @@ fn clear_keeps_a_queued_head_ticket_stale_instead_of_reinjecting_it() {
         let channel = ChannelId::new(7_186_807);
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(channel);
-        let waiting = item(851);
+        let mut waiting = item(851);
+        waiting.source_message_queued_generations =
+            vec![SourceMessageQueuedGeneration::user_instruction(
+                waiting.message_id,
+                waiting.queued_generation,
+            )];
         assert!(handle.enqueue(waiting.clone(), context()).await.enqueued);
         let ticket = match handle
             .claim_queued_head(QueueIdentity::of(&waiting), context())

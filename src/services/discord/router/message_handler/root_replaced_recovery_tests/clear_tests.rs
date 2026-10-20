@@ -187,6 +187,10 @@ fn recover_after_clear(case: &Case, original: &HostedRecord, effects: &[Value]) 
 #[test]
 fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg() {
     let case = Case::launched("rr-clear-disabled");
+    assert!(
+        crate::services::tui_prompt_dedupe::herdr_claim_admission(case.fx.logical(), true).is_ok(),
+        "the real launch still admits N1 before clear observes its replacement"
+    );
     let _intake = IntakeGate::configure(&case);
     assert!(!crate::services::discord::herdr_terminate::terminate_enabled());
     let original = case.fx.record();
@@ -309,7 +313,7 @@ fn rr_public_clear_preserves_original_actor_and_inflight_while_discarding_q_pg()
             let effects = case.effects();
             let active = Arc::new(CancelToken::new());
             let path = crate::services::discord::inflight::inflight_state_path(
-                &crate::config::runtime_root().unwrap(),
+                &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
                 &ProviderKind::Claude,
                 CHANNEL,
             );

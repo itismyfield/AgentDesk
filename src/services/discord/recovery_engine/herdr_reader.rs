@@ -102,9 +102,16 @@ impl RootReplacedProbe {
             return Ok(None);
         }
         let attach = HerdrSourceAttach::Refused(verdict);
-        RootReplacedCandidate::from_refusal(&self.row, &attach)
-            .map(Some)
-            .ok_or_else(|| format!("pane does not prove RootReplaced: {attach:?}"))
+        let candidate = RootReplacedCandidate::from_refusal(&self.row, &attach)
+            .ok_or_else(|| format!("pane does not prove RootReplaced: {attach:?}"))?;
+        if let HostedRecord::Known(record) = &self.row.record {
+            // Reuse the restart refusal's nonce-guarded admission revocation.
+            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
+                &record.owner.logical_key,
+                Some(&record.execution_nonce),
+            );
+        }
+        Ok(Some(candidate))
     }
 }
 
