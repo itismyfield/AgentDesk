@@ -185,7 +185,7 @@ mod high_risk_recovery {
                     let request = command(&ctx, &data, channel);
                     let observe = async {
                         until(|| {
-                            fx.take_calls().iter().any(|call| {
+                            fx.calls().iter().any(|call| {
                                 call.starts_with("send-keys") && call.ends_with("Escape")
                             })
                         })
@@ -502,6 +502,7 @@ fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
             .into_iter()
             .enumerate()
         {
+            eprintln!("native stop composer window: {change}");
             fx.serve(Server::Live);
             fx.pane(&running());
             let shared = discord::make_shared_data_for_tests();
@@ -530,7 +531,7 @@ fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
             let request = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop");
             let update = async {
                 until(|| {
-                    fx.take_calls()
+                    fx.calls()
                         .iter()
                         .any(|call| call.starts_with("capture-pane"))
                 })

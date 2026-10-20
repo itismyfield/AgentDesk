@@ -149,6 +149,9 @@ pub(super) async fn invoke_real_slash_action(
     command: poise::Command<Data, Error>,
     name: &str,
 ) -> bool {
+    ctx.http.set_application_id(serenity::ApplicationId::new(
+        ctx.cache.current_user().id.get(),
+    ));
     let options = poise::FrameworkOptions::<Data, Error>::default();
     let (manager, _) =
         serenity::gateway::ShardManager::new(serenity::gateway::ShardManagerOptions {
@@ -206,11 +209,10 @@ pub(super) async fn invoke_real_slash_action(
         invocation_data: &invocation_data,
         __non_exhaustive: (),
     };
+    let result = command.slash_action.expect("production slash action")(app).await;
     assert!(
-        command.slash_action.expect("production slash action")(app)
-            .await
-            .is_ok(),
-        "the actual {name} body must finish successfully"
+        result.is_ok(),
+        "the actual {name} body must finish successfully: {result:?}"
     );
     has_sent_initial_response.load(Ordering::SeqCst)
 }

@@ -751,7 +751,7 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     loop {
                         if fx
-                            .take_calls()
+                            .calls()
                             .iter()
                             .any(|call| call.starts_with("capture-pane"))
                         {

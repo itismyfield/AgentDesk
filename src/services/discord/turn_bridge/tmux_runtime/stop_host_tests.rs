@@ -171,12 +171,19 @@ impl Fixture {
         self.codex.id()
     }
 
-    /// The logged tmux calls, oldest first, and clears the log.
+    pub(in super::super) fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The logged tmux calls, oldest first, and clears the log after writers finish.
     pub(in super::super) fn take_calls(&self) -> Vec<String> {
-        let log = self.dir.path().join("calls");
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        let _ = std::fs::remove_file(log);
-        calls.lines().map(str::to_string).collect()
+        let calls = self.calls();
+        let _ = std::fs::remove_file(self.dir.path().join("calls"));
+        calls
     }
 
     /// The SIGINTs delivered to the stand-in since the last call.
