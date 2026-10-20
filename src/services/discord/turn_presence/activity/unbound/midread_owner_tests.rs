@@ -275,6 +275,151 @@ struct DrainCase {
     ids: [u64; 2],
     began: tokio::time::Instant,
     label: &'static str,
+    periodic_only: bool,
+}
+
+fn wake_mutant(name: &str) -> bool {
+    crate::services::claude_tui::source_verify::n2b_mutant(name)
+}
+
+struct WakeProducerState {
+    serial: tokio::sync::Mutex<()>,
+    producer: std::sync::Mutex<Option<&'static str>>,
+    completion_release: tokio::sync::watch::Sender<bool>,
+    completion_blocked: AtomicUsize,
+    attempts: std::sync::Mutex<Vec<(&'static str, bool)>>,
+    started: tokio::sync::Notify,
+}
+
+struct WakeProducers {
+    state: Arc<WakeProducerState>,
+    _hook: crate::services::discord::queue_io::IdleQueueKickHookResetForTests,
+}
+
+impl WakeProducers {
+    fn install(channel: ChannelId, periodic_only: bool) -> Self {
+        let (completion_release, _) = tokio::sync::watch::channel(!periodic_only);
+        let state = Arc::new(WakeProducerState {
+            serial: tokio::sync::Mutex::new(()),
+            producer: std::sync::Mutex::new(None),
+            completion_release,
+            completion_blocked: AtomicUsize::new(0),
+            attempts: std::sync::Mutex::new(Vec::new()),
+            started: tokio::sync::Notify::new(),
+        });
+        let observed = state.clone();
+        let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
+            Arc::new(move |runtime, provider, candidate, reason| {
+                let state = observed.clone();
+                Box::pin(async move {
+                    if candidate != channel {
+                        return None;
+                    }
+                    if !matches!(reason, "turn_completion_event" | "turn_presence_idle") {
+                        // The seam has no lane argument: preserve unknown Idle/QueuedOnly callers.
+                        tracing::info!(
+                            channel_id = channel.get(),
+                            reason,
+                            "A2_R5_OTHER_PRODUCER original_lane=true"
+                        );
+                        return None;
+                    }
+                    if reason == "turn_completion_event" {
+                        let mut released = state.completion_release.subscribe();
+                        if !*released.borrow_and_update() {
+                            state.completion_blocked.fetch_add(1, Ordering::SeqCst);
+                        }
+                        loop {
+                            let open = *released.borrow_and_update();
+                            if open || released.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    // A blocked completion never owns this mutex; a real NoStart permits fallback.
+                    let _serial = state.serial.lock().await;
+                    let http = runtime
+                        .serenity_http_or_token_fallback()
+                        .expect("isolated kickoff fixture HTTP client");
+                    let ctx = runtime.http.cached_serenity_ctx.get();
+                    let token = runtime
+                        .http
+                        .cached_bot_token
+                        .get()
+                        .expect("isolated kickoff fixture bot token");
+                    let deps = crate::services::discord::router::IntakeDeps {
+                        http: &http,
+                        cache: ctx.map(|ctx| &ctx.cache),
+                        ctx_for_chained_dispatch: ctx,
+                        shared: &runtime,
+                        token,
+                    };
+                    tracing::info!(
+                        "Deferred drain: one-shot kick for channel {} ({reason})",
+                        channel
+                    );
+                    let outcome = crate::services::discord::queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
+                        reason,
+                        crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queue_channel(
+                            &deps, &provider, channel,
+                        ),
+                    ).await;
+                    state
+                        .attempts
+                        .lock()
+                        .unwrap()
+                        .push((reason, outcome.started));
+                    if outcome.started {
+                        let mut producer = state.producer.lock().unwrap();
+                        if producer.is_none() {
+                            *producer = Some(reason);
+                        }
+                        drop(producer);
+                        state.started.notify_waiters();
+                    }
+                    Some(outcome)
+                })
+            }),
+        );
+        Self { state, _hook: hook }
+    }
+
+    async fn wait_for_start(&self, deadline: tokio::time::Instant) {
+        let _ = tokio::time::timeout_at(deadline, async {
+            loop {
+                let started = self.state.started.notified();
+                tokio::pin!(started);
+                started.as_mut().enable();
+                if self.producer().is_some() {
+                    break;
+                }
+                started.await;
+            }
+        })
+        .await;
+    }
+
+    fn producer(&self) -> Option<&'static str> {
+        *self.state.producer.lock().unwrap()
+    }
+
+    fn attempts(&self) -> Vec<(&'static str, bool)> {
+        self.state.attempts.lock().unwrap().clone()
+    }
+
+    fn completion_blocked(&self) -> usize {
+        self.state.completion_blocked.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.state.completion_release.send_replace(true);
+    }
+}
+
+impl Drop for WakeProducers {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct RecoveryDriver {
@@ -296,7 +441,9 @@ impl RecoveryDriver {
             loop {
                 interval.tick().await;
                 let tick = counted.fetch_add(1, Ordering::SeqCst) + 1;
-                supervisor.tick().await;
+                if !wake_mutant("a2-periodic-wake-removed") {
+                    supervisor.tick().await;
+                }
                 trace_supervisor_tick(&supervisor, tick, first_wake);
             }
         });
@@ -339,6 +486,7 @@ async fn supervisor_drains_pair(
         ids: [a, b],
         began,
         label,
+        periodic_only,
     } = case;
     let _failure_logs = FailureLogs(logs.clone());
     let baseline = supervisor.state();
@@ -377,12 +525,39 @@ async fn supervisor_drains_pair(
             .collect::<Vec<_>>(),
         [b]
     );
+    let producers = WakeProducers::install(fixture.rig.channel, periodic_only);
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
+    if wake_mutant("a2-allow-early-b") {
+        // Premature terminal completion exercises the real consumer before the fixture releases A.
+        first.release.send(()).unwrap();
+        until(async || {
+            inflight::load_inflight_state(&fixture.provider, fixture.rig.channel.get())
+                .is_none_or(|row| row.user_msg_id == b)
+        })
+        .await;
+        if !periodic_only {
+            crate::services::discord::queue_io::kick_idle_queue_channel_if_context_available(
+                &fixture.rig.shared,
+                &fixture.provider,
+                fixture.rig.channel,
+                "turn_completion_event",
+            )
+            .await;
+        }
+        producers.wait_for_start(first_wake + RECOVERY_LIMIT).await;
+        eprintln!(
+            "A2_R5_EARLY_B_FAULT periodic_only={periodic_only} producer={:?} fixture_a_released=false",
+            producers.producer()
+        );
+    }
     tokio::task::yield_now().await;
-    assert!(matches!(
-        second.entered.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ));
+    assert!(
+        matches!(
+            second.entered.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "FIFO B must not enter before the fixture releases A"
+    );
     assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_some());
     assert_eq!(guard.0.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -398,15 +573,14 @@ async fn supervisor_drains_pair(
     let completion_offset = logs.0.lock().unwrap().len();
     eprintln!("A2_S3_A_HELD a_entered=1 no_early_b=1");
     first.finish();
-    until(async || {
-        kick_observed_after(
-            logs,
-            fixture.rig.channel,
-            "turn_completion_event",
-            completion_offset,
-        )
-    })
-    .await;
+    producers.wait_for_start(first_wake + RECOVERY_LIMIT).await;
+    let producer = producers.producer();
+    assert!(
+        producer.is_some(),
+        "a real queue producer must start FIFO B within the recovery bound; attempts={:?} periodic_only={periodic_only} state={:?}",
+        producers.attempts(),
+        supervisor.state()
+    );
     ledger.push(second.wait_with_limit(fixture, b, RECOVERY_LIMIT).await);
     let b_entry = began.elapsed();
     let b_after_a_kick = first_wake.elapsed();
@@ -414,12 +588,38 @@ async fn supervisor_drains_pair(
         .last_kick_at()
         .unwrap()
         .duration_since(first_wake);
-    // When the wake policy improves, invert this bound to <= RECOVERY_LIMIT.
-    assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
+    if periodic_only {
+        assert!(
+            producers.completion_blocked() > 0,
+            "the fixture barrier must hold an actual completion kick"
+        );
+        assert_eq!(producer, Some("turn_presence_idle"));
+    }
+    if producer == Some("turn_presence_idle") {
+        assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
+        assert_eq!(supervisor.woken_head(), Some(b));
+        assert_eq!(supervisor.state()["kickoffs_total"], 2);
+    }
     assert!(b_after_a_kick <= RECOVERY_LIMIT);
-    assert_eq!(supervisor.woken_head(), Some(b));
     assert_eq!(supervisor.state()["generation"], baseline["generation"]);
-    assert_eq!(supervisor.state()["kickoffs_total"], 2);
+    assert!(
+        kick_observed_after(
+            logs,
+            fixture.rig.channel,
+            "turn_completion_event",
+            completion_offset
+        ) || producers.completion_blocked() > 0
+            || producers
+                .attempts()
+                .iter()
+                .any(|(reason, _)| *reason == "turn_completion_event")
+    );
+    eprintln!(
+        "A2_R5_RECOVERY_BRANCH case={label} periodic_only={periodic_only} producer={} b_provider_id={b} no_early_b=1 completion_blocked={}",
+        producer.unwrap(),
+        producers.completion_blocked()
+    );
+    producers.release();
     second.finish();
     fixture.assert_finished().await;
     let recovery_ticks = driver.stop().await;
@@ -592,6 +792,7 @@ async fn a2_actual_foreign_watcher_release_mid_kick_read_is_superseded_then_supe
             ids: [a, b],
             began,
             label: "midread_foreign_release",
+            periodic_only: false,
         },
     )
     .await;
@@ -605,8 +806,27 @@ async fn a2_s1_no_core_stale_canonical_private_fixture_supervisor_drains_fifo_pg
     )) {
         return;
     }
+    no_core_stale_canonical_phase(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_s1_no_core_stale_canonical_periodic_phase_drains_fifo_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a2_s1_no_core_stale_canonical_periodic_phase_drains_fifo_pg"
+    )) {
+        return;
+    }
+    no_core_stale_canonical_phase(true).await;
+}
+
+async fn no_core_stale_canonical_phase(periodic_only: bool) {
     let logs = capture_logs();
-    let id = 69_184_132;
+    let id = if periodic_only {
+        69_184_133
+    } else {
+        69_184_132
+    };
     let fixture = Fixture::connect_and_migrate_fixture(id, ProviderKind::Claude).await;
     fixture.produce_owners();
     let prior = fixture
@@ -715,6 +935,7 @@ async fn a2_s1_no_core_stale_canonical_private_fixture_supervisor_drains_fifo_pg
             ids: [a, b],
             began: tokio::time::Instant::now(),
             label: "s1_no_core_stale_canonical",
+            periodic_only,
         },
     )
     .await;

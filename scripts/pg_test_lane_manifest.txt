@@ -2520,6 +2520,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::cross_ru
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_relaunch_open_canary_foreign_self_holds_dequeue_with_watcher_reason_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_turn_start_route_requires_foreign_owner_then_starts_once_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::midread_owner_tests::a2_actual_foreign_watcher_release_mid_kick_read_is_superseded_then_supervisor_drains_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::midread_owner_tests::a2_s1_no_core_stale_canonical_periodic_phase_drains_fifo_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::midread_owner_tests::a2_s1_no_core_stale_canonical_private_fixture_supervisor_drains_fifo_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::nonce_tests::a2_foreign_receipt_only_self_change_rejects_saved_idle_publication_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::nonce_tests::a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg
