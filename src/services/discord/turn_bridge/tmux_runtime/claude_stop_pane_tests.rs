@@ -169,10 +169,11 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
                     active,
                 );
                 let _ = fx.take_calls();
-                let outcome = interrupt_claude_turn_session_preserving(
+                let outcome = interrupt_claude_native_turn(
                     &token,
-                    Some(session.clone()),
+                    session.clone(),
                     "!stop",
+                    ClaudeStopTurnIdentity::capture(path.to_str().unwrap()).unwrap(),
                 )
                 .await;
                 let sent = fx

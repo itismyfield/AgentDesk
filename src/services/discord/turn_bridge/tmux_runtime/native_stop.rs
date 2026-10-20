@@ -3,6 +3,7 @@
 use super::claude_stop_delivery::{ClaudeStopTurnIdentity, interrupt_claude_native_turn};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
+use crate::services::platform::tmux::{SessionPresence, session_presence};
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{CancelActiveTurnResult, ChannelMailboxHandle};
@@ -43,6 +44,14 @@ pub(in crate::services::discord) fn empty() -> CancelActiveTurnResult {
     }
 }
 
+fn confirmed_missing_session(session: &str) -> bool {
+    match session_presence(session) {
+        SessionPresence::Missing => true,
+        SessionPresence::ProbeFailed => super::claude_stop_pane::mutant("probe_is_absent"),
+        SessionPresence::Present => false,
+    }
+}
+
 impl NativeStop {
     pub(in crate::services::discord) async fn begin(
         shared: &SharedData,
@@ -74,10 +83,25 @@ impl NativeStop {
             stop.finished = true;
             return Some(stop);
         }
-        if !crate::services::discord::host_liveness::local_tmux(session, None)
-            || !crate::services::platform::tmux::has_session(session)
-        {
+        if !crate::services::discord::host_liveness::local_tmux(session, None) {
             return None;
+        }
+        if confirmed_missing_session(session) {
+            let expected_binding = token.tmux_session_name();
+            let weak = Arc::downgrade(token);
+            let absent_session = session.to_owned();
+            let absent = Arc::new(move || {
+                crate::services::discord::host_liveness::local_tmux(&absent_session, None)
+                    && confirmed_missing_session(&absent_session)
+                    && weak
+                        .upgrade()
+                        .is_some_and(|token| token.tmux_session_name() == expected_binding)
+            });
+            if token.native_stop.handoff_idle(absent) {
+                return None;
+            }
+            stop.finished = true;
+            return Some(stop);
         }
         let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session);
         let identity = binding

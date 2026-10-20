@@ -376,13 +376,17 @@ fn native_idle_slash_recovery(missing: bool) {
     if !missing {
         std::fs::write(root.path().join("tmux"), "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in capture-pane) printf 'Ready for input (type message + Enter)\\n❯\\n' ;; esac\nexit 0\n").unwrap();
     }
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-    let shared = crate::services::discord::make_shared_data_for_tests();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(Box::pin(async {
+    let db=crate::dispatch::test_support::DispatchPostgresTestDb::create("native_slash_recovery","native slash recovery").await;
+    let pool=db.connect_and_migrate_with_max_connections(4).await;
+    let shared=crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
     let author = serenity::UserId::new(42);
     shared.settings.write().await.owner_user_id = Some(author.get());
     let session = "native-idle-slash-recovery";
-    let transcript = root.path().join("native.jsonl");
+    assert_eq!(crate::config::runtime_root().as_deref(),Some(root.path()));
+    let transcript=std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(session,"jsonl"));
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(session,crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui).unwrap();
     let mut content = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n".to_string();
     if !missing {
         content.push_str("{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n");
@@ -402,6 +406,7 @@ fn native_idle_slash_recovery(missing: bool) {
     );
     let token = Arc::new(CancelToken::new());
     token.bind_claude_tmux_session(session);
+    if missing { let failed=token.native_stop.attempt("before_session_death".into(),Arc::new(||false)).unwrap();failed.complete(false); }
     assert!(
         shared
             .mailbox(channel)
@@ -419,6 +424,10 @@ fn native_idle_slash_recovery(missing: bool) {
             ),
         )
         .await;
+    let evidence=crate::services::discord::zombie_foreground_release::collect_zombie_foreground_evidence(&ProviderKind::Claude,channel,Some(&token));
+    eprintln!("native zombie fixture missing={missing} evidence={evidence:?}");
+    assert!(evidence.mailbox_holds_active_turn && !evidence.active_turn_cancelled && !evidence.inflight_state_present);
+    assert_eq!(evidence.tui_structurally_idle,Some(true),"the launch-shaped fixture is independently terminal");
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = count.clone();
     let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
@@ -452,7 +461,7 @@ fn native_idle_slash_recovery(missing: bool) {
             .await
             .cancel_token
             .is_none(),
-        "idle native slash must release the zombie foreground"
+        "idle native slash must release the zombie foreground: cancelled={} replies={:?}", token.cancelled.load(Ordering::Acquire), transport.replies.lock().unwrap()
     );
     let mut releases = 0;
     while let Ok(event) = events.try_recv() {
@@ -472,7 +481,8 @@ fn native_idle_slash_recovery(missing: bool) {
         "zombie release schedules one queue kickoff"
     );
     crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
-    });
+    drop(data);drop(shared);drop(transport);pool.close().await;db.drop().await;
+    }));
 }
 
 #[test]

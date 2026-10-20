@@ -773,36 +773,44 @@ fn preserve_stop_raw_draft_matches_main_escape() {
 #[test]
 fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
     let fx = Fixture::new();
-    fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+
     run(async {
-        let (shared, registry) = runtime().await;
-        let channel = ChannelId::new(7_193_801);
-        let session = "native-unconfirmed-api-recovery";
-        let (token, _) = generating_turn(&fx, session);
-        start(&shared, channel, &token).await;
-        let row = inflight_row(&ProviderKind::Claude, channel, session, false);
-        let before = file_state(&row);
-        let target = TurnLifecycleTarget {
-            provider: Some(ProviderKind::Claude),
-            channel_id: Some(channel),
-            tmux_name: session.into(),
-        };
-        let result = crate::services::turn_lifecycle::stop_turn_preserving_queue(
-            Some(&registry),
-            &target,
-            "native_unconfirmed_api",
-        )
-        .await;
-        assert_eq!(
-            result.refusal_reason(),
-            "native_stop_unconfirmed",
-            "a native delivery failure is not a non-tmux host"
-        );
-        assert!(mailbox_holds(&shared, channel, &token).await);
-        assert!(!token.cancelled.load(Ordering::Acquire));
-        assert_eq!(file_state(&row), before);
-        assert_eq!(tombstone(channel), None);
-        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+        for (n, probe_failed) in [false, true].into_iter().enumerate() {
+            fx.serve(if probe_failed {
+                Server::Missing
+            } else {
+                Server::Live
+            });
+            fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+            let (shared, registry) = runtime().await;
+            let channel = ChannelId::new(7_193_801 + n as u64 * 3);
+            let session = format!("native-unconfirmed-api-recovery-{n}");
+            let (token, _) = generating_turn(&fx, &session);
+            start(&shared, channel, &token).await;
+            let row = inflight_row(&ProviderKind::Claude, channel, &session, false);
+            let before = file_state(&row);
+            let target = TurnLifecycleTarget {
+                provider: Some(ProviderKind::Claude),
+                channel_id: Some(channel),
+                tmux_name: session.clone(),
+            };
+            let result = crate::services::turn_lifecycle::stop_turn_preserving_queue(
+                Some(&registry),
+                &target,
+                "native_unconfirmed_api",
+            )
+            .await;
+            assert_eq!(
+                result.refusal_reason(),
+                "native_stop_unconfirmed",
+                "a native delivery failure is not a non-tmux host"
+            );
+            assert!(mailbox_holds(&shared, channel, &token).await);
+            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert_eq!(file_state(&row), before);
+            assert_eq!(tombstone(channel), None);
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
     });
 }
 
