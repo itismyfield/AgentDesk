@@ -137,6 +137,7 @@ cli::doctor::orchestrator::api_exposure::tests::rejected_tokenless_non_loopback_
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
+cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
 cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
 cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
 cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
@@ -1390,6 +1391,14 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::db_deadline_tests::health_handler_acquire_budget_public_and_detail
+server::routes::health_api::db_deadline_tests::health_handler_cold_pool_is_bounded_and_marked_slow
+server::routes::health_api::db_deadline_tests::health_handler_db_deadline_covers_late_queries
+server::routes::health_api::db_deadline_tests::health_handler_parallel_db_preserves_complete_results
+server::routes::health_api::db_deadline_tests::health_handler_pg_rtt_300ms_completes_under_2s
+server::routes::health_api::db_deadline_tests::health_handler_select1_timeout_is_unhealthy
+server::routes::health_api::db_deadline_tests::health_handler_snapshot_delay_marks_bulk_unmeasured
+server::routes::health_api::db_deadline_tests::health_handler_timeout_drops_all_db_guards
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
@@ -10946,6 +10955,8 @@ services::health_active_session_audit::tests::active_session_audit_settings_clam
 services::health_active_session_audit::tests::active_session_audit_stalled_turn_recommends_stall_watchdog
 services::health_active_session_audit::tests::active_session_audit_truncated_and_single_row_per_session
 services::health_active_session_audit::tests::active_session_audit_turn_active_no_dispatch_maps_to_stale_mailbox
+services::health_diagnostics::request_batch::tests::bulk_session_rows_isolate_decode_failures
+services::health_diagnostics::request_batch::tests::health_batch_queries_preserve_main_semantics
 services::health_diagnostics::session_state::tests::session_lookup_preserves_failures_and_absence_on_health_wire
 services::health_diagnostics::tests::a_pending_health_await_is_visible_as_in_flight
 services::health_diagnostics::tests::active_session_audit_query_filters_foreign_and_background_rows

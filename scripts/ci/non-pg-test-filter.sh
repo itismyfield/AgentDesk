@@ -16,6 +16,7 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::doctor::orchestrator::observation_tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -53,6 +54,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::campaigns::tests
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::escalation::manual_decision_gate_tests
+  --skip server::routes::health_api::db_deadline_tests
   --skip server::routes::health_api::host_guard_tests
   --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
@@ -216,6 +218,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
   --skip services::dispatches::wait_queue::tests
+  --skip services::health_diagnostics::request_batch::tests
   --skip services::herdr_launch::tests
   --skip services::maintenance::jobs::db_retention::tests
   --skip services::message_outbox_circuit_authority_tests
@@ -262,6 +265,11 @@ NON_PG_FILTER_REPLAY=(
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
   cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
+  cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
+  cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
+  cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
+  cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
+  cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop

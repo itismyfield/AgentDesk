@@ -2,6 +2,7 @@
 [files]
 src/cli/channel_home_tests.rs
 src/cli/dcserver_pg_bootstrap.rs
+src/cli/doctor/orchestrator/observation_tests.rs
 src/cli/herdr_tests.rs
 src/db/auto_queue/entries.rs
 src/db/auto_queue/entries/dispatch_failure.rs
@@ -72,6 +73,7 @@ src/server/routes/campaigns.rs
 src/server/routes/dispatched_sessions_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
+src/server/routes/health_api/db_deadline_tests.rs
 src/server/routes/health_api/host_guard_tests.rs
 src/server/routes/herdr_legacy_tests.rs
 src/server/routes/memory_api.rs
@@ -297,6 +299,7 @@ src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/outbox_queue_replay_tests.rs
 src/services/dispatches/wait_queue.rs
+src/services/health_diagnostics/request_batch_tests.rs
 src/services/herdr_launch_tests.rs
 src/services/maintenance/jobs/db_retention.rs
 src/services/maintenance/jobs/worktree_orphan_sweep.rs
@@ -351,6 +354,7 @@ src/voice/turn_link.rs
 [modules]
 cli::channel_home::tests
 cli::dcserver_pg_bootstrap::tests
+cli::doctor::orchestrator::observation_tests
 cli::herdr::tests
 db::auto_queue::entries::dispatch_failure::tests
 db::auto_queue::entries::tests
@@ -425,6 +429,7 @@ server::routes::campaigns::tests
 server::routes::dispatched_sessions::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
+server::routes::health_api::db_deadline_tests
 server::routes::health_api::host_guard_tests
 server::routes::herdr_legacy_tests
 server::routes::memory_api::request_body_tests
@@ -662,6 +667,7 @@ services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::outbox_queue::replay_hold_tests
 services::dispatches::wait_queue::tests
+services::health_diagnostics::request_batch::tests
 services::herdr_launch::tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
@@ -721,6 +727,7 @@ cli::channel_home::tests::mutations_are_refused_before_any_database_access_while
 cli::channel_home::tests::reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg
 cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
 cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg
+cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
 cli::herdr::tests::a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg
 cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg
@@ -1292,6 +1299,14 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_deliver
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_sends_only_to_configured_owner_dm
+server::routes::health_api::db_deadline_tests::health_handler_acquire_budget_public_and_detail
+server::routes::health_api::db_deadline_tests::health_handler_cold_pool_is_bounded_and_marked_slow
+server::routes::health_api::db_deadline_tests::health_handler_db_deadline_covers_late_queries
+server::routes::health_api::db_deadline_tests::health_handler_parallel_db_preserves_complete_results
+server::routes::health_api::db_deadline_tests::health_handler_pg_rtt_300ms_completes_under_2s
+server::routes::health_api::db_deadline_tests::health_handler_select1_timeout_is_unhealthy
+server::routes::health_api::db_deadline_tests::health_handler_snapshot_delay_marks_bulk_unmeasured
+server::routes::health_api::db_deadline_tests::health_handler_timeout_drops_all_db_guards
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::herdr_legacy_tests::m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg
@@ -2385,6 +2400,7 @@ services::dispatches::outbox_queue::replay_hold_tests::replay_hold_dormant_batch
 services::dispatches::outbox_queue::replay_hold_tests::replay_hold_old_notify_and_followup_never_call_notifier_but_status_reaction_does_pg
 services::dispatches::outbox_queue::replay_hold_tests::replay_hold_unreadable_batch_gate_fails_closed_without_spending_retry_budget_pg
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
+services::health_diagnostics::request_batch::tests::health_batch_queries_preserve_main_semantics
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_keeps_a_pending_that_names_a_pane_after_an_unsent_create_pg
