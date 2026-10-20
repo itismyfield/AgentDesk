@@ -230,13 +230,6 @@ pub(crate) fn shows_inject<S: AsRef<str>>(rows: &[S]) -> bool {
         .split(']')
         .next()
         .is_some_and(|header| header.contains(SCHEMA_FOLDED))
-        || history::screen_header(
-            &rows
-                .iter()
-                .map(AsRef::as_ref)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
 }
 
 /// Whether an inject header shows anywhere in the rows, as the older `[📱 ` check looked for
@@ -247,7 +240,7 @@ pub(crate) fn holds_inject<S: AsRef<str>>(rows: &[S]) -> bool {
         .flat_map(|row| row.as_ref().chars())
         .filter(|c| !c.is_whitespace())
         .collect();
-    folded.contains(SCHEMA_FOLDED) || history::screen_header(&folded)
+    folded.contains(SCHEMA_FOLDED)
 }
 
 /// A row AgentDesk opened as a Discord prompt (`[User:` …), excluding a running turn's input.

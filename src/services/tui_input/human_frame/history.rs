@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+mod screen;
+#[cfg(test)]
+mod screen_tests;
+
 const CAPACITY: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -25,6 +29,8 @@ struct Entry {
     body_hash: String,
     class_hash: String,
     header: String,
+    #[serde(default)]
+    screen_prefix: String,
     events: Vec<Event>,
 }
 
@@ -80,11 +86,15 @@ fn path() -> Result<PathBuf, String> {
                 .then_some(path)
                 .ok_or_else(|| "frame ledger test path outside temporary directory".into());
         }
-        static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        return Ok(ROOT
-            .get_or_init(|| tempfile::tempdir().expect("frame ledger test root"))
-            .path()
-            .join("injected_frames.json"));
+        if let Some(root) = crate::config::runtime_root()
+            && root.starts_with(std::env::temp_dir())
+        {
+            return Ok(root.join("runtime/injected_frames.json"));
+        }
+        thread_local! {
+            static ROOT: tempfile::TempDir = tempfile::tempdir().expect("frame ledger test root");
+        }
+        return Ok(ROOT.with(|root| root.path().join("injected_frames.json")));
     }
     #[cfg(not(test))]
     crate::config::runtime_root()
@@ -180,6 +190,7 @@ pub(crate) fn register(
                 .map_or(frame, |(head, _)| head)
                 .to_string()
                 + "]",
+            screen_prefix: screen::prefix(frame),
             events: Vec::new(),
         });
         Ok(())
@@ -232,19 +243,8 @@ pub(crate) fn known(frame: &str) -> bool {
         .any(|entry| hashes.contains(&entry.class_hash))
 }
 
-pub(crate) fn screen_header(text: &str) -> bool {
-    let folded: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let Some(store) = path().ok().and_then(|path| read(&path).ok()) else {
-        return false;
-    };
-    store.entries.iter().any(|entry| {
-        let header: String = entry
-            .header
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        folded.contains(&header)
-    })
+pub(crate) fn screen_pending(session: &str, text: &str) -> bool {
+    screen::pending(session, text)
 }
 
 /// Claims a complete exact record once; a known record identity cannot move between attempts.

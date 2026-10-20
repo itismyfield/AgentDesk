@@ -149,7 +149,7 @@ pub(crate) fn composer_admission(
         return ComposerAdmission::Any;
     }
     let sighting = capture().map_or(DraftSighting::Unsettled, |capture| {
-        super::busy_inject::draft_sighting(&capture)
+        super::busy_inject::draft_sighting_in_session(tmux_session_name, &capture)
     });
     match sighting {
         DraftSighting::Settled => {

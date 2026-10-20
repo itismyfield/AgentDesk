@@ -1,6 +1,11 @@
 //! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
+mod ownership;
+pub(crate) use ownership::{
+    ComposerOwner, composer_owner, composer_owner_in_session, draft_sighting,
+    draft_sighting_in_session,
+};
 mod receipt;
 mod submit;
 #[cfg(test)]
@@ -15,7 +20,11 @@ enum TurnGate {
     AnyTurn,
 }
 pub(crate) use receipt::exact as exact_receipt;
+#[cfg(test)]
+mod receipt_interleave_tests;
 pub(in crate::services::claude_tui) mod screen;
+#[cfg(test)]
+mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
 pub(in crate::services::claude_tui) mod stash;
@@ -29,10 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use super::composer_lock::{ComposerAdmission, DraftSighting};
+use super::composer_lock::ComposerAdmission;
 use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
-use crate::services::tui_input::human_frame::{holds_inject, shows_inject};
 use crate::services::tui_o::shadow::ShadowProvider;
 
 /// Larger inputs are refused before any tmux call.
@@ -237,10 +245,7 @@ pub(super) fn transcript_submission(
                     {
                         return Some(confirmed);
                     }
-                } else if expected
-                    .split_once(']')
-                    .is_some_and(|(header, _)| text.contains(&format!("{header}]")))
-                {
+                } else if text.contains(expected) {
                     return Some(false);
                 }
             }
@@ -554,62 +559,6 @@ fn judge_before_paste(
             .map(Plan::Direct)
             .ok_or(Veto::UnpredictableRender),
     }
-}
-
-/// How a protected pane's draft reads in one capture.
-pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
-    let screen = screen::read(capture);
-    match (screen.stash, screen.composer) {
-        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Empty) => {
-            DraftSighting::Settled
-        }
-        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(rows))
-            if !rows.iter().any(|row| row.contains("[📱 ")) && !holds_inject(&rows) =>
-        {
-            DraftSighting::PersonDraft
-        }
-        _ => DraftSighting::Unsettled,
-    }
-}
-
-/// Whose text the composer holds before an automatic key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ComposerOwner {
-    /// Nothing typed: an empty `❯` or a faint placeholder.
-    Empty,
-    /// A Discord prompt AgentDesk typed (`[User: …]`) that never left the composer.
-    AgentDesk,
-    /// Typed text in the measured layout whose removal a later capture can see.
-    Person,
-    Unread,
-}
-
-pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
-    match screen::typed(capture) {
-        Some(false) => ComposerOwner::Empty,
-        Some(true) => {
-            let screen = screen::read(capture);
-            if screen.stash != screen::Stash::AbsentInRecognizedLayout {
-                return ComposerOwner::Unread;
-            }
-            match screen.composer {
-                screen::Composer::Text(rows) if agentdesk_prompt(&rows) => ComposerOwner::AgentDesk,
-                screen::Composer::Empty => ComposerOwner::Unread,
-                _ => ComposerOwner::Person,
-            }
-        }
-        None => ComposerOwner::Unread,
-    }
-}
-
-/// AgentDesk frames every Discord prompt it types as `[User: …]`; a running turn's input left
-/// in the composer reads as a person's draft, as the older `[📱 …]` one did.
-fn agentdesk_prompt(rows: &[String]) -> bool {
-    let first = rows.first().map(|row| row.trim_start()).unwrap_or_default();
-    first
-        .get(..6)
-        .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
-        && !shows_inject(rows)
 }
 
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.

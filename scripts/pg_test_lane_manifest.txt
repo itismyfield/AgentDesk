@@ -1709,6 +1709,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_mended_head_clears_pending_marker_without_another_paste_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reserved_head_live_offer_keeps_one_pending_entry_without_a_notice_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reuse_keeps_foreign_merged_rich_and_disabled_heads_queued_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg

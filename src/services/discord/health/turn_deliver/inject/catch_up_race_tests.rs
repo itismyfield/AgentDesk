@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crate::services::discord::health::{
@@ -21,6 +22,7 @@ const TEXT: &str = "status?\nline two\nline three";
 #[derive(Clone, Default)]
 struct RestState {
     markers: Arc<Mutex<HashSet<String>>>,
+    notices: Arc<AtomicUsize>,
 }
 
 async fn rest(State(state): State<RestState>, request: Request<Body>) -> Response {
@@ -52,6 +54,14 @@ async fn rest(State(state): State<RestState>, request: Request<Body>) -> Respons
             .into_response();
         }
         if tail.ends_with("/messages") {
+            if method == Method::POST {
+                state.notices.fetch_add(1, Ordering::SeqCst);
+                return axum::Json(json!({"id": "940720200000999", "channel_id": tail.trim_end_matches("/messages"),
+                    "author": user, "content": "queue notice", "timestamp": "2026-10-20T11:00:00Z",
+                    "edited_timestamp": null, "tts": false, "mention_everyone": false,
+                    "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
+                    "pinned": false, "type": 0})).into_response();
+            }
             return axum::Json(json!([])).into_response();
         }
         return axum::Json(json!({"id": tail, "type": 0, "guild_id": "1",
@@ -102,6 +112,10 @@ impl Transport {
             .iter()
             .any(|marker| marker.eq_ignore_ascii_case("%F0%9F%93%AC") || marker == "📬")
     }
+
+    fn notice_count(&self) -> usize {
+        self.state.notices.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for Transport {
@@ -135,12 +149,23 @@ fn queued(message: MessageId, generation: u64) -> Intervention {
 
 #[tokio::test(flavor = "current_thread")]
 async fn catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg() {
+    catch_up_live_entry(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_reserved_head_live_offer_keeps_one_pending_entry_without_a_notice_pg() {
+    catch_up_live_entry(true).await;
+}
+
+async fn catch_up_live_entry(reserved: bool) {
+    use crate::services::turn_orchestrator::QueuedHeadClaim;
+
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root_path = crate::config::runtime_root().unwrap();
-    let channel = ChannelId::new(940_720_200_000_001);
+    let channel = ChannelId::new(940_720_200_000_001 + u64::from(reserved));
     let generation = crate::services::discord::runtime_store::process_generation();
     let timestamp = chrono::Utc::now().timestamp_millis() - 1_420_070_400_000 - 2_000;
-    let message_id = MessageId::new((timestamp as u64) << 22 | 7202);
+    let message_id = MessageId::new((timestamp as u64) << 22 | (7202 + u64::from(reserved)));
     let config = crate::runtime_layout::config_file_path(&root_path);
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::create_dir_all(root_path.join("workspace")).unwrap();
@@ -225,6 +250,26 @@ async fn catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_mark
         enqueued.enqueued && enqueued.persistence_error.is_none(),
         "catch-up enqueue committed"
     );
+    let original = crate::services::discord::mailbox_snapshot(&shared, channel)
+        .await
+        .intervention_queue;
+    let _reservation = if reserved {
+        let persistence = crate::services::discord::queue_persistence_context(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+        );
+        let QueuedHeadClaim::Reserved(ticket) = shared
+            .mailbox(channel)
+            .claim_queued_head(QueueIdentity::of(&original[0]), persistence)
+            .await
+        else {
+            panic!("fixture holds the queued head reservation before the live arrival");
+        };
+        Some(ticket)
+    } else {
+        None
+    };
     crate::services::discord::queue_marker::note_added_queued_generation(
         &shared,
         &transport.ctx.http,
@@ -267,6 +312,31 @@ async fn catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_mark
         seen.offers, 1,
         "fixture must enter the production live busy-inject boundary"
     );
+    if reserved {
+        assert_eq!(
+            transport.notice_count(),
+            0,
+            "reserved catch-up head must not emit a queue-error notice"
+        );
+        assert!(
+            matches!(seen.outcomes.as_slice(), [outcome] if outcome.starts_with("NotSent") && outcome.contains("source_owned")),
+            "the actor reservation keeps custody of the live source: {seen:?}"
+        );
+        assert!(
+            pane.keys().is_empty(),
+            "a reserved head is not pasted again"
+        );
+        let after = crate::services::discord::mailbox_snapshot(&shared, channel)
+            .await
+            .intervention_queue;
+        assert_eq!(after.len(), 1, "reserved source keeps one queued entry");
+        assert_eq!(format!("{after:?}"), format!("{original:?}"));
+        assert!(
+            transport.pending_present(),
+            "a reserved source keeps its pending marker"
+        );
+        return;
+    }
     assert!(
         matches!(seen.outcomes.as_slice(), [outcome] if outcome.starts_with("Injected")),
         "live arrival must inject its own catch-up head before fallback intake: {seen:?}"
@@ -625,12 +695,14 @@ async fn confirmed_source_blocks_late_pending_rest_marker() {
     shared.turn_view_reconciler.enable_test_http_reactions();
     let channel = ChannelId::new(940_720_200_000_400);
     let message = MessageId::new(channel.get() + 100);
+    // Exercise the REST transport on another target, leaving this target unfinalized.
+    let control = MessageId::new(message.get() + 1);
     let generation = shared.restart.current_generation;
     crate::services::discord::queue_marker::note_added_queued_generation(
         &shared,
         &transport.ctx.http,
         channel,
-        message,
+        control,
         '📬',
         generation,
         "catch_up_fixture",
@@ -644,7 +716,7 @@ async fn confirmed_source_blocks_late_pending_rest_marker() {
         &shared,
         &transport.ctx.http,
         channel,
-        message,
+        control,
         '📬',
         generation,
         "catch_up_fixture",

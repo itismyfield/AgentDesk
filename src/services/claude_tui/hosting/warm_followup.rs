@@ -95,7 +95,7 @@ fn recover_claude_tui_stranded_prompt_draft(
     if let Some(snapshot) =
         claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
         && !(crate::services::claude_tui::host_input::guarded_submission::idle_stash::managed_enabled(tmux_session_name)
-            && crate::services::claude_tui::busy_inject::composer_owner(&snapshot.pane_tail)
+            && crate::services::claude_tui::busy_inject::composer_owner_in_session(tmux_session_name, &snapshot.pane_tail)
                 == crate::services::claude_tui::busy_inject::ComposerOwner::Person)
         && let Some(draft_state) =
             claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path)

@@ -45,7 +45,9 @@ pub(super) async fn own_queued_head(
     .await;
     Ok(match attempt {
         // This source already has queue custody, even when no queued-head reservation was taken.
-        InjectAttempt::NotSent(_) => InjectAttempt::NotSent(SOURCE_OWNED),
+        InjectAttempt::NotSent(_) | InjectAttempt::HandbackFailed("queued_head_blocked") => {
+            InjectAttempt::NotSent(SOURCE_OWNED)
+        }
         other => other,
     })
 }

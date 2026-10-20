@@ -1978,6 +1978,8 @@ services::claude_compact_trigger::tests::scrub_fallback_never_uses_a_small_nativ
 services::claude_compact_trigger::tests::stale_authority_rejection_cannot_rearm_a_newer_cycle
 services::claude_compact_trigger::tests::stale_generation_worker_neither_sends_nor_rearms_after_pane_recreated
 services::claude_compact_trigger::tests::window_switch_invalidates_old_worker_and_starts_a_fresh_cycle
+services::claude_tui::busy_inject::receipt_interleave_tests::a_previous_same_author_drain_does_not_contaminate_the_next_receipt
+services::claude_tui::busy_inject::screen_identity_tests::pending_plain_composer_protects_only_its_session_and_frame_until_receipt
 services::claude_tui::busy_inject::screen_tests::a_busy_pane_with_a_status_line_under_the_box_plans_the_paste
 services::claude_tui::busy_inject::screen_tests::a_flat_paste_is_drawn_in_the_rows_measured_at_each_boundary
 services::claude_tui::busy_inject::screen_tests::a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits
@@ -4417,6 +4419,7 @@ services::discord::health::transcript_binding_stall::tests::a_transcript_that_gr
 services::discord::health::transcript_binding_stall::tests::an_idle_channel_is_never_alerted_on
 services::discord::health::transcript_binding_stall::tests::an_unresolvable_bound_transcript_is_not_this_verdict
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_mended_head_clears_pending_marker_without_another_paste_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reserved_head_live_offer_keeps_one_pending_entry_without_a_notice_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reuse_keeps_foreign_merged_rich_and_disabled_heads_queued_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
@@ -12459,6 +12462,9 @@ services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_current_thread_runt
 services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_current_thread_timeout_kills_and_reaps
 services::tui_input::bounded_tmux_tests::bounded_tmux_scoped_pending_drop_still_runs_deadline_cleanup
 services::tui_input::bounded_tmux_tests::bounded_tmux_timeout_kills_descendants_before_reaping_live_or_exited_leader
+services::tui_input::human_frame::history::screen_tests::confirmed_author_history_preserves_all_ten_idle_recovery_regressions
+services::tui_input::human_frame::history::screen_tests::frame_history_follows_each_test_runtime_root
+services::tui_input::human_frame::history::screen_tests::pending_screen_matches_folded_body_and_ignores_other_providers
 services::tui_input::human_frame::history::tests::codex_receipt_identity_selects_each_identical_attempt_and_replays_its_own_entry
 services::tui_input::human_frame::history::tests::durable_frame_replay_is_injected_and_headerless_human_is_not
 services::tui_input::human_frame::history::tests::unreadable_ledger_defers_plain_user_frames_and_leaves_headerless_humans_alone
