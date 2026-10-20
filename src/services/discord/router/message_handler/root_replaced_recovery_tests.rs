@@ -939,7 +939,8 @@ mod recheck_tests;
 
 #[test]
 fn rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg() {
-    self::recheck_tests::retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries();
+    self::recheck_tests::retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries(
+    );
 }
 
 #[test]
