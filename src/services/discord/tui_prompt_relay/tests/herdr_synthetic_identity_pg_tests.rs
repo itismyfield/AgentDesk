@@ -318,6 +318,10 @@ async fn hook_observer_carries_the_original_hosted_source_through_pending_json_r
     assert_eq!(observed.tmux_session_name, fixture.logical);
     assert_eq!(observed.prompt, "retain this hook's original hosted source");
     let lease = record_observed_external_turn_lease(&fixture.shared, &observed, channel);
+    assert!(
+        lease.turn_id.is_some(),
+        "the hook assigned an original turn identity"
+    );
     let worker_lock = pending::channel_lock("claude", channel.get())
         .lock_owned()
         .await;
@@ -355,9 +359,33 @@ async fn hook_observer_carries_the_original_hosted_source_through_pending_json_r
         serialized["hosted_source"]
     );
     fixture.assert_quiet().await;
+    drop(worker_lock);
+    let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let inflight =
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
+            let still_pending = pending::load_all().iter().any(|record| {
+                record.channel_id == channel.get()
+                    && record.anchor_message_id == saved.anchor_message_id
+            });
+            if let Some(inflight) = inflight.filter(|_| !still_pending) {
+                break inflight;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the real deferred worker claimed, saved inflight and completed its pending record");
+    assert_eq!(claimed.hosted_execution_nonce.as_deref(), Some(N1));
+    assert_eq!(
+        claimed.session_id.as_deref(),
+        Some(fixture.source.session_id.as_str())
+    );
+    assert_eq!(claimed.output_path.as_deref(), fixture.source.path.to_str());
+    assert_eq!(claimed.external_turn_id, lease.turn_id);
+    assert_eq!(claimed.user_msg_id, saved.anchor_message_id);
     drop(hooks);
     fixture.close().await;
-    drop(worker_lock);
 }
 
 #[tokio::test(flavor = "current_thread")]
