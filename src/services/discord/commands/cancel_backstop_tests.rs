@@ -210,9 +210,12 @@ pub(super) async fn invoke_real_slash_action(
         __non_exhaustive: (),
     };
     let result = command.slash_action.expect("production slash action")(app).await;
+    if let Err(poise::FrameworkError::Command { error, .. }) = &result {
+        eprintln!("slash action failed: {error}");
+    }
     assert!(
         result.is_ok(),
-        "the actual {name} body must finish successfully: {result:?}"
+        "the actual {name} body must finish successfully"
     );
     has_sent_initial_response.load(Ordering::SeqCst)
 }
