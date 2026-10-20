@@ -14,10 +14,6 @@ use tokio::time::{Instant, timeout_at};
 use super::super::mailbox::{
     MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations,
 };
-#[cfg(unix)]
-use super::super::reachability::composite::{
-    RelayVerdictProbe, RelayVerdictReport, apply_relay_verdict_polarity, observe_relay_verdict,
-};
 use super::super::redaction;
 use super::super::session_enrichment::{
     self, ExecutorWitness, SessionEnrichment, TmuxObservationBudget,
@@ -27,8 +23,6 @@ use super::super::unpaired_active_token::{
     self, RelayHealthBuildInput, build_relay_health_snapshot,
 };
 use super::super::{HealthRegistry, ProviderEntry};
-#[cfg(unix)]
-use super::relay_probe::relay_verdict_probe_operands;
 use super::{
     DiscordHealthSnapshot, HealthStatus, RelayThreadProofSnapshot, last_outbound_activity_ms,
     relay_active_turn_from_inflight, trace_relay_health_classification,
@@ -278,51 +272,19 @@ pub(super) async fn channel_entries<'s>(
                 session.inflight.as_ref(),
             ),
         });
-        // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
-        // the durable T4-B2c ledger, the T4-B3 receipt projection and
-        // the T4-B5 sidecar. Whether it may also change polarity is the
-        // `RelayVerdictSource` switch, read once per poll below. The
-        // row's `output_path` is passed to the divergence comparison
-        // only; nothing here resolves or tails through it.
+        // The verdict is composed and applied to the polarity in the parent, a judgment consumer.
         #[cfg(unix)]
-        let relay_verdict = {
-            // The health poll's `tmux_present` witness is intentionally
-            // weaker than the recovery snapshot's has-session probe, and
-            // weaker again once the shared observation budget is spent
-            // (`session_enrichment::witness_tmux_session_within`). The
-            // explicit helper operand
-            // keeps that difference visible instead of silently forking the
-            // remaining inputs.
-            let operands = relay_verdict_probe_operands(
+        let relay_verdict = super::ChannelRelayVerdict::compose(
+            super::ChannelVerdictInput {
+                registry,
+                provider: &entry.name,
+                provider_kind: provider_kind.as_ref(),
+                channel,
+                session: &session,
+                relay_health: &relay_health,
                 executor_witness,
-                &relay_health,
-                registry.started_at_unix(),
-            );
-            observe_relay_verdict(RelayVerdictProbe {
-                provider: provider_kind.as_ref(),
-                channel_id: channel.get(),
-                row_output_path: session
-                    .inflight
-                    .as_ref()
-                    .and_then(|state| state.output_path.as_deref()),
-                registry_output_path: session.watcher_output_path.as_deref(),
-                pane_idle_confirmed: operands.pane_idle_confirmed,
-                rowless_turn: operands.rowless_turn,
-                placeholder_present: operands.placeholder_present,
-                executor: operands.executor,
-                now_epoch_ms: operands.now_epoch_ms,
-                process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
-            })
-        };
-        #[cfg(unix)]
-        let verdict_governs =
-            composite_governs_polarity && !o_owned_channels.contains(&channel.get());
-        #[cfg(unix)]
-        apply_relay_verdict_polarity(
-            verdict_governs,
-            &relay_verdict,
-            &entry.name,
-            channel.get(),
+                governs: composite_governs_polarity && !o_owned_channels.contains(&channel.get()),
+            },
             degraded_reasons,
             expired_relay_ledgers,
             status,
@@ -362,7 +324,7 @@ pub(super) async fn channel_entries<'s>(
                 registry.started_at_unix(),
             );
             #[cfg(unix)]
-            let reachability = RelayVerdictReport::of(&relay_verdict, verdict_governs);
+            let reachability = relay_verdict.report();
             let relay_stall_state = RelayStallClassifier::classify(&relay_health);
             trace_relay_health_classification(&relay_health, relay_stall_state);
             mailbox_entries.push(MailboxHealthSnapshot {

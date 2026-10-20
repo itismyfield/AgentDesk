@@ -20,11 +20,14 @@ use super::provider_probe::{self, ProviderHealthSnapshot};
 // pre-B6 snapshot: no composed verdict, no polarity from one.
 #[cfg(unix)]
 use super::reachability::composite::{
-    RelayVerdictProbe, observe_relay_verdict, relay_verdict_source,
+    RelayVerdict, RelayVerdictProbe, RelayVerdictReport, apply_relay_verdict_polarity,
+    observe_relay_verdict, relay_verdict_source,
 };
 #[cfg(unix)]
 use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
+#[cfg(unix)]
+use super::session_enrichment::ExecutorWitness;
 use super::session_enrichment::{HealthSnapshotOptions, SessionEnrichment};
 use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token::{self, RelayHealthBuildInput, build_relay_health_snapshot};
@@ -720,6 +723,95 @@ async fn watcher_state_snapshot_for_shared(
         relay_stall_state,
         relay_health,
     })
+}
+
+/// What one channel's relay verdict is composed from.
+#[cfg(unix)]
+struct ChannelVerdictInput<'a> {
+    registry: &'a HealthRegistry,
+    provider: &'a str,
+    provider_kind: Option<&'a ProviderKind>,
+    channel: ChannelId,
+    session: &'a SessionEnrichment,
+    relay_health: &'a RelayHealthSnapshot,
+    executor_witness: ExecutorWitness,
+    governs: bool,
+}
+
+/// One channel's composed relay verdict; the channel pass only carries it to the detail payload.
+#[cfg(unix)]
+struct ChannelRelayVerdict {
+    verdict: RelayVerdict,
+    governs: bool,
+}
+
+#[cfg(unix)]
+impl ChannelRelayVerdict {
+    fn compose(
+        input: ChannelVerdictInput<'_>,
+        degraded_reasons: &mut Vec<String>,
+        expired_relay_ledgers: &mut Vec<String>,
+        status: &mut HealthStatus,
+    ) -> Self {
+        let ChannelVerdictInput {
+            registry,
+            provider,
+            provider_kind,
+            channel,
+            session,
+            relay_health,
+            executor_witness,
+            governs,
+        } = input;
+        // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
+        // the durable T4-B2c ledger, the T4-B3 receipt projection and
+        // the T4-B5 sidecar. Whether it may also change polarity is the
+        // `RelayVerdictSource` switch, read once per poll below. The
+        // row's `output_path` is passed to the divergence comparison
+        // only; nothing here resolves or tails through it.
+        //
+        // The health poll's `tmux_present` witness is intentionally
+        // weaker than the recovery snapshot's has-session probe, and
+        // weaker again once the shared observation budget is spent
+        // (`session_enrichment::witness_tmux_session_within`). The
+        // explicit helper operand
+        // keeps that difference visible instead of silently forking the
+        // remaining inputs.
+        let operands = relay_verdict_probe_operands(
+            executor_witness,
+            relay_health,
+            registry.started_at_unix(),
+        );
+        let verdict = observe_relay_verdict(RelayVerdictProbe {
+            provider: provider_kind,
+            channel_id: channel.get(),
+            row_output_path: session
+                .inflight
+                .as_ref()
+                .and_then(|state| state.output_path.as_deref()),
+            registry_output_path: session.watcher_output_path.as_deref(),
+            pane_idle_confirmed: operands.pane_idle_confirmed,
+            rowless_turn: operands.rowless_turn,
+            placeholder_present: operands.placeholder_present,
+            executor: operands.executor,
+            now_epoch_ms: operands.now_epoch_ms,
+            process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
+        });
+        apply_relay_verdict_polarity(
+            governs,
+            &verdict,
+            provider,
+            channel.get(),
+            degraded_reasons,
+            expired_relay_ledgers,
+            status,
+        );
+        Self { verdict, governs }
+    }
+
+    fn report(&self) -> RelayVerdictReport {
+        RelayVerdictReport::of(&self.verdict, self.governs)
+    }
 }
 
 /// Build the detailed health check snapshot for authenticated/local diagnostics.
