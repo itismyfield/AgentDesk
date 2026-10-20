@@ -1185,6 +1185,7 @@ mod herdr_synthetic_identity_pg_tests {
                 "lease_session_key": self.key, "generation": self.shared.restart.current_generation,
                 "created_at_ms": 0, "observed_at_ms": 0,
                 "captured_source": [source.path.display().to_string(), 0],
+                "hosted_source_checked": true,
                 "hosted_source": {
                     "provider": "claude", "channel_id": self.channel.get(), "logical_key": self.logical,
                     "execution_nonce": nonce, "source": source
@@ -1707,6 +1708,10 @@ mod herdr_synthetic_identity_pg_tests {
         let original = fixture.pending(N1, &fixture.source, 7_186_633);
         let mut old_encoded = serde_json::to_value(&original).unwrap();
         old_encoded.as_object_mut().unwrap().remove("hosted_source");
+        old_encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("hosted_source_checked");
         let old: pending::TuiDirectPendingStart = serde_json::from_value(old_encoded).unwrap();
         fixture.replace_execution(HostedState::Bound, N2).await;
         fixture.publish_source(&fixture.source, N2, 2);
@@ -1743,6 +1748,204 @@ mod herdr_synthetic_identity_pg_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn legacy_unpinned_pending_holds_a_later_n2_source_then_releases_the_input_gate_pg() {
+        let root = tempfile::tempdir().unwrap();
+        let log_path = root.path().join("legacy-origin-hold.log");
+        crate::logging::test_capture::pin_callsite_interest();
+        let _capture = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(std::fs::File::create(&log_path).unwrap())
+                .finish(),
+        );
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let _binding = crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(
+            root.path(),
+        );
+        let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let channel = ChannelId::new(7_186_672);
+        let anchor = 7_186_673;
+        let _hosts =
+            crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+        let fixture = Fixture::new(root.path(), channel).await;
+        fixture.replace_execution(HostedState::Bound, N2).await;
+        let path = root.path().join("later-n2-source-in-legacy-pending.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let source =
+            crate::services::tui_o::shadow::binding_reader::source_id_for("native-n2", &path)
+                .unwrap();
+        fixture.publish_source(&source, N2, 2);
+        let history = binding_events::records_strict(channel.get())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|event| matches!(&event.new,
+                    binding_events::BindingTarget::Source(found) if found == &source))
+                .count(),
+            1,
+            "the later captured path has unique N2 history, which cannot prove the old input"
+        );
+        let hosted_before = fixture.hosted_json().await;
+        let mut encoded = serde_json::to_value(fixture.pending(N1, &source, anchor)).unwrap();
+        let fields = encoded.as_object_mut().unwrap();
+        fields.remove("hosted_source");
+        fields.remove("hosted_source_checked");
+        assert!(!fields.contains_key("hosted_source"));
+        assert!(!fields.contains_key("hosted_source_checked"));
+        let old: pending::TuiDirectPendingStart = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(old.hosted_source.is_none());
+        assert!(!old.hosted_source_checked);
+        assert_eq!(
+            old.captured_source.as_ref().map(|source| source.0.as_str()),
+            path.to_str()
+        );
+        pending::persist(&old).unwrap();
+        let old_path = crate::services::discord::runtime_store::tui_direct_pending_start_root()
+            .unwrap()
+            .join(format!("claude_{}_{anchor}.json", channel.get()));
+        std::fs::write(&old_path, serde_json::to_vec(&encoded).unwrap()).unwrap();
+        let restored = pending::load_all()
+            .into_iter()
+            .find(|record| record.channel_id == channel.get())
+            .expect("the production reader restored JSON predating both source fields");
+        assert_eq!(restored, old);
+        assert_eq!(restored.attempt_count, 0);
+        assert!(pending::pending_synthetic_start_blocks_idle_kickoff(
+            "claude",
+            channel.get()
+        ));
+        let entered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let production_claim = Arc::new(synthetic_start::pending_start_claim_fn());
+        let claim_fn: pending::ClaimFn = {
+            let entered = entered.clone();
+            let completed = completed.clone();
+            Box::new(move |shared, record| {
+                let entered = entered.clone();
+                let completed = completed.clone();
+                let production_claim = production_claim.clone();
+                Box::pin(async move {
+                    entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let claimed = production_claim(shared, record).await;
+                    completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    claimed
+                })
+            })
+        };
+        pending::spawn_worker(
+            fixture.shared.clone(),
+            restored,
+            synthetic_start::pending_start_view_fn(),
+            claim_fn,
+            synthetic_start::pending_start_abort_cleanup_fn(),
+            synthetic_orphan_reclaim::pending_start_reclaim_orphan_fn(),
+        );
+        let (saved, retained) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved =
+                    inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
+                let retained = pending::load_all()
+                    .into_iter()
+                    .find(|record| record.channel_id == channel.get());
+                if saved.is_some()
+                    || retained.as_ref().is_some_and(|record| {
+                        record.attempt_count >= pending::PENDING_START_MAX_CLAIM_ATTEMPTS
+                    })
+                {
+                    break (saved, retained);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the actual worker either claimed or exhausted all five production claim attempts");
+        assert!(
+            saved.is_none(),
+            "legacy input adopted the later N2 source from path history alone"
+        );
+        fixture.assert_quiet().await;
+        assert_eq!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            pending::PENDING_START_MAX_CLAIM_ATTEMPTS as usize
+        );
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            pending::PENDING_START_MAX_CLAIM_ATTEMPTS as usize
+        );
+        let logs = std::fs::read_to_string(&log_path).unwrap();
+        let holds: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains("legacy_herdr_pending_origin_unproven"))
+            .collect();
+        assert_eq!(
+            holds.len(),
+            1,
+            "one worker reports its bounded Hold retries once"
+        );
+        for line in holds {
+            assert!(line.contains("INFO"));
+            assert!(line.contains(&format!("channel_id={}", channel.get())));
+            assert!(line.contains(&format!("pending_id={anchor}")));
+            assert!(line.contains("captured_path_present=true"));
+        }
+        let retained = retained.expect("the original unproved input remains durable");
+        assert_eq!(
+            retained.attempt_count,
+            pending::PENDING_START_MAX_CLAIM_ATTEMPTS
+        );
+        assert!(retained.hosted_source.is_none());
+        assert!(!retained.hosted_source_checked);
+        assert_eq!(retained.captured_source, old.captured_source);
+        assert_eq!(retained.lease_turn_id, old.lease_turn_id);
+        assert_eq!(fixture.hosted_json().await, hosted_before);
+        assert!(pending::pending_synthetic_start_present(
+            "claude",
+            channel.get()
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pending::pending_synthetic_start_blocks_idle_kickoff("claude", channel.get()) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the existing gate releases PRESENT after the actual worker has stopped");
+        assert!(!pending::pending_synthetic_start_present(
+            "claude",
+            channel.get()
+        ));
+        assert!(pending::pending_synthetic_start_abandoned(
+            "claude",
+            channel.get()
+        ));
+        assert_eq!(
+            pending::load_all()
+                .into_iter()
+                .find(|record| record.channel_id == channel.get()),
+            Some(retained),
+            "releasing the next-input gate does not discard or restamp the held old input"
+        );
+        let current = fixture.pending(N2, &source, anchor + 1);
+        assert!(current.hosted_source_checked);
+        fixture.publish_pending_lease(&current);
+        assert!(
+            fixture.claim(&current).await,
+            "a normally proved N2 input still claims after gate release"
+        );
+        let saved =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        assert_eq!(saved.hosted_execution_nonce.as_deref(), Some(N2));
+        assert_eq!(saved.user_msg_id, current.anchor_message_id);
+        assert!(
+            old_path.exists(),
+            "the unresolved old record remains available for inspection"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn old_pending_with_an_exact_original_source_still_claims_current_n1_pg() {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
@@ -1754,18 +1957,77 @@ mod herdr_synthetic_identity_pg_tests {
         let _hosts =
             crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
         let fixture = Fixture::new(root.path(), channel).await;
-        let mut encoded =
-            serde_json::to_value(fixture.pending(N1, &fixture.source, 7_186_603)).unwrap();
-        encoded.as_object_mut().unwrap().remove("hosted_source");
+        let mut original = fixture.pending(N1, &fixture.source, 7_186_603);
+        original.hosted_source_checked = false;
+        assert!(original.hosted_source.is_some());
+        assert!(fixture.claim(&original).await);
+        let before =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        let actor = crate::services::discord::mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("the original source established its own actor");
+        let active = fixture
+            .shared
+            .restart
+            .global_active
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(before.hosted_record_id.is_some_and(|id| id > 0));
+        assert_eq!(before.turn_source, inflight::TurnSource::ExternalInput);
+        assert_eq!(before.external_turn_id, original.lease_turn_id);
+        assert!(
+            before
+                .external_turn_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(before.session_key.as_deref(), Some(fixture.key.as_str()));
+        assert_eq!(before.output_path.as_deref(), fixture.source.path.to_str());
+        assert_eq!(before.hosted_execution_nonce.as_deref(), Some(N1));
+        assert_eq!(
+            before.session_id.as_deref(),
+            Some(fixture.source.session_id.as_str())
+        );
+        let mut encoded = serde_json::to_value(&original).unwrap();
+        let encoded_fields = encoded.as_object_mut().unwrap();
+        encoded_fields.remove("hosted_source");
+        encoded_fields.remove("hosted_source_checked");
         let old: pending::TuiDirectPendingStart = serde_json::from_value(encoded).unwrap();
+        assert!(old.hosted_source.is_none());
+        assert!(!old.hosted_source_checked);
         assert!(
             fixture.claim(&old).await,
-            "an old record's exact original source proves its original execution"
+            "the original inflight episode independently proves this old record's execution"
         );
         let saved =
             inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
         assert_eq!(saved.user_msg_id, old.anchor_message_id);
         assert_eq!(saved.output_path.as_deref(), fixture.source.path.to_str());
+        assert_eq!(saved.provider, before.provider);
+        assert_eq!(saved.channel_id, before.channel_id);
+        assert_eq!(saved.tmux_session_name, before.tmux_session_name);
+        assert_eq!(saved.turn_nonce, before.turn_nonce);
+        assert_eq!(saved.external_turn_id, before.external_turn_id);
+        assert_eq!(saved.session_key, before.session_key);
+        assert_eq!(saved.hosted_record_id, before.hosted_record_id);
+        assert_eq!(saved.hosted_execution_nonce, before.hosted_execution_nonce);
+        assert_eq!(saved.session_id, before.session_id);
+        assert_eq!(saved.turn_start_offset, before.turn_start_offset);
+        assert_eq!(saved.last_offset, before.last_offset);
+        assert_eq!(saved.response_sent_offset, before.response_sent_offset);
+        let readopted = crate::services::discord::mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("re-adoption retained the original actor");
+        assert!(Arc::ptr_eq(&actor, &readopted));
+        assert_eq!(
+            fixture
+                .shared
+                .restart
+                .global_active
+                .load(std::sync::atomic::Ordering::Relaxed),
+            active
+        );
         fixture.close().await;
     }
 
@@ -1797,6 +2059,10 @@ mod herdr_synthetic_identity_pg_tests {
             .as_object_mut()
             .unwrap()
             .remove("hosted_source");
+        unknown_encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("hosted_source_checked");
         unknown_encoded["captured_source"] = serde_json::Value::Null;
         let unknown: pending::TuiDirectPendingStart =
             serde_json::from_value(unknown_encoded).unwrap();
@@ -1861,6 +2127,10 @@ mod herdr_synthetic_identity_pg_tests {
         let mut encoded =
             serde_json::to_value(fixture.pending(N1, &fixture.source, id + 1)).unwrap();
         encoded.as_object_mut().unwrap().remove("hosted_source");
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("hosted_source_checked");
         if ambiguous {
             fixture.append_source_event(&fixture.source, "ambiguous-original-execution", 2);
         } else {

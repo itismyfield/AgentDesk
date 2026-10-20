@@ -322,3 +322,93 @@ async fn failed_existing_actor_readoption_preserves_the_original_actor_and_saved
             .is_err()
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn old_unpinned_known_tmux_pending_still_claims_its_captured_source() {
+    use crate::services::discord::tui_direct_pending_start as pending;
+    use crate::services::discord::tui_prompt_relay::synthetic_start;
+    use crate::services::session_host::HostKind;
+    use crate::services::tmux_common::host_marker::{self, HostKindMarker};
+    use std::sync::Mutex;
+
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let _binding =
+        crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(root.path());
+    let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+    for marked in [false, true] {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_186_682 + u64::from(marked));
+        let logical = if marked {
+            "legacy-unpinned-known-tmux-7186"
+        } else {
+            "legacy-unpinned-markerless-tmux-7186"
+        };
+        let path = root.path().join("known-tmux-original-source.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        if marked {
+            host_marker::record_tmux_host_marker(logical);
+        }
+        assert_eq!(
+            host_marker::read_host_kind_marker(logical),
+            if marked {
+                HostKindMarker::Known(HostKind::Tmux)
+            } else {
+                HostKindMarker::Absent
+            }
+        );
+        assert!(crate::config::session_hosts::herdr_endpoint(channel.get()).is_none());
+        assert!(!dedupe::herdr_execution_listed(logical));
+        dedupe::register_tmux_runtime_binding(
+            logical,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("known-native-tmux-source".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        shared.tmux_watchers.insert(
+            channel,
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: logical.into(),
+                output_path: path.display().to_string(),
+                paused: Arc::new(false.into()),
+                resume_offset: Arc::new(Mutex::new(None)),
+                cancel: Arc::new(false.into()),
+                pause_epoch: Arc::new(0.into()),
+                turn_delivered: Arc::new(false.into()),
+                last_heartbeat_ts_ms: Arc::new(chrono::Utc::now().timestamp_millis().into()),
+            },
+        );
+        let old: pending::TuiDirectPendingStart = serde_json::from_value(serde_json::json!({
+            "provider": "claude", "channel_id": channel.get(), "tmux_session_name": logical,
+            "prompt_text": "known tmux input", "anchor_message_id": 7_186_683,
+            "lease_relay_owner": "tmux_watcher", "lease_runtime_kind": "claude_tui",
+            "lease_turn_id": "known-tmux-original-turn", "lease_session_key": null,
+            "generation": shared.restart.current_generation, "created_at_ms": 0, "observed_at_ms": 0,
+            "captured_source": [path.display().to_string(), 0]
+        })).unwrap();
+        assert!(old.hosted_source.is_none());
+        assert!(!old.hosted_source_checked);
+        assert!(old.captured_source.is_some());
+        let claim = synthetic_start::pending_start_claim_fn();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), claim(&shared, &old))
+                .await
+                .expect("the known non-Herdr production claim completed"),
+            "a non-Herdr None input was held by the legacy Herdr origin policy"
+        );
+        let saved =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+        assert_eq!(saved.user_msg_id, old.anchor_message_id);
+        assert_eq!(saved.output_path.as_deref(), path.to_str());
+        assert_eq!(saved.external_turn_id, old.lease_turn_id);
+        assert!(saved.hosted_record_id.is_none());
+        assert!(saved.hosted_execution_nonce.is_none());
+    }
+}

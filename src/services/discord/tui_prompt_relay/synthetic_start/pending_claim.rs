@@ -84,7 +84,9 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
     if let Some(claim) = RESTORE_CLAIM_FOR_TEST.with(|slot| slot.borrow_mut().take()) {
         return claim;
     }
-    Box::new(|shared, record| {
+    let reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Box::new(move |shared, record| {
+        let reported = reported.clone();
         Box::pin(async move {
             let Some(provider) = ProviderKind::from_str(&record.provider) else {
                 return false;
@@ -95,17 +97,26 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             // fields (a restart clears the in-memory lease map). NEVER resubmit
             // the provider prompt — only the relay lease is restored.
             let mut lease = ExternalInputRelayLease::unassigned(Some(record.channel_id));
-            lease.hosted_source = record.hosted_source.clone().or_else(|| {
-                // Only older records may recover a missing pin from their original captured source.
-                // A modern failed observation stays unowned across deferred retries.
-                (!record.hosted_source_checked).then_some(())?;
-                crate::services::tui_prompt_dedupe::hosted_source::restore(
-                    provider.as_str(),
-                    &record.tmux_session_name,
-                    record.channel_id,
-                    record.captured_source.as_ref()?,
-                )
-            });
+            lease.hosted_source = record.hosted_source.clone();
+            if !record.hosted_source_checked
+                && record.hosted_source.is_none()
+                && record.captured_source.is_some()
+            {
+                lease.hosted_source = original_pending_source(&provider, record);
+                if lease.hosted_source.is_none() && legacy_herdr_pending(shared, record).await {
+                    // A worker owns one record; its bounded retries report the same Hold once.
+                    if !reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::info!(
+                            event = "legacy_herdr_pending_origin_unproven",
+                            channel_id = record.channel_id,
+                            pending_id = record.anchor_message_id,
+                            captured_path_present = record.captured_source.is_some(),
+                            "legacy_herdr_pending_origin_unproven"
+                        );
+                    }
+                    return false;
+                }
+            }
             lease.turn_id = record.lease_turn_id.clone();
             lease.session_key = record.lease_session_key.clone();
             lease.relay_owner = parse_external_input_relay_owner(&record.lease_relay_owner);
@@ -207,4 +218,69 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             claim.claimed
         })
     })
+}
+
+async fn legacy_herdr_pending(
+    shared: &Arc<SharedData>,
+    record: &super::super::super::tui_direct_pending_start::TuiDirectPendingStart,
+) -> bool {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
+    };
+    use crate::services::session_host::HostKind;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+
+    if crate::config::session_hosts::herdr_endpoint(record.channel_id).is_some()
+        || crate::services::tui_prompt_dedupe::herdr_execution_listed(&record.tmux_session_name)
+        || read_host_kind_marker(&record.tmux_session_name)
+            == HostKindMarker::Known(HostKind::Herdr)
+    {
+        return true;
+    }
+    let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), record.lease_session_key.as_deref())
+    else {
+        return false;
+    };
+    match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
+        HostedLookup::Found(observed) => observed.record != HostedRecord::Legacy,
+        HostedLookup::Missing => false,
+        _ => true,
+    }
+}
+
+/// Only the same saved external episode can supply a missing legacy execution pin.
+fn original_pending_source(
+    provider: &ProviderKind,
+    record: &super::super::super::tui_direct_pending_start::TuiDirectPendingStart,
+) -> Option<crate::services::tui_prompt_dedupe::hosted_source::HostedSourcePin> {
+    fn nonempty(value: Option<&str>) -> Option<&str> {
+        value.filter(|value| !value.is_empty())
+    }
+    let turn = nonempty(record.lease_turn_id.as_deref())?;
+    let key = nonempty(record.lease_session_key.as_deref())?;
+    let captured = record.captured_source.as_ref()?;
+    let original =
+        super::super::super::inflight::load_inflight_state_read_only(provider, record.channel_id)?;
+    if original.provider != provider.as_str()
+        || original.channel_id != record.channel_id
+        || original.turn_source != TurnSource::ExternalInput
+        || original.tmux_session_name.as_deref() != Some(record.tmux_session_name.as_str())
+        || original.user_msg_id != record.anchor_message_id
+        || original.external_turn_id.as_deref() != Some(turn)
+        || original.session_key.as_deref() != Some(key)
+        || original.output_path.as_deref() != Some(captured.0.as_str())
+        || !original.hosted_record_id.is_some_and(|id| id > 0)
+    {
+        return None;
+    }
+    crate::services::tui_prompt_dedupe::hosted_source::restore(
+        provider.as_str(),
+        &record.tmux_session_name,
+        record.channel_id,
+        captured,
+        (
+            nonempty(original.session_id.as_deref())?,
+            nonempty(original.hosted_execution_nonce.as_deref())?,
+        ),
+    )
 }

@@ -161,16 +161,24 @@ pub(crate) fn validate(pin: &HostedSourcePin) -> bool {
     })
 }
 
-/// An old pending record may name its original file even when it predates the nonce carrier.
+/// An exact saved episode supplies the original native session and execution nonce.
 pub(crate) fn restore(
     provider: &str,
     logical: &str,
     channel: u64,
     captured_source: &(String, u64),
+    (native_session, execution_nonce): (&str, &str),
 ) -> Option<HostedSourcePin> {
     let path = Path::new(&captured_source.0);
-    (std::fs::metadata(path).ok()?.len() >= captured_source.1)
-        .then(|| capture(provider, logical, channel, path, None))?
+    (std::fs::metadata(path).ok()?.len() >= captured_source.1).then_some(())?;
+    capture_native(
+        provider,
+        logical,
+        channel,
+        Some(path),
+        Some(native_session),
+        Some(execution_nonce),
+    )
 }
 
 fn capture_native(
