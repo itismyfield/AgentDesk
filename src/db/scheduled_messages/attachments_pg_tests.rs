@@ -48,21 +48,16 @@ async fn postgres_image_attachment_partial_triplets_are_rejected() {
 }
 
 #[test]
-fn image_attachment_create_input_is_dormant() {
+fn image_create_json_preserves_optional_contract() {
     for value in [
         json!(null),
         json!({}),
         json!({"filename":"picture.png","data":"AAAA"}),
     ] {
-        let result = serde_json::from_value::<
-            crate::server::routes::scheduled_messages::CreateScheduledMessageBody,
-        >(json!({
+        let parsed = serde_json::from_value::<crate::server::routes::scheduled_messages::CreateScheduledMessageBody>(json!({
             "content":"unchanged text", "scheduledAt":"2030-01-01T00:00:00Z", "imageAttachment":value
-        }));
-        assert!(
-            result.is_err(),
-            "imageAttachment must be rejected, including null"
-        );
+        })).expect("image parsing defers validation to the API");
+        assert_eq!(parsed.image_attachment, (!value.is_null()).then_some(value));
     }
     serde_json::from_value::<
         crate::server::routes::scheduled_messages::CreateScheduledMessageBody,
@@ -128,6 +123,7 @@ async fn postgres_image_attachment_storage_insert_patch_preserve_and_clear() {
         .await
         .expect("transactional insert");
     tx.commit().await.expect("commit");
+    let row = assert_metadata_then_load(&pool, row).await;
     assert_eq!(
         row.image_attachment
             .as_ref()
@@ -145,6 +141,7 @@ async fn postgres_image_attachment_storage_insert_patch_preserve_and_clear() {
     .await
     .expect("text patch")
     .expect("editable");
+    let row = assert_metadata_then_load(&pool, row).await;
     assert_eq!(
         row.image_attachment
             .as_ref()
@@ -167,6 +164,7 @@ async fn postgres_image_attachment_storage_insert_patch_preserve_and_clear() {
     .await
     .expect("replace triplet")
     .expect("editable");
+    let row = assert_metadata_then_load(&pool, row).await;
     let image = row.image_attachment.as_ref().expect("replaced image");
     assert_eq!(
         (&image.filename, &image.content_type, image.data.as_ref()),
@@ -264,7 +262,19 @@ async fn postgres_image_attachment_limits_cover_sql_insert_patch_and_copy() {
         .await
         .expect("reload")
         .expect("row");
-    assert_eq!(unchanged.image_attachment, row.image_attachment);
+    assert_eq!(
+        unchanged.to_api_json()["imageAttachment"],
+        row.to_api_json()["imageAttachment"]
+    );
+    assert_eq!(
+        unchanged
+            .image_attachment
+            .as_ref()
+            .unwrap()
+            .require_loaded()
+            .unwrap(),
+        &[1]
+    );
     pool.close().await;
     pg_db.drop().await;
 }
@@ -339,7 +349,14 @@ async fn postgres_image_attachment_detail_loads_exact_bytes() {
         new.image_attachment.as_ref().map(|image| &image.data),
         "detail must load original bytes"
     );
-    assert_eq!(detail.image_attachment, row.image_attachment);
+    assert!(
+        row.image_attachment.as_ref().unwrap().data.is_none(),
+        "insert RETURNING is metadata only"
+    );
+    assert_eq!(
+        detail.to_api_json()["imageAttachment"],
+        row.to_api_json()["imageAttachment"]
+    );
     pool.close().await;
     pg_db.drop().await;
 }
@@ -463,6 +480,7 @@ async fn postgres_image_list_cannot_enter_attachment_handoff() {
         result.is_err(),
         "metadata-only list row must not enter binary handoff"
     );
+    let row = assert_metadata_then_load(&pool, row).await;
     let image = row.image_attachment.as_ref().unwrap();
     let loaded = crate::services::message_outbox::OutboxAttachment::try_from(image).unwrap();
     assert_eq!(loaded.data, &[0, 255, 42]);
@@ -482,4 +500,15 @@ fn image_byte_limit_matches_immutable_definition_and_outbox_migrations() {
             "immutable image checks must share MAX_IMAGE_BYTES"
         );
     }
+}
+
+async fn assert_metadata_then_load(pool: &PgPool, row: ScheduledMessageRow) -> ScheduledMessageRow {
+    assert!(
+        row.image_attachment.as_ref().unwrap().data.is_none(),
+        "write RETURNING must not load image bytes"
+    );
+    get_scheduled_message_pg(pool, &row.id)
+        .await
+        .unwrap()
+        .unwrap()
 }

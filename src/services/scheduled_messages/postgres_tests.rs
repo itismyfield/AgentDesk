@@ -1641,9 +1641,8 @@ async fn postgres_expiry_does_not_terminalize_a_still_live_agent_turn() {
 async fn postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff() {
     let (pg_db, pool) = create_test_pool("agentdesk_smsg_image_fire", "dormant image fire").await;
     let message = insert_due_push_message(&pool).await;
-    sqlx::query("UPDATE scheduled_messages SET image_filename='image.png', image_content_type='image/png', image_data=$1, provider_targets=$2, provider_target_summary=$2 WHERE id=$3")
+    sqlx::query("UPDATE scheduled_messages SET image_filename='image.png', image_content_type='image/png', image_data=$1 WHERE id=$2")
         .bind(&b"image bytes"[..])
-        .bind(json!({"kakao":{"accountId":"default","friendUuids":[],"sendToSelf":true}}))
         .bind(&message.id).execute(&pool).await.expect("direct SQL image definition");
     let fire = claim_one(&pool, "dormant-image-worker").await;
     assert!(fire.message.image_attachment.is_some());

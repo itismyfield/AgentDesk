@@ -735,6 +735,11 @@
       "path": "migrations/postgres/0144_message_outbox_image_attachments.sql",
       "sha256": "4a6b494388f2b0c387f11b9c468aa93ac8eefbf11b6d0f4f87ef994ba7c655e3",
       "version": 144
+    },
+    {
+      "path": "migrations/postgres/0145_scheduled_image_consumer_guards.sql",
+      "sha256": "6d58674a9e52ff2ff9505076be6aee77205b8e3f6fe31764d9238ca00935727c",
+      "version": 145
     }
   ],
   "version": 1

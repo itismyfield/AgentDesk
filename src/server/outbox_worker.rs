@@ -1,5 +1,7 @@
 //! Background drain for durable message outbox and detached terminal custody.
 
+pub(super) mod claim;
+
 use super::{drain_message_outbox_batch_once, outbox_actionable_delivery};
 use crate::services::discord::health::HealthRegistry;
 use sqlx::PgPool;

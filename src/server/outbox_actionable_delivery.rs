@@ -115,8 +115,14 @@ pub(super) async fn deliver(
     (fallback_status.to_string(), fallback_error)
 }
 
-pub(super) fn failure_action(row: &PendingMessageOutboxRow) -> super::MessageOutboxFailureAction {
-    if row.attachment.is_err() || RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+pub(super) fn failure_action(
+    row: &PendingMessageOutboxRow,
+    status: &str,
+) -> super::MessageOutboxFailureAction {
+    if row.attachment.is_err()
+        || (row.attachment.as_ref().is_ok_and(Option::is_some) && status == "400 Bad Request")
+        || RETIRED_SEND_SOURCES.contains(&row.source.as_str())
+    {
         super::MessageOutboxFailureAction::Fail {
             retry_count: row.retry_count,
         }

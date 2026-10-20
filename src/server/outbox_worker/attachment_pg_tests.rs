@@ -129,7 +129,12 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    let claimed = claim_pending_message_outbox_batch_pg(&pool, "before-restart").await;
+    let mut claimed = Vec::new();
+    for _ in 0..6 {
+        let batch = claim_pending_message_outbox_batch_pg(&pool, "before-restart").await;
+        assert_eq!(batch.len(), 1, "image claim batch must contain one payload");
+        claimed.extend(batch);
+    }
     assert_eq!(claimed.len(), 6);
     for row in &claimed {
         let attachment = row.attachment.as_ref().unwrap().as_ref().unwrap();
@@ -170,11 +175,17 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
         retry[0].attachment.as_ref().unwrap().as_ref().unwrap().data,
         image().data
     );
-    sqlx::query("UPDATE message_outbox SET claimed_at=NOW()-INTERVAL '1 day' WHERE id=$1")
-        .bind(persistent)
-        .execute(&pool)
+    let mut lease_tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('agentdesk.outbox_image_consumer_v1', 'enabled', true)")
+        .execute(&mut *lease_tx)
         .await
         .unwrap();
+    sqlx::query("UPDATE message_outbox SET claimed_at=NOW()-INTERVAL '1 day' WHERE id=$1")
+        .bind(persistent)
+        .execute(&mut *lease_tx)
+        .await
+        .unwrap();
+    lease_tx.commit().await.unwrap();
     let reclaimed = claim_pending_message_outbox_batch_pg(&pool, "stale-restart").await;
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].delivery_ids(), ids);
@@ -433,6 +444,193 @@ async fn image_prod_options_and_sent_cleanup_preserve_sentinel_pg() {
     .await
     .unwrap();
     assert!(retained, "failed image must keep bytes for redrive");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn image_claim_batch_budget_and_old_consumer_barrier_pg() {
+    let (db, pool) = image_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+    let first =
+        enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("budget-first"), Some(image()))
+            .await
+            .unwrap();
+    enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("budget-second"), Some(image()))
+        .await
+        .unwrap();
+    enqueue_outbox_pg_on_tx(&mut tx, message("budget-text-one"))
+        .await
+        .unwrap();
+    enqueue_outbox_pg_on_tx(&mut tx, message("budget-text-two"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let error = sqlx::query("UPDATE message_outbox SET status='processing', claim_owner='old', claimed_at=NOW() WHERE id=$1").bind(first).execute(&pool).await.unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("55000"),
+        "old outbox consumer must never claim an image as text"
+    );
+    let batch = claim_pending_message_outbox_batch_pg(&pool, "budget-new").await;
+    assert_eq!(batch.len(), 3);
+    assert_eq!(
+        batch
+            .iter()
+            .filter(|row| row.attachment.as_ref().unwrap().is_some())
+            .count(),
+        1
+    );
+    let second = claim_pending_message_outbox_batch_pg(&pool, "budget-next").await;
+    assert_eq!(second.len(), 1);
+    assert!(second[0].attachment.as_ref().unwrap().is_some());
+    let row = batch.iter().find(|r| r.id == first).unwrap();
+    let error = sqlx::query(
+        "UPDATE message_outbox SET claim_owner='old-reclaim', claimed_at=NOW() WHERE id=$1",
+    )
+    .bind(row.id)
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("55000")
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn image_preflight_400_fails_first_attempt_pg() {
+    let (db, pool) = image_pool().await;
+    let mut tx = pool.begin().await.unwrap();
+    let id =
+        enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message("permanent-error"), Some(image()))
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    assert_eq!(
+        drain_message_outbox_batch_once(&pool, Some("invalid-preflight"), move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { ("400 Bad Request".into(), "invalid binary content".into()) }
+        })
+        .await,
+        1
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let result: (String, i64, bool) = sqlx::query_as(
+        "SELECT status,retry_count,attachment_data IS NOT NULL FROM message_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        ("failed".into(), 0, true),
+        "image 400 must fail on the first attempt and preserve bytes"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg() {
+    use axum::{Json, extract::State};
+    use base64::Engine as _;
+    use serde_json::json;
+    let (db, pool) = image_pool().await;
+    let caps =
+        crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state(
+            &json!({}),
+        );
+    for id in ["book", "mini"] {
+        sqlx::query("INSERT INTO worker_nodes (instance_id,capabilities) VALUES ($1,$2)")
+            .bind(id)
+            .bind(&caps)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let config = crate::config::Config::default();
+    let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+    let state = crate::server::routes::AppState {
+        pg_pool: Some(pool.clone()),
+        engine,
+        config: Arc::new(config),
+        broadcast_tx,
+        batch_buffer,
+        health_registry: None,
+        cluster_instance_id: None,
+    };
+    let body=serde_json::from_value(json!({"content":"body", "targetChannelId":"7001", "scheduledAt":(chrono::Utc::now()-chrono::Duration::seconds(1)).to_rfc3339(),
+        "imageAttachment":{"filename":"image.png","contentType":"image/png","dataBase64":base64::engine::general_purpose::STANDARD.encode(image().data)}
+    })).unwrap();
+    let (status, Json(response)) =
+        crate::server::routes::scheduled_messages::create_scheduled_message(
+            State(state),
+            Ok(Json(body)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    let id = response["scheduledMessage"]["id"].as_str().unwrap();
+    let mut fires = crate::db::scheduled_messages::claim_due_fires_pg(
+        &pool,
+        "image-e2e",
+        true,
+        10,
+        300,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fires.len(), 1);
+    crate::services::scheduled_messages::fire_claimed(
+        &pool,
+        None,
+        fires.pop().unwrap(),
+        chrono::Utc::now(),
+    )
+    .await;
+    let parent: String = sqlx::query_scalar("SELECT status FROM scheduled_messages WHERE id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(parent, "sent");
+    let claimed = claim_pending_message_outbox_batch_pg(&pool, "image-e2e-outbox").await;
+    assert_eq!(claimed.len(), 1);
+    let row = &claimed[0];
+    let options = outbox_actionable_delivery::delivery_options(row).unwrap();
+    let (correlation, semantic) = row.delivery_ids();
+    let (status, _, payloads) =
+        crate::services::discord::outbound::send_gate::deliver_options_on_wire(
+            options,
+            &row.content,
+            &correlation,
+            &semantic,
+        )
+        .await;
+    assert_eq!(status, "200 OK");
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].0["enforce_nonce"], true);
+    assert!(
+        payloads[0]
+            .1
+            .windows(image().data.len())
+            .any(|part| part == image().data),
+        "API image must reach the authorized binary upload unchanged"
+    );
+    mark_message_outbox_sent_pg(&pool, row.id, &row.claim_owner, row.claimed_at)
+        .await
+        .unwrap();
+    let cleared:bool=sqlx::query_scalar("SELECT status='sent' AND attachment_data IS NULL AND dedupe_key IS NOT NULL FROM message_outbox WHERE id=$1").bind(row.id).fetch_one(&pool).await.unwrap();
+    assert!(cleared);
     pool.close().await;
     db.drop().await;
 }

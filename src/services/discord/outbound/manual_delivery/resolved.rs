@@ -42,6 +42,14 @@ pub(in crate::services::discord::outbound) async fn send_resolved_manual_message
         bot,
         ..
     } = notification;
+    if let Some(attachment) = notification.attachment {
+        if let Err(detail) = image_delivery::preflight(notification, attachment) {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"ok": false, "error": detail}).to_string(),
+            );
+        }
+    }
     let channel_id = ChannelId::new(channel_id_raw);
     let send_result = deliver_manual_notification(client, dedup, notification).await;
     match send_result {

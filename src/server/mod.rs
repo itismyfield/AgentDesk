@@ -2441,77 +2441,7 @@ async fn schedule_message_outbox_retry_pg(
     Ok(())
 }
 
-async fn claim_pending_message_outbox_batch_pg(
-    pool: &PgPool,
-    claim_owner: &str,
-) -> Vec<PendingMessageOutboxRow> {
-    let rows = match sqlx::query(
-        "WITH claimed AS (
-            SELECT id
-              FROM message_outbox
-             WHERE (
-                    status = 'pending'
-                    AND (
-                        next_attempt_at IS NULL
-                        OR next_attempt_at <= NOW()
-                    )
-                 )
-                OR (
-                    status = 'processing'
-                    AND (
-                        claimed_at IS NULL
-                        OR claimed_at <= NOW() - ($1::bigint * INTERVAL '1 second')
-                    )
-                )
-             ORDER BY id ASC
-             FOR UPDATE SKIP LOCKED
-             LIMIT 10
-        )
-        UPDATE message_outbox mo
-           SET status = 'processing',
-               claimed_at = NOW(),
-               claim_owner = $2,
-               error = NULL
-          FROM claimed
-         WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count, mo.claim_owner, mo.claimed_at,
-                  mo.attachment_filename, mo.attachment_content_type, mo.attachment_data",
-    )
-    .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
-    .bind(claim_owner)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!("[outbox-pg] failed to claim message_outbox rows: {error}");
-            return Vec::new();
-        }
-    };
-
-    let mut claimed = rows
-        .into_iter()
-        .filter_map(|row| {
-            Some(PendingMessageOutboxRow {
-                id: row.try_get::<i64, _>("id").ok()?,
-                target: row.try_get::<String, _>("target").ok()?,
-                content: row.try_get::<String, _>("content").ok()?,
-                bot: row.try_get::<String, _>("bot").ok()?,
-                source: row.try_get::<String, _>("source").ok()?,
-                reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
-                session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
-                retry_count: row.try_get::<i64, _>("retry_count").unwrap_or(0),
-                attachment: crate::services::message_outbox::decode_claimed_attachment(&row),
-                claim_owner: row.try_get::<String, _>("claim_owner").ok()?,
-                claimed_at: row
-                    .try_get::<chrono::DateTime<chrono::Utc>, _>("claimed_at")
-                    .ok()?,
-            })
-        })
-        .collect::<Vec<_>>();
-    claimed.sort_by_key(|row| row.id);
-    claimed
-}
+use outbox_worker::claim::claim_pending_message_outbox_batch_pg;
 
 async fn drain_message_outbox_batch_once<F, Fut>(
     pg_pool: &PgPool,
@@ -2585,7 +2515,7 @@ where
             }
         } else {
             let error_text = format!("{status}: {err_text}");
-            let action = outbox_actionable_delivery::failure_action(row);
+            let action = outbox_actionable_delivery::failure_action(row, &status);
             match action {
                 MessageOutboxFailureAction::Fail { retry_count } => {
                     let failed_update = mark_message_outbox_failed_pg(

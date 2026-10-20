@@ -37,7 +37,7 @@ pub(super) use resolved::{
 };
 mod image_delivery;
 #[cfg(test)]
-mod image_delivery_tests;
+pub(super) mod image_delivery_tests;
 #[cfg(test)]
 mod production_nonce_tests;
 

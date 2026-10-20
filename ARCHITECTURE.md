@@ -215,6 +215,8 @@ src/
 │   │   ├── attachments_pg_tests.rs
 │   │   ├── discord_mentions.rs
 │   │   ├── external_delivery.rs
+│   │   ├── image_lifecycle.rs
+│   │   ├── image_lifecycle_tests.rs
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
@@ -364,7 +366,8 @@ src/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
 │   ├── outbox_worker/
-│   │   └── attachment_pg_tests.rs
+│   │   ├── attachment_pg_tests.rs
+│   │   └── claim.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -434,9 +437,10 @@ src/
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
+│   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
 │   │   │   ├── discord_mentions.rs
-│   │   │   ├── dormant_image_tests.rs
+│   │   │   ├── image_activation_tests.rs
 │   │   │   ├── image_input.rs
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
@@ -2543,6 +2547,8 @@ src/
 │   │   └── transport_tests.rs
 │   ├── maintenance/
 │   │   ├── jobs/
+│   │   │   ├── db_retention/
+│   │   │   │   └── image_retention.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs

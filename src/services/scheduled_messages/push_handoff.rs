@@ -42,7 +42,9 @@ pub(super) enum PushHandoffError {
 }
 
 pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
-    if fire.message.image_attachment.is_some() {
+    if fire.message.image_attachment.is_some()
+        && !db::image_rollout_ready_pg(pool).await.unwrap_or(false)
+    {
         finish_terminal_failure(pool, fire, "image transport not enabled").await;
         return;
     }
@@ -80,6 +82,20 @@ pub(super) async fn commit(
         return Err(PushHandoffError::Invalid(
             "image attachment requires a Discord target",
         ));
+    }
+    if attachment.is_some() {
+        if message.provider_targets.is_some() {
+            return Err(PushHandoffError::Invalid(
+                "image attachments do not support provider targets",
+            ));
+        }
+        let rendered = render_discord_content(&message.content, &message.discord_mention_user_ids);
+        if message.content.trim().is_empty()
+            || rendered.encode_utf16().count()
+                > crate::services::discord::outbound::DISCORD_HARD_LIMIT_CHARS
+        {
+            return Err(PushHandoffError::Invalid("invalid image content length"));
+        }
     }
     if message.target_channel_id.is_none() && message.provider_targets.is_none() {
         return Err(PushHandoffError::Invalid("no delivery target"));

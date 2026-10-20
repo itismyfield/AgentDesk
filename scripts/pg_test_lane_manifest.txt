@@ -46,6 +46,7 @@ src/db/replay_disposition_tests/compatibility_tests.rs
 src/db/replay_disposition_tests/concurrency_tests.rs
 src/db/replay_disposition_tests/consumer_tests.rs
 src/db/scheduled_messages/attachments_pg_tests.rs
+src/db/scheduled_messages/image_lifecycle_tests.rs
 src/db/scheduled_messages/postgres_tests.rs
 src/db/session_observability/background_ordering_pg_tests.rs
 src/db/session_transcripts.rs
@@ -82,7 +83,7 @@ src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
-src/server/routes/scheduled_messages/dormant_image_tests.rs
+src/server/routes/scheduled_messages/image_activation_tests.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
 src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
@@ -401,6 +402,7 @@ db::replay_disposition::tests::concurrency_tests
 db::replay_disposition::tests::consumer_tests
 db::replay_disposition::write_tests
 db::scheduled_messages::attachments_pg_tests
+db::scheduled_messages::image_lifecycle::tests
 db::scheduled_messages::postgres_tests
 db::session_observability::tests_pg
 db::session_transcripts::clear_fence_pg_tests
@@ -1129,6 +1131,9 @@ db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_partial_
 db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_storage_insert_patch_preserve_and_clear
 db::scheduled_messages::attachments_pg_tests::postgres_image_decoder_rejects_corrupt_metadata_projection
 db::scheduled_messages::attachments_pg_tests::postgres_image_list_cannot_enter_attachment_handoff
+db::scheduled_messages::image_lifecycle::tests::postgres_image_retention_job_wiring_pg
+db::scheduled_messages::image_lifecycle::tests::postgres_image_rollout_includes_offline_members_and_outbox_consumers
+db::scheduled_messages::image_lifecycle::tests::postgres_terminal_image_retention_reclaims_one_shots_and_preserves_recurring
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
 db::scheduled_messages::postgres_tests::postgres_agent_turn_start_waits_for_parent_lock_and_observes_cancel
@@ -1247,7 +1252,11 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_
 server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node
 server::multinode_regression::multinode_regression_pg_tests::multinode_single_leader_lock_allows_one_holder
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
+server::outbox_worker::attachment_pg_tests::image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg
+server::outbox_worker::attachment_pg_tests::image_claim_batch_budget_and_old_consumer_barrier_pg
 server::outbox_worker::attachment_pg_tests::image_outbox_paths_preserve_retry_restart_and_dedupe_pg
+server::outbox_worker::attachment_pg_tests::image_preflight_400_fails_first_attempt_pg
+server::outbox_worker::attachment_pg_tests::image_prod_options_and_sent_cleanup_preserve_sentinel_pg
 server::outbox_worker::attachment_pg_tests::legacy_enqueue_wrappers_keep_null_attachment_bytes_pg
 server::outbox_worker::attachment_pg_tests::outbox_image_constraints_reject_partial_and_oversized_rows_pg
 server::outbox_worker::attachment_pg_tests::partial_outbox_image_never_invokes_text_delivery_pg
@@ -1354,7 +1363,8 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
-server::routes::scheduled_messages::image_input::tests::postgres_image_attachment_patch_input_is_dormant
+server::routes::scheduled_messages::image_input::tests::postgres_image_api_create_patch_rollout_and_redaction
+server::routes::scheduled_messages::image_input::tests::postgres_image_route_body_limit_and_eight_mib_boundary
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel

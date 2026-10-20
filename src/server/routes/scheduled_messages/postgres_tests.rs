@@ -63,7 +63,7 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
     .await;
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
-        _image_attachment: (),
+        image_attachment: None,
         content: "trim explicit bot before persistence".to_string(),
         discord_mention_user_ids: None,
         title: None,
@@ -107,7 +107,7 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
     .await;
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
-        _image_attachment: (),
+        image_attachment: None,
         content: "push must not persist an unused agent association".to_string(),
         discord_mention_user_ids: None,
         title: None,

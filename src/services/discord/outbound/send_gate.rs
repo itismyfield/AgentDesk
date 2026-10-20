@@ -682,3 +682,6 @@ agents:
         assert_eq!(SendCallerClass::from_header("attacker"), None);
     }
 }
+
+#[cfg(test)]
+pub(crate) use super::manual_delivery::image_delivery_tests::deliver_options_on_wire;

@@ -37,6 +37,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
   --skip db::replay_disposition::write_tests
+  --skip db::scheduled_messages::image_lifecycle::tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
   --skip engine::ops::auto_queue_ops::tests
   --skip engine::ops::config_ops::tests
@@ -326,8 +327,8 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_layer_zero_cap_disables_truncation_for_visibility
   db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
-  db::scheduled_messages::attachments_pg_tests::image_attachment_create_input_is_dormant
   db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
+  db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
   db::session_transcripts::native_clear_pg_tests::record_and_classification_agree_on_every_row_shape
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
@@ -378,6 +379,8 @@ NON_PG_FILTER_REPLAY=(
   server::routes::message_outbox::tests::monitor_alert_routing_separates_actionable_and_informational_kinds
   server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
   server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
+  server::routes::scheduled_messages::image_input::tests::image_context_rejects_mixed_targets_and_rendered_utf16_overflow
+  server::routes::scheduled_messages::image_input::tests::image_upload_validates_filename_mime_magic_and_base64
   server::routes::scheduled_messages::postgres_tests::scheduled_message_bot_defaults_to_non_triggering_notify
   server::routes::scheduled_messages::postgres_tests::scheduled_push_rejects_agent_only_fields_but_allows_explicit_clears
   services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error

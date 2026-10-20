@@ -1,19 +1,15 @@
-//! Reject image input until the transport and fleet capability gates are ready.
+//! Bounded JSON uploads and effective image-definition validation.
 
-use serde::{Deserialize, Deserializer, de::Error};
-use serde_json::{Map, Value as JsonValue};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
 
 use super::{AppError, StatusCode, app_error};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateScheduledMessageBody {
-    #[serde(
-        default,
-        rename = "imageAttachment",
-        deserialize_with = "reject_create"
-    )]
-    pub _image_attachment: (),
+    pub image_attachment: Option<JsonValue>,
     pub content: String,
     #[serde(default)]
     pub discord_mention_user_ids: Option<Vec<String>>,
@@ -38,20 +34,162 @@ pub struct CreateScheduledMessageBody {
     pub on_context_failure: Option<String>,
 }
 
-pub(super) fn reject_create<'de, D: Deserializer<'de>>(_: D) -> Result<(), D::Error> {
-    Err(D::Error::custom("imageAttachment is not enabled"))
+pub(super) const BODY_LIMIT: usize = 12 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Upload<'a> {
+    filename: &'a str,
+    content_type: &'a str,
+    data_base64: &'a str,
 }
 
-pub(super) fn reject_patch(body: &Map<String, JsonValue>) -> Result<(), AppError> {
-    if body.contains_key("imageAttachment") {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "imageAttachment is not enabled",
+fn invalid(message: &str) -> AppError {
+    app_error(StatusCode::BAD_REQUEST, message)
+}
+
+pub(super) fn decode(
+    value: Option<&JsonValue>,
+) -> Result<Option<crate::db::scheduled_messages::ScheduledMessageImageAttachment>, AppError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let upload = Upload::deserialize(value).map_err(|_| {
+        invalid("imageAttachment requires filename, contentType and dataBase64 strings")
+    })?;
+    if upload.filename.is_empty()
+        || upload.filename.len() > 128
+        || !upload.filename.as_bytes()[0].is_ascii_alphanumeric()
+        || !upload
+            .filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(invalid(
+            "imageAttachment.filename must be a plain ASCII filename up to 128 bytes",
+        ));
+    }
+    let content_type = upload.content_type.to_ascii_lowercase();
+    let extension = upload
+        .filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        (extension.as_str(), content_type.as_str()),
+        ("png", "image/png")
+            | ("jpg" | "jpeg", "image/jpeg")
+            | ("gif", "image/gif")
+            | ("webp", "image/webp")
+    ) {
+        return Err(invalid(
+            "imageAttachment filename extension and MIME must match PNG, JPEG, GIF or WebP",
+        ));
+    }
+    let max = crate::db::scheduled_messages::MAX_IMAGE_BYTES;
+    if upload.data_base64.len() > max.div_ceil(3) * 4 {
+        return Err(invalid("imageAttachment exceeds 8 MiB"));
+    }
+    let data = STANDARD
+        .decode(upload.data_base64)
+        .map_err(|_| invalid("imageAttachment.dataBase64 must be canonical standard base64"))?;
+    if !(1..=max).contains(&data.len()) {
+        return Err(invalid("imageAttachment must contain 1 byte to 8 MiB"));
+    }
+    let matches_magic = match content_type.as_str() {
+        "image/png" => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => data.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"),
+        "image/webp" => data.starts_with(b"RIFF") && data.get(8..12) == Some(&b"WEBP"[..]),
+        _ => false,
+    };
+    if !matches_magic {
+        return Err(invalid("imageAttachment magic must match MIME"));
+    }
+    Ok(Some(
+        crate::db::scheduled_messages::ScheduledMessageImageAttachment {
+            filename: upload.filename.to_owned(),
+            content_type,
+            data,
+        },
+    ))
+}
+
+pub(super) fn reject_mixed(has_provider_targets: bool) -> Result<(), AppError> {
+    if has_provider_targets {
+        return Err(invalid(
+            "imageAttachment cannot be combined with providerTargets",
         ));
     }
     Ok(())
 }
 
+pub(super) struct Context<'a> {
+    pub kind: &'a str,
+    pub target: Option<&'a str>,
+    pub providers: bool,
+    pub content: &'a str,
+    pub mentions: &'a [String],
+}
+
+pub(super) fn validate_context(context: Context<'_>) -> Result<(), AppError> {
+    if context.kind != crate::db::scheduled_messages::KIND_PUSH {
+        return Err(invalid("imageAttachment is only valid for push delivery"));
+    }
+    if context.target.is_none() {
+        return Err(invalid(
+            "imageAttachment requires a Discord targetChannelId",
+        ));
+    }
+    reject_mixed(context.providers)?;
+    let units = context.content.encode_utf16().count()
+        + context
+            .mentions
+            .iter()
+            .map(|id| id.len() + 4)
+            .sum::<usize>();
+    if context.content.trim().is_empty()
+        || units > crate::services::discord::outbound::DISCORD_HARD_LIMIT_CHARS
+    {
+        return Err(invalid(
+            "image content after Discord mentions must contain 1 to 2000 UTF-16 units",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn ensure_rollout(pool: &sqlx::PgPool) -> Result<(), AppError> {
+    match crate::db::scheduled_messages::image_rollout_ready_pg(pool).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(app_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "imageAttachment requires upgraded scheduled and outbox consumers on every registered worker (at least two)",
+        )),
+        Err(error) => Err(app_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("image rollout check: {error}"),
+        )),
+    }
+}
+
+pub(super) fn extract<T>(
+    body: Result<axum::Json<T>, axum::extract::rejection::JsonRejection>,
+) -> Result<T, AppError> {
+    body.map(|axum::Json(body)| body).map_err(|error| {
+        let status = if error.status() == StatusCode::UNPROCESSABLE_ENTITY {
+            StatusCode::BAD_REQUEST
+        } else {
+            error.status()
+        };
+        crate::error::AppError::new(
+            status,
+            crate::error::ErrorCode::Validation,
+            "invalid scheduled message JSON",
+        )
+    })
+}
+
 #[cfg(test)]
-#[path = "dormant_image_tests.rs"]
+#[path = "image_activation_tests.rs"]
 mod tests;

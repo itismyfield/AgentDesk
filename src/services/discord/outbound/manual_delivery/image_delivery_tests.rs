@@ -234,7 +234,7 @@ async fn manual_text_compatibility_wrapper_keeps_wire_bytes() {
     )
     .await;
     assert_eq!(status, "200 OK");
-    let (status, _) = send_resolved_manual_message(
+    let (status, _) = send_authorized_manual_message(
         &client,
         &dedup,
         ResolvedManualMessage {
@@ -254,6 +254,7 @@ async fn manual_text_compatibility_wrapper_keeps_wire_bytes() {
                 attachment: None,
             },
         },
+        &super::super::send_gate::ManualOutboundOptions::default(),
     )
     .await;
     assert_eq!(status, "200 OK");
@@ -300,18 +301,22 @@ async fn image_without_durable_identity_never_falls_back_to_text() {
 
 #[test]
 fn binary_error_logging_uses_display_only() {
+    let shorthand = regex::Regex::new(r"(?:^|[\s,(])\?(?:error|err|e)\b").unwrap();
+    let interpolation = regex::Regex::new(r"\{(?:error|err|e):\?\}").unwrap();
     for source in [
         include_str!("image_delivery.rs"),
         include_str!("../send_gate.rs"),
         include_str!("../../../message_outbox.rs"),
+        include_str!("../../../../server/mod.rs"),
+        include_str!("../../../../server/outbox_worker.rs"),
+        include_str!("../../../../server/outbox_actionable_delivery.rs"),
+        include_str!("../../../scheduled_messages/push_handoff.rs"),
+        include_str!("../../../scheduled_messages.rs"),
+        include_str!("../../../../server/outbox_worker/claim.rs"),
     ] {
         assert!(
-            !source.contains("{error:?}"),
-            "image errors must not log PG DETAIL with Debug"
-        );
-        assert!(
-            !source.contains("error = ?error"),
-            "image errors must use Display fields"
+            !shorthand.is_match(source) && !interpolation.is_match(source),
+            "image errors must use Display without PG DETAIL"
         );
     }
 }
@@ -353,4 +358,74 @@ async fn lost_binary_receipt_retries_with_same_nonce_and_reservation() {
         "Discord nonce must reuse the accepted message after a lost receipt"
     );
     task.abort();
+}
+
+pub(crate) async fn deliver_options_on_wire(
+    options: super::super::send_gate::ManualOutboundOptions,
+    content: &str,
+    correlation: &str,
+    semantic: &str,
+) -> (&'static str, String, Vec<(Value, Vec<u8>)>) {
+    let (wire, client, task) = client().await;
+    let (status, body) = send_authorized_manual_message(
+        &client,
+        &OutboundDeduper::new(),
+        ResolvedManualMessage {
+            channel_id_raw: 7001,
+            target: "channel:7001",
+            pg_pool: None,
+            record_transcript: false,
+            transcript_source_label: None,
+            notification: ManualNotification {
+                channel_id: "7001",
+                content,
+                bot: "notify",
+                source: "scheduled_message",
+                summary: None,
+                delivery_id: Some(ManualOutboundDeliveryId {
+                    correlation_id: correlation,
+                    semantic_event_id: semantic,
+                }),
+                headless_nonce_enabled: false,
+                attachment: None,
+            },
+        },
+        &options,
+    )
+    .await;
+    let payloads = wire.payloads.lock().unwrap().clone();
+    task.abort();
+    (status, body, payloads)
+}
+
+#[tokio::test]
+async fn invalid_binary_preflight_returns_400_without_upload() {
+    for content in [String::new(), "😀".repeat(1001)] {
+        let options = super::super::send_gate::ManualOutboundOptions {
+            trusted_internal_outbox: true,
+            image_attachment: Some(Arc::new(
+                crate::services::message_outbox::StoredOutboxAttachment {
+                    filename: "image.png".into(),
+                    content_type: "image/png".into(),
+                    data: b"image".to_vec(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (status, _, payloads) = deliver_options_on_wire(
+            options,
+            &content,
+            "message_outbox:scheduled_message:test:channel:7001",
+            "message_outbox:45:deliver",
+        )
+        .await;
+        assert_eq!(
+            status, "400 Bad Request",
+            "invalid image preflight must be a permanent error"
+        );
+        assert!(
+            payloads.is_empty(),
+            "invalid image must make zero HTTP posts"
+        );
+    }
 }

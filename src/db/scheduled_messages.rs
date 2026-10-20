@@ -15,8 +15,12 @@ use uuid::Uuid;
 
 mod agent;
 mod attachments;
+mod image_lifecycle;
 use attachments::{IMAGE_COLUMNS, LIST_IMAGE_COLUMNS};
 pub use attachments::{MAX_IMAGE_BYTES, ScheduledMessageImage, ScheduledMessageImageAttachment};
+pub use image_lifecycle::{
+    get_scheduled_message_metadata_pg, image_rollout_ready_pg, reclaim_terminal_images_pg,
+};
 mod api_json;
 mod discord_mentions;
 mod external_delivery;
@@ -226,7 +230,7 @@ pub async fn find_active_by_dedupe_key_pg(
     dedupe_key: &str,
 ) -> Result<Option<ScheduledMessageRow>, sqlx::Error> {
     sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
-        "SELECT {DEFINITION_COLUMNS}, {IMAGE_COLUMNS} FROM scheduled_messages
+        "SELECT {DEFINITION_COLUMNS}, {LIST_IMAGE_COLUMNS} FROM scheduled_messages
          WHERE dedupe_key = $1 AND status IN ('scheduled', 'firing')
          LIMIT 1"
     )))
@@ -328,7 +332,7 @@ pub async fn update_scheduled_message_pg(
         .push(" AND status = 'scheduled' RETURNING ")
         .push(DEFINITION_COLUMNS)
         .push(", ")
-        .push(IMAGE_COLUMNS);
+        .push(LIST_IMAGE_COLUMNS);
     builder.build_query_as().fetch_optional(pool).await
 }
 

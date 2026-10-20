@@ -8,22 +8,14 @@ pub(super) async fn deliver<C: ManualOutboundClient>(
     notification: ManualNotification<'_>,
     attachment: OutboxAttachment<'_>,
 ) -> ManualDeliveryOutcome {
-    let Some(nonce) = notification
-        .delivery_id
-        .and_then(|id| headless_nonce::image_delivery_nonce(notification.source, id))
-    else {
-        return ManualDeliveryOutcome::Failed {
-            detail: "binary attachment requires a durable scheduled-message outbox identity".into(),
-        };
+    let nonce = match preflight(notification, attachment) {
+        Ok(nonce) => nonce,
+        Err(detail) => {
+            return ManualDeliveryOutcome::Failed {
+                detail: detail.into(),
+            };
+        }
     };
-    if !(1..=crate::db::scheduled_messages::MAX_IMAGE_BYTES).contains(&attachment.data.len())
-        || crate::services::discord::formatting::discord_message_units(notification.content)
-            > DISCORD_HARD_LIMIT_CHARS
-    {
-        return ManualDeliveryOutcome::Failed {
-            detail: "invalid binary attachment size or content length".into(),
-        };
-    }
     match client
         .post_binary_attachment(
             notification.channel_id,
@@ -41,6 +33,24 @@ pub(super) async fn deliver<C: ManualOutboundClient>(
             detail: error.to_string(),
         },
     }
+}
+
+pub(super) fn preflight(
+    notification: ManualNotification<'_>,
+    attachment: OutboxAttachment<'_>,
+) -> Result<String, &'static str> {
+    let nonce = notification
+        .delivery_id
+        .and_then(|id| headless_nonce::image_delivery_nonce(notification.source, id))
+        .ok_or("binary attachment requires a durable scheduled-message outbox identity")?;
+    if !(1..=crate::db::scheduled_messages::MAX_IMAGE_BYTES).contains(&attachment.data.len())
+        || notification.content.trim().is_empty()
+        || crate::services::discord::formatting::discord_message_units(notification.content)
+            > DISCORD_HARD_LIMIT_CHARS
+    {
+        return Err("invalid binary attachment size or content length");
+    }
+    Ok(nonce)
 }
 
 impl SerenityManualOutboundClient {
