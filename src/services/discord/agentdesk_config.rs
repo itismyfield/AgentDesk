@@ -6,7 +6,7 @@ use poise::serenity_prelude::ChannelId;
 use super::DispatchProfile;
 use super::meeting::{MeetingAgentConfig, MeetingConfig, SummaryAgentConfig, SummaryAgentRule};
 use super::settings::{
-    PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_memory_settings,
+    PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_agent_memory_settings,
 };
 use crate::config::{
     AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config, MeetingAgentEntry,
@@ -99,7 +99,6 @@ pub(crate) fn ensure_agent_setup_config(
     }
     let mut channels = AgentChannels::default();
     channels.insert(&input.provider, channel);
-
     let mut next_agents = config.agents.clone();
     next_agents.push(AgentDef {
         id: input.agent_id.clone(),
@@ -116,6 +115,7 @@ pub(crate) fn ensure_agent_setup_config(
         department: None,
         avatar_emoji: None,
         preferred_intake_node_labels: None,
+        memory_group: None,
     });
 
     if let Err(error) = crate::voice::commands::validate_agent_alias_collisions(&next_agents) {
@@ -153,7 +153,7 @@ fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -
         && channel.provider().as_deref() == Some(input.provider.as_str())
 }
 
-fn load_agentdesk_config() -> Option<Config> {
+pub(super) fn load_agentdesk_config() -> Option<Config> {
     load_agentdesk_config_with_path().map(|(config, _)| config)
 }
 
@@ -315,6 +315,10 @@ pub(super) struct ChannelWorktreeIsolationPolicy {
     pub(super) channel_provider: Option<ProviderKind>,
 }
 
+#[cfg(test)]
+#[path = "agentdesk_memory_tests.rs"]
+mod memory_tests;
+
 fn role_binding_from_channel(
     agent: &crate::config::AgentDef,
     provider_key: &str,
@@ -333,7 +337,7 @@ fn role_binding_from_channel(
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
         quality_feedback_injection_enabled: channel.quality_feedback_injection().unwrap_or(true),
         auth_profile: "default".to_string(),
-        memory: resolve_memory_settings(None, None),
+        memory: resolve_agent_memory_settings(Some(agent)),
     }
 }
 
@@ -347,7 +351,7 @@ fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKi
         peer_agents_enabled: true,
         quality_feedback_injection_enabled: true,
         auth_profile: "default".to_string(),
-        memory: resolve_memory_settings(None, None),
+        memory: resolve_agent_memory_settings(Some(agent)),
     }
 }
 
@@ -465,7 +469,7 @@ fn meeting_agent_from_entry(
                 reasoning_effort: None,
                 workspace: default_workspace(role_id),
                 peer_agents_enabled: true,
-                memory: resolve_memory_settings(None, None),
+                memory: resolve_agent_memory_settings(agent),
             })
         }
         MeetingAgentEntry::Detailed(def) => {
@@ -504,7 +508,7 @@ fn meeting_agent_from_entry(
                 reasoning_effort: None,
                 workspace: default_workspace(&def.role_id),
                 peer_agents_enabled: true,
-                memory: resolve_memory_settings(None, None),
+                memory: resolve_agent_memory_settings(agent),
             })
         }
     }
@@ -520,13 +524,7 @@ pub(super) fn resolve_role_binding(
     {
         return Some(role_binding_from_channel(agent, provider_key, channel));
     }
-    // Voice channels are configured via `agents[].voice.channel_id`, not
-    // `agents[].channels`, so `find_channel_binding` never matches them. Without
-    // a role-map entry the voice transcript announce to the voice channel is
-    // rejected with 403 `channel not in role-map`, which makes voice_barge_in
-    // refuse the direct voice turn fallback and the agent never replies. Treat a
-    // configured voice channel as role-mapped to its owning agent so the
-    // announce + dispatch path is authorized automatically when voice is set up.
+    // Voice channels bind through the owning agent rather than provider channels.
     resolve_voice_channel_role_binding(&config, channel_id)
 }
 
@@ -866,7 +864,7 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
                     reasoning_effort: None,
                     workspace: default_workspace(&agent.id),
                     peer_agents_enabled: true,
-                    memory: resolve_memory_settings(None, None),
+                    memory: resolve_agent_memory_settings(Some(agent)),
                 })
                 .collect()
         } else {

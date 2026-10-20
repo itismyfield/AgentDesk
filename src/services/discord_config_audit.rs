@@ -1309,7 +1309,6 @@ mod db_agent_drift_tests {
             discord_channel_cdx: cdx.map(str::to_string),
         }
     }
-
     fn yaml_agent_with_provider_channel(provider: &str, provider_channel: &str) -> AgentDef {
         AgentDef {
             id: provider.to_string(),
@@ -1334,6 +1333,7 @@ mod db_agent_drift_tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 
@@ -1461,7 +1461,6 @@ mod voice_alias_precheck_tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
     }
-
     fn make_agent(id: &str, name: &str, channel_name: Option<&str>) -> AgentDef {
         let mut channels = AgentChannels::default();
         channels.insert(
@@ -1499,6 +1498,7 @@ mod voice_alias_precheck_tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 

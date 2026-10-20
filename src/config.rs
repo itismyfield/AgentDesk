@@ -10,6 +10,8 @@ mod runtime_settings;
 mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
+mod agent_memory;
+pub use agent_memory::AgentDef;
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 pub(crate) mod runtime_profile;
@@ -360,42 +362,6 @@ where
                 .collect::<Vec<_>>()
         }),
     )
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct AgentDef {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub name_ko: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_word: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub voice_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitivity_mode: Option<BargeInSensitivity>,
-    #[serde(default, skip_serializing_if = "AgentVoiceConfig::is_default")]
-    pub voice: AgentVoiceConfig,
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
-    pub channels: AgentChannels,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[serde(default)]
-    pub department: Option<String>,
-    #[serde(default)]
-    pub avatar_emoji: Option<String>,
-    /// Cluster intake node-affinity labels (#3667). When set and non-empty,
-    /// intake for this agent's channels is routed to an online worker node whose
-    /// labels satisfy this list; `Some([])` means no preference (intake stays on
-    /// the leader). `None` (key absent from yaml) leaves any existing DB value
-    /// untouched on sync, so an out-of-band label is never wiped. Maps to the
-    /// `agents.preferred_intake_node_labels` JSONB column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_intake_node_labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

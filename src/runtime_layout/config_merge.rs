@@ -318,6 +318,7 @@ fn ensure_config_agent(
         department: None,
         avatar_emoji: None,
         preferred_intake_node_labels: None,
+        memory_group: None,
     });
     (config.agents.len() - 1, true)
 }
