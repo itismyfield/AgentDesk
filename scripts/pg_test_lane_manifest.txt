@@ -670,6 +670,7 @@ services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
 services::dispatches::outbox_queue::replay_hold_tests
 services::dispatches::wait_queue::tests
 services::herdr_launch::tests
+services::herdr_launch::tests::retired_hold_tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
 services::maintenance::jobs::worktree_orphan_sweep::keep_set_query_failure_fail_closed_pg_tests
@@ -2434,6 +2435,9 @@ services::herdr_launch::tests::herdr_launch_probes_a_pending_pane_without_eviden
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
 services::herdr_launch::tests::herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
+services::herdr_launch::tests::retired_hold_tests::retired_launch_normal_fresh_once_and_live_rows_untouched_pg
+services::herdr_launch::tests::retired_hold_tests::retired_launch_owner_mismatch_keeps_n1_hold_and_row_pg
+services::herdr_launch::tests::retired_hold_tests::retired_launch_requires_absent_n1_hold_durability_before_n2_create_pg
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_pg_reference_gate
 services::maintenance::jobs::db_retention::tests::db_retention_context_snapshot_terminal_reclaim
 services::maintenance::jobs::db_retention::tests::db_retention_job_reports_intake_outbox_candidates_without_deleting

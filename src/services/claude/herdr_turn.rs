@@ -320,7 +320,7 @@ fn logged_session(target: &BindingTarget) -> Option<&str> {
 }
 
 /// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
-fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+pub(crate) fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
@@ -347,17 +347,26 @@ pub(crate) enum HoldRelease {
 /// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
 /// as does a Codex cold start once its launch's own source is bound.
 pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
-    let path = match hold_path(nonce) {
-        Ok(path) => path,
+    let (path, removed) = match unlink_hold(nonce) {
+        Ok(unlinked) => unlinked,
         Err(error) => return HoldRelease::Kept(error),
     };
+    if !removed {
+        return HoldRelease::Released;
+    }
+    match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
+        Ok(()) => HoldRelease::Released,
+        Err(error) => HoldRelease::NotDurable(error.to_string()),
+    }
+}
+
+/// Unlinks the same validated nonce path for ordinary and durable hold release.
+pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
+    let path = hold_path(nonce)?;
     match std::fs::remove_file(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HoldRelease::Released,
-        Err(error) => HoldRelease::Kept(error.to_string()),
-        Ok(()) => match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
-            Ok(()) => HoldRelease::Released,
-            Err(error) => HoldRelease::NotDurable(error.to_string()),
-        },
+        Ok(()) => Ok((path, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, false)),
+        Err(error) => Err(error.to_string()),
     }
 }
 
