@@ -50,6 +50,7 @@ fn bridge(
     let mut context = seed_context("", row);
     context.provider = ProviderKind::Claude;
     context.user_msg_id = Some(MessageId::new(channel.get() + 1));
+    context.current_msg_id = Some(MessageId::new(channel.get() + 2));
     context.gateway = shown.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     discord::increment_global_active(shared, "native_stop_contract");
