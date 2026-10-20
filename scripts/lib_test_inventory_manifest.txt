@@ -11764,6 +11764,7 @@ services::routines::agent_executor::reliability::tests::provider_error_from_comp
 services::routines::agent_executor::reliability::tests::terminal_turn_error_settles_only_for_fresh_runs
 services::routines::agent_executor::start_deferral::tests::a_start_held_back_by_a_watcher_recovery_is_deferred_not_failed
 services::routines::agent_executor::start_deferral::tests::busy_mailbox_and_unready_runtime_starts_are_deferred_not_failed
+services::routines::agent_executor::start_deferral::tests::dm_reservation_failures_keep_the_dm_user_and_defer_only_transient_causes
 services::routines::agent_executor::tests::assistant_preview_caps_long_messages
 services::routines::agent_executor::tests::attempts_include_fallback_detects_kind
 services::routines::agent_executor::tests::claimed_failure_plan_falls_back_when_retry_disabled
@@ -11901,6 +11902,7 @@ services::routines::migrated::tests::zprofile_paths_teardown_present
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg
 services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_per_streak_pg
+services::routines::reliability_pg_tests::dm_agent_start_before_runtime_is_ready_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::runtime::tests::agent_action_detail_includes_checkpoint_decision_summary
