@@ -759,6 +759,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::headless_delivery::production_seam_tests::outbox_enqueue_error_reaches_cancel_check_then_direct_fallback
   services::discord::turn_bridge::intake_settlement::tests::classify_preserve_precedes_every_terminal_receipt
   services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
+  services::discord::turn_bridge::intake_settlement::tests::settlement_wiring_guard_rejects_commented_calls_and_counts_coded_copies
   services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
@@ -774,6 +775,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
+  services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::source_guard_tests::slash_stop_guards_reject_commented_steps_and_count_coded_calls
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io

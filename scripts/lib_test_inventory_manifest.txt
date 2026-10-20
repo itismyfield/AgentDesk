@@ -7225,7 +7225,10 @@ services::discord::router::response_format::tests::voluntary_feedback_reminder_i
 services::discord::router::response_format::tests::wip_warning_is_injected_into_reply_context_when_uncommitted_changes_exist
 services::discord::router::response_format::tests::wrap_user_prompt_with_author_keeps_single_line_body_inline
 services::discord::router::response_format::tests::wrap_user_prompt_with_author_preserves_multiline_body
+services::discord::router::source_guard_support::arm_bodies_skip_pattern_braces_and_refuse_expression_arms
 services::discord::router::source_guard_support::as_written_matching_skips_prose_and_quoted_copies
+services::discord::router::source_guard_support::compact_keeps_literal_bytes_and_drops_only_outside_whitespace
+services::discord::router::source_guard_support::literal_needle_parts_match_whole_literal_tokens_only
 services::discord::router::source_guard_support::literal_only_needles_fail_closed
 services::discord::runtime_bootstrap::bootstrap_tests::bootstrap_session_reset_pending_excludes_restored_model_overrides
 services::discord::runtime_bootstrap::bootstrap_tests::delete_stale_queued_placeholder_cards_with_deletes_only_supplied_stale_cards
@@ -9682,6 +9685,8 @@ services::discord::turn_bridge::bridge_entry_persist::tests::saved_competing_bin
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_exit_reconcile_preserves_first_pin_across_registry_replacement
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_reconciliation_preserves_existing_anchor_edit_cache
 services::discord::turn_bridge::bridge_entry_persist::tests::seeding_the_bridge_local_body_from_a_durable_row_is_recorded
+services::discord::turn_bridge::bridge_entry_persist::tests::source_guard_tests::bridge_entry_bans_count_coded_calls_but_not_comments
+services::discord::turn_bridge::bridge_entry_persist::tests::source_guard_tests::bridge_entry_guards_reject_commented_and_reordered_steps
 services::discord::turn_bridge::bridge_entry_persist::tests::stream_authority_loss_relinquishes_guards_before_visible_finalization
 services::discord::turn_bridge::bridge_entry_persist::tests::the_first_reconcile_after_a_seed_is_structurally_silent
 services::discord::turn_bridge::bridge_entry_persist::tests::the_reconcile_entry_point_records_the_body_it_adopts
@@ -9779,6 +9784,7 @@ services::discord::turn_bridge::completion_guard::span_tests::concurrent_complet
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_covers_work_dispatch_types_including_plan
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_excludes_side_paths_and_review_family
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_requires_live_status
+services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::bridge_entry_contract_rejects_commented_hand_offs_and_counts_coded_entries
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::bridge_entry_sites_pin_mailbox_token_registration_contract
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::empty_nonce_never_proves_ownership
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::five_row_decision_table_is_fail_closed
@@ -9794,6 +9800,7 @@ services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_flags_and_outcomes
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_suppresses_o_owned_and_unresolved_identity_summaries
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::suspended_panel_projection_rechecks_summary_authority_without_consuming_the_latch
+services::discord::turn_bridge::context::tests::completion_waiter_guard_follows_code_not_comments_or_quoted_copies
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded
 services::discord::turn_bridge::context_window::tests::a_declined_done_records_nothing
@@ -9869,6 +9876,7 @@ services::discord::turn_bridge::intake_settlement::tests::settle_is_idempotent_a
 services::discord::turn_bridge::intake_settlement::tests::settlement_rolls_back_with_caller_transaction_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_row_lock_timeout_is_swallowed_and_counted_pg
 services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
+services::discord::turn_bridge::intake_settlement::tests::settlement_wiring_guard_rejects_commented_calls_and_counts_coded_copies
 services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg
 services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg
@@ -9895,6 +9903,7 @@ services::discord::turn_bridge::recovery_text::tests::turn_end_wip_warning_stash
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_is_not_consumed_by_other_provider_pg
 services::discord::turn_bridge::recovery_text::tests::voluntary_feedback_reminder_stash_take_and_put_back_round_trips_pg
 services::discord::turn_bridge::response_delivery::headless_completion_footer_tests::headless_enqueue_success_registers_completion_footer_text
+services::discord::turn_bridge::response_delivery::headless_completion_footer_tests::headless_footer_guard_rejects_commented_and_moved_footer_writes
 services::discord::turn_bridge::response_delivery::streaming_edit_text_tests::empty_response_notice_is_delivery_only_not_history_payload
 services::discord::turn_bridge::response_delivery::tests::korean_answer_under_the_character_limit_stays_one_message
 services::discord::turn_bridge::response_delivery::tests::long_authoritative_done_after_rollover_replays_full_body
@@ -10010,6 +10019,7 @@ services::discord::turn_bridge::stream_loop::content_arms::provider_error_presen
 services::discord::turn_bridge::stream_loop::content_arms::tests::active_usage_compact_gate_allows_managed_and_external_interactive_turns
 services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification::tests::folded_readiness_timeout_from_error_arm_is_requeued_and_skips_quiescence
 services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification::tests::readiness_timeout_idle_at_prompt_marker_preserves_live_session
+services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification::tests::wiring_joints_reject_commented_fields_and_out_of_scope_copies
 services::discord::turn_bridge::stream_loop::expected_identity_tests::deterministic_tool_divergence_releases_done_and_cancel_without_requeue
 services::discord::turn_bridge::stream_loop::expected_identity_tests::disconnected_receiver_with_done_behind_retained_retry_is_backed_off
 services::discord::turn_bridge::stream_loop::expected_identity_tests::disconnected_runtime_ready_retry_ahead_of_done_is_backed_off_before_done
@@ -10021,6 +10031,7 @@ services::discord::turn_bridge::stream_loop::expected_identity_tests::identity_m
 services::discord::turn_bridge::stream_loop::expected_identity_tests::no_handoff_keeps_original_expected_identity_and_stream_tick_behavior
 services::discord::turn_bridge::stream_loop::expected_identity_tests::retained_retry_policies_are_wired_to_both_cancel_boundaries_and_backoff
 services::discord::turn_bridge::stream_loop::expected_identity_tests::saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush
+services::discord::turn_bridge::stream_loop::expected_identity_tests::stream_loop_retry_and_handoff_guards_reject_commented_and_reordered_steps
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_on_error_blocks_profile_and_takeover_before_any_recovery
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_checkpoint_wakeup_positive_stop_off_and_absent_pg
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
@@ -10034,6 +10045,7 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_too
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_watcher_self_handoff_fence_records_the_durable_body_it_adopts
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arm_locals_follow_the_durable_row_after_a_guarded_save
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences
+services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_projection_guard_rejects_commented_and_reordered_steps_per_arm
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
@@ -10054,6 +10066,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_competing_bind_wins_dirty_flush
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_flush_persists_and_clears_dirty
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
+services::discord::turn_bridge::stream_tick::guarded_persist::tests::source_guard_tests::production_tick_guard_rejects_commented_and_reordered_steps
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
 services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_is_edited_into_the_panel_below_o_posts
@@ -10114,6 +10127,7 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_short_fallback_exact_receipt_5071
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::prepare_bridge_lease_decision_table_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::controller_bridge_acquire_sites_mint_fresh_attempts
+services::discord::turn_bridge::terminal_controller_cutover::tests::source_guard_tests::acquire_site_guard_rejects_commented_mints_and_counts_coded_copies
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
 services::discord::turn_bridge::terminal_delivery::s2a1_bridge_tests::s2a1_bridge_optional_session_noop_movement_and_heartbeat_are_preserved
 services::discord::turn_bridge::terminal_delivery::s2a1_bridge_tests::s2a1_bridge_real_lease_outcomes_preserve_delivery_policy_without_certificate
@@ -10295,6 +10309,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_s
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::source_guard_tests::slash_stop_guards_reject_commented_steps_and_count_coded_calls
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::control_request_envelope_matches_agent_sdk_interrupt_shape
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::tui_pane_uses_escape_keystroke
 services::discord::turn_bridge::tmux_runtime::interrupt_policy::claude_session_preserving_interrupt_tests::wrapper_pane_uses_stream_json_control_request

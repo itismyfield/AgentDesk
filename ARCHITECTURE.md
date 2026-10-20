@@ -2074,6 +2074,9 @@ src/
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
+│   │   │   ├── bridge_entry_persist/
+│   │   │   │   └── tests/
+│   │   │   │       └── source_guard_tests.rs
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
@@ -2137,6 +2140,7 @@ src/
 │   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── footer_retirement_raw_history_tests.rs
 │   │   │   │   ├── guarded_persist.rs
+│   │   │   │   ├── guarded_persist_source_guard_tests.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
@@ -2147,6 +2151,8 @@ src/
 │   │   │   │   ├── rollover_guard.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
@@ -2184,6 +2190,7 @@ src/
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
 │   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
+│   │   │   │   ├── codex_stop_source_guard_tests.rs
 │   │   │   │   ├── herdr_http_cancel_tests.rs
 │   │   │   │   ├── herdr_stop_pane_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
