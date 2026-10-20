@@ -108,7 +108,7 @@ pub(in crate::services::discord) fn discard_legacy_waiting(
             }
         });
         let unlink = || {
-            match std::fs::remove_file(entry.path()) {
+            match super::unlink_record_file(&entry.path()) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),

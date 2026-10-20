@@ -355,8 +355,12 @@ fn delete_locked(record: &TuiDirectPendingStart) {
     mark_absent(&record.key());
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
-        let _ = std::fs::remove_file(path);
+        let _ = unlink_record_file(&path);
     }
+}
+
+fn unlink_record_file(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
 }
 
 /// Delete the record of a turn whose output is already committed so neither its
