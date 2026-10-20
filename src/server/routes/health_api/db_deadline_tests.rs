@@ -98,6 +98,18 @@ impl Db {
         }
         tokio::time::sleep(RTT * 2 + Duration::from_millis(100)).await;
     }
+
+    /// Waits until every pooled connection is idle again: sqlx pings a connection on release,
+    /// so for one round trip after a response its connections cannot be reused.
+    async fn settle(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while self.pool.num_idle() < self.pool.size() as usize {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("every connection returns to the idle queue");
+    }
 }
 
 fn app(
@@ -383,6 +395,8 @@ async fn health_handler_parallel_db_preserves_complete_results() {
     let registry = registry_with_mailboxes(&channels).await;
     let addr = serve(app(&db.pool, Some(registry), Default::default())).await;
     for path in ["/health/detail", "/health"] {
+        // Each request starts on the warm pool, not on new connections opened over the slow link.
+        db.settle().await;
         let (_, body, elapsed) = http_get(addr, path).await;
         assert!(elapsed < BUDGET, "{path} {elapsed:?}: {body}");
         assert_eq!(
