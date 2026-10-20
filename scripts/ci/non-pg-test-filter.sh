@@ -455,6 +455,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+  services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
+  services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
   services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
   services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
