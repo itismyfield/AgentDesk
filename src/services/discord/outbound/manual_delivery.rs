@@ -31,9 +31,10 @@ use crate::services::dispatches::discord_delivery::{
 mod discord_units_tests;
 mod headless_nonce;
 mod resolved;
+#[cfg(test)]
+use resolved::send_resolved_manual_message;
 pub(super) use resolved::{
     ManualNotification, ResolvedManualMessage, send_authorized_manual_message,
-    send_resolved_manual_message,
 };
 mod image_delivery;
 #[cfg(test)]

@@ -301,7 +301,7 @@ pub async fn get_scheduled_message(
     Path(id): Path<String>,
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
-    let row = match db::get_scheduled_message_metadata_pg(pool, &id).await {
+    let row = match db::get_scheduled_message_pg(pool, &id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return Err(app_error(
