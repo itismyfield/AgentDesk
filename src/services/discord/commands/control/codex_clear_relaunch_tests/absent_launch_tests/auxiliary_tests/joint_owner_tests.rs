@@ -210,6 +210,38 @@ async fn make_binding_only(fixture: &CanaryFixture) {
     .await
     .unwrap_or_else(|reason| panic!("binding-only canonical name was not resolved: {reason:?}"));
     assert_eq!(derived, CANARY_TMUX);
+    let raw = dedupe::binding_events::records_strict(CANARY_CHANNEL)
+        .unwrap()
+        .unwrap();
+    let prior = raw
+        .iter()
+        .find(|event| {
+            event.tmux_session == CANARY_TMUX
+                && event.execution_nonce.as_deref()
+                    == Some(fixture.context.execution_nonce.as_str())
+                && match &event.new {
+                    dedupe::binding_events::BindingTarget::Source(source)
+                    | dedupe::binding_events::BindingTarget::Resolved { source, .. } => {
+                        source == &fixture.old_source
+                    }
+                    _ => false,
+                }
+        })
+        .expect("the actual N2 hook must retain its exact durable Source binding");
+    assert!(!dedupe::codex_verified_event_allowed(prior));
+    use crate::services::tui_o::writer::binding::{
+        BindingEvents, BindingRecord, ChannelBindingLog,
+    };
+    let filtered = ChannelBindingLog::new(
+        CANARY_CHANNEL,
+        crate::services::tui_o::shadow::ShadowProvider::Codex,
+    )
+    .binding_events_since(CANARY_CHANNEL, 0)
+    .unwrap();
+    assert!(filtered.iter().any(|event| {
+        event.seq == prior.seq && matches!(&event.record, BindingRecord::Rejected { .. })
+    }));
+    eprintln!("BUNDLE_NO_CORE_BINDING raw_exact_n2=1 source_permission=0 filtered_rejected=1");
     let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
     let unbound =
         activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
