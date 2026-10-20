@@ -96,15 +96,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         {
                             return false;
                         }
+                        let prepared = self
+                            .writer
+                            .store()
+                            .ledger()
+                            .unresolved()
+                            .map(|(serial, _)| serial);
                         self.writer.alarm(WriterAlarm::WaitingTooLong {
                             incident: format!("new_root_waiting:{}", uuid::Uuid::new_v4()),
                             ready: self.owed.len(),
-                            prepared: self
-                                .writer
-                                .store()
-                                .ledger()
-                                .unresolved()
-                                .map(|(serial, _)| serial),
+                            prepared,
                         });
                     }
                 }
