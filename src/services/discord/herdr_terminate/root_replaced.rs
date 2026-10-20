@@ -24,7 +24,7 @@ pub(crate) enum Recovery {
 #[derive(Clone, Debug)]
 pub(crate) struct RootReplacedCandidate(HostedObservation);
 impl RootReplacedCandidate {
-    pub(crate) fn from_refusal(
+    pub(in crate::services::discord) fn from_refusal(
         row: &HostedObservation,
         attach: &HerdrSourceAttach,
     ) -> Option<Self> {
