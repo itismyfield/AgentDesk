@@ -42,8 +42,7 @@ const LIST_STALE_DISPATCHED_SQL: &str = "SELECT id FROM public.intake_outbox
 const LIST_STALE_SPAWNED_SQL: &str = "SELECT id FROM public.intake_outbox
  WHERE status = $1 AND spawned_at < $2 ORDER BY spawned_at ASC, id ASC LIMIT $3";
 
-pub(crate) const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str =
-    "s.channel_id = io.channel_id AND s.status = 'turn_active'";
+const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str = "s.status = 'turn_active'";
 
 /// Builds the shared durable-session liveness classification used by both the
 /// sweep's cheap preflight and its authoritative terminal CAS.
@@ -57,10 +56,7 @@ pub(crate) const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str =
 /// turns normally leave it NULL. Migration 0028's
 /// `sessions_status_known_check` rejects the legacy `working` status, so the
 /// durable liveness scope does not include it.
-pub(crate) fn durable_inflight_liveness_case_sql(
-    fresh_param: usize,
-    absence_param: usize,
-) -> String {
+fn durable_inflight_liveness_case_sql(fresh_param: usize, absence_param: usize) -> String {
     format!(
         "CASE
            WHEN s.last_heartbeat >= ${fresh_param} THEN 2
@@ -68,6 +64,74 @@ pub(crate) fn durable_inflight_liveness_case_sql(
            ELSE 0
          END"
     )
+}
+
+/// Zero matching active rows are Absent so dead turns release the channel fence.
+/// Presence counts explain that drain decision without changing its grade.
+pub(crate) fn durable_inflight_liveness_sql() -> String {
+    let liveness = durable_inflight_liveness_case_sql(2, 3);
+    let scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
+    format!(
+        "SELECT ROW(count(s.id), count(s.id) FILTER (WHERE {scope}),
+                    COALESCE(MAX({liveness}) FILTER (WHERE {scope}), 0)::smallint)
+           FROM public.intake_outbox io
+           LEFT JOIN public.sessions s ON s.channel_id = io.channel_id
+          WHERE io.id = $1"
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbsentBasis {
+    NoSessionRow,
+    NoTurnActiveRow,
+    StaleHeartbeat,
+}
+
+impl AbsentBasis {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSessionRow => "no_session_row",
+            Self::NoTurnActiveRow => "no_turn_active_row",
+            Self::StaleHeartbeat => "stale_heartbeat",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DurableInflightLiveness {
+    pub(crate) grade: i16,
+    absent_basis: Option<AbsentBasis>,
+}
+
+impl From<(i64, i64, i16)> for DurableInflightLiveness {
+    fn from((channel_rows, turn_active_rows, grade): (i64, i64, i16)) -> Self {
+        let absent_basis = if grade == 0 {
+            Some(match (channel_rows, turn_active_rows) {
+                (0, _) => AbsentBasis::NoSessionRow,
+                (_, 0) => AbsentBasis::NoTurnActiveRow,
+                _ => AbsentBasis::StaleHeartbeat,
+            })
+        } else {
+            None
+        };
+        Self {
+            grade,
+            absent_basis,
+        }
+    }
+}
+
+impl DurableInflightLiveness {
+    pub(crate) fn record_absence(self, outbox_id: i64, phase: &'static str) {
+        if let Some(basis) = self.absent_basis {
+            tracing::info!(
+                outbox_id,
+                phase,
+                absent_basis = basis.as_str(),
+                "intake delivery liveness permits fence drain"
+            );
+        }
+    }
 }
 
 fn normalize_limit(limit: i64) -> i64 {
@@ -194,7 +258,7 @@ async fn lock_and_classify_durable_inflight(
     outbox_id: i64,
     heartbeat_fresh: DateTime<Utc>,
     absence_cutoff: DateTime<Utc>,
-) -> Result<i16, sqlx::Error> {
+) -> Result<DurableInflightLiveness, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
         "SELECT s.id
            FROM public.intake_outbox io
@@ -207,20 +271,16 @@ async fn lock_and_classify_durable_inflight(
     .fetch_all(&mut *conn)
     .await?;
 
-    let liveness = durable_inflight_liveness_case_sql(2, 3);
-    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
-    let statement = format!(
-        "SELECT COALESCE(MAX({liveness}), 0)::smallint
-           FROM public.intake_outbox io
-           JOIN public.sessions s ON {session_scope}
-          WHERE io.id = $1"
-    );
-    sqlx::query_scalar(AssertSqlSafe(statement))
+    let statement = durable_inflight_liveness_sql();
+    let row: (i64, i64, i16) = sqlx::query_scalar(AssertSqlSafe(statement))
         .bind(outbox_id)
         .bind(heartbeat_fresh)
         .bind(absence_cutoff)
         .fetch_one(conn)
-        .await
+        .await?;
+    let liveness = DurableInflightLiveness::from(row);
+    liveness.record_absence(outbox_id, "cas");
+    Ok(liveness)
 }
 
 /// Locks and settles a strictly stale dispatched row as official `Unknown`.
@@ -241,7 +301,9 @@ pub(crate) async fn settle_dispatched_unknown(
     if !try_lock_dispatched_for_proof(conn, outbox_id).await? {
         return Ok(false);
     }
-    if lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await? != 0 {
+    let liveness =
+        lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await?;
+    if liveness.grade != 0 {
         return Ok(false);
     }
     let result = sqlx::query(
@@ -275,7 +337,9 @@ pub(crate) async fn settle_spawned_unknown(
     if locked.is_none() {
         return Ok(false);
     }
-    if lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await? != 0 {
+    let liveness =
+        lock_and_classify_durable_inflight(conn, outbox_id, heartbeat_fresh, cutoff).await?;
+    if liveness.grade != 0 {
         return Ok(false);
     }
     sqlx::query(

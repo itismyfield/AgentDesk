@@ -7273,6 +7273,8 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::spawned_sett
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_cutoffs_do_not_panic_for_extreme_values
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_defers_ambiguous_live_signal_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_is_bounded_and_ordered_and_logs_truncation_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_liveness_scope_and_boundaries_match_cas_pg
+services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_records_absent_basis_and_drains_fence_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_runs_after_restart_with_only_spawned_stamp_debt_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_runs_when_stage_lowered_but_open_dispatched_exists_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_settles_stale_dispatched_as_unknown_pg
