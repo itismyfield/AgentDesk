@@ -178,23 +178,39 @@ fn reasons(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A label, the arm's registry and config, the path, and the acquires it may make.
+type BudgetCase = (
+    &'static str,
+    Option<Arc<HealthRegistry>>,
+    crate::config::Config,
+    &'static str,
+    u64,
+);
+
+/// The global probe counters are shared, so their tests hold the counter lock on a plain thread.
+fn counted_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
 /// Acquires per request, counted by `ProbedPool` and, independently, by the statements the
 /// proxy saw executed, so a query outside a probe bracket still counts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn health_handler_acquire_budget_public_and_detail() {
+#[test]
+fn health_handler_acquire_budget_public_and_detail() {
     let _serial = hang_forensics::counter_test_lock();
+    counted_runtime().block_on(health_handler_acquire_budget_public_and_detail_body());
+}
+
+async fn health_handler_acquire_budget_public_and_detail_body() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = Db::start(Duration::ZERO, 8).await;
     db.seed_blocks().await;
     let mailboxes = registry_with_mailboxes(&[6_871_200_001, 6_871_200_002, 6_871_200_003]).await;
     let empty = || Some(Arc::new(HealthRegistry::new()));
-    let cases: [(
-        &str,
-        Option<Arc<HealthRegistry>>,
-        crate::config::Config,
-        &str,
-        u64,
-    ); 6] = [
+    let cases: [BudgetCase; 6] = [
         ("standalone public", None, Default::default(), "/health", 4),
         (
             "standalone detail",
@@ -564,9 +580,13 @@ async fn health_handler_snapshot_delay_marks_bulk_unmeasured() {
 
 /// A cut or cancelled request leaves no probe in flight and starts nothing afterwards, and the
 /// next request after the stall clears reads correct values through the same pool.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn health_handler_timeout_drops_all_db_guards() {
+#[test]
+fn health_handler_timeout_drops_all_db_guards() {
     let _serial = hang_forensics::counter_test_lock();
+    counted_runtime().block_on(health_handler_timeout_drops_all_db_guards_body());
+}
+
+async fn health_handler_timeout_drops_all_db_guards_body() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = Db::start(Duration::ZERO, 8).await;
     db.seed_blocks().await;

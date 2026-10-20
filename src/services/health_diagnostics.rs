@@ -182,7 +182,9 @@ pub async fn is_recent_cluster_worker(
 pub(crate) mod pg_wire_proxy;
 mod request_batch;
 mod session_state;
-pub(crate) use request_batch::{HealthKvMeta, SessionLookups, load_auto_queue_cleanup_backlog_pg};
+#[cfg(test)]
+pub(crate) use request_batch::load_auto_queue_cleanup_backlog_pg;
+pub(crate) use request_batch::{HealthKvMeta, SessionLookups};
 
 pub async fn load_channel_session_state(
     pg_pool: Option<&PgPool>,

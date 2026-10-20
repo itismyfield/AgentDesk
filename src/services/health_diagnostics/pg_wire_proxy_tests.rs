@@ -14,7 +14,6 @@ struct Shared {
     delay: Mutex<Duration>,
     stalls: Mutex<Vec<String>>,
     executions: Mutex<Vec<String>>,
-    connections: Mutex<usize>,
 }
 
 /// One proxy in front of one upstream database; dropping it stops accepting connections.
@@ -56,7 +55,6 @@ impl PgWireProxy {
                     else {
                         continue;
                     };
-                    *shared.connections.lock().unwrap() += 1;
                     let _ = client.set_nodelay(true);
                     let _ = server.set_nodelay(true);
                     tokio::spawn(relay(
@@ -116,10 +114,6 @@ impl PgWireProxy {
 
     pub(crate) fn reset_executions(&self) {
         self.shared.executions.lock().unwrap().clear();
-    }
-
-    pub(crate) fn connections_opened(&self) -> usize {
-        *self.shared.connections.lock().unwrap()
     }
 }
 
