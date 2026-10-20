@@ -313,6 +313,13 @@ fn binary_error_logging_uses_display_only() {
         include_str!("../../../scheduled_messages/push_handoff.rs"),
         include_str!("../../../scheduled_messages.rs"),
         include_str!("../../../../server/outbox_worker/claim.rs"),
+        include_str!("../../../../db/scheduled_messages/image_lifecycle.rs"),
+        include_str!("../../../maintenance/jobs/db_retention/image_retention.rs"),
+        include_str!("../../../../server/routes/scheduled_messages/create.rs"),
+        include_str!("../../../../server/routes/scheduled_messages/image_input.rs"),
+        include_str!("../../../../server/routes/scheduled_messages.rs"),
+        include_str!("../../../../db/scheduled_messages.rs"),
+        include_str!("../../../maintenance/jobs/db_retention.rs"),
     ] {
         assert!(
             !shorthand.is_match(source) && !interpolation.is_match(source),

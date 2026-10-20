@@ -25,6 +25,7 @@ fn image_upload_validates_filename_mime_magic_and_base64() {
         "a\r.png",
         "a\n.png",
         ".png",
+        "png",
         "한글.png",
     ] {
         let mut value = upload(b"\x89PNG\r\n\x1a\n");
@@ -216,6 +217,18 @@ async fn postgres_image_api_create_patch_rollout_and_redaction() {
         "dedupe conflict lookup must not load image bytes"
     );
     let path = format!("/scheduled-messages/{id}");
+    let (status, detail) = request(&app, "GET", &path, JsonValue::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["scheduledMessage"], response["scheduledMessage"]);
+    assert!(!detail.to_string().contains("dataBase64"));
+    let metadata = crate::db::scheduled_messages::get_scheduled_message_metadata_pg(&pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        metadata.image_attachment.unwrap().data.is_none(),
+        "GET metadata loader must omit bytes"
+    );
     sqlx::query("UPDATE worker_nodes SET capabilities=capabilities-'message_outbox' WHERE instance_id='mini'").execute(&pool).await.unwrap();
     assert_eq!(
         request(&app, "PATCH", &path, json!({"title":"gate closed"}))

@@ -42,11 +42,18 @@ pub(super) enum PushHandoffError {
 }
 
 pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
-    if fire.message.image_attachment.is_some()
-        && !db::image_rollout_ready_pg(pool).await.unwrap_or(false)
-    {
-        finish_terminal_failure(pool, fire, "image transport not enabled").await;
-        return;
+    if fire.message.image_attachment.is_some() {
+        match db::image_rollout_ready_pg(pool).await {
+            Ok(true) => {}
+            Ok(false) => {
+                finish_terminal_failure(pool, fire, "image transport not enabled").await;
+                return;
+            }
+            Err(_) => {
+                interrupt_for_retry(pool, fire, "image rollout check failed").await;
+                return;
+            }
+        }
     }
     match commit(pool, fire, now).await {
         Ok(PushHandoffOutcome::Committed) => {}

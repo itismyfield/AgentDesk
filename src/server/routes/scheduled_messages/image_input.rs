@@ -72,8 +72,9 @@ pub(super) fn decode(
     let content_type = upload.content_type.to_ascii_lowercase();
     let extension = upload
         .filename
-        .rsplit('.')
-        .next()
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map(|(_, extension)| extension)
         .unwrap_or("")
         .to_ascii_lowercase();
     if !matches!(

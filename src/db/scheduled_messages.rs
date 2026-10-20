@@ -213,6 +213,7 @@ pub fn is_unique_violation(error: &sqlx::Error) -> bool {
     )
 }
 
+#[cfg(test)]
 pub async fn get_scheduled_message_pg(
     pool: &PgPool,
     id: &str,

@@ -1670,6 +1670,39 @@ async fn postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff() {
 }
 
 #[tokio::test]
+async fn postgres_image_rollout_query_error_interrupts_and_rearms_parent() {
+    let (pg_db, pool) = create_test_pool("smsg_image_gate_error", "image gate query retry").await;
+    let message = insert_due_push_message(&pool).await;
+    sqlx::query("UPDATE scheduled_messages SET image_filename='image.png', image_content_type='image/png', image_data=$1, schedule='@every 10m' WHERE id=$2")
+        .bind(&b"image bytes"[..]).bind(&message.id).execute(&pool).await.unwrap();
+    let fire = claim_one(&pool, "image-gate-error-worker").await;
+    sqlx::query("ALTER TABLE worker_nodes RENAME TO unavailable_worker_nodes")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(db::image_rollout_ready_pg(&pool).await.is_err());
+    fire_push(&pool, &fire, Utc::now()).await;
+    let status: (String, String, Option<String>) = sqlx::query_as("SELECT sm.status, d.status, d.error FROM scheduled_messages sm JOIN scheduled_message_deliveries d ON d.scheduled_message_id=sm.id WHERE sm.id=$1")
+        .bind(&message.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        status.1,
+        db::DELIVERY_INTERRUPTED,
+        "gate query error must interrupt delivery for retry"
+    );
+    assert_eq!(
+        status.0,
+        db::STATUS_SCHEDULED,
+        "gate query error must rearm the recurring parent"
+    );
+    assert_eq!(status.2.as_deref(), Some("image rollout check failed"));
+    let handoffs: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM message_outbox), (SELECT COUNT(*) FROM scheduled_external_delivery_outbox)")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(handoffs, (0, 0), "gate query error must make zero handoffs");
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes() {
     let (pg_db, pool) =
         create_test_pool("agentdesk_smsg_image_handoff", "loaded image handoff").await;

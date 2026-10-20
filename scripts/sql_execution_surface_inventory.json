@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "e40255fa4e752a031fc389991b6db35aa821db3c",
+  "measured_at_sha": "60593de1f6ea6b36e1fe2e52ad12f6b60272d750",
   "records": [
     {
       "root": "migrations/postgres",
@@ -41850,6 +41850,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:14301a9fffa2591527a27b54e36935909714a34756e9158f900546b23349dd8a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:1d8f1266cc3054022f3ee438b9249e88a8e5f2588e5f6ef7006551a43d0178b1"
     },
     {
@@ -42036,6 +42045,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fc335c4f2447fe48035c4a0867534456ba26f035537ed74a0294cc903e824bd6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
@@ -42067,6 +42085,24 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:407aeb76dd5d28ff0b067cba79bd239b43f6f3daac24731b22ed6d540e12f152"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7e2959baa082548d3429d3fe22898569d026dac87c9cd8b35a6a89b88e369201"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bd9455a64d12bf99dbed9a9fdf4b9d2aedbe2e26827765202aadeb67cec95061"
     },
     {
       "root": "src",
