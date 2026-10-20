@@ -223,11 +223,7 @@ async fn attempt(
     }
     let message = live.message.id;
     let guard = inject_disposition::claim_source(provider, message, Instant::now())?;
-    if crate::services::discord::mailbox_snapshot(shared, live.channel_id)
-        .await
-        .cancel_token
-        .is_none()
-    {
+    if !shared.has_inject_turn(provider, live.channel_id).await {
         return None;
     }
     let prepare = super::super::message_handler::prepare_busy_inject_uploads;

@@ -195,6 +195,11 @@ async fn idle_bundle_precheck_never_reads_storage_or_retains_files_pg() {
         register_inject_runtime(&HealthRegistry::new(), &[channel], Some(pool.clone())).await;
     shared.restart.reconcile_done.store(true, Relaxed);
     let pane = InjectPane::new(channel, "all");
+    pane.idle();
+    pane.set(
+        InjectPane::TRANSCRIPT,
+        "{\"type\":\"result\",\"subtype\":\"success\"}\n",
+    );
     let _gate = test_support::open_gate(channel);
     let message = message(channel, "inspect", 1);
     let uploads = [Upload::Bundle(BundleRef {

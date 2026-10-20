@@ -329,6 +329,45 @@ fn busy_turn(
     }
 }
 
+impl SharedData {
+    /// Checks the holder or bound transcript without preparing uploads or touching the pane.
+    pub(crate) async fn has_inject_turn(
+        &self,
+        provider: &ProviderKind,
+        channel: ChannelId,
+    ) -> bool {
+        if crate::services::discord::mailbox_snapshot(self, channel)
+            .await
+            .cancel_token
+            .is_some()
+        {
+            return true;
+        }
+        let runtime = match provider {
+            ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+            ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
+            _ => return false,
+        };
+        let row = crate::services::discord::inflight::load_inflight_state_read_only(
+            provider,
+            channel.get(),
+        );
+        let watcher = self.tmux_watchers.channel_binding(&channel);
+        let named = channel_name(self, channel).await;
+        tui_session(
+            provider,
+            runtime,
+            row.as_ref(),
+            watcher.map(|binding| binding.tmux_session_name),
+            named,
+        )
+        .is_some_and(|(_, transcript)| {
+            (runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel.get()))
+                || busy_turn(runtime, &transcript).is_ok()
+        })
+    }
+}
+
 /// Every veto that needs no pane call, in the documented order.
 async fn resolve(
     shared: &Arc<SharedData>,
