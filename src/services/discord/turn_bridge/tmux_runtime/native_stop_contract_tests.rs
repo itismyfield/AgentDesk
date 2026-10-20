@@ -491,6 +491,72 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
             }
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
+        use crate::db::o_channel_homes::{HeldHome, HomeState};
+        use crate::services::cluster::channel_home::{self, HomeGate};
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_042);
+        let session = "native-stop-cancelled-caller";
+        fx.reject_escape(false);
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        let id = channel.get().to_string();
+        let home = HomeGate::new(&id, "mini");
+        home.confirm(
+            &HeldHome::for_test(&id, "mini", 1, HomeState::Worker),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let permit = home.admit_command("claude").unwrap();
+        let (holding, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                session,
+                || {
+                    holding.send(()).unwrap();
+                    released.recv().unwrap();
+                },
+            );
+        });
+        held.recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        let _ = fx.take_calls();
+        let mut caller = Box::pin(channel_home::command_scope(
+            Some(permit),
+            begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop"),
+        ));
+        tokio::select! {
+            _ = &mut caller => panic!("delivery must wait on the composer"),
+            () = until(|| fx.calls().iter().any(|call| call.starts_with("capture-pane"))) => {}
+        }
+        drop(caller);
+        assert_eq!(
+            home.commands_in_flight(),
+            1,
+            "the delivery retains its admitted command after caller cancellation"
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        until(|| home.commands_in_flight() == 0).await;
+        let permit = home.admit_command("claude").unwrap();
+        let result = channel_home::command_scope(
+            Some(permit),
+            begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop"),
+        )
+        .await;
+        let CommandStop::Native(result) = result else {
+            panic!("shared delivered result");
+        };
+        assert_eq!(result.wire()["effect_started"], true);
+        assert_eq!(
+            fx.take_calls()
+                .iter()
+                .filter(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+                .count(),
+            1
+        );
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
     });
 }
 
