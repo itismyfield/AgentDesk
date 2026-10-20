@@ -16,20 +16,8 @@ pub(super) const FLUSH_RS: &str = include_str!("../../../runtime_bootstrap/recov
 pub(super) const CONTROLLER_RS: &str = include_str!("../../../placeholder_controller.rs");
 pub(super) const GATE_RS: &str = include_str!("../../queued_card_gate.rs");
 
-/// Every spelling by which a gated region could reach Discord's message DELETE
-/// or PATCH without a teardown token.
-///
-/// Enumerated from the tree, NOT from what the pre-#5035 code happened to call:
-/// `git grep -ohE "[A-Za-z_.:]*(delete|edit)_[a-z_]*message[a-z_]*\(" --
-/// 'src/services/discord/**/*.rs' | sort -u`. Both the serenity spellings
-/// (`.delete_message(`, `.edit_message(`) and the in-tree helper spellings
-/// (`http::delete_channel_message`, `http::edit_channel_message`, the
-/// `_with_components` and `edit_outbound_message*` variants) are covered; the
-/// earlier two-string list missed every helper spelling in both directions.
-///
-/// This list is deliberately NOT applied to `queued_card_gate.rs` itself, which
-/// legitimately calls `http::delete_channel_message` / `http::edit_channel_message`
-/// as the token-consuming boundary.
+/// Serenity and in-tree helper spellings that DELETE or PATCH a message without a teardown
+/// token; `queued_card_gate.rs` is the token boundary and is not checked against them.
 const RAW_DISCORD_MESSAGE_OPS: &[&str] = &[
     "delete_message(",
     "delete_channel_message(",
