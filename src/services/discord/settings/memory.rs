@@ -120,6 +120,7 @@ pub(crate) fn resolve_memory_settings(
     let merged = merge_memory_config(base, override_cfg);
     let resolved_backend = resolve_memory_backend(merged.backend.as_deref());
     ResolvedMemorySettings {
+        memory_group: None,
         backend: resolved_backend.kind,
         memento_fallback: resolved_backend.memento_fallback,
         recall_timeout_ms: clamp_timeout(
@@ -140,6 +141,15 @@ pub(crate) fn resolve_memory_settings(
             MAX_MEMORY_CAPTURE_TIMEOUT_MS,
             DEFAULT_MEMORY_CAPTURE_TIMEOUT_MS,
         ),
+    }
+}
+
+pub(crate) fn resolve_agent_memory_settings(
+    agent: Option<&crate::config::AgentDef>,
+) -> ResolvedMemorySettings {
+    ResolvedMemorySettings {
+        memory_group: agent.and_then(|agent| agent.memory_group.clone()),
+        ..resolve_memory_settings(None, None)
     }
 }
 

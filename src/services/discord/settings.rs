@@ -40,7 +40,9 @@ pub(super) use content::{
     load_review_tuning_guidance, load_role_prompt, load_shared_prompt_for_profile,
     render_peer_agent_guidance,
 };
-pub(crate) use memory::{memory_settings_for_binding, resolve_memory_settings};
+pub(crate) use memory::{
+    memory_settings_for_binding, resolve_agent_memory_settings, resolve_memory_settings,
+};
 pub(super) use read::{load_bot_settings, load_last_session_path, save_last_session_runtime};
 pub use read::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -175,6 +177,7 @@ impl MemoryBackendKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedMemorySettings {
+    pub memory_group: Option<String>,
     pub backend: MemoryBackendKind,
     /// True only when the resolved `backend` is `File` because memento was the
     /// requested/configured backend but is degraded (unreachable). Lets the
@@ -189,6 +192,7 @@ pub(crate) struct ResolvedMemorySettings {
 impl Default for ResolvedMemorySettings {
     fn default() -> Self {
         Self {
+            memory_group: None,
             backend: MemoryBackendKind::File,
             memento_fallback: false,
             recall_timeout_ms: DEFAULT_MEMORY_RECALL_TIMEOUT_MS,
