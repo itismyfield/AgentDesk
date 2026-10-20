@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "b821889f6ad775086712f30062169926e937a715",
+  "measured_at_sha": "f74c4078a10857f687de58a57591fa9da1b936dd",
   "records": [
     {
       "root": "migrations/postgres",
@@ -37486,6 +37486,42 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:ed0176b6604a85320247d68e4bcfc26327240ab16da001b5e9182d23ed61acb6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:28cac182b728f5439290cc05e114786699b77942c6ee235c6ffc060f2f3f09c7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4683a612049527f6270ba239841bbbcdebd1f8749098d07beefb370bf766cffe"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:1522208dba661c4694f65fd80d1aac9d5bfdcf8111c5ef0f60898c95add8586a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:9819ce8b2f04ec0c77267e8bedda56d9fcf4012ced3e3182ba3f1707034c09c9"
     },
     {
       "root": "src",
