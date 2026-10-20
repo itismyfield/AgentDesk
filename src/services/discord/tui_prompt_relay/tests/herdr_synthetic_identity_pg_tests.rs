@@ -32,7 +32,11 @@ impl Fixture {
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
         let logical = format!("synthetic-recovery-{}", channel.get());
         dedupe::register_tmux_channel(&logical, channel.get());
-        let key = format!("claude/{}/{NODE}:{logical}", shared.token_hash);
+        let key = crate::services::discord::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &ProviderKind::Claude,
+            &logical,
+        );
         let owner = HostedOwner {
             provider: "claude".into(),
             discord_token_hash: shared.token_hash.clone(),
@@ -318,6 +322,7 @@ async fn hook_observer_carries_the_original_hosted_source_through_pending_json_r
     assert_eq!(observed.tmux_session_name, fixture.logical);
     assert_eq!(observed.prompt, "retain this hook's original hosted source");
     let lease = record_observed_external_turn_lease(&fixture.shared, &observed, channel);
+    assert_eq!(lease.session_key.as_deref(), Some(fixture.key.as_str()));
     assert!(
         lease.turn_id.is_some(),
         "the hook assigned an original turn identity"
