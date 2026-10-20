@@ -141,9 +141,77 @@ fn strict_metadata_refuses_duplicate_gap_foreign_and_unreadable_records() {
             format!("{}\n{second}\n", serde_json::to_string(&first).unwrap()),
         )
         .unwrap();
-        assert!(
-            collect(CHANNEL, &ProviderKind::Codex, &[]).is_err(),
-            "invalid metadata variant {variant} was accepted"
-        );
+        for needed in [true, false] {
+            let mut candidates = empty_candidates();
+            if !needed {
+                candidates.current = Some(TMUX.into());
+            }
+            assert!(
+                collect(CHANNEL, &ProviderKind::Codex, &[], &Ok(candidates)).is_err(),
+                "invalid metadata variant {variant} was accepted, needed={needed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn known_candidates_do_not_read_ownership_while_pinning_strict_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let _root =
+        crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(root.path());
+    let dir = root.path().join(p5::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut event = pending(1);
+    event.new = p5::BindingTarget::Source(p5::SourceId {
+        session_id: "019e660d-4859-7522-9cee-8ba7c4e7c743".into(),
+        path: "/private/no-source-body-is-opened.jsonl".into(),
+        dev: 1,
+        ino: 2,
+    });
+    std::fs::write(
+        dir.join(format!("{CHANNEL}.log")),
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    let delivery = BindingEvent {
+        seq: event.seq,
+        channel_id: CHANNEL,
+        provider: ShadowProvider::Codex,
+        tmux_session: TMUX.into(),
+        execution_nonce: context().execution_nonce,
+        record: BindingRecord::Rejected {
+            detail: "old source remains denied".into(),
+            closes: None,
+        },
+        committed_at: event.committed_at,
+    };
+    for variant in 0..5 {
+        let mut candidates = empty_candidates();
+        match variant {
+            0 => candidates.current = Some(TMUX.into()),
+            1 => candidates.names.push(Candidate {
+                name: TMUX.into(),
+                origin: Origin::Binding(1),
+            }),
+            2 => candidates.inflight = true,
+            3 => candidates.conflict = true,
+            _ => {}
+        }
+        let candidates = if variant == 4 {
+            Err("existing candidate failure".into())
+        } else {
+            Ok(candidates)
+        };
+        OWNERSHIP_LOOKUPS.with(|count| count.set(0));
+        let snapshot = collect(
+            CHANNEL,
+            &ProviderKind::Codex,
+            std::slice::from_ref(&delivery),
+            &candidates,
+        )
+        .expect("known candidates must not require absence ownership metadata");
+        assert!(snapshot.name.is_none());
+        assert_eq!(snapshot.records, vec![event.clone()]);
+        assert_eq!(OWNERSHIP_LOOKUPS.with(std::cell::Cell::get), 0);
     }
 }

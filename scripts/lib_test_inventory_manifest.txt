@@ -10620,6 +10620,7 @@ services::discord::turn_presence::activity::tests::presence_requires_live_host_w
 services::discord::turn_presence::activity::tests::s1_actual_tail_initial_resume_and_poll_have_bounded_hash_free_reads
 services::discord::turn_presence::activity::tests::s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
+services::discord::turn_presence::activity::unbound::binding_metadata::tests::known_candidates_do_not_read_ownership_while_pinning_strict_metadata
 services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_rejects_scope_and_existing_name_conflicts_before_supplementing
 services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_snapshot_pins_context_nonce_even_when_the_candidate_name_does_not_change
 services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_supplements_only_a_name_without_installing_current_or_source

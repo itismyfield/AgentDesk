@@ -210,13 +210,12 @@ impl Files {
             };
             let log = ChannelBindingLog::new(channel, shadow);
             let bindings = log.binding_events_since(channel, 0)?;
-            let metadata = binding_metadata::collect(channel, provider, &bindings)?;
-            let candidates = observe_candidates(channel, provider, core, &fallback, &log).and_then(
-                |mut candidates| {
-                    metadata.supplement(&mut candidates)?;
-                    Ok(candidates)
-                },
-            );
+            let candidates = observe_candidates(channel, provider, core, &fallback, &log);
+            let metadata = binding_metadata::collect(channel, provider, &bindings, &candidates)?;
+            let candidates = candidates.and_then(|mut candidates| {
+                metadata.supplement(&mut candidates)?;
+                Ok(candidates)
+            });
             let row = inflight::load_inflight_state_read_only_result(provider, channel);
             let row_identity = serde_json::to_string(&row).map_err(|e| e.to_string())?;
             let traces = candidates

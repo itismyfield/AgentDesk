@@ -4,6 +4,11 @@ use super::*;
 use crate::services::tmux_common;
 use crate::services::tui_prompt_dedupe::{binding_context, binding_events as p5};
 
+#[cfg(test)]
+std::thread_local! {
+    static OWNERSHIP_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Snapshot {
     records: Vec<p5::BindingEvent>,
@@ -50,6 +55,7 @@ pub(super) fn collect(
     channel: u64,
     provider: &ProviderKind,
     delivery: &[BindingEvent],
+    candidates: &Result<Candidates, String>,
 ) -> Result<Snapshot, String> {
     if *provider != ProviderKind::Codex {
         return Ok(Snapshot::default());
@@ -68,6 +74,21 @@ pub(super) fn collect(
         records,
         name: None,
     };
+    let needed = candidates.as_ref().is_ok_and(|candidates| {
+        candidates.channel == channel
+            && candidates.provider == *provider
+            && candidates.current.is_none()
+            && candidates.names.is_empty()
+            && !candidates.inflight
+            && !candidates.conflict
+    });
+    #[cfg(test)]
+    let needed = needed
+        || std::env::var("AGENTDESK_N2B_TEST_MUTATION")
+            .is_ok_and(|mutation| mutation == "joint-metadata-all");
+    if !needed {
+        return Ok(snapshot);
+    }
     let Some(event) = snapshot
         .records
         .iter()
@@ -99,6 +120,8 @@ pub(super) fn collect(
         .as_deref()
         .filter(|nonce| !nonce.is_empty())
         .ok_or("binding metadata has no execution nonce")?;
+    #[cfg(test)]
+    OWNERSHIP_LOOKUPS.with(|count| count.set(count.get() + 1));
     let context = p5::codex::context_for_nonce(channel, &event.tmux_session, Some(nonce))
         .map_err(|error| error.to_string())?
         .ok_or("binding metadata ownership context missing")?;
