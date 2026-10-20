@@ -17,7 +17,12 @@ fn measured_snapshot(snapshot: &Value) -> Measurement<Option<MailboxFinding>> {
         .get("session_lookup_error")
         .filter(|v| !v.is_null())
     {
-        return Err(FieldIssue::new("session_lookup_error", Some(error), "null"));
+        let mut issue = FieldIssue::new("session_lookup_error", Some(error), "null");
+        // A lookup the request deadline never let start is told apart from one that failed.
+        if error.get("cause").and_then(Value::as_str) == Some("not_started") {
+            issue.code = "not_started";
+        }
+        return Err(issue);
     }
     let cancel = boolean(snapshot, "has_cancel_token")?;
     let queue = count(snapshot, "queue_depth")?;
@@ -103,7 +108,14 @@ fn measured_snapshot(snapshot: &Value) -> Measurement<Option<MailboxFinding>> {
 pub(crate) fn classify_mailbox_snapshot(snapshot: &Value) -> Option<MailboxFinding> {
     match measured_snapshot(snapshot) {
         Ok(finding) => finding,
-        Err(issue) => Some(unavailable(snapshot, issue)),
+        Err(issue) => {
+            let not_started = issue.code == "not_started";
+            let mut finding = unavailable(snapshot, issue);
+            if not_started {
+                finding.id = "mailbox_session_lookup_not_started";
+            }
+            Some(finding)
+        }
     }
 }
 

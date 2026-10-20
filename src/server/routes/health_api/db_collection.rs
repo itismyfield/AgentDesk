@@ -8,7 +8,8 @@ use tokio::time::{Instant, error::Elapsed, timeout_at};
 
 use crate::services::health_active_session_audit::ActiveSessionAuditReport;
 use crate::services::health_diagnostics::{
-    self, AutoQueueCleanupBacklog, DispatchOutboxStats, HealthKvMeta, SessionLookups,
+    self, AutoQueueCleanupBacklog, DispatchOutboxStats, HealthKvMeta, MailboxSessions,
+    SessionLookups,
 };
 
 use super::AppState;
@@ -104,7 +105,7 @@ pub(super) async fn read_initial_alongside<T>(
 /// The reads that need the snapshot body.
 pub(super) struct LateReads {
     /// Detail only: one lookup result per mailbox channel.
-    pub(super) sessions: Option<SessionLookups>,
+    pub(super) sessions: Option<MailboxSessions>,
     /// Whether this node is a gateway standby, before the `server_up` check.
     pub(super) standby_without_gateway: bool,
     timed_out: bool,
@@ -157,13 +158,19 @@ pub(super) async fn read_late(
             .collect::<SessionLookups>()
     };
     let mut timed_out = false;
-    let sessions = match sessions {
+    // Only a lookup that never started is marked: one cut after it started stays a failure.
+    let not_started = matches!(sessions, Late::NotStarted);
+    let lookups = match sessions {
         Late::Done(lookups) => lookups,
         Late::Elapsed => {
             timed_out = true;
             unmeasured("health deadline elapsed during session lookup")
         }
         Late::NotStarted => unmeasured("health deadline elapsed before session lookup"),
+    };
+    let sessions = MailboxSessions {
+        lookups,
+        not_started,
     };
     let standby_without_gateway = match standby {
         Late::Done(standby) => standby,

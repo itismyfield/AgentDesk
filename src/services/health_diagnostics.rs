@@ -251,14 +251,22 @@ pub(crate) async fn load_mailbox_session_states(
     }
 }
 
-/// Writes each mailbox row's session fields, or its `session_lookup_error`, from `lookups`.
+/// One health request's session lookups; `not_started` when the deadline passed before they began.
+pub(crate) struct MailboxSessions {
+    pub(crate) lookups: SessionLookups,
+    pub(crate) not_started: bool,
+}
+
+/// Writes each mailbox row's session fields, or its `session_lookup_error`, from `sessions`.
 pub(crate) async fn enrich_mailbox_sessions(
     json: &mut serde_json::Value,
-    lookups: &SessionLookups,
+    sessions: &MailboxSessions,
 ) {
-    session_state::enrich_with(json, |channel_id| {
+    let cause = sessions.not_started.then_some("not_started");
+    session_state::enrich_with(json, cause, |channel_id| {
         std::future::ready(
-            lookups
+            sessions
+                .lookups
                 .get(&channel_id)
                 .cloned()
                 .unwrap_or_else(|| Err("session lookup missing for channel".to_string())),
