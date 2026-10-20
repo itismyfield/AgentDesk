@@ -2833,7 +2833,7 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
-    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
+    /// Retired `tui_o` keys (the shadow block, Codex history adoption) still load; the rest is kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -2841,10 +2841,10 @@ mod secret_bearing_config_file_tests {
         let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
              turn: {channels: [41], all_owned: true}\n\
              repost: {enabled: true, channels: [41]}\n\
-             alert_channel_id: 42\n\
-             codex_history_adoption: false\n";
-        let settings =
-            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
+             alert_channel_id: 42\n";
+        let settings = format!(
+            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\ncodex_history_adoption: {enabled}\n{live}"
+        );
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
             serde_yaml::from_str(live).unwrap();
         let indented = settings

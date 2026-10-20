@@ -88,7 +88,7 @@ fn run(
             return None;
         }
         let admission = composer_lock::composer_admission(session, || Some(before.clone()));
-        let owner = busy_inject::composer_owner(&before);
+        let owner = busy_inject::composer_owner_in_session(session, &before);
         if admission == composer_lock::ComposerAdmission::Any {
             if owner == busy_inject::ComposerOwner::Empty {
                 return None;

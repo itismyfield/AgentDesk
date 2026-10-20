@@ -1,6 +1,11 @@
 //! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
+mod ownership;
+pub(crate) use ownership::{
+    ComposerOwner, composer_owner, composer_owner_in_session, draft_sighting,
+    draft_sighting_in_session,
+};
 mod receipt;
 mod submit;
 #[cfg(test)]
@@ -15,7 +20,11 @@ enum TurnGate {
     AnyTurn,
 }
 pub(crate) use receipt::exact as exact_receipt;
+#[cfg(test)]
+mod receipt_interleave_tests;
 pub(in crate::services::claude_tui) mod screen;
+#[cfg(test)]
+mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
 pub(in crate::services::claude_tui) mod stash;
@@ -29,10 +38,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use super::composer_lock::{ComposerAdmission, DraftSighting};
+use super::composer_lock::ComposerAdmission;
 use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
-use crate::services::tui_input::human_frame::{holds_inject, shows_inject};
 use crate::services::tui_o::shadow::ShadowProvider;
 
 /// Larger inputs are refused before any tmux call.
@@ -163,7 +171,7 @@ pub(crate) fn fresh_nonce() -> String {
 }
 
 /// The header line keeps the first character off `/`, `!` and `#` and names the person.
-pub(crate) use crate::services::tui_input::human_frame::inject as frame;
+pub(crate) use crate::services::tui_input::human_frame::plain_inject as frame;
 
 fn marker(nonce: &str) -> String {
     format!(" · {nonce}]")
@@ -190,21 +198,57 @@ pub(super) fn transcript_submission(
         return None;
     }
     let marker = marker(nonce);
+    let legacy = expected.is_none_or(|frame| {
+        !frame.starts_with("[User: ")
+            || frame
+                .split(']')
+                .next()
+                .is_some_and(|header| header.contains(" · 📱 v1 mode="))
+    });
+    let registered = expected.is_some_and(|frame| {
+        crate::services::tui_input::human_frame::history::registered(nonce, path, frame)
+    });
     let mut reader = std::io::BufReader::new(file);
     let mut line = Vec::new();
+    let mut position = offset;
     while reader
         .read_until(b'\n', &mut line)
         .is_ok_and(|read| read > 0)
     {
-        // A line without its newline may still be mid-write.
+        let start = position;
+        position += line.len() as u64;
         if line.ends_with(b"\n")
             && let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line)
             && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
-            && text.contains(&marker)
         {
-            return Some(
-                expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
-            );
+            if legacy && text.contains(&marker) {
+                return Some(
+                    expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
+                );
+            }
+            if registered && let Some(expected) = expected {
+                if !has_nontext && receipt::exact(&text, expected) {
+                    let kind = match record.get("type").and_then(|v| v.as_str()) {
+                        Some("queue-operation") => "enqueue",
+                        Some("attachment") => "command",
+                        _ => "user",
+                    };
+                    let row = record.get("uuid").and_then(|v| v.as_str()).or_else(|| {
+                        record
+                            .pointer("/attachment/source_uuid")
+                            .and_then(|v| v.as_str())
+                    });
+                    if let Some(confirmed) =
+                        crate::services::tui_input::human_frame::history::receipt(
+                            nonce, path, start, kind, row, expected,
+                        )
+                    {
+                        return Some(confirmed);
+                    }
+                } else if text.contains(expected) {
+                    return Some(false);
+                }
+            }
         }
         line.clear();
     }
@@ -517,62 +561,6 @@ fn judge_before_paste(
     }
 }
 
-/// How a protected pane's draft reads in one capture.
-pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
-    let screen = screen::read(capture);
-    match (screen.stash, screen.composer) {
-        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Empty) => {
-            DraftSighting::Settled
-        }
-        (screen::Stash::AbsentInRecognizedLayout, screen::Composer::Text(rows))
-            if !rows.iter().any(|row| row.contains("[📱 ")) && !holds_inject(&rows) =>
-        {
-            DraftSighting::PersonDraft
-        }
-        _ => DraftSighting::Unsettled,
-    }
-}
-
-/// Whose text the composer holds before an automatic key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ComposerOwner {
-    /// Nothing typed: an empty `❯` or a faint placeholder.
-    Empty,
-    /// A Discord prompt AgentDesk typed (`[User: …]`) that never left the composer.
-    AgentDesk,
-    /// Typed text in the measured layout whose removal a later capture can see.
-    Person,
-    Unread,
-}
-
-pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
-    match screen::typed(capture) {
-        Some(false) => ComposerOwner::Empty,
-        Some(true) => {
-            let screen = screen::read(capture);
-            if screen.stash != screen::Stash::AbsentInRecognizedLayout {
-                return ComposerOwner::Unread;
-            }
-            match screen.composer {
-                screen::Composer::Text(rows) if agentdesk_prompt(&rows) => ComposerOwner::AgentDesk,
-                screen::Composer::Empty => ComposerOwner::Unread,
-                _ => ComposerOwner::Person,
-            }
-        }
-        None => ComposerOwner::Unread,
-    }
-}
-
-/// AgentDesk frames every Discord prompt it types as `[User: …]`; a running turn's input left
-/// in the composer reads as a person's draft, as the older `[📱 …]` one did.
-fn agentdesk_prompt(rows: &[String]) -> bool {
-    let first = rows.first().map(|row| row.trim_start()).unwrap_or_default();
-    first
-        .get(..6)
-        .is_some_and(|head| head.eq_ignore_ascii_case("[User:"))
-        && !shows_inject(rows)
-}
-
 /// Channel ids whose panes may take the stash path, comma-separated and read once; unset is none.
 pub(crate) const STASH_CHANNELS_ENV: &str = "ADK_BUSY_INJECT_STASH_CHANNELS";
 
@@ -688,6 +676,16 @@ fn inject_locked(
     if pane.ok(&["load-buffer", "-b", &buffer, &path]).is_none() {
         return Report::not_sent(Veto::LoadFailed);
     }
+    if let Err(error) = crate::services::tui_input::human_frame::history::register(
+        ("claude", request.session, request.nonce, request.author),
+        request.transcript,
+        offset,
+        text,
+    ) {
+        tracing::warn!(%error, "busy frame ledger registration failed");
+        let _ = pane.ok(&["delete-buffer", "-b", &buffer]);
+        return Report::not_sent(Veto::LoadFailed);
+    }
     let attempt = Attempt {
         pane,
         g0: state.generation,
@@ -700,7 +698,7 @@ fn inject_locked(
         stash,
         cursor: std::cell::Cell::new(None),
     };
-    match plan {
+    let report = match plan {
         Plan::Direct(drawn) => {
             let mut last = None;
             let outcome = paste_into_empty(&attempt, &drawn, &mut last);
@@ -717,7 +715,14 @@ fn inject_locked(
             report
         }
         Plan::Stash(draft) => stash::run(&attempt, &draft),
+    };
+    if matches!(report.outcome, Outcome::NotSent(_)) {
+        crate::services::tui_input::human_frame::history::withdraw(
+            request.nonce,
+            request.transcript,
+        );
     }
+    report
 }
 
 /// One locked attempt past the pre-paste verdict, with the frame loaded into a tmux buffer.

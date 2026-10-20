@@ -489,6 +489,7 @@ class SharedSkipRuleTests(unittest.TestCase):
         data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
         self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
         resolver = skip_pin_registry.load(ROOT).frozensets()[1]
+        self.assertLessEqual(data["PINNED_RESOLVER_TEST_ONLY_FILES"], resolver)
         self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
         basename = {
             path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")

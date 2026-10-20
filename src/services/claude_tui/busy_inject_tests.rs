@@ -29,6 +29,16 @@ fn text() -> String {
     frame("iMessage", "200", "ann", NONCE, "are you there?")
 }
 
+fn v1_text() -> String {
+    crate::services::tui_input::human_frame::inject(
+        "iMessage",
+        "200",
+        "ann",
+        NONCE,
+        "are you there?",
+    )
+}
+
 // Claude draws continuation rows two columns in.
 fn screen(composer: &str, extra: &str) -> String {
     let composer = composer.replace('\n', "\n  ");
@@ -174,6 +184,10 @@ impl Fake {
     }
 
     fn run(&self, timing: &Timing) -> Outcome {
+        self.run_text("are you there?", timing)
+    }
+
+    fn run_text(&self, text: &str, timing: &Timing) -> Outcome {
         let session = self.session();
         let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
         let request = Request {
@@ -183,7 +197,7 @@ impl Fake {
             author: "200",
             name: "ann",
             nonce: NONCE,
-            text: "are you there?",
+            text,
         };
         inject(&pane, &request, timing)
     }
@@ -195,6 +209,32 @@ impl Fake {
             .filter(|line| line.split_whitespace().nth(1) == Some(subcommand))
             .map(str::to_string)
             .collect()
+    }
+
+    /// Resolve late evidence using the identity and exact bytes actually pasted.
+    fn pasted_attempt_submission(&self) -> Option<bool> {
+        let loads = self.calls("load-buffer");
+        assert_eq!(loads.len(), 1, "one pasted attempt owns the late receipt");
+        let mut args = loads[0].split_whitespace();
+        args.find(|arg| *arg == "-b").unwrap();
+        let id = args
+            .next()
+            .unwrap()
+            .strip_prefix("agentdesk-busy-inject-")
+            .unwrap();
+        let pasted = fs::read_to_string(self.dir.path().join("buffer")).unwrap();
+        let registered = crate::services::tui_input::human_frame::history::registered;
+        assert!(
+            registered(id, &self.transcript, &pasted),
+            "late receipt must retain its pasted attempt ID and exact frame hash"
+        );
+        assert!(!registered("foreign-attempt", &self.transcript, &pasted));
+        assert!(!registered(
+            id,
+            &self.transcript,
+            &format!("{pasted}\nforeign")
+        ));
+        transcript_submission(&self.transcript, 0, id, Some(&pasted))
     }
 
     /// Keys the server applied while a client was attached.
@@ -218,36 +258,38 @@ impl Fake {
 
 #[test]
 fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
     // Evidence before the offset never counts.
-    file.write_all(enqueue_record(&text()).as_bytes()).unwrap();
+    file.write_all(enqueue_record(&v1_text()).as_bytes())
+        .unwrap();
     let offset = fs::metadata(path).unwrap().len();
-    let marker_text = text();
+    let marker_text = v1_text();
     let ignored = [
         serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": marker_text}]}}),
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": marker_text}]}}),
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": marker_text}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": marker_text}),
         serde_json::json!({"type": "queue-operation", "operation": "dequeue"}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "x")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "x")}),
     ];
     for record in ignored {
         writeln!(file, "{}", real(record)).unwrap();
     }
     assert!(!transcript_carries(path, offset, NONCE));
     // A record still being written has no newline yet.
-    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", text())}});
+    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", v1_text())}});
     write!(file, "{}", real(merged)).unwrap();
     assert!(!transcript_carries(path, offset, NONCE));
     writeln!(file).unwrap();
     assert!(transcript_carries(path, offset, NONCE));
 
     for record in [
-        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", text())}}),
-        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": text()}]}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": text()}),
+        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", v1_text())}}),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": v1_text()}]}}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": v1_text()}),
     ] {
         let fresh = Fake::new();
         let offset = fs::metadata(&fresh.transcript).unwrap().len();
@@ -270,7 +312,8 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
 
 #[test]
 fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
-    let expected = text();
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let expected = v1_text();
     for body in [
         expected.clone(),
         format!("{expected}\noperator draft X"),
@@ -307,7 +350,8 @@ fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
 
 #[test]
 fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
-    let expected = text();
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let expected = v1_text();
     let text_block = serde_json::json!({"type": "text", "text": expected});
     let mut cases = vec![
         (serde_json::json!(expected), true),
@@ -359,7 +403,8 @@ fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
 
 #[test]
 fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
-    let expected = text();
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let expected = v1_text();
     let fake = Fake::new();
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
@@ -372,7 +417,7 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
         serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "are you there?")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "are you there?")}),
     ] {
         writeln!(file, "{}", real(record.clone())).unwrap();
         assert_eq!(
@@ -408,7 +453,10 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
 
 #[test]
 fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
-    let framed = frame("iMessage", "200", "a]b\nc", NONCE, "/clear");
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let framed = crate::services::tui_input::human_frame::inject(
+        "iMessage", "200", "a]b\nc", NONCE, "/clear",
+    );
     let header = "[User: a)b c (ID: 200) · 📱 v1 mode=inject source=iMessage · abcd1234]";
     assert_eq!(framed, format!("{header}\n/clear"));
 }
@@ -417,9 +465,16 @@ fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
 /// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
 #[test]
 fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
-    let framed = frame(source, "343742347365974026", "0hbujang", NONCE, "status?");
+    let framed = crate::services::tui_input::human_frame::inject(
+        source,
+        "343742347365974026",
+        "0hbujang",
+        NONCE,
+        "status?",
+    );
     let header = framed.lines().next().unwrap();
     let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
     let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());
@@ -436,6 +491,7 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
 
 #[test]
 fn every_pre_paste_veto_leaves_the_pane_untouched() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     type Setup = fn(&Fake);
     let cases: [(&str, Setup, Veto); 10] = [
         (
@@ -518,6 +574,7 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
 
 #[test]
 fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.caps(&[busy_empty()]);
     let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
@@ -553,10 +610,11 @@ fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
 
 #[test]
 fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
-    let folded = "[Pasted text #1 +1 lines]".to_string();
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     // A person's stash beside an empty composer needs no C-s; Claude hands it back on the submit.
     let stashed = format!("{:>58}", "› stashed");
-    for (owned, status) in [(text(), ""), (folded, ""), (text(), stashed.as_str())] {
+    for status in ["", stashed.as_str()] {
+        let owned = text();
         let fake = Fake::new();
         let empty =
             busy_empty().replace(&format!("\n\n{BORDER}"), &format!("\n{status}\n{BORDER}"));
@@ -573,9 +631,112 @@ fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
     }
 }
 
+// Fake tmux subprocesses can be delayed by compiler load; use the production receipt window.
+const MULTILINE_TIMING: Timing = Timing {
+    confirm_window: Duration::from_secs(3),
+    ..FAST
+};
+
+fn multiline_payload() -> String {
+    format!(
+        "Please inspect these files:\n{}\n\n  Preserve this indentation.\nReport one result per file.",
+        (0..24)
+            .map(|i| format!("/tmp/downloads/design-reference-{i:02}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn paste_block(inner: &str) -> String {
+    format!("<pasted_content id=\"dfd9\">\n{inner}\n</pasted_content id=\"dfd9\">")
+}
+
+#[test]
+fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let payload = multiline_payload();
+    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
+    assert!(expected.encode_utf16().count() > 800);
+    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
+    let wrapped = paste_block(&expected);
+    for body in [
+        expected.clone(),
+        wrapped.clone(),
+        format!("\n\n{wrapped}\n"),
+    ] {
+        for record in [
+            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": body}),
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": body}}),
+            serde_json::json!({"type": "user", "message": {"content": body}}),
+        ] {
+            let fake = Fake::new();
+            fake.caps(&[busy_empty(), screen(&folded, "")]);
+            fs::write(
+                fake.dir.path().join("on_enter"),
+                real(record.clone()) + "\n",
+            )
+            .unwrap();
+            assert_eq!(
+                fake.run_text(&payload, &MULTILINE_TIMING),
+                Outcome::Injected,
+                "{record}"
+            );
+            assert_eq!(fake.keys(), (1, 1, 0), "{record}");
+            assert_eq!(
+                fs::read_to_string(fake.dir.path().join("buffer")).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn multiline_folded_paste_keeps_foreign_input_contaminated() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let payload = multiline_payload();
+    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
+    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
+    let wrapped = paste_block(&expected);
+    for body in [
+        format!("{expected}\noperator input"),
+        paste_block(&format!("{expected}\noperator input")),
+        format!("operator input\n{wrapped}"),
+        format!("{wrapped}\noperator input"),
+        wrapped.replace(
+            "</pasted_content id=\"dfd9\">",
+            "</pasted_content id=\"abcd\">",
+        ),
+        paste_block(&wrapped),
+        format!("{wrapped}\n{}", paste_block("operator input")),
+        format!("\n{wrapped}\n"),
+        format!("\n\n\n{wrapped}\n"),
+        format!("\n\n{wrapped}"),
+        format!("\n\n{wrapped}\n\n"),
+        format!("\n\n{expected}\n"),
+        format!("\r\n\r\n{wrapped}\r\n"),
+    ] {
+        for body in [body.clone(), format!("\n\n{body}\n")] {
+            let fake = Fake::new();
+            fake.caps(&[busy_empty(), screen(&folded, "")]);
+            fs::write(fake.dir.path().join("on_enter"), enqueue_record(&body)).unwrap();
+            assert_eq!(
+                fake.run_text(&payload, &MULTILINE_TIMING),
+                Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
+                "submitted body: {body:?}"
+            );
+            assert_eq!(
+                fake.keys(),
+                (1, 1, 0),
+                "a contaminated receipt never resubmits"
+            );
+        }
+    }
+}
+
 /// After the paste nothing is NotSent; every path ends with at most one Enter and no deletion.
 #[test]
 fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let prefix = |n: usize| text().chars().take(n).collect::<String>();
     // (name, captures, transcript accepts on Enter, outcome, (pastes, Enter keys, other keys))
     type Case<'a> = (&'a str, Vec<String>, bool, Outcome, (usize, usize, usize));
@@ -643,14 +804,14 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_carries(&fake.transcript, 0, NONCE)
+            fake.pasted_attempt_submission() == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
             (1, 1, 0),
             true
         ),
-        "late transcript"
+        "late transcript belongs to the pasted attempt and frame hash"
     );
     // Production window: 3s window < record at 3.2s <= reply at 3.3s < 5s tmux call budget.
     // The Enter takes effect at once; the window must not start from the late reply.
@@ -668,14 +829,14 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_carries(&fake.transcript, 0, NONCE)
+            fake.pasted_attempt_submission() == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
             (1, 1, 0),
             true
         ),
-        "slow Enter reply"
+        "slow Enter reply retains the pasted attempt receipt"
     );
     for (name, subcommand, outcome) in [
         ("paste fails", "paste-buffer", Unconfirmed::PasteFailed),
@@ -691,6 +852,7 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
 /// A person's keys mixed into the composer stop the Enter; nothing is ever deleted.
 #[test]
 fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let owned = || vec![busy_empty(), screen(&text(), "")];
     // (name, captures, attach seen by checks, attach when the server applies each key, ...)
     type Case<'a> = (
@@ -768,4 +930,56 @@ fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
         Outcome::Unconfirmed(Unconfirmed::NotObserved)
     );
     assert_eq!(fake.keys(), (1, 1, 0));
+}
+
+#[test]
+fn identical_plain_frames_need_their_own_fresh_enqueue_and_not_a_late_command_or_user() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    fs::write(&path, "").unwrap();
+    let session = format!("receipt-{}", uuid::Uuid::new_v4());
+    let framed = frame("discord", "720102", "ann", "ca720104", "same words");
+    let register = crate::services::tui_input::human_frame::history::register;
+    register(
+        ("claude", &session, "ca720104", "720102"),
+        &path,
+        0,
+        &framed,
+    )
+    .unwrap();
+    let append = |record: serde_json::Value| {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{record}").unwrap();
+    };
+    append(
+        serde_json::json!({"type":"queue-operation", "operation":"enqueue", "uuid":"enqueue-a", "content":framed}),
+    );
+    assert_eq!(
+        transcript_submission(&path, 0, "ca720104", Some(&framed)),
+        Some(true)
+    );
+    let second = fs::metadata(&path).unwrap().len();
+    register(
+        ("claude", &session, "ca720105", "720102"),
+        &path,
+        second,
+        &framed,
+    )
+    .unwrap();
+    append(
+        serde_json::json!({"type":"attachment", "attachment":{"type":"queued_command", "commandMode":"prompt", "source_uuid":"command-a", "prompt":framed}}),
+    );
+    append(serde_json::json!({"type":"user", "uuid":"late-user-a", "message":{"content":framed}}));
+    assert_eq!(
+        transcript_submission(&path, second, "ca720105", Some(&framed)),
+        None
+    );
+    append(
+        serde_json::json!({"type":"queue-operation", "operation":"enqueue", "uuid":"enqueue-b", "content":framed}),
+    );
+    assert_eq!(
+        transcript_submission(&path, second, "ca720105", Some(&framed)),
+        Some(true)
+    );
 }
