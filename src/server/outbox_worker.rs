@@ -1,5 +1,7 @@
 //! Background drain for durable message outbox and detached terminal custody.
 
+pub(super) mod claim;
+
 use super::{drain_message_outbox_batch_once, outbox_actionable_delivery};
 use crate::services::discord::health::HealthRegistry;
 use sqlx::PgPool;
@@ -87,3 +89,27 @@ pub(crate) async fn drain_message_outbox_once(
     })
     .await
 }
+
+impl super::PendingMessageOutboxRow {
+    pub(super) fn delivery_ids(&self) -> (String, String) {
+        let reason = self
+            .reason_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("message");
+        let session = self
+            .session_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(self.target.as_str());
+        (
+            format!("message_outbox:{}:{reason}:{session}", self.source),
+            format!("message_outbox:{}:deliver", self.id),
+        )
+    }
+}
+
+#[cfg(test)]
+mod attachment_pg_tests;

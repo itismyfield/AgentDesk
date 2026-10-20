@@ -21,7 +21,12 @@ use crate::db::scheduled_messages::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 
+mod create;
 mod discord_mentions;
+mod image_input;
+use create::validate_create;
+pub use image_input::CreateScheduledMessageBody;
+pub(super) const IMAGE_BODY_LIMIT: usize = image_input::BODY_LIMIT;
 mod provider_targets;
 mod snapshot_capture;
 
@@ -30,7 +35,6 @@ use discord_mentions::{
     ensure_rollout_ready as ensure_discord_mentions_rollout_ready,
     required_from_state as required_discord_mentions,
     validate_rendered_content_length as validate_discord_rendered_content_length,
-    validate_user_ids as validate_discord_mention_user_ids,
 };
 
 #[cfg(test)]
@@ -84,38 +88,12 @@ fn scheduled_message_bot_or_default(bot: Option<&str>) -> String {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateScheduledMessageBody {
-    pub content: String,
-    #[serde(default)]
-    pub discord_mention_user_ids: Option<Vec<String>>,
-    pub title: Option<String>,
-    pub target_channel_id: Option<String>,
-    pub bot: Option<String>,
-    pub delivery_kind: Option<String>,
-    pub agent_id: Option<String>,
-    pub agent_instruction: Option<String>,
-    pub on_agent_failure: Option<String>,
-    pub scheduled_at: String,
-    pub schedule: Option<String>,
-    pub timezone: Option<String>,
-    pub expires_at: Option<String>,
-    pub source: Option<String>,
-    pub created_by: Option<String>,
-    pub dedupe_key: Option<String>,
-    pub provider_targets: Option<JsonValue>,
-    /// #4658: 'fresh' or a source-channel context `snapshot`.
-    pub context_strategy: Option<String>,
-    /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
-    pub on_context_failure: Option<String>,
-}
-
 /// POST /api/scheduled-messages
 pub async fn create_scheduled_message(
     State(state): State<AppState>,
-    Json(body): Json<CreateScheduledMessageBody>,
+    body: Result<Json<CreateScheduledMessageBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResponse {
+    let body = image_input::extract(body)?;
     let pool = pool_or_unavailable(&state)?;
     let new = validate_create(pool, &body, required_discord_mentions(&state)).await?;
 
@@ -150,208 +128,6 @@ pub async fn create_scheduled_message(
             format!("create scheduled message: {error}"),
         )),
     }
-}
-
-async fn validate_create(
-    pool: &PgPool,
-    body: &CreateScheduledMessageBody,
-    required_discord_mention_user_ids: &[String],
-) -> Result<NewScheduledMessage, AppError> {
-    let content = body.content.trim();
-    if content.is_empty() {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "content must not be empty",
-        ));
-    }
-
-    let delivery_kind = body
-        .delivery_kind
-        .as_deref()
-        .unwrap_or(db::KIND_PUSH)
-        .to_string();
-    if delivery_kind != db::KIND_PUSH && delivery_kind != db::KIND_AGENT {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "deliveryKind must be 'push' or 'agent'",
-        ));
-    }
-    let discord_mention_user_ids = effective_scheduled_discord_mention_user_ids(
-        body.discord_mention_user_ids.as_deref().unwrap_or_default(),
-        &delivery_kind,
-        required_discord_mention_user_ids,
-    )?;
-    let validated_provider_targets =
-        provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)
-            .await?;
-    let on_agent_failure = body
-        .on_agent_failure
-        .as_deref()
-        .unwrap_or("fail")
-        .to_string();
-    if on_agent_failure != "fail" && on_agent_failure != "push_raw" {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "onAgentFailure must be 'fail' or 'push_raw'",
-        ));
-    }
-
-    let context_strategy = body
-        .context_strategy
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(db::CONTEXT_STRATEGY_FRESH)
-        .to_string();
-    if context_strategy != db::CONTEXT_STRATEGY_FRESH
-        && context_strategy != db::CONTEXT_STRATEGY_SNAPSHOT
-    {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "contextStrategy must be 'fresh' or 'snapshot'",
-        ));
-    }
-    if context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT && delivery_kind != db::KIND_AGENT {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "contextStrategy 'snapshot' is only valid for agent delivery",
-        ));
-    }
-    let on_context_failure = body
-        .on_context_failure
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(db::ON_CONTEXT_FAILURE_FAIL)
-        .to_string();
-    if on_context_failure != db::ON_CONTEXT_FAILURE_FAIL
-        && on_context_failure != db::ON_CONTEXT_FAILURE_FRESH
-    {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "onContextFailure must be 'fail' or 'fresh'",
-        ));
-    }
-
-    let timezone = body
-        .timezone
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "Asia/Seoul".to_string());
-    let schedule = body
-        .schedule
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-    let mut scheduled_at = parse_rfc3339("scheduledAt", &body.scheduled_at)?;
-    let expires_at = match body.expires_at.as_deref() {
-        Some(value) => Some(parse_rfc3339("expiresAt", value)?),
-        None => None,
-    };
-
-    let now = Utc::now();
-    if scheduled_at < now - Duration::seconds(PAST_TOLERANCE_SECS) {
-        match schedule.as_deref() {
-            Some(schedule) => {
-                scheduled_at =
-                    crate::services::scheduling::next_due_after(schedule, &timezone, now)
-                        .map_err(|error| app_error(StatusCode::BAD_REQUEST, format!("{error}")))?;
-            }
-            None => {
-                return Err(app_error(
-                    StatusCode::BAD_REQUEST,
-                    "scheduledAt is in the past and no schedule is set",
-                ));
-            }
-        }
-    } else if let Some(schedule) = schedule.as_deref() {
-        crate::services::scheduling::next_due_after(schedule, &timezone, now)
-            .map_err(|error| app_error(StatusCode::BAD_REQUEST, format!("{error}")))?;
-    }
-
-    if let Some(expires_at) = expires_at {
-        if expires_at <= scheduled_at {
-            return Err(app_error(
-                StatusCode::BAD_REQUEST,
-                "expiresAt must be after scheduledAt",
-            ));
-        }
-    }
-
-    let target_channel_id = normalize_target_channel_id(
-        body.target_channel_id
-            .clone()
-            .filter(|value| !value.trim().is_empty()),
-    )?;
-    if !discord_mention_user_ids.is_empty() && target_channel_id.is_none() {
-        return Err(app_error(
-            StatusCode::BAD_REQUEST,
-            "discordMentionUserIds requires targetChannelId",
-        ));
-    }
-    validate_discord_rendered_content_length(content, &discord_mention_user_ids)?;
-    if !discord_mention_user_ids.is_empty() {
-        ensure_discord_mentions_rollout_ready(pool).await?;
-    }
-    let agent_id = body
-        .agent_id
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-    let agent_instruction = body
-        .agent_instruction
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-
-    validate_agent_only_fields(
-        &delivery_kind,
-        agent_id.as_deref(),
-        agent_instruction.as_deref(),
-        body.on_agent_failure.is_some(),
-    )?;
-
-    validate_targeting(
-        pool,
-        &delivery_kind,
-        target_channel_id.as_deref(),
-        agent_id.as_deref(),
-        validated_provider_targets.is_some(),
-    )
-    .await?;
-
-    Ok(NewScheduledMessage {
-        content: content.to_string(),
-        discord_mention_user_ids,
-        title: body.title.clone().filter(|value| !value.trim().is_empty()),
-        target_channel_id,
-        bot: scheduled_message_bot_or_default(body.bot.as_deref()),
-        delivery_kind,
-        agent_id,
-        agent_instruction,
-        on_agent_failure,
-        scheduled_at,
-        schedule,
-        timezone,
-        expires_at,
-        source: body
-            .source
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "api".to_string()),
-        created_by: body
-            .created_by
-            .clone()
-            .filter(|value| !value.trim().is_empty()),
-        dedupe_key: body
-            .dedupe_key
-            .clone()
-            .filter(|value| !value.trim().is_empty()),
-        provider_targets: validated_provider_targets
-            .as_ref()
-            .map(|targets| targets.stored.clone()),
-        provider_target_summary: validated_provider_targets.map(|targets| targets.summary),
-        context_strategy,
-        context_snapshot_id: None,
-        on_context_failure,
-    })
 }
 
 fn validate_agent_only_fields(
@@ -525,7 +301,7 @@ pub async fn get_scheduled_message(
     Path(id): Path<String>,
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
-    let row = match db::get_scheduled_message_pg(pool, &id).await {
+    let row = match db::get_scheduled_message_metadata_pg(pool, &id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return Err(app_error(
@@ -567,8 +343,9 @@ pub async fn get_scheduled_message(
 pub async fn patch_scheduled_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResponse {
+    let body = image_input::extract(body)?;
     let pool = pool_or_unavailable(&state)?;
     let Some(body) = body.as_object() else {
         return Err(app_error(
@@ -577,7 +354,7 @@ pub async fn patch_scheduled_message(
         ));
     };
 
-    let existing = match db::get_scheduled_message_pg(pool, &id).await {
+    let existing = match db::get_scheduled_message_metadata_pg(pool, &id).await {
         Ok(Some(row)) => row,
         Ok(None) => {
             return Err(app_error(
@@ -688,6 +465,21 @@ async fn build_patch(
 ) -> Result<ScheduledMessagePatch, AppError> {
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
+    if body.contains_key("imageAttachment") {
+        patch.image_attachment = Some(image_input::decode(body.get("imageAttachment"))?);
+    }
+    let has_image = patch
+        .image_attachment
+        .as_ref()
+        .map_or(existing.image_attachment.is_some(), |image| image.is_some());
+    if has_image {
+        image_input::reject_mixed(
+            body.get("providerTargets")
+                .map_or(existing.provider_targets.is_some(), |value| {
+                    !value.is_null()
+                }),
+        )?;
+    }
 
     // A snapshot definition stays bound to its source. Retargeting could inject
     // one channel's frozen context into another; cancel and recreate instead.
@@ -779,6 +571,19 @@ async fn build_patch(
     }
     let effective_content = patch.content.as_deref().unwrap_or(&existing.content);
     validate_discord_rendered_content_length(effective_content, &effective_mentions)?;
+    if has_image {
+        image_input::validate_context(image_input::Context {
+            kind: body
+                .get("deliveryKind")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(effective_kind),
+            target: effective_target.as_deref(),
+            providers: has_provider_targets,
+            content: effective_content,
+            mentions: &effective_mentions,
+        })?;
+        image_input::ensure_rollout(pool).await?;
+    }
     validate_agent_only_fields(
         effective_kind,
         effective_agent.as_deref(),
@@ -875,7 +680,7 @@ pub async fn trigger_scheduled_message_now(
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
     if state.health_registry.is_none() {
-        match db::get_scheduled_message_pg(pool, &id).await {
+        match db::get_scheduled_message_metadata_pg(pool, &id).await {
             Ok(Some(row))
                 if row.status == db::STATUS_SCHEDULED && delivery_render::needs_discord(&row) =>
             {
@@ -904,7 +709,7 @@ pub async fn trigger_scheduled_message_now(
         Ok(Some(claimed)) => claimed,
         Ok(None) => {
             // Missing, terminal, firing, or claimed by a concurrent worker.
-            return match db::get_scheduled_message_pg(pool, &id).await {
+            return match db::get_scheduled_message_metadata_pg(pool, &id).await {
                 Ok(Some(row)) => Err(app_error(
                     StatusCode::CONFLICT,
                     format!(
@@ -966,7 +771,7 @@ pub async fn list_scheduled_message_deliveries(
         Some(value) => Some(parse_rfc3339("before", value)?),
         None => None,
     };
-    match db::get_scheduled_message_pg(pool, &id).await {
+    match db::get_scheduled_message_metadata_pg(pool, &id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Err(app_error(
@@ -997,6 +802,7 @@ mod delivery_render;
 
 #[cfg(test)]
 mod tests {
+    use super::discord_mentions::validate_user_ids as validate_discord_mention_user_ids;
     use super::*;
     use chrono::TimeZone;
 
