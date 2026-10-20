@@ -2,17 +2,17 @@
 //! the consecutive-failure alert.
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use super::store::{NewRoutine, RoutineStore};
+use super::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
 use super::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, after_startup_grace,
     run_due_tick, runtime::RoutineRunOutcome,
 };
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 
 fn store(pool: &PgPool) -> RoutineStore {
     RoutineStore::new_with_timezone_and_checkpoint_limit(
@@ -47,28 +47,52 @@ async fn run_row(pool: &PgPool, run_id: &str) -> (String, i32, Option<Value>) {
         .expect("routine run row")
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn agent_start_before_provider_registers_defers_then_fails_after_window_pg() {
-    let db = TestPostgresDb::create().await;
-    let pool = db.connect_and_migrate().await;
+async fn insert_boot_agent(pool: &PgPool) {
     sqlx::query(
         "INSERT INTO agents (id, name, provider, discord_channel_cc)
          VALUES ('boot-agent', 'boot agent', 'claude', '6551001')",
     )
-    .execute(&pool)
+    .execute(pool)
     .await
     .unwrap();
-    let store = store(&pool);
+}
+
+async fn claim_boot_agent_run(store: &RoutineStore) -> ClaimedRoutineRun {
     store
         .attach_routine(new_routine("memento-hygiene", Some("boot-agent"), None))
         .await
         .unwrap();
-    let claimed = store
+    store
         .claim_due_runs(1)
         .await
         .unwrap()
         .pop()
-        .expect("due run");
+        .expect("due run")
+}
+
+/// Makes a deferred run due now, with its deferral window opened at `opened`.
+async fn retry_deferred_start(pool: &PgPool, run_id: &str, opened: DateTime<Utc>) {
+    let opened = opened.to_rfc3339();
+    sqlx::query(
+        "UPDATE routine_runs
+         SET result_json = jsonb_set(result_json, '{deferred_since}', to_jsonb($2::text)),
+             next_retry_at = NOW() - INTERVAL '1 second'
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .bind(&opened)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_start_before_provider_registers_defers_then_fails_after_window_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    insert_boot_agent(&pool).await;
+    let store = store(&pool);
+    let claimed = claim_boot_agent_run(&store).await;
     let run_id = claimed.run_id.clone();
     // A registry with no provider registered yet is the state right after a restart.
     let executor = RoutineAgentExecutor::new(
@@ -88,18 +112,71 @@ async fn agent_start_before_provider_registers_defers_then_fails_after_window_pg
     assert_eq!(result["deferred_reason"], "provider_not_ready");
 
     // The runtime never registers: once the deferral window has passed the start fails.
-    let opened = (Utc::now() - Duration::minutes(11)).to_rfc3339();
-    sqlx::query(
-        "UPDATE routine_runs
-         SET result_json = jsonb_set(result_json, '{deferred_since}', to_jsonb($2::text)),
-             next_retry_at = NOW() - INTERVAL '1 second'
-         WHERE id = $1",
-    )
-    .bind(&run_id)
-    .bind(&opened)
-    .execute(&pool)
-    .await
-    .unwrap();
+    retry_deferred_start(&pool, &run_id, Utc::now() - Duration::minutes(11)).await;
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(outcomes[0].status, "failed", "{outcomes:?}");
+    let (status, _, _) = run_row(&pool, &run_id).await;
+    assert_eq!(status, "failed");
+
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dm_agent_start_before_runtime_is_ready_defers_then_fails_after_window_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    insert_boot_agent(&pool).await;
+    let store = store(&pool);
+    let claimed = claim_boot_agent_run(&store).await;
+    let run_id = claimed.run_id.clone();
+    // Registered for the agent's channel but with no Discord client yet: the DM reservation
+    // reports a runtime that is not ready.
+    let registry = Arc::new(HealthRegistry::new());
+    register_bot_auth_for_tests(&registry, "claude", 6551001, None, Vec::new(), false).await;
+    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+
+    let outcome = executor
+        .start_agent_run(
+            &store,
+            claimed,
+            "run".into(),
+            Some("4242".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, "deferred", "{outcome:?}");
+    let (status, retry_count, result) = run_row(&pool, &run_id).await;
+    let result = result.expect("deferred result");
+    assert_eq!((status.as_str(), retry_count), ("running", 0));
+    assert_eq!(result["deferred_reason"], "provider_not_ready");
+    assert_eq!(result["dm_user_id"], "4242");
+    assert!(
+        result["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("DM turn for boot-agent and user 4242")),
+        "{result}"
+    );
+
+    // The re-attempt inside the window reserves the DM again and stays deferred.
+    retry_deferred_start(&pool, &run_id, Utc::now() - Duration::minutes(1)).await;
+    let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
+    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+    assert_eq!(outcomes[0].status, "deferred", "{outcomes:?}");
+    let (_, retry_count, result) = run_row(&pool, &run_id).await;
+    let result = result.expect("deferred result");
+    assert_eq!(
+        (retry_count, &result["dm_user_id"]),
+        (0, &Value::from("4242"))
+    );
+
+    // Once the window has passed the same error fails the run.
+    retry_deferred_start(&pool, &run_id, Utc::now() - Duration::minutes(11)).await;
     let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
     assert_eq!(outcomes.len(), 1, "{outcomes:?}");
     assert_eq!(outcomes[0].status, "failed", "{outcomes:?}");
