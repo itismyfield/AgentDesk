@@ -93,6 +93,11 @@ pub(super) async fn active_native(
     }
     snapshot
         .cancel_token
-        .and_then(|token| token.tmux_session_name())
+        .and_then(|token| {
+            token.tmux_session_name().or_else(|| {
+                inflight::load_inflight_state_read_only(&shared.provider, channel.get())
+                    .and_then(|row| row.tmux_session_name)
+            })
+        })
         .is_some_and(|session| super::turn_bridge::native_preserve_stop(&shared.provider, &session))
 }

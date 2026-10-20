@@ -266,7 +266,7 @@ mod high_risk_recovery {
 fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
     let fx = Fixture::new();
     run(async {
-        for (n, failure) in ["modal", "capture", "io", "unknown"]
+        for (n, failure) in ["modal", "capture", "io", "unknown", "unbound"]
             .into_iter()
             .enumerate()
         {
@@ -283,7 +283,12 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
             let channel = ChannelId::new(7_193_200 + n as u64);
             let (mock, ctx, server, data) = transport(&shared, channel).await;
             let session = format!("native-stop-failed-{failure}");
-            let (token, path) = generating_turn(&fx, &session);
+            let (bound, path) = generating_turn(&fx, &session);
+            let token = if failure == "unbound" {
+                Arc::new(CancelToken::new())
+            } else {
+                bound
+            };
             if failure == "unknown" {
                 std::fs::write(&path, "{\"type\":\"unknown\"}\n").unwrap();
             }
@@ -294,6 +299,14 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
             let before = inflight::InflightTurnIdentity::from_state(
                 &inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
                     .unwrap(),
+            );
+            assert!(
+                discord::mailbox_stop::active_native(
+                    &shared,
+                    channel,
+                    Some(MessageId::new(channel.get() + 1))
+                )
+                .await
             );
             let mailbox = discord::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
                 &shared,
