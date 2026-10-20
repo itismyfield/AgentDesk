@@ -300,7 +300,7 @@ fn clear_rejects_late_queue_and_marker_restore_without_dropping_a_current_input(
             &ProviderKind::Claude,
             "clear-preserve",
             channel,
-            &[old.clone()],
+            std::slice::from_ref(&old),
             None,
         )
         .unwrap();
