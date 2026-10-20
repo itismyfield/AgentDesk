@@ -94,6 +94,7 @@ async fn the_claude_idle_scanner_carries_the_transcript_it_actually_read() {
         &format!(
             "{}\n",
             serde_json::json!({"type":"user", "sessionId":pane.a, "uuid":"source-entry",
+                "timestamp":chrono::Utc::now().to_rfc3339(),
                 "message":{"role":"user", "content":[{"type":"text", "text":"scanned input"}]}})
         ),
     );
