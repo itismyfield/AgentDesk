@@ -53,7 +53,7 @@ pub(crate) async fn held_input_channels(provider: &str) -> Result<Vec<String>, S
     if !provider.trim().eq_ignore_ascii_case("codex")
         || !super::super::owned_channels()
             .iter()
-            .any(|(_, kind)| *kind == RuntimeHandoffKind::CodexTui)
+            .any(|(channel, _)| selected_codex_input(provider, *channel))
     {
         return Ok(super::held_channels(provider));
     }
@@ -65,6 +65,7 @@ pub(crate) async fn held_input_channels(provider: &str) -> Result<Vec<String>, S
 
 pub(crate) fn selected_codex_input(provider: &str, channel: u64) -> bool {
     provider.trim().eq_ignore_ascii_case("codex")
+        && channel == crate::services::codex_tui::canary::CANARY_CHANNEL
         && super::super::owned_kind(channel) == Some(RuntimeHandoffKind::CodexTui)
 }
 
