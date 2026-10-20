@@ -161,6 +161,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/stop.rs` | admission | `home_fence::admit` :122 |
 | `src/services/discord/commands/tool_call.rs` | admission | `home_fence::admit` :162. on/off 저장과 공개 응답 완료까지 command permit을 보유한다(:80–87) |
 | `src/services/discord/commands/text_commands.rs` | admission | `current_command` :37, `admit_command` :389·:1300 |
+| `src/services/discord/herdr_terminate/root_replaced.rs` | admission | `admit_command` :226 뒤 같은 permit을 proof·retirement·cleanup까지 보유. blocking proof :265·:290와 cleanup :347은 `command_worker_scope`를 복원하며 새 home 권위를 만들지 않음 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
