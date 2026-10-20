@@ -555,10 +555,7 @@ fn rr_public_clear_failed_queue_publish_reports_partial_even_after_retirement_pg
         reply.contains("대기 메시지 수를 확인하지 못했어요."),
         "{reply}"
     );
-    assert!(
-        reply.contains("일부 정리를 완료하지 못했어요."),
-        "{reply}"
-    );
+    assert!(reply.contains("일부 정리를 완료하지 못했어요."), "{reply}");
     assert!(reply.contains("이전 Herdr 실행을 정리했어요."), "{reply}");
     assert!(
         !reply.contains("세션을 초기화했어요."),
