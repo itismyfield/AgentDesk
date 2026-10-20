@@ -144,6 +144,7 @@ cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_d
 cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
 cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
 cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
+cli::doctor::orchestrator::observation_tests::unanswered_snapshot_read_withholds_only_the_active_count
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
 cli::doctor::orchestrator::profile_filter_tests::non_macos_fd_probes_are_empty
@@ -4315,7 +4316,9 @@ services::discord::health::session_enrichment::tests::transcript_discovery_prefe
 services::discord::health::snapshot::health_observation::pg_tests::health_handler_actor_and_db_share_one_deadline
 services::discord::health::snapshot::health_observation::pg_tests::health_timeout_consumers_keep_existing_gates
 services::discord::health::snapshot::health_observation::tests::health_snapshot_actor_timeout_covers_secondary_reads
+services::discord::health::snapshot::health_observation::tests::health_snapshot_by_late_start_keeps_the_request_deadline
 services::discord::health::snapshot::health_observation::tests::health_snapshot_parallel_actors_keep_other_channels
+services::discord::health::snapshot::health_observation::tests::health_snapshot_reconfirm_does_not_confirm_a_replaced_episode
 services::discord::health::snapshot::health_observation::tests::health_snapshot_slow_actor_within_deadline_is_ok
 services::discord::health::snapshot::health_observation::tests::health_snapshot_timeout_preserves_park_and_episode
 services::discord::health::snapshot::relay_probe::tests::health_grace_and_stall_threshold_for_a_rowless_turn_move_independently
