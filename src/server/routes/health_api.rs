@@ -17,6 +17,9 @@ use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
+mod db_collection;
+#[cfg(test)]
+mod db_deadline_tests;
 #[cfg(test)]
 mod host_guard_tests;
 /// Disclosure rules for the unauthenticated `/api/health` body.
@@ -26,7 +29,7 @@ mod runtime_profile;
 mod session_repair;
 #[cfg(all(test, unix))]
 mod unread_tail_attribution_tests;
-use runtime_profile::{attach_runtime_profile, cluster_standby_without_gateway};
+use runtime_profile::attach_runtime_profile;
 
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
 

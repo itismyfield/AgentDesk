@@ -409,8 +409,11 @@ src/
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
+│   │   │   ├── db_collection.rs
+│   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
 │   │   │   ├── public_projection.rs
+│   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
@@ -2515,6 +2518,9 @@ src/
 │   │   └── tests/
 │   │       └── mod.rs
 │   ├── health_diagnostics/
+│   │   ├── pg_wire_proxy.rs
+│   │   ├── request_batch.rs
+│   │   ├── request_batch_tests.rs
 │   │   └── session_state.rs
 │   ├── imsg_reply/
 │   │   ├── contract.rs

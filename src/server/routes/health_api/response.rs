@@ -1,10 +1,72 @@
 //! `/api/health` response assembly for the registry and standalone arms.
+use super::db_collection::{self, Initial};
 use super::*;
 
 /// Build combined DB + Discord provider health: a redacted summary for public
 /// callers, full diagnostics for authenticated/local detail callers.
 pub(super) async fn health_response(state: &AppState, detailed: bool) -> Response {
-    let server_up = health_diagnostics::probe_server_up(state.pg_pool_ref()).await;
+    let deadline = db_collection::deadline();
+    let Some(registry) = state.health_registry.as_ref() else {
+        let (initial, ()) =
+            db_collection::read_initial_alongside(state, detailed, deadline, async {}).await;
+        return assemble(state, detailed, initial, None).await;
+    };
+    let snapshot = async {
+        let snapshot = if detailed {
+            health::build_health_snapshot(registry).await
+        } else {
+            health::build_public_health_snapshot(registry).await
+        };
+        let status = snapshot.status();
+        (
+            status,
+            serde_json::to_value(snapshot).unwrap_or_else(|_| serde_json::json!({})),
+        )
+    };
+    registry_response(state, registry, detailed, deadline, snapshot).await
+}
+
+/// The registry arm; `snapshot` runs alongside the initial reads, then the late reads use
+/// whatever time it left before `deadline`.
+pub(super) async fn registry_response(
+    state: &AppState,
+    registry: &health::HealthRegistry,
+    detailed: bool,
+    deadline: tokio::time::Instant,
+    snapshot: impl std::future::Future<Output = (health::HealthStatus, serde_json::Value)>,
+) -> Response {
+    let alongside = async {
+        let (status, json) = snapshot.await;
+        let late = db_collection::read_late(state, detailed, &json, deadline).await;
+        (status, json, late)
+    };
+    let (initial, snapshot) =
+        db_collection::read_initial_alongside(state, detailed, deadline, alongside).await;
+    assemble(state, detailed, initial, Some((registry, snapshot))).await
+}
+
+type Snapshot<'a> = (
+    &'a health::HealthRegistry,
+    (
+        health::HealthStatus,
+        serde_json::Value,
+        db_collection::LateReads,
+    ),
+);
+
+async fn assemble(
+    state: &AppState,
+    detailed: bool,
+    initial: Initial,
+    snapshot: Option<Snapshot<'_>>,
+) -> Response {
+    let server_up = matches!(initial.server_up, Ok(true));
+    // A SELECT 1 still pending at the deadline is `db_slow`, not a failed database.
+    let db_unavailable = !server_up && initial.server_up.is_ok();
+    let late_timed_out = snapshot
+        .as_ref()
+        .is_some_and(|(_, (_, _, late))| late.timed_out());
+    let db_slow = initial.timed_out() || late_timed_out;
     let release_source = crate::services::release_source::health_json(detailed);
 
     let dashboard_ok = state.config.cluster.runtime_profile.modules().dashboard && {
@@ -20,7 +82,7 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
         crate::cli::agentdesk_runtime_root().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let disk_snapshot = disk_monitor::probe(&disk_probe_path);
 
-    let outbox_stats = health_diagnostics::load_dispatch_outbox_stats(state.pg_pool_ref()).await;
+    let outbox_stats = initial.outbox.ok().flatten();
     let outbox_json = outbox_stats.as_ref().map(|stats| {
         serde_json::json!({
             "pending": stats.pending,
@@ -35,47 +97,36 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
         .unwrap_or(0);
     // Auto-queue cleanup outbox backlog. `dead_lettered` rows hit the attempt cap and are
     // never retried, stranding a slot token and provider session.
-    let auto_queue_cleanup_json =
-        health_diagnostics::load_auto_queue_cleanup_backlog(state.pg_pool_ref())
-            .await
-            .map(|backlog| {
-                serde_json::json!({
-                    "pending": backlog.pending,
-                    "dead_lettered": backlog.dead_lettered,
-                })
-            });
-    let config_audit_report =
-        health_diagnostics::load_config_audit_report_pg(state.pg_pool_ref()).await;
-    let pipeline_override_report =
-        health_diagnostics::load_pipeline_override_report_pg(state.pg_pool_ref()).await;
+    let auto_queue_cleanup_json = initial.cleanup.ok().flatten().map(|backlog| {
+        serde_json::json!({
+            "pending": backlog.pending,
+            "dead_lettered": backlog.dead_lettered,
+        })
+    });
+    let kv = initial.kv.ok();
+    let config_audit_report = kv.as_ref().and_then(|kv| kv.config_audit.clone());
+    let pipeline_override_report = kv.as_ref().and_then(|kv| kv.pipeline_overrides.clone());
+    // A cut audit leaves its block out rather than reporting an empty candidate set.
+    let active_session_audit = match initial.audit {
+        Some(Ok(audit)) => Some(audit.to_json()),
+        _ => None,
+    };
 
-    if let Some(ref registry) = state.health_registry {
-        let discord_snapshot = if detailed {
-            health::build_health_snapshot(registry).await
-        } else {
-            health::build_public_health_snapshot(registry).await
-        };
-        let mut status = discord_snapshot.status();
-        let mut json =
-            serde_json::to_value(discord_snapshot).unwrap_or_else(|_| serde_json::json!({}));
-        if detailed {
-            health_diagnostics::enrich_mailbox_session_state(&mut json, state.pg_pool_ref()).await;
-            // Read-only DB active-session mismatch audit; detail-only, mutates nothing.
-            json["active_session_audit"] = health_diagnostics::build_active_session_audit(
-                state.pg_pool_ref(),
-                state.cluster_instance_id.as_deref(),
-            )
-            .await
-            .to_json();
+    if let Some((registry, (mut status, mut json, late))) = snapshot {
+        if let Some(lookups) = &late.sessions {
+            health_diagnostics::enrich_mailbox_sessions(&mut json, lookups).await;
+        }
+        // Read-only DB active-session mismatch audit; detail-only, mutates nothing.
+        if let Some(audit) = active_session_audit {
+            json["active_session_audit"] = audit;
         }
         let mut degraded_reasons = json["degraded_reasons"]
             .as_array()
             .cloned()
             .unwrap_or_default();
-        // Must run before the `retain` below: it keys on the `no_providers_registered`
-        // reason that a standby node then drops as noise.
-        let cluster_standby_without_gateway =
-            cluster_standby_without_gateway(state, server_up, &degraded_reasons).await;
+        // Read from the snapshot's reasons before the `retain` below drops
+        // `no_providers_registered` on a standby node.
+        let cluster_standby_without_gateway = late.standby_without_gateway && server_up;
         let all_registered_providers_standby = registry.all_providers_are_standby().await;
         let cluster_standby = cluster_standby_without_gateway || all_registered_providers_standby;
         if cluster_standby {
@@ -85,7 +136,13 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
 
         if !server_up {
             status = status.worsen(health::HealthStatus::Unhealthy);
+        }
+        if db_unavailable {
             degraded_reasons.push(serde_json::json!("db_unavailable"));
+        }
+        if db_slow {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!("db_slow"));
         }
         if outbox_age >= health_diagnostics::OUTBOX_AGE_DEGRADED_SECS {
             status = status.worsen(health::HealthStatus::Degraded);
@@ -181,8 +238,10 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
 
         // Credential-free dispatch-gate counters. Attached on both paths, but only the detail
         // body carries them: `public_health_json` does not allowlist this key.
-        let (gate_enabled_override, gate_danger_override) =
-            health_diagnostics::load_dispatch_gate_runtime_overrides(state.pg_pool_ref()).await;
+        let (gate_enabled_override, gate_danger_override) = kv
+            .as_ref()
+            .map(|kv| kv.dispatch_gate_overrides())
+            .unwrap_or((None, None));
         json["rate_limit_dispatch_gate"] =
             serde_json::to_value(crate::services::dispatch_gate::diagnostics_with_overrides(
                 gate_enabled_override,
@@ -214,8 +273,12 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
             health::HealthStatus::Unhealthy
         };
         let mut degraded_reasons: Vec<serde_json::Value> = Vec::new();
-        if !server_up {
+        if db_unavailable {
             degraded_reasons.push(serde_json::json!("db_unavailable"));
+        }
+        if db_slow {
+            health_state = health_state.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!("db_slow"));
         }
 
         // Mirror the registry branch so a bad resident warm server cannot sit under
@@ -277,13 +340,8 @@ pub(super) async fn health_response(state: &AppState, detailed: bool) -> Respons
         if let Some(report) = pipeline_override_report {
             json["pipeline_overrides"] = report;
         }
-        if detailed {
-            json["active_session_audit"] = health_diagnostics::build_active_session_audit(
-                state.pg_pool_ref(),
-                state.cluster_instance_id.as_deref(),
-            )
-            .await
-            .to_json();
+        if let Some(audit) = active_session_audit {
+            json["active_session_audit"] = audit;
         }
         if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
             json["opencode"] = opencode_block;

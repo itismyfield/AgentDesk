@@ -11,14 +11,31 @@ pub(super) async fn load_with<R>(
     else {
         return Ok(None);
     };
-    let get = |field| read(&row, field).map_err(|error| format!("decode session {field}: {error}"));
-    Ok(Some(ChannelSessionState {
+    decode(&row, read).map(Some)
+}
+
+pub(super) fn decode<R>(
+    row: &R,
+    read: impl Fn(&R, &str) -> Result<Option<String>, sqlx::Error>,
+) -> Result<ChannelSessionState, String> {
+    let get = |field| read(row, field).map_err(|error| format!("decode session {field}: {error}"));
+    Ok(ChannelSessionState {
         agent_id: get("agent_id")?,
         provider: get("provider")?,
         status: get("status")?,
         active_dispatch_id: get("active_dispatch_id")?,
         thread_channel_id: get("thread_channel_id")?,
-    }))
+    })
+}
+
+/// The channel ids [`enrich_with`] looks up, in row order.
+pub(super) fn mailbox_channels(json: &serde_json::Value) -> Vec<u64> {
+    json.get("mailboxes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|mailbox| mailbox.get("channel_id")?.as_u64())
+        .collect()
 }
 
 pub(super) async fn enrich_with<F: Future<Output = Result<Option<ChannelSessionState>, String>>>(

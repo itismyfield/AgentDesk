@@ -12,6 +12,13 @@ pub(super) fn unavailable(snapshot: &Value, issue: FieldIssue) -> MailboxFinding
 }
 
 fn measured_snapshot(snapshot: &Value) -> Measurement<Option<MailboxFinding>> {
+    // A failed or cut session lookup leaves the session fields unmeasured, not absent.
+    if let Some(error) = snapshot
+        .get("session_lookup_error")
+        .filter(|v| !v.is_null())
+    {
+        return Err(FieldIssue::new("session_lookup_error", Some(error), "null"));
+    }
     let cancel = boolean(snapshot, "has_cancel_token")?;
     let queue = count(snapshot, "queue_depth")?;
     let watcher = boolean(snapshot, "watcher_attached")?;
