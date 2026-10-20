@@ -27,7 +27,7 @@ mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;
 mod tool_activity;
-mod tool_summary;
+pub(crate) mod tool_summary;
 mod turn_anchor;
 mod workflow_panel;
 

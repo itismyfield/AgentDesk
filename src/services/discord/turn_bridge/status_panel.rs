@@ -277,6 +277,9 @@ async fn complete_status_panel_v2_on_surface<G: TurnGateway + ?Sized>(
             }
         }
     };
+    if send_fallback && super::super::footer_retirement::retired() {
+        return true;
+    }
     let completed_id = if send_fallback {
         match surface.send(channel_id, &panel_text).await {
             Ok(id) => {
@@ -495,6 +498,10 @@ pub(super) async fn migrate_separate_status_panel_to_footer<G: TurnGateway + ?Si
 #[cfg(test)]
 #[path = "status_panel_tests.rs"]
 mod status_panel_v2_rework_tests;
+
+#[cfg(test)]
+#[path = "footer_retirement_tests.rs"]
+mod footer_retirement_tests;
 
 pub(super) fn record_status_panel_events(
     shared: &SharedData,

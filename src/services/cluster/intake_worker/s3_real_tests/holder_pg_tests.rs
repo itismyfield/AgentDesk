@@ -184,9 +184,24 @@ pub(super) async fn holder_with_owed_tail(env: &Env) -> Booted {
         .collect();
     assert_eq!(
         kinds,
-        ["prepared", "posted"],
-        "only the baseline was prepared"
+        ["excluded", "prepared", "posted"],
+        "only the baseline and its opening mark were recorded"
     );
+    assert_eq!(
+        entries[0]["entry"],
+        serde_json::json!({
+            "type": "excluded",
+            "unit_key": {
+                "channel_id": C,
+                "provider": "claude",
+                "native_key": "m0:0#turn",
+                "kind": "tool"
+            },
+            "reason": "turn_summary_open"
+        })
+    );
+    assert_eq!(entries[1]["entry"]["serial"], serde_json::json!(0));
+    assert_eq!(entries[2]["entry"]["serial"], serde_json::json!(0));
     assert_eq!(node.discord().posts(), ["base"], "no tail POST started");
     assert_eq!(deliver_running(), Some(0));
     let names: Vec<_> = (segments.iter())

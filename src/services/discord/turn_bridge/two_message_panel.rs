@@ -25,7 +25,6 @@
 //! `turn_bridge/status_panel.rs` stay lean. The parent's call sites are thin.
 
 use super::*;
-
 /// Pure gate: should the sink create the #3805 P2 status panel as a NEW message
 /// BELOW the answer (answer-first layout)?
 ///
@@ -43,7 +42,8 @@ pub(super) fn bridge_should_create_two_message_status_panel(
     status_panel_msg_id: Option<MessageId>,
     current_msg_id: MessageId,
 ) -> bool {
-    two_message_panel_enabled
+    !super::super::footer_retirement::retired()
+        && two_message_panel_enabled
         && !single_message_panel_footer_mode
         && status_panel_v2_enabled
         && status_panel_msg_id.is_none()
@@ -276,12 +276,10 @@ pub(in crate::services::discord) fn two_message_should_reanchor_panel_on_rollove
     two_message_panel_enabled: bool,
     status_panel_present: bool,
 ) -> bool {
-    two_message_panel_enabled && status_panel_present
+    !super::super::footer_retirement::retired() && two_message_panel_enabled && status_panel_present
 }
 
-/// #3805 P2 (PR-D): re-anchor the sink's two-message status panel BELOW the new
-/// answer chunk after a mid-turn rollover created a fresh tail answer message.
-///
+/// Re-anchor the panel below the fresh rollover answer chunk.
 /// Sequence:
 /// 1. Send the NEW panel BELOW the new tail answer and immediately record it in
 ///    the durable orphan store as a crash-window safety net.
@@ -429,10 +427,10 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::footer_retirement::legacy_for_test;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::GatewayFuture;
     use std::sync::Mutex;
-
     fn isolate_agentdesk_runtime_root() -> crate::config::TestRuntimeRootGuard {
         crate::config::TestRuntimeRootGuard::new()
     }
@@ -611,7 +609,7 @@ mod tests {
     #[test]
     fn gate_requires_flag_on_v2_no_footer_no_panel_real_answer() {
         let answer = MessageId::new(10);
-
+        let _legacy = legacy_for_test();
         // Happy path: flag ON, footer OFF, v2 ON, no panel yet, real answer.
         assert!(bridge_should_create_two_message_status_panel(
             true, false, true, None, answer,
@@ -836,7 +834,7 @@ mod tests {
 
     #[test]
     fn reanchor_gate_requires_flag_on_and_a_live_panel() {
-        // OFF → never (the rollover path is byte-identical to today).
+        let _legacy = legacy_for_test();
         assert!(!two_message_should_reanchor_panel_on_rollover(false, true));
         assert!(!two_message_should_reanchor_panel_on_rollover(false, false));
         // ON but no live panel → nothing to re-anchor.

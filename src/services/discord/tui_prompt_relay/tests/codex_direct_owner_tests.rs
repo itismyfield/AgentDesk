@@ -302,6 +302,37 @@ fn answer_lines_with(text: &str) -> String {
             "type": "task_complete", "last_agent_message": text}}))
 }
 
+async fn append_answer(requests: &Requests, codex: &CodexChannel, split_tick: bool) {
+    if !split_tick {
+        append(&codex.rollout, &answer_lines());
+        return;
+    }
+    append(
+        &codex.rollout,
+        &rollout_line(serde_json::json!({"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": RESPONSE}]}})),
+    );
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            deliveries(requests, codex.channel)
+                .iter()
+                .any(|(method, _, body)| {
+                    method == "PATCH"
+                        && serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                            == RESPONSE
+                })
+        })
+        .await,
+        "split tick must observe the body PATCH before completion: {:?}",
+        requests.lock().unwrap()
+    );
+    append(
+        &codex.rollout,
+        &rollout_line(serde_json::json!({"type": "event_msg", "payload": {
+        "type": "task_complete", "last_agent_message": RESPONSE}})),
+    );
+}
+
 fn append(path: &Path, text: &str) {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -415,6 +446,84 @@ fn deliveries(requests: &Requests, channel: ChannelId) -> Vec<(String, String, S
         .collect()
 }
 
+async fn assert_settled_answer(requests: &Requests, codex: &CodexChannel, anchor: u64) {
+    assert!(
+        wait_for(Duration::from_secs(20), || {
+            let messages = format!("/channels/{}/messages", codex.channel.get());
+            requests.lock().unwrap().iter().any(|(method, path, body)| {
+                method == "POST"
+                    && path.ends_with(&messages)
+                    && serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                        .as_str()
+                        .is_some_and(|content| content.starts_with("-# ✅ "))
+            })
+        })
+        .await,
+        "the body must reach its terminal summary: {:?}",
+        requests.lock().unwrap()
+    );
+    let requests = requests.lock().unwrap().clone();
+    let messages = format!("/channels/{}/messages", codex.channel.get());
+    let anchor = format!("{messages}/{anchor}");
+    let calls: Vec<_> = requests
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (method, path, body))| {
+            if !matches!(method.as_str(), "POST" | "PATCH") || !path.contains(&messages) {
+                return None;
+            }
+            let content = serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            Some((index, method.as_str(), path.as_str(), content))
+        })
+        .collect();
+    let bodies: Vec<_> = calls
+        .iter()
+        .filter(|(_, method, path, content)| {
+            (*method == "PATCH" && path.ends_with(&anchor)) || content.contains(RESPONSE)
+        })
+        .collect();
+    assert!(
+        (1..=2).contains(&bodies.len()),
+        "one target's streaming and terminal edits: {requests:?}"
+    );
+    for (_, method, path, content) in &bodies {
+        assert!(
+            *method == "PATCH" && path.ends_with(&anchor),
+            "the claimed anchor alone is edited: {requests:?}"
+        );
+        assert_eq!(
+            content, RESPONSE,
+            "retired footer leaves an exact body: {requests:?}"
+        );
+    }
+    let last = bodies.last().expect("final body edit");
+    assert_eq!(
+        last.3, RESPONSE,
+        "the last body call settles the answer: {requests:?}"
+    );
+    let summaries: Vec<_> = calls
+        .iter()
+        .filter(|(_, _, _, content)| content.starts_with("-# ✅ "))
+        .collect();
+    assert_eq!(summaries.len(), 1, "one completion summary: {requests:?}");
+    let summary = summaries[0];
+    assert!(
+        summary.1 == "POST" && summary.2.ends_with(&messages),
+        "summary is its own message: {requests:?}"
+    );
+    assert!(
+        summary.0 > last.0,
+        "summary follows the final body call: {requests:?}"
+    );
+    assert!(
+        !summary.3.contains('\n'),
+        "summary stays one line: {requests:?}"
+    );
+}
+
 fn tail_starts(channel: ChannelId) -> usize {
     let starts = super::super::codex_idle_rollout::TAIL_STARTS
         .lock()
@@ -445,22 +554,33 @@ fn codex_direct_answer_reaches_discord_once_beside_a_relay_jsonl_watcher() {
     let _env_lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let root = tempfile::tempdir().expect("isolated root");
-    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        root.path(),
-    );
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(codex_direct_answer_scenario(root.path()));
+    for split_tick in [true, false] {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(codex_direct_answer_scenario(root.path(), split_tick));
+    }
 }
 
-async fn codex_direct_answer_scenario(root: &Path) {
+async fn codex_direct_answer_scenario(root: &Path, split_tick: bool) {
+    super::super::codex_idle_rollout::TAIL_STARTS
+        .lock()
+        .unwrap()
+        .clear();
+    super::super::codex_idle_rollout::POLL_NOTES
+        .lock()
+        .unwrap()
+        .clear();
     enable_session_bound_delivery();
     // An empty writer list keeps every channel on the Legacy relay these paths serve.
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
@@ -530,7 +650,7 @@ async fn codex_direct_answer_scenario(root: &Path) {
     );
     let lease = hook_first.lease(&shared);
     assert!(hook_first.claim(&shared, 5_704_101, &lease).await.claimed);
-    append(&hook_first.rollout, &answer_lines());
+    append_answer(&requests, &hook_first, split_tick).await;
     assert!(
         wait_for(Duration::from_secs(15), || !deliveries(
             &requests,
@@ -759,33 +879,7 @@ async fn codex_direct_answer_scenario(root: &Path) {
         (&parked, 5_704_501),
         (&repeat, 5_704_601),
     ] {
-        let sent = deliveries(&requests, codex.channel);
-        let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
-        let content = |body: &str| {
-            let value = serde_json::from_str::<serde_json::Value>(body).unwrap();
-            value["content"].as_str().unwrap_or_default().to_string()
-        };
-        let finals = sent.iter().filter(|(_, _, body)| content(body) == RESPONSE);
-        assert_eq!(finals.count(), 1, "one answer edit: {sent:?}");
-        // When the answer and the turn end reach the bridge in separate passes, its first-answer
-        // fast lane edits the same anchor once with the answer above the status line.
-        assert!(sent.len() <= 2, "one answer edit: {sent:?}");
-        for (method, path, _) in &sent {
-            assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
-        }
-        let (_, _, last) = sent.last().unwrap();
-        assert_eq!(
-            content(last),
-            RESPONSE,
-            "the answer edits the claimed anchor"
-        );
-        if let [(_, _, progress), _] = sent.as_slice() {
-            let status = content(progress);
-            assert!(
-                status.starts_with(&format!("{RESPONSE}\n\n")),
-                "only the answer's progress edit precedes it: {sent:?}"
-            );
-        }
+        assert_settled_answer(&requests, codex, anchor).await;
         let turns = finalized_turns
             .iter()
             .filter(|id| **id == codex.channel.get());

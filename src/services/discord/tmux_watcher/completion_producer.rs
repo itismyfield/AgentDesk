@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+pub(in crate::services::discord) use super::cancel_handoff::completion::capture_actors;
+
 // Watcher callers keep this path; the release bundle itself lives in the finalizer cleanup.
 pub(in crate::services::discord) use crate::services::discord::turn_finalizer::cleanup::terminal_release::release_restored_watcher_active_turn_before_panel_edit;
 
@@ -38,7 +41,10 @@ pub(super) fn note_watcher_terminal_projection_settled(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffer<S, SniffFuture>(
+pub(in crate::services::discord) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffer<
+    S,
+    SniffFuture,
+>(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -58,6 +64,8 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
     turn_is_external_input_for_session: bool,
     turn_is_non_managed_tui_mirror: bool,
     two_message_status_panel_generation_superseded: bool,
+    summary: Option<crate::services::discord::turn_end_summary::LiveSummary>,
+    completion_actor: Option<&std::sync::Weak<crate::services::provider::CancelToken>>,
 ) where
     S: FnOnce(Option<String>) -> SniffFuture,
     SniffFuture: std::future::Future<Output = bool>,
@@ -80,6 +88,10 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
     }
     let body_claim =
         crate::services::tui_o::cutover::BodyClaim::tmux(channel_id.get(), session.as_deref());
+    let summary = crate::services::discord::turn_end_summary::WatcherSummary::capture(
+        summary,
+        completion_actor,
+    );
     let background_agent_pending = sniff_background_agent_pending(tmux_session_name).await;
     complete_watcher_terminal_footer_or_status_panel(
         http,
@@ -103,4 +115,5 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffe
         body_claim,
     )
     .await;
+    crate::services::discord::turn_end_summary::post_watcher(http, shared, provider, summary).await;
 }

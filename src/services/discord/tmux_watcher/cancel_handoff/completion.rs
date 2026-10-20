@@ -6,23 +6,49 @@ use crate::services::discord::{
 use crate::services::provider::CancelToken;
 use std::sync::Weak;
 
-pub(in crate::services::discord::tmux::tmux_watcher) async fn capture_actor(
+pub(in crate::services::discord) async fn capture_actors(
     shared: &SharedData,
     channel: ChannelId,
     original: Option<&InflightTurnState>,
-) -> Option<Weak<CancelToken>> {
-    let original = original?;
-    let snapshot = shared.mailbox_peek(channel)?.snapshot().await;
-    let actor = snapshot.cancel_token?;
-    (original
+) -> (Option<Weak<CancelToken>>, Option<Weak<CancelToken>>) {
+    let Some(original) = original else {
+        return (None, None);
+    };
+    let Some(mailbox) = shared.mailbox_peek(channel) else {
+        return (None, None);
+    };
+    let snapshot = mailbox.snapshot().await;
+    let Some(actor) = snapshot.cancel_token else {
+        return (None, None);
+    };
+    let completion_actor = (original
         .turn_nonce
         .as_deref()
         .is_some_and(|nonce| !nonce.is_empty())
         && actor.turn_nonce() == original.turn_nonce.as_deref()
         && snapshot.active_user_message_id.map(|id| id.get())
             == Some(original.effective_finalizer_turn_id())
-        && snapshot.active_request_owner.map(|id| id.get()) == Some(original.request_owner_user_id))
-    .then(|| Arc::downgrade(&actor))
+        && snapshot.active_request_owner.map(|id| id.get())
+            == Some(original.request_owner_user_id))
+    .then(|| Arc::downgrade(&actor));
+    let owned_id = snapshot.active_user_message_id.map(|id| id.get())
+        == Some(original.effective_finalizer_turn_id())
+        || (original.user_msg_id == 0 && snapshot.active_user_message_id.is_none());
+    let summary_nonce = original
+        .turn_nonce
+        .as_deref()
+        .filter(|nonce| !nonce.is_empty());
+    let summary_actor = (actor.turn_nonce().filter(|nonce| !nonce.is_empty()) == summary_nonce
+        && snapshot
+            .active_turn_nonce
+            .as_deref()
+            .filter(|nonce| !nonce.is_empty())
+            == summary_nonce
+        && owned_id
+        && snapshot.active_request_owner.map(|id| id.get())
+            == Some(original.request_owner_user_id))
+    .then(|| Arc::downgrade(&actor));
+    (completion_actor, summary_actor)
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) async fn finish_after_receipt(
@@ -110,3 +136,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn finish_after_recei
         )
         .await;
 }
+
+#[cfg(test)]
+#[path = "completion_actor_capture_tests.rs"]
+mod actor_capture_tests;

@@ -100,7 +100,7 @@ fn local_retry_managed_verified_host_drains_budget_before_following_exact_work()
             polls(20).await;
             let posts = io.posts.to(CANARY_CHANNEL);
             if retired.is_none() {
-                assert_eq!(posts, ["local saved payload", "following exact"], "due Budget must drain even in verified mode");
+                assert_eq!(posts, ["local saved payload", "following exact", "-# ✅ 완료"], "due Budget must drain even in verified mode");
                 let store = harness.channel();
                 assert_eq!(store.ledger().piece(1).unwrap().local_retry, Some(crate::services::tui_o::store::ledger::LocalRetryMark::Attempt { root_serial: 0 }));
                 assert!(matches!(store.ledger().piece(1).unwrap().outcome, Some(PieceOutcome::Posted(_))));

@@ -773,9 +773,26 @@ async fn d4d_legacy_ledger_receipt_overlay_is_read_only_pg() {
     let (ledger, approval, rows) = persisted(&harness, &pool).await;
     assert_eq!(fresh, (vec!["fresh".to_owned()], false, 2, Some(None)));
     let appended = ledger.strip_prefix(before.0.as_slice()).unwrap();
-    let serials: Vec<_> = String::from_utf8_lossy(appended)
+    let entries: Vec<serde_json::Value> = String::from_utf8_lossy(appended)
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries[0]["entry"],
+        serde_json::json!({
+            "type": "excluded",
+            "unit_key": {
+                "channel_id": CHANNEL,
+                "provider": "claude",
+                "native_key": "fresh:0#turn",
+                "kind": "tool"
+            },
+            "reason": "turn_summary_open"
+        })
+    );
+    let serials: Vec<_> = entries[1..]
+        .iter()
         .map(|line| {
             (
                 line["entry"]["type"].clone(),

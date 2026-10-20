@@ -12,6 +12,21 @@ pub(super) struct TuiDirectBridgeGateway {
 }
 
 impl TurnGateway for TuiDirectBridgeGateway {
+    fn send_notice_once<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(
+            super::super::outbound::confirmation::send_terminal_notice_http_once(
+                &self.http,
+                &self.shared,
+                channel_id,
+                content,
+            ),
+        )
+    }
+
     fn send_message<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -208,4 +223,16 @@ impl TurnGateway for TuiDirectBridgeGateway {
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         None
     }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn terminal_notice_test_gateway(
+    http: Arc<serenity::Http>,
+    shared: Arc<SharedData>,
+) -> Arc<dyn TurnGateway> {
+    Arc::new(TuiDirectBridgeGateway {
+        http,
+        shared,
+        provider: ProviderKind::Claude,
+    })
 }

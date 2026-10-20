@@ -16,8 +16,8 @@
 //! panel pass scans prior-generation inflight channels and applies one finalize
 //! edit that strips the animated footer and appends `⏹ (재시작으로 중단됨)`.
 //! After 301 seconds, the orphan-placeholder pass scans configured provider
-//! channels and deletes at most ten current-bot-authored messages per channel
-//! whose content is exactly `...`, age exceeds five minutes, and id is absent
+//! channels and deletes at most ten current-bot-authored exact intake placeholders
+//! whose age exceeds five minutes, and id is absent
 //! from freshly reloaded inflight and pending-start state. Each pass reads one
 //! recent-message page of at most 50 messages per channel.
 //!
@@ -27,17 +27,17 @@
 //! Exact-placeholder cleanup is separately guarded by bot authorship, age, and
 //! durable-link exclusion. Independent per-pass guards block rescans without
 //! letting the earlier frozen-panel pass suppress the delayed orphan pass.
-
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
-
-use poise::serenity_prelude as serenity;
-
 use super::SharedData;
 use super::gateway::edit_outbound_message;
 use super::inflight::{load_inflight_states_for_sweep, parse_updated_at_unix};
 use super::single_message_panel::reclaim_finalize_text;
 use crate::services::provider::ProviderKind;
+use poise::serenity_prelude as serenity;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+#[path = "startup_reclaim/intake_placeholder_retirement_tests.rs"]
+mod intake_placeholder_retirement_tests;
 
 /// Recent-message read page size. One page per candidate channel; matches the
 /// catch-up path's `CATCH_UP_FETCH_LIMIT` so the spinner-bearing panel is on
@@ -184,10 +184,8 @@ fn message_change_unix(msg: &serenity::Message) -> i64 {
     )
 }
 
-/// Pure core of `message_change_unix`: prefer the edit time when present so a
-/// pre-boot message edited after boot (current generation re-rendered it) is
-/// correctly treated as current and skipped. Split out for unit testing without
-/// fabricating a full serenity `Message`.
+/// Prefer edit time so pre-boot messages edited this generation remain protected.
+/// Kept pure for tests that do not fabricate a Serenity message.
 fn change_unix_from_parts(edited_unix: Option<i64>, created_unix: i64) -> i64 {
     edited_unix.unwrap_or(created_unix)
 }
@@ -202,7 +200,7 @@ fn is_orphan_placeholder_candidate(
     protected_message_ids: &HashSet<u64>,
 ) -> bool {
     author_id == bot_user_id
-        && content == "..."
+        && (content == "..." || content == super::formatting::build_processing_status_block("⠋"))
         && message_change_unix < now_unix_secs - ORPHAN_PLACEHOLDER_MIN_AGE_SECS
         && !protected_message_ids.contains(&message_id)
 }

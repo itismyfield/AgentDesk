@@ -1,0 +1,38 @@
+id: E-60
+title: O 본문 → 성공 도구 카드 → 본문 → 턴 요약
+agent_mode: real_live
+coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
+cells: [claude-pipe, claude-tui]
+isolation: required
+durable_delivery_probe: true
+notes: |
+  Deployment-coordinator live acceptance only. The target channel must already
+  use O with tool cards enabled. An evaluated O receipt is mandatory; a cell
+  name or declared feature is not evidence of output ownership.
+steps:
+  - send_prompt: |
+      First emit exactly [E2E:E60:BEFORE].
+      Then use the Bash tool to run: python3 -c "import time; time.sleep(20); print('E60_TOOL_DONE')"
+      Only after the command succeeds emit exactly [E2E:E60:AFTER].
+  - wait_for_provider_hold_state:
+      ok_marker: "[E2E:E60:BEFORE]"
+      late_marker: "[E2E:E60:AFTER]"
+      timeout_s: 180
+      poll_interval_s: 1
+  - wait_for_discord_text: "[E2E:E60:AFTER]"
+    timeout_s: 300
+assertions:
+  - provider_hold_marker_seen: "[E2E:E60:BEFORE]"
+  - no_duplicate_marker: "[E2E:E60:BEFORE]"
+  - no_duplicate_marker: "[E2E:E60:AFTER]"
+  - no_status_chrome: true
+  - completion_per_turn:
+      exact: 1
+      marker: "[E2E:E60:AFTER]"
+  - turn_summary_after_body:
+      body_marker: "[E2E:E60:AFTER]"
+      before_marker: "[E2E:E60:BEFORE]"
+      tool_label: Bash
+      header: "-# ✅"
+      output_owner: o
