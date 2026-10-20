@@ -1,6 +1,5 @@
-//! Drifted-row retirement at the claim: every proof axis, the CAS outcomes it reports, the
-//! compensation and cleanup-less callers, and turns admitted around the retirement.
-//! Drifted rows here are synthetic; no production writer of that drift is known.
+//! Drifted-row retirement at the claim: proof axes, CAS outcomes, callers and nearby turns.
+//! The drifted rows are synthetic; no production writer of that drift is known.
 
 use super::row_retirement::{RuntimeWitness, retire_drifted_row, test_hooks};
 use super::*;
@@ -599,9 +598,8 @@ async fn start_turn(
     (token, state, created)
 }
 
-/// Intake B admitted between A's release and the retirement meets A's row and is deferred
-/// exactly once, then starts once after the retirement; a headless B answers Conflict with
-/// nothing queued; a B admitted after the retirement is never touched by A's late duplicate.
+/// B admitted between A's release and retirement is deferred once (headless: Conflict) and
+/// then starts once; a B admitted after it is untouched by A's late duplicate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turns_admitted_around_the_retirement_keep_their_input_and_row() {
     super::super::tests::with_isolated_runtime_root(|| async {
