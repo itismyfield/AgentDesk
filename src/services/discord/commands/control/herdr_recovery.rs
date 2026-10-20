@@ -276,17 +276,22 @@ async fn discard_waiting(
             let readable =
                 match inflight::load_inflight_state_read_only_result(provider, channel.get()) {
                     Ok(Some(row)) => {
-                        if row.user_msg_id != 0 {
+                        if row.user_msg_id == 0 {
+                            false
+                        } else {
                             excluded.insert(MessageId::new(row.user_msg_id));
+                            true
                         }
-                        true
                     }
                     Ok(None) => true,
                     Err(_) => false,
                 };
             if !readable {
                 cleared.persistence.count_unknown = true;
-                report.fail("legacy_pending_discard", "original inflight unreadable");
+                report.fail(
+                    "legacy_pending_discard",
+                    "original inflight identity unavailable",
+                );
             }
             if logical.is_none() {
                 cleared.persistence.count_unknown = true;

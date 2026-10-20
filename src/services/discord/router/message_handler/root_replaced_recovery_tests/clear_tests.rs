@@ -626,6 +626,44 @@ fn rr_public_clear_selects_old_originless_json_and_preserves_modern_pending_pg()
         |record| record.anchor_message_id == modern.anchor_message_id
             && record.hosted_source_checked
     ));
+    let inflight = crate::services::discord::inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        CHANNEL,
+        None,
+        7_186_901,
+        0,
+        7_186_903,
+        "unknown original anchor".into(),
+        Some("original-native".into()),
+        Some(case.fx.logical().into()),
+        None,
+        None,
+        0,
+    );
+    crate::services::discord::inflight::save_inflight_state(&inflight).unwrap();
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Claude,
+        CHANNEL,
+    );
+    let inflight_bytes = std::fs::read(&inflight_path).unwrap();
+    let unknown = clear(&case);
+    assert!(
+        unknown
+            .reply()
+            .contains("대기 메시지 수를 확인하지 못했어요."),
+        "{}",
+        unknown.reply()
+    );
+    assert!(
+        path(&old).exists(),
+        "an unknown active anchor cannot authorize legacy JSON discard"
+    );
+    assert_eq!(std::fs::read(&inflight_path).unwrap(), inflight_bytes);
+    assert_eq!(std::fs::read(path(&modern)).unwrap(), modern_bytes);
+    assert_eq!(case.fx.record(), original);
+    assert_eq!(case.effects(), effects);
+    std::fs::remove_file(inflight_path).unwrap();
     let report = clear(&case);
     let reply = report.reply();
     assert!(reply.contains("대기 메시지 1건을 비웠어요."), "{reply}");
