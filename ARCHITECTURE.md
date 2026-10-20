@@ -1160,6 +1160,8 @@ src/
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── loader_gate_observation_tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
@@ -1235,6 +1237,8 @@ src/
 │   │   │   ├── telemetry.rs
 │   │   │   └── worker.rs
 │   │   ├── live_bridge/
+│   │   │   ├── guard_tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
@@ -1245,6 +1249,9 @@ src/
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
 │   │   ├── model_catalog/
+│   │   │   ├── claude/
+│   │   │   │   └── tests/
+│   │   │   │       └── source_guard_tests.rs
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
@@ -1698,6 +1705,9 @@ src/
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
+│   │   ├── runtime_store/
+│   │   │   └── generation_allocation_tests/
+│   │   │       └── source_guard_tests.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
