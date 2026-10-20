@@ -82,9 +82,10 @@ fn native_inflight_row(channel: ChannelId, token: &Arc<CancelToken>, session: &s
     let mut row =
         inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
     row.turn_nonce = token.turn_nonce().map(str::to_owned);
-    row.output_path = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
-        .map(|binding| binding.output_path);
-    row.turn_start_offset = Some(0);
+    assert!(
+        row.output_path.is_none(),
+        "native prelaunch has no transcript path"
+    );
     inflight::save_inflight_state(&row).unwrap();
     path
 }

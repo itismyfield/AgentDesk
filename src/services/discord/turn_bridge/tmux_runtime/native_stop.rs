@@ -52,49 +52,49 @@ fn confirmed_missing_session(session: &str) -> bool {
     }
 }
 
-fn owns_native_turn(
+fn recovery_admissible(
     provider: &ProviderKind,
     channel: ChannelId,
-    token: &CancelToken,
+    token: &Arc<CancelToken>,
     session: &str,
+    completed: bool,
 ) -> Option<bool> {
     if token.tmux_session_name().as_deref() != Some(session) {
-        return Some(false);
+        return Some(true);
     }
-    let Some(binding) =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
-    else {
-        return Some(false);
-    };
-    let row = match crate::services::discord::inflight::load_inflight_state_read_only_result(
+    let live_owner =
+        crate::services::discord::live_bridge::retain_original(provider, channel.get(), token)
+            .is_some()
+            && !super::claude_stop_pane::mutant("ignore_live_owner");
+    match crate::services::discord::inflight::load_inflight_state_read_only_result(
         provider,
         channel.get(),
     ) {
-        Ok(Some(row)) => row,
-        Ok(None) => return Some(false),
-        Err(_) => return None,
-    };
-    if token.turn_nonce().is_none()
-        || row.turn_nonce.as_deref() != token.turn_nonce()
-        || row.tmux_session_name.as_deref() != Some(session)
-    {
-        return Some(false);
+        Ok(Some(row)) => {
+            if row
+                .tmux_session_name
+                .as_deref()
+                .is_some_and(|name| name != session)
+                || row
+                    .turn_nonce
+                    .as_deref()
+                    .zip(token.turn_nonce())
+                    .is_some_and(|(row, token)| row != token)
+            {
+                return Some(true);
+            }
+            // Prelaunch rows have no transcript yet; a matching nonce still owns the row.
+            if live_owner
+                || token.turn_nonce().is_some() && row.turn_nonce.as_deref() == token.turn_nonce()
+            {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        Ok(None) => Some(completed && !live_owner),
+        Err(_) => None,
     }
-    let Some((path, offset)) = row.output_path.as_deref().zip(row.turn_start_offset) else {
-        return Some(false);
-    };
-    let first = match ClaudeStopTurnIdentity::capture_start(&binding.output_path, offset) {
-        Ok(Some(first)) => first,
-        Ok(None) => return Some(false),
-        Err(_) => return None,
-    };
-    match first.matches_start(path, offset) {
-        Ok(true) => {}
-        Ok(false) => return Some(false),
-        Err(_) => return None,
-    }
-    // A bounded tail missing its user line cannot disprove this recorded Native input.
-    Some(ClaudeStopTurnIdentity::capture(&binding.output_path)? == first)
 }
 
 impl NativeStop {
@@ -131,9 +131,10 @@ impl NativeStop {
         if super::claude_stop_pane::mutant("native_always_none") {
             return None;
         }
-        let ownership = owns_native_turn(provider, channel, token, session);
+        let completed = token.native_stop.is_completed();
+        let recovery = recovery_admissible(provider, channel, token, session, completed);
         if !super::claude_stop_pane::mutant("protect_unowned")
-            && (ownership == Some(false)
+            && (recovery == Some(true)
                 || (token.native_stop.is_completed()
                     && super::claude_stop_pane::mutant("recovery_without_owner_gate")))
         {
@@ -152,7 +153,8 @@ impl NativeStop {
                         )
                         .map(|binding| binding.output_path)
                             == expected_source
-                        && (owns_native_turn(&provider, channel, &token, &session) == Some(false)
+                        && (recovery_admissible(&provider, channel, &token, &session, completed)
+                            == Some(true)
                             || super::claude_stop_pane::mutant("recovery_without_owner_gate"))
                 })
             });
@@ -164,7 +166,7 @@ impl NativeStop {
             stop.finished = true;
             return Some(stop);
         }
-        if ownership.is_none() {
+        if recovery.is_none() {
             stop.notify = token.native_stop.claim_notice();
             return Some(stop);
         }

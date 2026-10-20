@@ -468,10 +468,10 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
                 let next =
                     begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
                 assert!(
-                    matches!(next, CommandStop::Stop(_)),
-                    "a foreign native turn uses main recovery, not old delivery proof"
+                    matches!(next, CommandStop::Native(_)),
+                    "a new native identity cannot reuse the previous proof"
                 );
-                assert!(token.cancelled.load(Ordering::Acquire));
+                assert!(!token.cancelled.load(Ordering::Acquire));
                 assert!(
                     !fx.take_calls()
                         .iter()
@@ -977,20 +977,17 @@ fn preserve_stop_completed_owner_keeps_natural_first() {
 }
 
 #[test]
-fn preserve_stop_foreign_unbound_or_unowned_uses_main() {
+fn preserve_stop_unbound_or_different_row_uses_main() {
     let fx = Fixture::new();
     fx.pane(&running());
     run(async {
         for entry in ["command", "mailbox"] {
             for (n, case) in [
                 "unbound",
-                "foreign",
-                "no_owner",
-                "unknown",
-                "bindingless",
                 "foreign_nonce",
-                "legacy",
-                "no_offset",
+                "foreign_session",
+                "completed_no_owner",
+                "completed_other_arc",
             ]
             .into_iter()
             .enumerate()
@@ -999,59 +996,51 @@ fn preserve_stop_foreign_unbound_or_unowned_uses_main() {
                 let channel =
                     ChannelId::new(7_193_910 + n as u64 + if entry == "mailbox" { 30 } else { 0 });
                 let session = format!("native-recovery-{case}");
-                let (bound, path) = generating_turn(&fx, &session);
+                let (bound, _) = generating_turn(&fx, &session);
                 let token = if case == "unbound" {
                     Arc::new(CancelToken::new())
-                } else if case == "legacy" {
-                    let token = Arc::new(CancelToken::from_persisted_turn_nonce(None));
-                    token.bind_claude_tmux_session(&session);
-                    token
                 } else {
                     bound
                 };
                 start(&shared, channel, &token).await;
-                if case != "no_owner" {
-                    native_inflight_row(channel, &token, &session);
-                }
+                let row_path = native_inflight_row(channel, &token, &session);
+                let mut other_owner = None;
+                let mut other_token = None;
                 match case {
-                    "foreign" => {
-                        let attempt = token
-                            .native_stop
-                            .attempt("previous_native".into(), Arc::new(|| false))
+                    "completed_no_owner" | "completed_other_arc" => {
+                        if case == "completed_other_arc" {
+                            let row = inflight::load_inflight_state_read_only(
+                                &ProviderKind::Claude,
+                                channel.get(),
+                            )
                             .unwrap();
-                        attempt.complete(true);
-                        append(
-                            &path,
-                            serde_json::json!({"type":"user","uuid":"foreign","message":{"content":"another turn"}}),
-                        );
+                            let other = Arc::new(CancelToken::from_persisted_turn_nonce(
+                                token.turn_nonce().map(str::to_owned),
+                            ));
+                            other_owner = discord::live_bridge::register_without_requeue(
+                                &shared,
+                                &ProviderKind::Claude,
+                                &row,
+                                &other,
+                            )
+                            .await
+                            .unwrap();
+                            other_token = Some(other);
+                        }
+                        std::fs::remove_file(&row_path).unwrap();
+                        token.native_stop.completed();
                     }
-                    "unknown" => {
-                        std::fs::write(&path, "{\"type\":\"unknown\"}\n").unwrap();
-                    }
-                    "bindingless" => {
-                        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
-                        crate::services::tmux_common::write_tmux_runtime_kind_marker(
-                            &session,
-                            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-                        )
-                        .unwrap();
-                    }
-                    "no_offset" => {
+                    "foreign_nonce" | "foreign_session" => {
                         let mut row = inflight::load_inflight_state_read_only(
                             &ProviderKind::Claude,
                             channel.get(),
                         )
                         .unwrap();
-                        row.turn_start_offset = None;
-                        inflight::save_inflight_state(&row).unwrap();
-                    }
-                    "foreign_nonce" => {
-                        let mut row = inflight::load_inflight_state_read_only(
-                            &ProviderKind::Claude,
-                            channel.get(),
-                        )
-                        .unwrap();
-                        row.turn_nonce = Some("foreign_nonce".into());
+                        if case == "foreign_nonce" {
+                            row.turn_nonce = Some("foreign_nonce".into());
+                        } else {
+                            row.tmux_session_name = Some("different-native-session".into());
+                        }
                         inflight::save_inflight_state(&row).unwrap();
                     }
                     _ => {}
@@ -1090,8 +1079,9 @@ fn preserve_stop_foreign_unbound_or_unowned_uses_main() {
                     !fx.take_calls()
                         .iter()
                         .any(|call| call.starts_with("send-keys")),
-                    "judgment never reuses old proof for {case}"
+                    "judgment must not send keys for {case}"
                 );
+                drop((other_owner, other_token));
                 crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
             }
         }
@@ -1102,7 +1092,7 @@ fn preserve_stop_foreign_unbound_or_unowned_uses_main() {
 fn preserve_stop_recovery_rechecks_owner_before_publish() {
     let fx = Fixture::new();
     run(async {
-        for (n, change) in ["owner", "binding", "source", "cleanup"]
+        for (n, change) in ["owner", "live_bridge", "binding", "source", "cleanup"]
             .into_iter()
             .enumerate()
         {
@@ -1111,6 +1101,8 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
             let session = format!("native-orphan-race-{change}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
+            token.native_stop.completed();
+            let mut owner = None;
             assert!(
                 discord::turn_bridge::NativeStop::begin(
                     &shared,
@@ -1126,6 +1118,23 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
             match change {
                 "owner" => {
                     native_inflight_row(channel, &token, &session);
+                }
+                "live_bridge" => {
+                    let row_path = native_inflight_row(channel, &token, &session);
+                    let row = inflight::load_inflight_state_read_only(
+                        &ProviderKind::Claude,
+                        channel.get(),
+                    )
+                    .unwrap();
+                    owner = discord::live_bridge::register_without_requeue(
+                        &shared,
+                        &ProviderKind::Claude,
+                        &row,
+                        &token,
+                    )
+                    .await
+                    .unwrap();
+                    std::fs::remove_file(row_path).unwrap();
                 }
                 "binding" => {
                     token.bind_claude_tmux_session("native-successor-binding");
@@ -1151,9 +1160,99 @@ fn preserve_stop_recovery_rechecks_owner_before_publish() {
                 .cancel_active_turn_if_current_unless_herdr(token.clone(), "recovery_race".into())
                 .await;
             assert!(matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent), "changed recovery authority must be rechecked: {change}");
+            drop(owner);
             assert!(!token.cancelled.load(Ordering::Acquire));
             assert!(mailbox_holds(&shared, channel, &token).await);
             assert_eq!(tombstone(channel), None);
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
+    });
+}
+
+#[test]
+fn preserve_stop_live_owner_keeps_prelaunch_native() {
+    let fx = Fixture::new();
+    fx.pane(&running());
+    run(async {
+        for (n, completed) in [false, true].into_iter().enumerate() {
+            let shared = discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7_193_950 + n as u64);
+            let session = format!("native-live-prelaunch-{completed}");
+            let (token, _) = generating_turn(&fx, &session);
+            start(&shared, channel, &token).await;
+            let row_path = inflight_row(&ProviderKind::Claude, channel, &session, false);
+            let mut row =
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+                    .unwrap();
+            row.turn_nonce = token.turn_nonce().map(str::to_owned);
+            assert!(
+                row.output_path.is_none(),
+                "production prelaunch has no transcript path"
+            );
+            inflight::save_inflight_state(&row).unwrap();
+            let owner = discord::live_bridge::register_without_requeue(
+                &shared,
+                &ProviderKind::Claude,
+                &row,
+                &token,
+            )
+            .await
+            .unwrap()
+            .expect("register exact live Arc");
+            assert!(
+                discord::live_bridge::retain_original(&ProviderKind::Claude, channel.get(), &token)
+                    .is_some()
+            );
+            if completed {
+                token.native_stop.completed();
+            }
+            let before = file_state(&row_path);
+            let _ = fx.take_calls();
+            let result =
+                begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+            assert!(
+                !token.cancelled.load(Ordering::Acquire),
+                "a live owner with prelaunch row must not publish cancel"
+            );
+            let CommandStop::Native(stop) = result else {
+                panic!("live prelaunch remains Native");
+            };
+            assert!(
+                stop.finish().await.token.is_none(),
+                "delivery is not native termination"
+            );
+            assert!(mailbox_holds(&shared, channel, &token).await);
+            assert_eq!(file_state(&row_path), before);
+            assert_eq!(tombstone(channel), None);
+            assert_eq!(
+                fx.take_calls()
+                    .iter()
+                    .filter(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+                    .count(),
+                usize::from(!completed)
+            );
+            if completed {
+                std::fs::remove_file(&row_path).unwrap();
+                assert!(
+                    matches!(
+                        begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop")
+                            .await,
+                        CommandStop::Native(_)
+                    ),
+                    "exact live owner protects completed rowless turn"
+                );
+                assert!(!token.cancelled.load(Ordering::Acquire));
+                drop(owner);
+                assert!(
+                    matches!(
+                        begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop")
+                            .await,
+                        CommandStop::Stop(_)
+                    ),
+                    "completed orphan returns to main after its exact owner leaves"
+                );
+                assert!(token.cancelled.load(Ordering::Acquire));
+            }
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
     });
