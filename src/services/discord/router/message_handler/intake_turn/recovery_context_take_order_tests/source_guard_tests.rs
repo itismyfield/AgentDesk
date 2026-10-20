@@ -17,7 +17,8 @@ const TRANSITION: [&str; 2] = [
 ];
 const NATIVE_CLEAR_PROVIDER: &str = "(http, shared, token, &provider)";
 const RECOVERED_FRESH: &str = "&mut t.recovered_fresh";
-const SPAWN_BRIDGE: &str = "spawn_turn_bridge(";
+// Split so the bridge entry-site census does not count this file as a caller.
+const SPAWN_BRIDGE: &str = concat!("spawn_turn_", "bridge(");
 const STAMP: &str = "dispatch_stamp::stamp_before_bridge_handoff";
 const BUSY_LOG: &str =
     "claude_tui follow-up queued because hosted TUI is busy before prompt submission";
