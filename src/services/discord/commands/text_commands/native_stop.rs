@@ -11,7 +11,7 @@ pub(super) async fn handle(
         &channel_id.get().to_string(),
         data.provider.as_str(),
     )?;
-    return crate::services::cluster::channel_home::command_scope(permit, async {
+    crate::services::cluster::channel_home::command_scope(permit, async {
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id, "!stop")
                     .await;
@@ -63,5 +63,5 @@ pub(super) async fn handle(
                 }
             }
             Ok(true)
-            }).await;
+            }).await
 }

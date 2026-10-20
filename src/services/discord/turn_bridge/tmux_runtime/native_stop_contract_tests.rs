@@ -128,45 +128,97 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
     );
 }
 
-#[test]
-fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
-    let fx = Fixture::new();
-    fx.pane(&running());
-    run(async {
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-            "native_stop_contract",
-            "native stop contract",
-        )
-        .await;
-        let pool = db.connect_and_migrate_with_max_connections(4).await;
-        assert_eq!(
-            sqlx::query_scalar::<_, i32>("SELECT 1")
-                .fetch_one(&pool)
-                .await
-                .unwrap(),
-            1
-        );
-        for natural_first in [false, true] {
-            let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-            let channel = ChannelId::new(7_193_101 + u64::from(natural_first));
-            let (mock, ctx, server, data) = transport(&shared, channel).await;
-            let session = format!("native-reader-stop-{natural_first}");
-            let (token, path) = generating_turn(&fx, &session);
-            start(&shared, channel, &token).await;
-            inflight_row(&ProviderKind::Claude, channel, &session, false);
-            let mut events = shared.turn_completion_events.subscribe();
-            let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
-            let _ = fx.take_calls();
-            if natural_first {
-                let stop =
-                    begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
-                let CommandStop::Native(stop) = stop else {
-                    panic!("native stop result required");
-                };
-                append(
-                    &path,
-                    serde_json::json!({"type":"system", "subtype":"turn_duration"}),
-                );
+mod high_risk_recovery {
+    use super::*;
+
+    #[test]
+    fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
+        let fx = Fixture::new();
+        fx.pane(&running());
+        run(async {
+            let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+                "native_stop_contract",
+                "native stop contract",
+            )
+            .await;
+            let pool = db.connect_and_migrate_with_max_connections(4).await;
+            for natural_first in [false, true] {
+                let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+                let channel = ChannelId::new(7_193_101 + u64::from(natural_first));
+                let (mock, ctx, server, data) = transport(&shared, channel).await;
+                let session = format!("native-reader-stop-{natural_first}");
+                let (token, path) = generating_turn(&fx, &session);
+                start(&shared, channel, &token).await;
+                inflight_row(&ProviderKind::Claude, channel, &session, false);
+                let mut events = shared.turn_completion_events.subscribe();
+                let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
+                let _ = fx.take_calls();
+                if natural_first {
+                    let stop =
+                        begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop")
+                            .await;
+                    let CommandStop::Native(stop) = stop else {
+                        panic!("native stop result required");
+                    };
+                    append(
+                        &path,
+                        serde_json::json!({"type":"system", "subtype":"turn_duration"}),
+                    );
+                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                        while mailbox_holds(&shared, channel, &token).await {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(stop.finish().await.token.is_none());
+                    assert!(token.is_completion_cleanup(), "natural completion must win");
+                    assert_eq!(tombstone(channel), None);
+                } else {
+                    let request = command(&ctx, &data, channel);
+                    let observe = async {
+                        until(|| {
+                            fx.take_calls().iter().any(|call| {
+                                call.starts_with("send-keys") && call.ends_with("Escape")
+                            })
+                        })
+                        .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        assert!(
+                            !token.cancelled.load(Ordering::Acquire),
+                            "delivery is not native termination"
+                        );
+                        assert!(
+                            mailbox_holds(&shared, channel, &token).await,
+                            "live native turn retains mailbox"
+                        );
+                        assert!(inflight::inflight_state_file_exists(
+                            &ProviderKind::Claude,
+                            channel.get()
+                        ));
+                        assert!(
+                            events.try_recv().is_err(),
+                            "no finalizer release before native exit"
+                        );
+                        assert!(
+                            !shown
+                                .0
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|body| body.contains("[Stopped]"))
+                        );
+                        append(
+                            &path,
+                            serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text","text":"NATIVE_READER_CONTINUES"}]}}),
+                        );
+                        append(
+                            &path,
+                            serde_json::json!({"type":"system", "subtype":"turn_duration"}),
+                        );
+                    };
+                    tokio::join!(request, observe);
+                }
                 tokio::time::timeout(std::time::Duration::from_secs(8), async {
                     while mailbox_holds(&shared, channel, &token).await {
                         tokio::task::yield_now().await;
@@ -174,89 +226,39 @@ fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
                 })
                 .await
                 .unwrap();
-                assert!(stop.finish().await.token.is_none());
-                assert!(token.is_completion_cleanup(), "natural completion must win");
-                assert_eq!(tombstone(channel), None);
-            } else {
-                let request = command(&ctx, &data, channel);
-                let observe = async {
-                    until(|| {
-                        fx.take_calls()
-                            .iter()
-                            .any(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
-                    })
-                    .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                    assert!(
-                        !token.cancelled.load(Ordering::Acquire),
-                        "delivery is not native termination"
-                    );
-                    assert!(
-                        mailbox_holds(&shared, channel, &token).await,
-                        "live native turn retains mailbox"
-                    );
-                    assert!(inflight::inflight_state_file_exists(
-                        &ProviderKind::Claude,
-                        channel.get()
-                    ));
-                    assert!(
-                        events.try_recv().is_err(),
-                        "no finalizer release before native exit"
-                    );
-                    assert!(
-                        !shown
-                            .0
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .any(|body| body.contains("[Stopped]"))
-                    );
-                    append(
-                        &path,
-                        serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text","text":"NATIVE_READER_CONTINUES"}]}}),
-                    );
-                    append(
-                        &path,
-                        serde_json::json!({"type":"system", "subtype":"turn_duration"}),
-                    );
-                };
-                tokio::join!(request, observe);
-            }
-            tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                while mailbox_holds(&shared, channel, &token).await {
-                    tokio::task::yield_now().await;
+                until(|| {
+                    !inflight::inflight_state_file_exists(&ProviderKind::Claude, channel.get())
+                })
+                .await;
+                let mut releases = 0;
+                while let Ok(event) = events.try_recv() {
+                    if event.phase
+                        == discord::turn_completion_events::TurnCompletionPhase::MailboxReleased
+                    {
+                        releases += 1;
+                    }
                 }
-            })
-            .await
-            .unwrap();
-            let mut releases = 0;
-            while let Ok(event) = events.try_recv() {
-                if event.phase
-                    == discord::turn_completion_events::TurnCompletionPhase::MailboxReleased
-                {
-                    releases += 1;
-                }
+                assert_eq!(releases, 1, "the canonical finalizer releases once");
+                assert!(!inflight::inflight_state_file_exists(
+                    &ProviderKind::Claude,
+                    channel.get()
+                ));
+                assert!(
+                    !mock
+                        .written_texts()
+                        .iter()
+                        .any(|text| text.contains("중단 미확인"))
+                );
+                tokio::task::spawn_blocking(move || reader.join().unwrap())
+                    .await
+                    .unwrap();
+                crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+                server.abort();
             }
-            assert_eq!(releases, 1, "the canonical finalizer releases once");
-            assert!(!inflight::inflight_state_file_exists(
-                &ProviderKind::Claude,
-                channel.get()
-            ));
-            assert!(
-                !mock
-                    .written_texts()
-                    .iter()
-                    .any(|text| text.contains("중단 미확인"))
-            );
-            tokio::task::spawn_blocking(move || reader.join().unwrap())
-                .await
-                .unwrap();
-            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
-            server.abort();
-        }
-        pool.close().await;
-        db.drop().await;
-    });
+            pool.close().await;
+            db.drop().await;
+        });
+    }
 }
 
 #[test]
@@ -457,11 +459,14 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
 fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
     let fx = Fixture::new();
     run(async {
-        for change in ["done", "successor", "draft", "modal", "capture"] {
+        for (n, change) in ["done", "successor", "draft", "modal", "capture"]
+            .into_iter()
+            .enumerate()
+        {
             fx.serve(Server::Live);
             fx.pane(&running());
             let shared = discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(7_193_070);
+            let channel = ChannelId::new(7_193_070 + n as u64);
             let session = format!("native-stop-window-{change}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;

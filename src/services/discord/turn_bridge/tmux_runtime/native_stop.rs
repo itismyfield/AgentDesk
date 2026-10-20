@@ -108,6 +108,7 @@ impl NativeStop {
                     && crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
                         std::path::Path::new(&path),
                     ) == crate::services::tui_turn_state::TuiTurnState::Idle
+                    && identity.still_current()
             });
             stop.terminal = terminal.clone();
             if terminal() {

@@ -204,7 +204,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
-  --skip services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -769,9 +768,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
-  services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_proof
-  services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues
-  services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_rechecks_after_composer_wait_without_retargeting
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
   services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io

@@ -652,7 +652,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::http_cancel
-services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -2356,7 +2356,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_s
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::http_cancel::herdr_http_cancel_with_the_switch_off_records_and_sends_nothing_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape
-services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg
