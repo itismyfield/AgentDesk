@@ -273,6 +273,7 @@ NON_PG_FILTER_REPLAY=(
   cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
   cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
   cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
+  cli::doctor::orchestrator::observation_tests::session_lookup_not_started_is_a_warning_without_repair
   cli::doctor::orchestrator::observation_tests::unanswered_snapshot_read_withholds_only_the_active_count
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres

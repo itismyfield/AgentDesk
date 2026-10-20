@@ -139,11 +139,13 @@ cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests:
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
 cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
+cli::doctor::orchestrator::observation_tests::doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair
 cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
 cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
 cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
 cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
 cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
+cli::doctor::orchestrator::observation_tests::session_lookup_not_started_is_a_warning_without_repair
 cli::doctor::orchestrator::observation_tests::unanswered_snapshot_read_withholds_only_the_active_count
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
 cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
