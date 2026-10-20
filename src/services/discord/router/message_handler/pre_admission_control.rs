@@ -575,7 +575,8 @@ pub(super) mod pre_admission_control_tests {
             FLAG,
             SPLICE,
         ];
-        let cases: [(fn(&str) -> Vec<String>, &str, &[&str]); 2] = [
+        type Judge = fn(&str) -> Vec<String>;
+        let cases: [(Judge, &str, &[&str]); 2] = [
             (deferred_take_gaps, INTAKE_TURN, &intake),
             (
                 upload_guard_gaps,
@@ -598,7 +599,7 @@ pub(super) mod pre_admission_control_tests {
         assert!(!upload_guard_gaps(&classify_first).is_empty());
         for (judge, source, anchor, write) in [
             (
-                deferred_take_gaps as fn(&str) -> Vec<String>,
+                deferred_take_gaps as Judge,
                 INTAKE_TURN,
                 EARLY,
                 "std::mem::take(&mut s.pending_uploads);",

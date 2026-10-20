@@ -335,8 +335,9 @@ pub(crate) fn preserve_param_gaps(intake: &str, guard: &str) -> Vec<String> {
 }
 
 type IntakeJudge = fn(&str) -> Vec<String>;
+type DynJudge<'a> = &'a dyn Fn(&str) -> Vec<String>;
 
-fn assert_rejects(source: &str, judge: &dyn Fn(&str) -> Vec<String>, needles: &[&str]) {
+fn assert_rejects(source: &str, judge: DynJudge<'_>, needles: &[&str]) {
     assert_eq!(judge(source), Vec::<String>::new());
     for needle in needles {
         for forgery in CommentForgery::ALL {
@@ -355,7 +356,7 @@ fn handler_guards_reject_commented_steps() {
     let abort = |src: &str| abort_branch_gaps(STALE_GUARD, src);
     let param = |src: &str| preserve_param_gaps(src, STALE_GUARD);
     let transition = |src: &str| transition_provider_gaps(src, RUNTIME_TRANSITION);
-    let cases: [(&dyn Fn(&str) -> Vec<String>, &[&str]); 9] = [
+    let cases: [(DynJudge<'_>, &[&str]); 9] = [
         (
             &transition,
             &[HANDLER, TRANSITION[0], TRANSITION[1], NATIVE_CLEAR_PROVIDER],

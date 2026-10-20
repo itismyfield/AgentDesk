@@ -117,7 +117,8 @@ mod command_boundary_tests {
 
     #[test]
     fn command_boundary_guards_reject_commented_code_and_count_coded_execution() {
-        let cases: [(fn(&str) -> Vec<String>, &[&str]); 2] = [
+        type Judge = fn(&str) -> Vec<String>;
+        let cases: [(Judge, &[&str]); 2] = [
             (wrapper_gaps, &[WRAPPER, CONSUME[0], CONSUME[1]]),
             (
                 legacy_gaps,
