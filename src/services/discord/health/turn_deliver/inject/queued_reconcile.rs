@@ -10,7 +10,9 @@ use super::{HumanInputRequest, InjectAttempt, SharedData, channel_name, live_tui
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject;
 use crate::services::tui_input::human_frame::{self, Mode};
-use crate::services::turn_orchestrator::{PendingQueueItem, QueueIdentity};
+use crate::services::turn_orchestrator::{
+    PendingQueueItem, QueueIdentity, SourceMessageQueuedGeneration,
+};
 use poise::serenity_prelude::ChannelId;
 
 type FileId = (u64, u64);
@@ -62,12 +64,24 @@ pub(super) async fn mend(
     }
     let (primary, generation) = (head.identity.primary, head.identity.queued_generation);
     let recorded_attempt = head.attempt.is_some();
+    let sources: Vec<_> = head
+        .identity
+        .sources
+        .iter()
+        .map(|source| {
+            SourceMessageQueuedGeneration::new(
+                poise::serenity_prelude::MessageId::new(source.message_id),
+                source.queued_generation,
+            )
+        })
+        .collect();
     let admission = (channel, parent, gate);
     if let Err(error) = mailbox.mend_queued_head(head, persistence, admission).await {
         let channel_id = channel.get();
         tracing::warn!(channel_id, primary, %error, "queued head proof was not applied");
         return None;
     }
+    super::catch_up_race::confirmed(shared, &request.provider, channel, &sources).await;
     tracing::info!(
         channel_id = channel.get(),
         head_message_id = primary,

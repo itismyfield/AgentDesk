@@ -2,6 +2,7 @@
 //! the mailbox order reservation, and the hand-off of one input to `claude_tui::busy_inject`, a
 //! Herdr pane's gate (`herdr`) or, once enabled, `codex_tui::busy_inject`.
 
+mod catch_up_race;
 mod herdr;
 mod names;
 mod queued_owner;
@@ -408,6 +409,10 @@ pub(crate) async fn attempt(
     request: &HumanInputRequest,
     origin: Origin,
 ) -> InjectAttempt {
+    let origin = match catch_up_race::own_queued_head(shared, request, origin).await {
+        Ok(attempt) => return attempt,
+        Err(origin) => origin,
+    };
     if let Origin::QueuedHead {
         expected,
         parent,
@@ -417,7 +422,7 @@ pub(crate) async fn attempt(
         if !Origin::queued_head_gate_enabled(&request.provider, request.channel_id, parent, gate) {
             return InjectAttempt::NotSent("queued_gate_off");
         }
-        return queued_owner::queued_attempt(shared, request, expected, parent, gate).await;
+        return queued_owner::queued_attempt(shared, request, expected, parent, gate, None).await;
     }
     let target = match resolve(shared, request, false).await {
         Ok(target) => target,
@@ -624,7 +629,17 @@ impl Owner {
                     .await;
                 // Recorded whatever the settle answered, so a restart still finds it.
                 if let Some(message) = message {
-                    record_terminal(&provider, channel_id, message, outcome).await;
+                    if outcome == InjectionOutcome::Observed {
+                        catch_up_race::confirmed(
+                            &shared,
+                            &provider,
+                            channel_id,
+                            &handback.source_message_queued_generations(),
+                        )
+                        .await;
+                    } else {
+                        record_terminal(&provider, channel_id, message, outcome).await;
+                    }
                 }
                 delivered
             }
@@ -834,3 +849,6 @@ fn pane(channel_id: u64, session: &str) -> busy_inject::Pane {
 /// Per-channel mode and tmux program for tests, so parallel tests never share a switch.
 #[cfg(test)]
 pub(crate) mod test_hook;
+
+#[cfg(all(test, unix))]
+mod catch_up_race_tests;
