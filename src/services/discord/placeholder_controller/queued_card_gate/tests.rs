@@ -441,7 +441,8 @@ async fn t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock() {
 /// of a listed file, passes.
 #[test]
 fn t7_gated_sites_hold_no_raw_destructive_call() {
-    source_guard_tests::assert_gated_sites();
+    let gaps = source_guard_tests::gate_wiring_gaps();
+    assert!(gaps.is_empty(), "{gaps:#?}");
 }
 
 // #5141: real HTTP evidence for parking and the timer-only 404 classifier.
@@ -632,5 +633,6 @@ async fn t2b_retry_deleter_treats_unknown_message_as_cleared() {
 
 #[test]
 fn t3_exit_body_logs_both_failures() {
-    source_guard_tests::assert_exit_body_logs_both_failures();
+    let gaps = source_guard_tests::exit_body_warning_gaps(source_guard_tests::GATE_RS);
+    assert!(gaps.is_empty(), "{gaps:#?}");
 }

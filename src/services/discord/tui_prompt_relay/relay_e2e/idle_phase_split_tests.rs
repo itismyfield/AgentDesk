@@ -3,12 +3,14 @@ use super::super::source_tick::PHASE_PROBE;
 use super::n1a_turn_mode::claude_idle_o_transition::fixture::*;
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::tui_o::writer::binding::{
     BindingEvents, BindingRecord, BindingTarget, ChannelBindingLog,
 };
 use crate::services::tui_o::writer::host::{self, HostParts, Readiness};
+use crate::test_support::CommentForgery;
 
 fn isolated(name: &str) -> bool {
     if std::env::var("ADK_IDLE_PHASE_CHILD").as_deref() == Ok(name) {
@@ -61,26 +63,68 @@ fn logged(channel: u64, path: &std::path::Path) -> bool {
         })
 }
 
+const BOOT: &str = include_str!("../../runtime_bootstrap.rs");
+const RELAY: &str = include_str!("../../tui_prompt_relay.rs");
+const BOOT_FN: &str = "pub(crate) async fn run_bot(";
+const CONFIRM: &str = "turn_retirement::confirm_at_boot(";
+const RELAY_START: &str =
+    "super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());";
+const IDLE_SPAWNS: [&str; 2] = [
+    "spawn_claude_idle_transcript_relay(shared.clone());",
+    "spawn_codex_idle_rollout_relay(shared.clone());",
+];
+
+/// Classification 2, comments excluded: boot confirmation precedes the relay start in `run_bot`
+/// and each idle relay spawns once. A lexical tripwire: no reachability or `cfg` evaluation.
+fn boot_relay_gaps(boot: &str, relay: &str) -> Vec<String> {
+    let mut gaps = Vec::new();
+    match Lexed::new(boot).block(BOOT_FN) {
+        Some(body) => {
+            let confirm = body.find(CONFIRM);
+            if !confirm.is_some_and(|at| body.find_after(at + CONFIRM.len(), RELAY_START).is_some())
+            {
+                gaps.push("boot confirmation must precede the relay start".to_string());
+            }
+        }
+        None => gaps.push(format!("missing {BOOT_FN}")),
+    }
+    let relay = Lexed::new(relay);
+    for spawn in IDLE_SPAWNS {
+        let count = relay.count(spawn);
+        if count != 1 {
+            gaps.push(format!("{spawn} appears {count} times; want 1"));
+        }
+    }
+    gaps
+}
+
 #[test]
 fn bootstrap_keeps_confirmation_before_the_existing_relay() {
-    let boot = include_str!("../../runtime_bootstrap.rs");
-    let spawn = boot
-        .find("super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());")
-        .unwrap();
-    assert!(boot.find("turn_retirement::confirm_at_boot(").unwrap() < spawn);
-    let relay = include_str!("../../tui_prompt_relay.rs");
-    assert_eq!(
-        relay
-            .matches("spawn_claude_idle_transcript_relay(shared.clone());")
-            .count(),
-        1
-    );
-    assert_eq!(
-        relay
-            .matches("spawn_codex_idle_rollout_relay(shared.clone());")
-            .count(),
-        1
-    );
+    assert_eq!(boot_relay_gaps(BOOT, RELAY), Vec::<String>::new());
+}
+
+#[test]
+fn boot_relay_guard_rejects_commented_steps_and_counts_coded_spawns() {
+    for forgery in CommentForgery::ALL {
+        for needle in [BOOT_FN, CONFIRM, RELAY_START] {
+            let forged = forge(BOOT, needle, forgery);
+            assert!(
+                !boot_relay_gaps(&forged, RELAY).is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+        for spawn in IDLE_SPAWNS {
+            let forged = forge(RELAY, spawn, forgery);
+            assert!(!boot_relay_gaps(BOOT, &forged).is_empty());
+        }
+    }
+    let late_confirm = swap(BOOT, CONFIRM, RELAY_START);
+    assert!(!boot_relay_gaps(&late_confirm, RELAY).is_empty());
+    let [claude, _] = IDLE_SPAWNS;
+    let prose = RELAY.replacen(claude, &format!("{claude}\n        // {claude}"), 1);
+    assert_eq!(boot_relay_gaps(BOOT, &prose), Vec::<String>::new());
+    let twice = RELAY.replacen(claude, &format!("{claude}\n        {claude}"), 1);
+    assert_eq!(boot_relay_gaps(BOOT, &twice).len(), 1);
 }
 
 #[test]
