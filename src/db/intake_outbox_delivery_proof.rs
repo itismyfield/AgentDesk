@@ -50,10 +50,8 @@ const DURABLE_INFLIGHT_SESSION_SCOPE_SQL: &str = "s.status = 'turn_active'";
 /// The surrounding query must expose the intake row as `io` and the session as
 /// `s`. The result is 2 for a fresh live heartbeat, 1 for evidence that must be
 /// deferred, and 0 when the active-session heartbeat has been absent past the
-/// state's cutoff. Callers coalesce no matching durable row to 0, so a missing
-/// row and an existing non-`turn_active` row are both classified as Absent. An
-/// active dispatch binding is deliberately irrelevant: ordinary interactive
-/// turns normally leave it NULL. Migration 0028's
+/// state's cutoff. An active dispatch binding is deliberately irrelevant:
+/// ordinary interactive turns normally leave it NULL. Migration 0028's
 /// `sessions_status_known_check` rejects the legacy `working` status, so the
 /// durable liveness scope does not include it.
 fn durable_inflight_liveness_case_sql(fresh_param: usize, absence_param: usize) -> String {
@@ -66,8 +64,8 @@ fn durable_inflight_liveness_case_sql(fresh_param: usize, absence_param: usize) 
     )
 }
 
-/// Zero matching active rows are Absent so dead turns release the channel fence.
-/// Presence counts explain that drain decision without changing its grade.
+/// The query coalesces no matching `turn_active` rows to 0 (Absent), draining the fence for missing or non-active sessions.
+/// Deferring zero rows would fence dead turns forever; no other drain exists (`intake_dispatch.rs` only recovers stale Pending rows).
 pub(crate) fn durable_inflight_liveness_sql() -> String {
     let liveness = durable_inflight_liveness_case_sql(2, 3);
     let scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
