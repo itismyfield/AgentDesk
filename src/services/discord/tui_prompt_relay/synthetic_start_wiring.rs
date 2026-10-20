@@ -574,11 +574,9 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                     &provider,
                     channel_id,
                     &prompt.tmux_session_name,
-                    &prompt.prompt,
-                    anchor_message_id,
+                    (&prompt.prompt, anchor_message_id),
                     &*lease,
-                    None,
-                    prompt.native_turn_id.as_deref(),
+                    (None, prompt.native_turn_id.as_deref()),
                 )
                 .await;
             claimed = claim.claimed;

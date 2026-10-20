@@ -97,6 +97,55 @@ impl Fixture {
         binding_context::PreparedIncarnation::create(context.clone()).unwrap();
         context
     }
+
+    fn recorded_execution_source(&self, nonce: &str, source: &SourceId) {
+        use std::io::Write;
+        let now = chrono::Utc::now();
+        let seq = binding_events::records_strict(CHANNEL)
+            .unwrap()
+            .unwrap()
+            .len() as u64
+            + 1;
+        let event = binding_events::BindingEvent {
+            seq,
+            channel_id: CHANNEL,
+            provider: "claude".into(),
+            tmux_session: LOGICAL.into(),
+            execution_nonce: Some(nonce.into()),
+            old: None,
+            new: BindingTarget::Source(source.clone()),
+            cause: binding_events::BindingCause::Resume,
+            parent_hint: None,
+            evidence: binding_events::BindingEvidence {
+                hook_event: Some("session_start".into()),
+                received_at: now,
+            },
+            committed_at: now,
+        };
+        let path = self
+            .root
+            .path()
+            .join(binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{CHANNEL}.log"));
+        let mut log = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(log, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+        log.sync_all().unwrap();
+        std::fs::write(
+            crate::services::tmux_common::session_temp_path(LOGICAL, "spawn_nonce"),
+            nonce,
+        )
+        .unwrap();
+        assert_eq!(
+            binding_events::records_strict(CHANNEL)
+                .unwrap()
+                .unwrap()
+                .last()
+                .unwrap()
+                .execution_nonce
+                .as_deref(),
+            Some(nonce)
+        );
+    }
 }
 
 impl Drop for Fixture {
@@ -167,7 +216,7 @@ fn a_source_reused_by_two_executions_does_not_choose_the_latest_nonce() {
     let fx = Fixture::new();
     let source = fx.source(N1, "native-one");
     let original = capture("claude", LOGICAL, CHANNEL, &source.path, None).unwrap();
-    assert_eq!(fx.source(N2, "native-one"), source);
+    fx.recorded_execution_source(N2, &source);
     assert!(capture("claude", LOGICAL, CHANNEL, &source.path, None).is_none());
     assert!(
         restore(
@@ -185,7 +234,7 @@ fn a_source_reused_by_two_executions_does_not_choose_the_latest_nonce() {
 fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
     let fx = Fixture::new();
     let source = fx.source(N1, "native-one");
-    fx.source(N2, "native-one");
+    fx.recorded_execution_source(N2, &source);
     let context = fx.context(N2, "native-one");
     let pin = capture_in_context("claude", LOGICAL, CHANNEL, &source.path, None, &context)
         .expect("the producer captured N2's original launch context");

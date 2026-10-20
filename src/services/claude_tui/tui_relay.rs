@@ -269,16 +269,12 @@ fn handle_send_with_backend(
     }
 
     let bytes = req.text.len();
-    // F1: hold the SAME per-pane composer mutation lock `/compact` steering uses
-    // across the paste + Enter, so a `/tui/send` and a busy-pane auto `/compact`
-    // cannot interleave their key sends — otherwise the two could co-mingle into
-    // a single corrupt `/compact<user text>` submission (or `/compact` could be
-    // Enter-submitted mid-paste). This HTTP handler holds no other lock, so the
-    // composer lock is the outermost acquisition here (one-directional order, no
-    // deadlock). The hold is narrowed to just the paste + Enter mutation.
+    // Serialize paste and Enter with composer steering so their writes cannot interleave.
+    // This handler acquires no other lock.
+    type ComposerMutation = Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)>;
     let mutation = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &session_name,
-        || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
+        || -> ComposerMutation {
             let protected = crate::services::claude_tui::composer_lock::admit_composer_write(
                 &session_name,
                 || backend.capture(&session_name),

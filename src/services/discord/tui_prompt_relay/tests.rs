@@ -3993,11 +3993,9 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
         &ProviderKind::Claude,
         channel,
         tmux,
-        "prompt",
-        anchor,
+        ("prompt", anchor),
         &original_lease,
-        None,
-        None,
+        (None, None),
     )
     .await;
     assert!(initial.claimed);

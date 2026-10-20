@@ -1,6 +1,7 @@
 use super::*;
 
 #[cfg(test)]
+#[path = "admitted/transition_tests.rs"]
 mod tests;
 
 pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
@@ -259,7 +260,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
             (mailbox_activation_occurred, &class),
         )
     {
-        return bridge_handoff::refresh_existing(
+        let refreshed = bridge_handoff::refresh_existing(
             shared,
             existing,
             lease,
@@ -273,6 +274,10 @@ pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
             pg_pin,
         )
         .await;
+        if refreshed.claimed {
+            identity.publish_deferred_lease(relay_owner);
+        }
+        return refreshed;
     }
 
     if !original_source_matches(&admission.fence, output_path.as_deref(), lease).await
@@ -344,6 +349,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
     {
         return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
     }
+    identity.publish_deferred_lease(relay_owner);
     tracing::info!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
@@ -369,5 +375,20 @@ async fn original_source_matches(
         }
         (Some(_), None) => false,
         (None, _) => true,
+    }
+}
+
+impl SyntheticClaimIdentity<'_> {
+    fn publish_deferred_lease(&self, owner: ExternalInputRelayOwner) {
+        if self.register_deferred_start {
+            // Rejected old pending records must never replace a current execution's lease.
+            let mut lease = self.lease.clone();
+            lease.relay_owner = owner;
+            crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                self.provider.as_str(),
+                self.tmux_session_name,
+                lease,
+            );
+        }
     }
 }

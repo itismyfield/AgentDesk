@@ -104,6 +104,10 @@ impl Fixture {
     }
 
     fn publish_source(&self, source: &binding_events::SourceId, nonce: &str, seq: u64) {
+        // The fixture writes its execution history explicitly below; publish the cache without
+        // also appending a second event for the same sequence through registration.
+        let log_root = binding_events::test_root();
+        binding_events::set_test_root(None);
         dedupe::register_tmux_runtime_binding(
             &self.logical,
             dedupe::TuiRuntimeBinding {
@@ -116,6 +120,7 @@ impl Fixture {
                 relay_last_offset: None,
             },
         );
+        binding_events::set_test_root(log_root.as_deref());
         self.shared.tmux_watchers.insert(
             self.channel,
             crate::services::discord::TmuxWatcherHandle {
@@ -163,6 +168,18 @@ impl Fixture {
             .unwrap();
         writeln!(log, "{}", serde_json::to_string(&event).unwrap()).unwrap();
         log.sync_all().unwrap();
+        let history = binding_events::records_strict(self.channel.get())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            history.len() as u64,
+            seq,
+            "fixture history must have one event per sequence"
+        );
+        assert_eq!(
+            history.last().unwrap().execution_nonce.as_deref(),
+            Some(nonce)
+        );
     }
 
     fn pending(
@@ -216,13 +233,17 @@ impl Fixture {
         claim(&self.shared, record).await
     }
 
-    fn publish_pending_lease(&self, record: &pending::TuiDirectPendingStart) {
+    fn publish_pending_lease(
+        &self,
+        record: &pending::TuiDirectPendingStart,
+    ) -> ExternalInputRelayLease {
         let mut lease = ExternalInputRelayLease::unassigned(Some(self.channel.get()));
         lease.turn_id = record.lease_turn_id.clone();
         lease.session_key = record.lease_session_key.clone();
         lease.relay_owner = ExternalInputRelayOwner::TmuxWatcher;
         lease.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
-        dedupe::record_external_input_turn_lease("claude", &self.logical, lease);
+        lease.hosted_source = record.hosted_source.clone();
+        dedupe::record_external_input_turn_lease("claude", &self.logical, lease)
     }
 
     async fn assert_quiet(&self) {
@@ -466,7 +487,7 @@ async fn a_pending_claim_from_n1_refuses_retired_n1_and_bound_n2_but_accepts_n2_
         crate::services::tui_o::shadow::binding_reader::source_id_for("native-n2", &path).unwrap();
     fixture.publish_source(&source, N2, 2);
     let current = fixture.pending(N2, &source, 7_186_304);
-    fixture.publish_pending_lease(&current);
+    fixture.publish_pending_lease(&original);
     assert!(
         fixture.claim(&current).await,
         "the valid N2 source must remain claimable"
@@ -561,6 +582,70 @@ async fn old_pending_without_original_source_holds_without_blocking_valid_n2_pg(
 #[tokio::test(flavor = "current_thread")]
 async fn old_pending_with_ambiguous_original_source_holds_without_blocking_valid_n2_pg() {
     old_pending_does_not_block_n2(true, 7_186_622).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_pending_cannot_replace_a_live_n2_lease_before_its_claim_is_refused_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let _binding =
+        crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(root.path());
+    let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let channel = ChannelId::new(7_186_642);
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+    let fixture = Fixture::new(root.path(), channel).await;
+    let stale = fixture.pending(N1, &fixture.source, 7_186_643);
+    let mut unknown_encoded = serde_json::to_value(&stale).unwrap();
+    unknown_encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("hosted_source");
+    unknown_encoded["captured_source"] = serde_json::Value::Null;
+    let unknown: pending::TuiDirectPendingStart = serde_json::from_value(unknown_encoded).unwrap();
+
+    fixture.replace_execution(HostedState::Bound, N2).await;
+    let path = root.path().join("live-n2-before-stale-pending.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for("native-n2", &path).unwrap();
+    fixture.publish_source(&source, N2, 2);
+    let current = fixture.pending(N2, &source, 7_186_644);
+    let current_lease = fixture.publish_pending_lease(&current);
+    assert_eq!(
+        current_lease
+            .hosted_source
+            .as_ref()
+            .map(|pin| pin.execution_nonce.as_str()),
+        Some(N2)
+    );
+    assert!(
+        dedupe::herdr_claim_admission(&fixture.logical, true).is_ok(),
+        "N2 is admitted before either stale pending attempts its claim"
+    );
+
+    for rejected in [&stale, &unknown] {
+        assert!(
+            !fixture.claim(rejected).await,
+            "a stale N1 or unknown old origin cannot claim the current N2 execution"
+        );
+        fixture.assert_quiet().await;
+        assert_eq!(
+            dedupe::external_input_relay_lease("claude", &fixture.logical, channel.get()),
+            Some(current_lease.clone()),
+            "a refused pending replaced the live N2 lease identity or original source pin"
+        );
+    }
+
+    assert!(
+        fixture.claim(&current).await,
+        "the existing N2 lease remains claimable without being republished after stale attempts"
+    );
+    let saved =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(saved.user_msg_id, current.anchor_message_id);
+    assert_eq!(saved.hosted_execution_nonce.as_deref(), Some(N2));
+    assert_eq!(saved.output_path.as_deref(), source.path.to_str());
+    fixture.close().await;
 }
 
 async fn old_pending_does_not_block_n2(ambiguous: bool, id: u64) {

@@ -76,7 +76,7 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_view_fn()
 }
 
 /// The worker's claim action: rehydrate the lease (in case a restart dropped the
-/// in-memory map), then run the normal [`claim::claim_tui_direct_synthetic_turn`] which
+/// in-memory map), then run the normal [`claim::claim_tui_direct_synthetic_turn_inner`] which
 /// reads the runtime binding FRESH and seeds `turn_start_offset = relay_last_offset()`
 /// (post-drain == EOF) with `response_sent_offset = 0`.
 pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
@@ -92,17 +92,6 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             };
             let channel_id = ChannelId::new(record.channel_id);
             let anchor_message_id = MessageId::new(record.anchor_message_id);
-            if record.captured_source.is_some()
-                && crate::services::tui_prompt_dedupe::external_input_relay_lease(
-                    provider.as_str(),
-                    &record.tmux_session_name,
-                    record.channel_id,
-                )
-                .is_some_and(|lease| lease.turn_id != record.lease_turn_id)
-            {
-                return false;
-            }
-
             // Rehydrate the external-input lease from the durable record's
             // fields (a restart clears the in-memory lease map). NEVER resubmit
             // the provider prompt — only the relay lease is restored.
@@ -122,54 +111,35 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
                 .lease_runtime_kind
                 .as_deref()
                 .and_then(RuntimeHandoffKind::from_str);
-            let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                provider.as_str(),
-                &record.tmux_session_name,
-                lease,
-            );
+            if record.captured_source.is_some()
+                && crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                    provider.as_str(),
+                    &record.tmux_session_name,
+                    record.channel_id,
+                )
+                .is_some_and(|current| {
+                    current.turn_id != lease.turn_id
+                        && !matches!((&current.hosted_source, &lease.hosted_source),
+                            (Some(previous), Some(original)) if previous != original)
+                })
+            {
+                return false;
+            }
 
             let claim = claim::claim_tui_direct_synthetic_turn_inner::<true>(
                 shared,
                 &provider,
                 channel_id,
                 &record.tmux_session_name,
-                &record.prompt_text,
-                anchor_message_id,
+                (&record.prompt_text, anchor_message_id),
                 &lease,
-                record.captured_source.as_ref(),
-                record.native_turn_id.as_deref(),
+                (
+                    record.captured_source.as_ref(),
+                    record.native_turn_id.as_deref(),
+                ),
             )
             .await
             .0;
-
-            // #3154 P1-3: adopt the claim's relay_owner into the in-memory lease
-            // EXACTLY like the inline (non-deferred) path does (see
-            // `relay_observed_prompt` lines ~854-865). The claim may decide the
-            // tmux WATCHER owns this turn's output; if so, the persisted lease
-            // (rehydrated as BridgeAdapter) is stale. Without re-recording it,
-            // the observer-side `maybe_spawn_claude_idle_response_tail` / bridge
-            // tail keeps running on the stale BridgeAdapter lease while the
-            // watcher relays the same output → DUPLICATE relay (the original
-            // bug). Re-record with the adopted owner so any bridge-tail guard
-            // reading the lease sees the watcher owns it and stops.
-            if claim_should_adopt_relay_owner(claim.claimed, lease.relay_owner, claim.relay_owner) {
-                let mut adopted = lease.clone();
-                adopted.relay_owner = claim.relay_owner;
-                let _ = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-                    provider.as_str(),
-                    &record.tmux_session_name,
-                    adopted,
-                );
-                tracing::info!(
-                    provider = %record.provider,
-                    channel_id = record.channel_id,
-                    tmux_session_name = %record.tmux_session_name,
-                    anchor_message_id = record.anchor_message_id,
-                    prior_relay_owner = lease.relay_owner.as_str(),
-                    adopted_relay_owner = claim.relay_owner.as_str(),
-                    "tui_direct_pending_start: deferred claim adopted watcher relay_owner into the in-memory lease (bridge tail will stand down)"
-                );
-            }
 
             // #3154 P1 (BridgeAdapter-GAP fix). The observer stood down for ALL
             // deferred starts because it could not know the RESOLVED owner before
@@ -184,9 +154,8 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             #[cfg(unix)]
             if claim.claimed && deferred_claim_requires_bridge_tail_relayer(claim.relay_owner) {
                 // The lease the bridge tail reads must reflect the resolved owner.
-                // `claim_should_adopt_relay_owner` above is false for the BridgeAdapter
-                // case (the rehydrated lease was already BridgeAdapter), so re-read the
-                // stored lease (or fall back to the rehydrated one) and ensure it carries
+                // Admission published the validated lease before releasing its transition.
+                // Re-read that lease (or fall back to the rehydrated one) so it carries
                 // the resolved owner before handing it to the self-gating tail.
                 let mut tail_lease =
                     crate::services::tui_prompt_dedupe::external_input_relay_lease(

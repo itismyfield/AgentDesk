@@ -10,6 +10,7 @@ pub(super) use pending_claim::{
     defer_synthetic_turn_start, pending_start_claim_fn, pending_start_view_fn,
 };
 mod stale_reclaim;
+#[cfg(test)]
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
 #[cfg(test)]
 pub(super) use claim::claim_tui_direct_synthetic_turn;

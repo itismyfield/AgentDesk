@@ -31,7 +31,7 @@ pub(super) enum AdmissionClass {
     Construction,
     /// A row for this anchor exists: re-adopting its episode, whatever token.
     PersistedAdoption {
-        pin: InflightEpisodePin,
+        pin: Box<InflightEpisodePin>,
         row_nonce: Option<String>,
     },
 }
@@ -159,7 +159,7 @@ pub(super) async fn prepare_admission<'a>(
         .map_err(|()| "synthetic original actor proof changed")?;
     let class = match row {
         Some(row) => AdmissionClass::PersistedAdoption {
-            pin: InflightEpisodePin::from_state(&row),
+            pin: Box::new(InflightEpisodePin::from_state(&row)),
             row_nonce: row.turn_nonce,
         },
         None => AdmissionClass::Construction,

@@ -250,4 +250,5 @@ pub(crate) fn capture_hook(
 }
 
 #[cfg(all(test, unix))]
+#[path = "hosted_source/source_tests.rs"]
 pub(crate) mod tests;

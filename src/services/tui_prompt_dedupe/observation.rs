@@ -74,9 +74,7 @@ pub fn observe_prompt_by_tmux_at(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
-        None,
-        None,
-        None,
+        (None, None, None),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -100,9 +98,7 @@ pub fn observe_prompt_by_tmux_with_entry_id_at(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
-        entry_id,
-        None,
-        None,
+        (entry_id, None, None),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -220,9 +216,7 @@ pub(crate) fn observe_hook_prompt_by_tmux_with_prompt_id_at(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
-        None,
-        prompt_id.map(ClaudePromptId::HookSubmit),
-        None,
+        (None, prompt_id.map(ClaudePromptId::HookSubmit), None),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -242,9 +236,7 @@ pub fn observe_prompt_by_tmux_with_row_ids_at(
         provider,
         tmux_session_name,
         &[prompt.to_string()],
-        entry_id,
-        prompt_id.map(ClaudePromptId::TranscriptRow),
-        None,
+        (entry_id, prompt_id.map(ClaudePromptId::TranscriptRow), None),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
     )
@@ -259,9 +251,7 @@ pub fn observe_prompt_candidates_by_tmux(
         provider,
         tmux_session_name,
         prompts,
-        None,
-        None,
-        None,
+        (None, None, None),
         PromptObservationEffect::NotifyAndLease,
         Utc::now(),
     )
@@ -276,9 +266,7 @@ pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
         provider,
         tmux_session_name,
         prompts,
-        None,
-        None,
-        None,
+        (None, None, None),
         PromptObservationEffect::RelayLeaseOnly,
         Utc::now(),
     )
@@ -294,13 +282,10 @@ fn observe_prompt_candidates_by_tmux_inner(
     provider: &str,
     tmux_session_name: &str,
     prompts: &[String],
-    entry_id: Option<&str>,
-    prompt_id: Option<ClaudePromptId<'_>>,
-    native_turn: Option<&str>,
+    ids: ObservationIds<'_>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
 ) -> PromptObservation {
-    let ids = (entry_id, prompt_id, native_turn);
     let evidence = handoff::Evidence::Unattributed;
     observe_inner(
         provider,

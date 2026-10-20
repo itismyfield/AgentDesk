@@ -675,6 +675,7 @@ src/
 │   │   ├── hook_server/
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
+│   │   │   ├── hook_event.rs
 │   │   │   ├── native_clear_fence_tests.rs
 │   │   │   ├── o_restart_preservation_tests.rs
 │   │   │   ├── observation_ingress.rs
@@ -1968,19 +1969,27 @@ src/
 │   │   │   │   ├── stale_resume_retry_e2e.rs
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
+│   │   │   ├── relay_ownership/
+│   │   │   │   └── hosted_source_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   ├── bridge_handoff/
 │   │   │   │   │   ├── reown/
 │   │   │   │   │   │   └── reown_tests.rs
 │   │   │   │   │   └── reown.rs
+│   │   │   │   ├── claim/
+│   │   │   │   │   ├── admitted/
+│   │   │   │   │   │   └── transition_tests.rs
+│   │   │   │   │   └── admitted.rs
 │   │   │   │   ├── non_bridge_claim/
 │   │   │   │   │   └── strict_yield_tests.rs
+│   │   │   │   ├── admission_fence.rs
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   │   ├── non_bridge_claim.rs
 │   │   │   │   ├── ownership.rs
+│   │   │   │   ├── pending_claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
@@ -1995,6 +2004,9 @@ src/
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
+│   │   │   │   ├── herdr_synthetic_claim_window_tests.rs
+│   │   │   │   ├── herdr_synthetic_identity_pg_tests.rs
+│   │   │   │   ├── herdr_synthetic_transition_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
 │   │   │   │   ├── pending_start_worker_claim_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
@@ -3104,6 +3116,9 @@ src/
 │   │   │   ├── codex_claim_tests.rs
 │   │   │   ├── lane_tests.rs
 │   │   │   └── log_record.rs
+│   │   ├── hosted_source/
+│   │   │   ├── observation.rs
+│   │   │   └── source_tests.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_policy/
 │   │   │   │   ├── clear_relaunch.rs
@@ -3140,6 +3155,7 @@ src/
 │   │   ├── extract.rs
 │   │   ├── handoff.rs
 │   │   ├── handoff_tests.rs
+│   │   ├── hosted_source.rs
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
 │   │   ├── native_clear.rs

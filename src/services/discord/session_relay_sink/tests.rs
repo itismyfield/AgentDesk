@@ -1815,7 +1815,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "answer",
@@ -1884,7 +1884,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
             short_controller::SinkShortReplaceCtx {
                 shared: &shared2,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "answer",
@@ -1927,14 +1927,14 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
         .build()
         .unwrap();
     let provider = ProviderKind::Claude;
-    let channel = ChannelId::new(8_041_491_1);
+    let channel = ChannelId::new(80_414_911);
     let session = "AgentDesk-claude-sink-short-4911";
     let generation_path = crate::services::tmux_common::session_temp_path(session, "generation");
     std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
     std::fs::write(&generation_path, b"source-a").unwrap();
     let generation = dr::current_generation_mtime_ns(session);
     let (start, end) = (0, 256);
-    let old_user_msg_id = 8_041_491_100;
+    let old_user_msg_id = 80_414_91100;
     let replacement_user_msg_id = 8_041_491_200;
     let mut delivery = delivery_with_fence_offset(
         session,
@@ -2021,7 +2021,7 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "old body",
@@ -2220,10 +2220,10 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         .build()
         .unwrap();
     let provider = ProviderKind::Claude;
-    let channel = ChannelId::new(8_041_4081);
+    let channel = ChannelId::new(80_414_081);
     let session = "AgentDesk-claude-session-sink-raw-4081";
     let raw_body = "# heading\nbody line\n".to_string();
-    let user_msg_id = 8_041_4080;
+    let user_msg_id = 80_414_080;
     let relay_text = formatting::format_for_discord_with_provider(&raw_body, &provider);
     assert_ne!(
         raw_body, relay_text,
@@ -2302,7 +2302,7 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: &relay_text,

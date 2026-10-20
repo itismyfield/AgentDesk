@@ -182,7 +182,7 @@ fn synthetic_bridge_handoff_fixture(
                 *synthetic_start::bridge_handoff::ADMISSION_PAUSE.lock().unwrap() =
                     Some((channel.get(), entered.clone(), resume.clone()));
                 let attempt = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
-                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease, None, None,
+                    &shared, &provider, channel, tmux, ("handoff prompt", anchor), &lease, (None, None),
                 );
                 let replace = async {
                     entered.notified().await;
