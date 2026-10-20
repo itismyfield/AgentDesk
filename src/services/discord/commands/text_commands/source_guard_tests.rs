@@ -56,6 +56,7 @@ pub(super) fn dispatch_gaps(source: &str) -> Vec<String> {
     if body.text().contains("Ok(false)") {
         gaps.push("dispatcher returns Ok(false)".to_string());
     }
+    // Nested subcommand wildcards are legitimate; only the outer match is forbidden.
     if rest
         .text()
         .lines()

@@ -960,7 +960,8 @@ src/
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   └── clear_refusal_reply_tests.rs
+│   │   │   │   ├── clear_refusal_reply_tests.rs
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── voice/
 │   │   │   │   └── alert.rs
 │   │   │   ├── cancel_backstop_tests.rs
@@ -1502,7 +1503,8 @@ src/
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
-│   │   │   │   │   └── replay_hold.rs
+│   │   │   │   │   ├── replay_hold.rs
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── notice.rs
@@ -1513,6 +1515,8 @@ src/
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
+│   │   │   │   ├── queue_effects/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
@@ -1520,6 +1524,7 @@ src/
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
+│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
@@ -1531,7 +1536,8 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── process_mailbox.rs
-│   │   │   │   │   └── routine_metadata.rs
+│   │   │   │   │   ├── routine_metadata.rs
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── dispatch_stamp/
 │   │   │   │   │   │   └── tests.rs
@@ -1558,6 +1564,7 @@ src/
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
+│   │   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
@@ -1585,6 +1592,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── provider_isolation_source_guard_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
@@ -1605,6 +1613,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
+│   │   │   ├── source_guard_support.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
