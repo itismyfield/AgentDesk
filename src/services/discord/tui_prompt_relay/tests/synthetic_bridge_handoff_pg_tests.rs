@@ -95,19 +95,37 @@ enum EmptyTailCase {
 }
 
 #[cfg(unix)]
+type SyntheticBridgeHandoffParameters = (
+    bool,
+    bool,
+    bool,
+    bool,
+    Option<bool>,
+    bool,
+    bool,
+    Option<EmptyTailCase>,
+    bool,
+    bool,
+    bool,
+    Option<ProviderKind>,
+);
+
+#[cfg(unix)]
 fn synthetic_bridge_handoff_fixture(
-    delayed_save: bool,
-    foreign_actor: bool,
-    wrong_source: bool,
-    postgres: bool,
-    recovery: Option<bool>,
-    failed_save: bool,
-    source_retry: bool,
-    empty_tail: Option<EmptyTailCase>,
-    postgres_race: bool,
-    admission_race: bool,
-    prefix_read_error: bool,
-    native_tail: Option<ProviderKind>,
+    (
+        delayed_save,
+        foreign_actor,
+        wrong_source,
+        postgres,
+        recovery,
+        failed_save,
+        source_retry,
+        empty_tail,
+        postgres_race,
+        admission_race,
+        prefix_read_error,
+        native_tail,
+    ): SyntheticBridgeHandoffParameters,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -752,47 +770,47 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         true, false, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, true, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, true, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, true, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -805,13 +823,13 @@ fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -824,29 +842,29 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, true, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, true, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -859,8 +877,8 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         None,
-    );
-    synthetic_bridge_handoff_fixture(
+    ));
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -873,13 +891,13 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -892,38 +910,38 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, true, None, false, false, None, true, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, true, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, false, true, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor() {
     for provider in [ProviderKind::Claude, ProviderKind::Codex] {
-        synthetic_bridge_handoff_fixture(
+        synthetic_bridge_handoff_fixture((
             false,
             false,
             false,
@@ -936,6 +954,6 @@ fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor(
             false,
             false,
             Some(provider),
-        );
+        ));
     }
 }

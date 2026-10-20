@@ -37,9 +37,11 @@ pub(super) enum AdmissionClass {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
+
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<TestPause> =
+    Mutex::new(None);
 
 #[cfg(test)]
 pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
@@ -49,7 +51,7 @@ pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
 /// One-shot test pause: parks `channel`'s claim until the test resumes it.
 #[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay) async fn pause_for_test(
-    slot: &Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    slot: &Mutex<TestPause>,
     channel: ChannelId,
 ) {
     let pause = {
@@ -121,9 +123,8 @@ pub(super) async fn capture_session_pin(
 }
 
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static PREPARE_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+pub(in crate::services::discord::tui_prompt_relay) static PREPARE_PAUSE: Mutex<TestPause> =
+    Mutex::new(None);
 
 pub(super) struct PreparedAdmission<'a> {
     pub(super) token: Arc<CancelToken>,

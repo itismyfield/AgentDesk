@@ -1,6 +1,9 @@
 //! Hosted synthetic claims keep their observed execution across deferred and post-claim races.
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::dispatched_session_canonical_identity::{
+    self as canonical, pg_tests as canonical_fixture,
+};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedExecution, HostedLocation, HostedOwner, HostedState, ProcessStamp,
     SourceRef,
@@ -83,9 +86,22 @@ impl Fixture {
                 baseline_event_seq: None,
             },
         };
-        sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)")
-            .bind(&key).bind(&shared.token_hash).bind(channel.get().to_string())
-            .bind(serde_json::to_value(&execution).unwrap()).execute(&pool).await.unwrap();
+        canonical::upsert_hook_session_with_identity_pg(
+            &pool,
+            crate::db::dispatched_sessions::HookSessionUpsert {
+                instance_id: None,
+                ..canonical_fixture::params(&key, &owner.channel_id)
+            },
+            Some(canonical::CanonicalSessionIdentity {
+                kind: canonical::SessionIdentityKind::DiscordChannel,
+                discord_token_hash: &shared.token_hash,
+                channel_id: &owner.channel_id,
+            }),
+        )
+        .await
+        .unwrap();
+        canonical_fixture::set_raw(&pool, &key, Some(serde_json::to_value(&execution).unwrap()))
+            .await;
         let path = root.join(format!("{}-native-n1.jsonl", channel.get()));
         std::fs::write(&path, b"").unwrap();
         let source =
@@ -215,21 +231,19 @@ impl Fixture {
         next.execution_nonce = nonce.into();
         next.source_ref.execution_nonce = nonce.into();
         next.expected.as_mut().unwrap().binding_nonce = nonce.into();
-        sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
-            .bind(&self.key)
-            .bind(serde_json::to_value(&next).unwrap())
-            .execute(&self.pool)
-            .await
-            .unwrap();
+        canonical_fixture::set_raw(
+            &self.pool,
+            &self.key,
+            Some(serde_json::to_value(&next).unwrap()),
+        )
+        .await;
         next
     }
 
     async fn hosted_json(&self) -> serde_json::Value {
-        sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE session_key = $1")
-            .bind(&self.key)
-            .fetch_one(&self.pool)
+        canonical_fixture::raw_of(&self.pool, &self.key)
             .await
-            .unwrap()
+            .expect("the fixture has a hosted execution")
     }
 
     async fn claim(&self, record: &pending::TuiDirectPendingStart) -> bool {

@@ -1357,11 +1357,11 @@ fn enforce_mode_stale_foreign_demote_refuses_across_a_respawn() {
 enum DeliveryLeaseArm {
     /// This turn's own key, deadline in the future: a terminal delivery for
     /// the very turn being destroyed is in flight.
-    LiveMatchedKey,
+    LiveMatched,
     /// This turn's own key, deadline already elapsed: a DEAD holder.
-    ExpiredMatchedKey,
+    ExpiredMatched,
     /// A live lease under some OTHER turn's key.
-    LiveForeignKey,
+    LiveForeign,
 }
 
 /// What one run of [`stale_foreign_demote_under_delivery_lease`] left behind.
@@ -1436,16 +1436,16 @@ async fn stale_foreign_demote_under_delivery_lease(
         "s4_r2_tui_delivery_fence_test",
     );
     let (lease_key, deadline_ms) = match arm {
-        DeliveryLeaseArm::LiveMatchedKey => (
+        DeliveryLeaseArm::LiveMatched => (
             matched_key,
             super::super::lease_now_ms().saturating_add(super::super::DELIVERY_LEASE_DEADLINE_MS),
         ),
         // Strictly in the past on the same monotonic clock the fence reads,
         // which only moves forward from here.
-        DeliveryLeaseArm::ExpiredMatchedKey => {
+        DeliveryLeaseArm::ExpiredMatched => {
             (matched_key, super::super::lease_now_ms().saturating_sub(1))
         }
-        DeliveryLeaseArm::LiveForeignKey => {
+        DeliveryLeaseArm::LiveForeign => {
             let foreign = super::super::DeliveryLeaseKey::new_for_site(
                 channel,
                 shared.restart.current_generation,
@@ -1538,7 +1538,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_140,
             "lease-live",
-            DeliveryLeaseArm::LiveMatchedKey,
+            DeliveryLeaseArm::LiveMatched,
         )
         .await;
         assert!(!live.demoted);
@@ -1554,7 +1554,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_141,
             "lease-expired",
-            DeliveryLeaseArm::ExpiredMatchedKey,
+            DeliveryLeaseArm::ExpiredMatched,
         )
         .await;
         assert!(expired.demoted);
@@ -1569,7 +1569,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_142,
             "lease-foreign",
-            DeliveryLeaseArm::LiveForeignKey,
+            DeliveryLeaseArm::LiveForeign,
         )
         .await;
         assert!(foreign.demoted);

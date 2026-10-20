@@ -1133,8 +1133,8 @@ async fn inflightless_ranged_frame_acquires_sink_lease_before_terminal_delivery_
     );
 }
 
-#[tokio::test]
-async fn watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277() {
+#[test]
+fn watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277() {
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -1142,83 +1142,87 @@ async fn watcher_preemption_blocks_task_context_route_promotion_before_card_post
         .unwrap_or_else(|poison| poison.into_inner());
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
-    let channel_id = 4_277_006;
-    let channel = ChannelId::new(channel_id);
-    let binding = matched(&channel_id.to_string());
-    let registry = Arc::new(HealthRegistry::new());
-    let shared = super::super::make_shared_data_for_tests();
-    shared
-        .http
-        .cached_bot_token
-        .set("test-token".to_string())
-        .expect("test token set once");
-    registry
-        .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
-        .await;
+    #[tokio::main(flavor = "current_thread")]
+    async fn run() {
+        let channel_id = 4_277_006;
+        let channel = ChannelId::new(channel_id);
+        let binding = matched(&channel_id.to_string());
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        shared
+            .http
+            .cached_bot_token
+            .set("test-token".to_string())
+            .expect("test token set once");
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+            .await;
 
-    let mut rebind = inflight_for(
-        &binding.expected_session_name,
-        RelayOwnerKind::Watcher,
-        true,
-    );
-    rebind.channel_id = channel_id;
-    rebind.user_msg_id = 0;
-    rebind.current_msg_id = 9_001;
-    rebind.started_at = "2026-07-24T01:00:00Z".to_string();
-    rebind.turn_start_offset = Some(640);
-    super::super::inflight::save_inflight_state(&rebind).expect("persist rebind inflight");
-
-    let range_start = 640;
-    let range_end = 1_024;
-    let watcher_key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
-        channel,
-        shared.restart.current_generation,
-        Some(&rebind),
-        &binding.expected_session_name,
-        range_end,
-        range_start,
-    );
-    assert!(shared.delivery_lease(channel).try_acquire(
-        watcher_key,
-        super::super::LeaseHolder::Watcher { instance_id: 91 },
-        range_start,
-        range_end,
-        super::super::lease_now_ms().saturating_add(10_000),
-    ));
-    let sink = SessionBoundDiscordRelaySink::new(registry);
-    let payload = concat!(
-        "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-route-mutation-4277\",\"tool_use_id\":\"toolu-bg-route-mutation-4277\",\"status\":\"completed\",\"summary\":\"background work\",\"task_notification_kind\":\"background\"}\n",
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"task answer\"}]}}\n",
-        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"task answer\"}\n"
-    );
-    let terminal = terminal_frame_offset(
-        &binding,
-        payload,
-        1,
-        range_end,
-        0,
-        &rebind.started_at,
-        Some(range_start),
-    );
-
-    let outcome = sink
-        .deliver(&terminal)
-        .await
-        .expect("lost lease is a known not-delivered outcome");
-
-    assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
-    assert_eq!(sink.delivered_total.load(Ordering::Acquire), 0);
-    assert!(
-        crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
-            ProviderKind::Claude.as_str(),
+        let mut rebind = inflight_for(
             &binding.expected_session_name,
-            channel_id,
-        )
-        .is_none(),
-        "task-card ensure must not run after the outer lease loses"
-    );
-    super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            RelayOwnerKind::Watcher,
+            true,
+        );
+        rebind.channel_id = channel_id;
+        rebind.user_msg_id = 0;
+        rebind.current_msg_id = 9_001;
+        rebind.started_at = "2026-07-24T01:00:00Z".to_string();
+        rebind.turn_start_offset = Some(640);
+        super::super::inflight::save_inflight_state(&rebind).expect("persist rebind inflight");
+
+        let range_start = 640;
+        let range_end = 1_024;
+        let watcher_key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
+            channel,
+            shared.restart.current_generation,
+            Some(&rebind),
+            &binding.expected_session_name,
+            range_end,
+            range_start,
+        );
+        assert!(shared.delivery_lease(channel).try_acquire(
+            watcher_key,
+            super::super::LeaseHolder::Watcher { instance_id: 91 },
+            range_start,
+            range_end,
+            super::super::lease_now_ms().saturating_add(10_000),
+        ));
+        let sink = SessionBoundDiscordRelaySink::new(registry);
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-route-mutation-4277\",\"tool_use_id\":\"toolu-bg-route-mutation-4277\",\"status\":\"completed\",\"summary\":\"background work\",\"task_notification_kind\":\"background\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"task answer\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"task answer\"}\n"
+        );
+        let terminal = terminal_frame_offset(
+            &binding,
+            payload,
+            1,
+            range_end,
+            0,
+            &rebind.started_at,
+            Some(range_start),
+        );
+
+        let outcome = sink
+            .deliver(&terminal)
+            .await
+            .expect("lost lease is a known not-delivered outcome");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
+        assert_eq!(sink.delivered_total.load(Ordering::Acquire), 0);
+        assert!(
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                ProviderKind::Claude.as_str(),
+                &binding.expected_session_name,
+                channel_id,
+            )
+            .is_none(),
+            "task-card ensure must not run after the outer lease loses"
+        );
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+    run();
 }
 
 #[tokio::test]

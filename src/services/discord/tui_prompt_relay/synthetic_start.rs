@@ -141,7 +141,8 @@ mod tests {
         // so the nonce is the one birth axis a successor shares; each of the
         // rest has to refuse the carry on its own.
         let current = InflightEpisodePin::from_state(&local);
-        let successors: [(&str, fn(&mut InflightTurnState)); 5] = [
+        type MutateEpisode = fn(&mut InflightTurnState);
+        let successors: [(&str, MutateEpisode); 5] = [
             ("turn_nonce", |row| {
                 row.turn_nonce = Some("5981-successor-nonce".into());
             }),

@@ -2824,10 +2824,9 @@ fn touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it() {
     {
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         assert!(
-            state
+            !state
                 .prompt_anchor_by_tmux
-                .get(&PromptKey::new(provider, tmux))
-                .is_none(),
+                .contains_key(&PromptKey::new(provider, tmux)),
             "the over-ceiling anchor was evicted, not resurrected"
         );
     }
