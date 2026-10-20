@@ -6,7 +6,7 @@ use crate::services::provider::ProviderKind;
 
 use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
-use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::inflight::{RelayOwnerKind, clear_inflight_state_if_matches};
 
 pub(in crate::services::discord) mod terminal_release;
 pub(in crate::services::discord) use terminal_release::rearm_queue_backstop_after_mailbox_release;
@@ -455,7 +455,8 @@ pub(super) async fn already_finalized_active_state(
         capture.publish_release(shared, key);
         capture.finish
     } else {
-        super::episode::clear_same_id_row(provider, key);
+        let kept = clear_inflight_state_if_matches(provider, key.channel_id.get(), key.user_msg_id);
+        super::episode::warn_same_id_row_kept(provider, key, kept);
         super::super::mailbox_finish_turn_if_matches(
             shared,
             provider,

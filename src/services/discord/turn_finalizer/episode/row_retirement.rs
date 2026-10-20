@@ -171,23 +171,18 @@ pub(in crate::services::discord::turn_finalizer) fn warn_no_episode_evidence(
 }
 
 /// Without episode evidence the compensation keeps its same-id row clear; name a row it kept.
-pub(in crate::services::discord::turn_finalizer) fn clear_same_id_row(
+pub(in crate::services::discord::turn_finalizer) fn warn_same_id_row_kept(
     provider: &ProviderKind,
     key: TurnKey,
+    outcome: GuardedClearOutcome,
 ) {
-    let channel_id = key.channel_id.get();
-    let outcome = super::super::super::inflight::clear_inflight_state_if_matches(
-        provider,
-        channel_id,
-        key.user_msg_id,
-    );
     if !matches!(
         outcome,
         GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing
     ) {
         tracing::warn!(
             provider = provider.as_str(),
-            channel_id,
+            channel_id = key.channel_id.get(),
             user_msg_id = key.user_msg_id,
             gate = "cas",
             reason = ?outcome,
