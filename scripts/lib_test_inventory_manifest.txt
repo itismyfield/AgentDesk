@@ -137,6 +137,8 @@ cli::doctor::orchestrator::api_exposure::tests::rejected_tokenless_non_loopback_
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
+cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
+cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
 cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
 cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
 cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
@@ -1430,9 +1432,18 @@ server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_cap
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_github_failure
 server::routes::github::tests::create_issue_non_dry_run_maps_shared_service_success_response
 server::routes::github::tests::create_issue_rejects_reserved_fields_without_gh_side_effects
+server::routes::health_api::db_deadline_tests::health_handler_acquire_budget_public_and_detail
+server::routes::health_api::db_deadline_tests::health_handler_cold_pool_is_bounded_and_marked_slow
+server::routes::health_api::db_deadline_tests::health_handler_db_deadline_covers_late_queries
+server::routes::health_api::db_deadline_tests::health_handler_parallel_db_preserves_complete_results
+server::routes::health_api::db_deadline_tests::health_handler_pg_rtt_300ms_completes_under_2s
+server::routes::health_api::db_deadline_tests::health_handler_select1_timeout_is_unhealthy
+server::routes::health_api::db_deadline_tests::health_handler_snapshot_delay_marks_bulk_unmeasured
+server::routes::health_api::db_deadline_tests::health_handler_timeout_drops_all_db_guards
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
+server::routes::health_api::response::kv_gate_tests::health_gate_kv_timeout_does_not_report_fallback_as_effective
 server::routes::health_api::runtime_profile::tests::health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint
 server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
 server::routes::health_api::runtime_profile::tests::health_shows_channel_homes_only_once_one_is_registered
@@ -4181,6 +4192,7 @@ services::discord::health::recovery::self_watchdog::policy::tests::unknown_witho
 services::discord::health::recovery::self_watchdog::tests::blackout_exit_skips_blocked_dump_helper
 services::discord::health::recovery::self_watchdog::tests::expired_deadline_reaches_exit_sink_without_probe_snapshot_or_dump
 services::discord::health::recovery::self_watchdog::tests::fast_exit_waits_for_dump_only_within_remaining_blackout_budget
+services::discord::health::recovery::self_watchdog::tests::health_response::db_slow_http_response_resets_watchdog_streak
 services::discord::health::recovery::self_watchdog::tests::observe_mode_keeps_actual_probes_without_dump_exit_or_post_deadline_spin
 services::discord::health::recovery::self_watchdog::tests::runtime_stall_exits_three_times_before_external_observation_limit
 services::discord::health::recovery::self_watchdog::tests::scheduling_runtime_and_db_progress_cannot_extend_silence_deadline
@@ -4325,6 +4337,12 @@ services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_
 services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
+services::discord::health::snapshot::health_observation::pg_tests::health_handler_actor_and_db_share_one_deadline
+services::discord::health::snapshot::health_observation::pg_tests::health_timeout_consumers_keep_existing_gates
+services::discord::health::snapshot::health_observation::tests::health_snapshot_actor_timeout_covers_secondary_reads
+services::discord::health::snapshot::health_observation::tests::health_snapshot_parallel_actors_keep_other_channels
+services::discord::health::snapshot::health_observation::tests::health_snapshot_slow_actor_within_deadline_is_ok
+services::discord::health::snapshot::health_observation::tests::health_snapshot_timeout_preserves_park_and_episode
 services::discord::health::snapshot::relay_probe::tests::health_grace_and_stall_threshold_for_a_rowless_turn_move_independently
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
 services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
@@ -11087,6 +11105,8 @@ services::health_active_session_audit::tests::active_session_audit_settings_clam
 services::health_active_session_audit::tests::active_session_audit_stalled_turn_recommends_stall_watchdog
 services::health_active_session_audit::tests::active_session_audit_truncated_and_single_row_per_session
 services::health_active_session_audit::tests::active_session_audit_turn_active_no_dispatch_maps_to_stale_mailbox
+services::health_diagnostics::request_batch::pg_tests::health_batch_queries_preserve_main_semantics
+services::health_diagnostics::request_batch::tests::bulk_session_rows_isolate_decode_failures
 services::health_diagnostics::session_state::tests::session_lookup_preserves_failures_and_absence_on_health_wire
 services::health_diagnostics::tests::a_pending_health_await_is_visible_as_in_flight
 services::health_diagnostics::tests::active_session_audit_query_filters_foreign_and_background_rows

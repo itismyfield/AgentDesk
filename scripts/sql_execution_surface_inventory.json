@@ -22559,6 +22559,42 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/server/routes/health_api/db_deadline_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8998de90cdd756eecebf3e631f69a6a931039e43395b679d1edeb4d76ee40167"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/health_api/db_deadline_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8fbf49ac992b2bbb021dd21dc324c6387f94d399557e120cff03d05cdd5b7d88"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/health_api/db_deadline_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:952e83e2c5dfb69c090bd7a84c7ec93cb647592d242f074ef01b74b30a193259"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/routes/health_api/db_deadline_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d956f99fbc9b698bd492cdc137bb0a276168ee63f9515b2287245a24a4c9a6f8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/server/routes/health_api/host_guard_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -38196,52 +38232,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:166bf1ad7b283a2689ee0f370f8b3217b860f464c775538820a28547f2593839"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:2523d0470c368deadbab13a6391c9bdfe8436f7149a28fdfc62cc966e6490545"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:3a64b802440403493db279f07ad0d28b16ecd4352a4b439bff3853270d8ade47"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:4ab7ad6e78bd6eb2f31b0e075a444c1e4892e8cf18feacb7efbe1ff02b37014e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:56ad457b178b6353a8cd98adf9ccfe29aa71d6338dde914539cb597770bb75cb"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:6395c73335d33d3f386090683b2c6cea532662dfe38b79db01240424ff576f7b"
     },
     {
       "root": "src",
@@ -38259,34 +38250,79 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:b3bf6856e3ac19b1e08e859babb0fb46a2e72c0c249a600cc0f7f33d6956fc42"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c89bde7c9004e2df10ee2ace1a35a25b6738be1aa7edd0feca8cb690dd109fd8"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e2cf1c2fd2d162785222191734710cb1688808053475093426efdca674857f58"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:fc89155153168fdf11b21dc7f63a5519d32371fb79f89ae5d233d25115e3413e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:15ced073b4824cc5ec4c27f504da98f516af6b1899419bfd2267785e17381122"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:3de6898fb145299de5fe659e3130ebbe1ab33ab7386c9a63ed121b0aecb9a099"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:acb3e681c90718c6a133973fb9e76eea5de5aa410b6ae566a7ec836d1c89f725"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:ed0176b6604a85320247d68e4bcfc26327240ab16da001b5e9182d23ed61acb6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:28cac182b728f5439290cc05e114786699b77942c6ee235c6ffc060f2f3f09c7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4683a612049527f6270ba239841bbbcdebd1f8749098d07beefb370bf766cffe"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:1522208dba661c4694f65fd80d1aac9d5bfdcf8111c5ef0f60898c95add8586a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/health_diagnostics/request_batch_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:9819ce8b2f04ec0c77267e8bedda56d9fcf4012ced3e3182ba3f1707034c09c9"
     },
     {
       "root": "src",

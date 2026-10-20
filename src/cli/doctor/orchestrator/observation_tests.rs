@@ -531,3 +531,93 @@ fn reason_aggregation_and_human_checks_preserve_safety_restrictions() {
         FixSafety::SafeIdleTmuxRepair
     );
 }
+
+/// A real detail body whose session lookup ran past the health deadline is a measurement gap:
+/// the busy mailbox it would otherwise repair is unmeasured, and nothing is posted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn doctor_session_lookup_timeout_never_posts_repair() {
+    use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+    use tower::ServiceExt;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let seed = db.connect_and_migrate().await;
+    let proxy = PgWireProxy::start(&db.database_url, std::time::Duration::ZERO).await;
+    let pool = proxy.pool(8);
+    proxy.stall("DISTINCT ON (thread_channel_id)");
+    let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    registry
+        .register("claude".to_string(), shared.clone())
+        .await;
+    let channel = 6_871_300_001u64;
+    crate::services::discord::host_teardown_gate::test_support::nameless_turn(
+        &shared,
+        poise::serenity_prelude::ChannelId::new(channel),
+    )
+    .await;
+    let mut engine_config = crate::config::Config::default();
+    engine_config.policies.hot_reload = false;
+    let tx = crate::server::ws::new_broadcast();
+    let app = crate::server::routes::api_router_with_pg(
+        crate::engine::PolicyEngine::new(&engine_config).unwrap(),
+        crate::config::Config::default(),
+        tx.clone(),
+        crate::server::ws::spawn_batch_flusher(tx),
+        Some(registry),
+        Some(pool.clone()),
+    );
+    let mut request = axum::http::Request::builder()
+        .uri("/health/detail")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let row = body["mailboxes"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["channel_id"] == json!(channel)))
+        .unwrap_or_else(|| panic!("the busy mailbox is listed: {body}"));
+    assert_eq!(row["has_cancel_token"], true, "{row}");
+    assert_eq!(
+        row["session_lookup_error"]["safety_gate"], "measurement_unavailable",
+        "{row}"
+    );
+
+    let findings = crate::cli::doctor::mailbox::classify_mailbox_findings(&body);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "mailbox_measurement_unavailable")
+            && findings.iter().all(|f| f.request.is_none()),
+        "{findings:?}"
+    );
+    let mut posts = 0;
+    let actions = apply_stale_mailbox_fixes_with_post(
+        &snapshot(body.clone()),
+        &repair_response_options(RunContext::ManualCli),
+        |_, _| {
+            posts += 1;
+            Ok(json!({"status": "applied"}))
+        },
+    );
+    assert_eq!(
+        posts, 0,
+        "a session lookup cut by the deadline must not lead to a POST"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.safety_gate == "measurement_unavailable")
+    );
+
+    proxy.release();
+    pool.close().await;
+    seed.close().await;
+    drop(proxy);
+    db.drop().await;
+}
