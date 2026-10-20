@@ -271,6 +271,63 @@ async fn retired_and_unretired_denied_sources_stay_untouched_while_fresh_work_po
 }
 
 #[tokio::test(start_paused = true)]
+async fn first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_scans() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_scans"
+    )) {
+        return;
+    }
+    let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _dedupe = DedupeGuard::acquire();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _scope = ScopeFixture::new();
+    let _tmux =
+        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(Some(root.path()));
+    let (current, source) = proven(root.path());
+    let harness = Harness::build_channel(CANARY_CHANNEL, |_| Vec::new());
+    harness.gate.acquired();
+    let writer = harness.writer();
+    let selection = writer.suspension.clone();
+    let (stop, stopped) = watch::channel(false);
+    let (resumed, ready) = watch::channel(false);
+    let actor = tokio::spawn(run_channel(
+        writer,
+        ShadowProvider::Codex,
+        Arc::new(ChannelBindingLog::new(
+            CANARY_CHANNEL,
+            ShadowProvider::Codex,
+        )),
+        stopped,
+        resumed,
+    ));
+    answer(&source, "Q1");
+    polls(6).await;
+    assert!(*ready.borrow());
+    assert_eq!(harness.port.posts(), ["Q1"]);
+    assert_eq!(
+        selection.nonce().as_deref(),
+        Some(current.execution_nonce.as_str()),
+        "O1: a proven fresh root is recorded even without denied cursors"
+    );
+    assert!(selection.is_empty());
+    assert!(dedupe::clear_relaunch::fresh_scope_ownership_calls_for_tests() > 0);
+    polls(6).await;
+    assert_eq!(
+        dedupe::clear_relaunch::fresh_scope_ownership_calls_for_tests(),
+        0,
+        "O1: the same nonce cannot rescan ownership on each poll"
+    );
+    stop.send(true).unwrap();
+    assert_eq!(actor.await.unwrap(), None);
+    dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
+    dedupe::binding_events::set_test_root(None);
+    dedupe::reset_state_for_tests();
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_new_exact_root_cannot_rescope_an_actual_owed_piece_into_permission() {
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),
@@ -380,7 +437,10 @@ async fn held_work(retired: bool, unsealed: bool) {
     }
     let before = harness.channel().cursor(&n3).unwrap().clone();
     let io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&n3.path);
-    let (n4_context, _) = proven(root.path());
+    let (n4_context, n4) = proven(root.path());
+    if unsealed {
+        answer(&n4, "held N4 answer");
+    }
     assert_ne!(n4_context.execution_nonce, n3_context.execution_nonce);
     assert!(
         dedupe::codex_verified_channel_delivery_allowed(CANARY_CHANNEL),
@@ -390,6 +450,7 @@ async fn held_work(retired: bool, unsealed: bool) {
     polls(6).await;
     let work = crate::services::tui_o::writer::actor::work_for_tests();
     let posts = harness.port.posts();
+    let alarms = harness.alarms.taken();
     stop.send(true).unwrap();
     assert_eq!(task.await.unwrap(), None);
     dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
@@ -409,4 +470,16 @@ async fn held_work(retired: bool, unsealed: bool) {
     );
     assert_eq!(harness.channel().cursor(&n3), Some(&before));
     assert_eq!(io.stats().read_bytes, 0);
+    if unsealed {
+        assert_eq!(
+            alarms
+                .iter()
+                .filter(|alarm| matches!(alarm,
+                WriterAlarm::WaitingTooLong { incident, .. }
+                    if incident.starts_with("new_root_waiting:")))
+                .count(),
+            1,
+            "O7-2X-K: a proven N4 blocked by announced N3 work raises one alarm: {alarms:?}"
+        );
+    }
 }

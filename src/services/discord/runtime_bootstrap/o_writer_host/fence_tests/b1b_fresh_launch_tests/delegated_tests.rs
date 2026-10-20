@@ -226,7 +226,7 @@ async fn delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg() 
         let drive = drive_fifo(&fixture, &output, &readiness, &old_io, done, &observed);
         let (ticks, ()) = tokio::join!(worker, drive);
         assert!(ticks.iter().any(|tick| *tick == TickOutcome::Processed));
-        for point in [test_executor::Checkpoint::BeforeFinalO, test_executor::Checkpoint::PreAccept,
+        for point in [test_executor::Checkpoint::PreAccept,
             test_executor::Checkpoint::Spawned, test_executor::Checkpoint::FinalDbDone] {
             assert!(checkpoints.lock().unwrap().contains(&point), "missing actual worker checkpoint {point:?}");
         }

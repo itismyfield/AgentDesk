@@ -6,6 +6,14 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{file_identity, same_file};
 use crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot;
 
+#[cfg(test)]
+static OWNERSHIP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn fresh_scope_ownership_calls_for_tests() -> usize {
+    OWNERSHIP_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Debug)]
 pub(crate) enum FreshReason {
     ExplicitClear(Captured),
@@ -26,6 +34,15 @@ fn input_target(channel: u64) -> Option<String> {
     }
     let panes = super::super::verified_panes(channel);
     (panes.len() == 1 && panes[0] == CANARY_TMUX).then(|| panes[0].clone())
+}
+
+/// A cheap rejection only; full proof and identity checks stay under source authority.
+pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> bool {
+    let Some(tmux) = input_target(channel) else {
+        return false;
+    };
+    matches!(absent_open::read_nonce(&tmux), SpawnNonceMarker::Known(nonce)
+        if last_nonce != Some(nonce.as_str()))
 }
 
 pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
@@ -196,6 +213,8 @@ pub(crate) fn with_fresh_scope(
         {
             return Ok(false);
         }
+        #[cfg(test)]
+        OWNERSHIP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if !binding_events::codex::latest_ownership(channel, &tmux)
             .is_ok_and(|pin| pin.is_some_and(|(_, current, _)| current == nonce))
         {
@@ -208,12 +227,6 @@ pub(crate) fn with_fresh_scope(
             .filter(|source| !allowed(source))
             .cloned()
             .collect();
-        if denied.is_empty() {
-            return Ok(false);
-        }
-        if !quiescent {
-            return Err("unresolved_work");
-        }
         #[cfg(test)]
         if crate::services::claude_tui::source_verify::n2b_mutant("b1b-proof") {
             install(nonce, denied);
@@ -255,7 +268,15 @@ pub(crate) fn with_fresh_scope(
         snapshot
             .recheck(authority)
             .map_err(|_| "fresh_evidence_missing")?;
+        let changed = !denied.is_empty();
+        if changed && !quiescent {
+            return Err("new_root_waiting");
+        }
+        #[cfg(test)]
+        if !changed && crate::services::claude_tui::source_verify::n2b_mutant("b1b-empty-nonce") {
+            return Ok(false);
+        }
         install(nonce, denied);
-        Ok(true)
+        Ok(changed)
     })
 }

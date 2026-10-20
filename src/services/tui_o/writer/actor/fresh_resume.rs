@@ -39,6 +39,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return false;
         }
         let channel = self.writer.channel();
+        if !crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_pending(
+            channel,
+            nonce.as_deref(),
+        ) {
+            return false;
+        }
         let quiescent = self.owed.is_empty()
             && !self.deriver.has_unsealed()
             && !self.writer.has_local_retry()
@@ -62,8 +68,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             &sources,
             quiescent,
             |nonce, denied| {
+                let changed = !denied.is_empty();
                 selection.extend(nonce, denied);
-                self.sources.reset_for_rescope();
+                if changed {
+                    self.sources.reset_for_rescope();
+                }
             },
         );
         match result {
@@ -81,6 +90,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 if self.scope_hold != Some(reason) {
                     tracing::info!(channel, reason, "[tui_o] source resume held");
                     self.scope_hold = Some(reason);
+                    if reason == "new_root_waiting" {
+                        #[cfg(test)]
+                        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-root-alarm")
+                        {
+                            return false;
+                        }
+                        self.writer.alarm(WriterAlarm::WaitingTooLong {
+                            incident: format!("new_root_waiting:{}", uuid::Uuid::new_v4()),
+                            ready: self.owed.len(),
+                            prepared: self
+                                .writer
+                                .store()
+                                .ledger()
+                                .unresolved()
+                                .map(|(serial, _)| serial),
+                        });
+                    }
                 }
                 false
             }

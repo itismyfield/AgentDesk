@@ -12,11 +12,11 @@ pub(super) async fn hold_off_o_gateway(
     target: &str,
     phase: &'static str,
 ) -> Result<bool, sqlx::Error> {
-    #[cfg(test)]
-    if phase == "final" {
-        test_executor::checkpoint(test_executor::Checkpoint::BeforeFinalO).await;
-    }
     let selected = intake_route::selected_codex_input(provider, channel_id.get());
+    #[cfg(test)]
+    if selected && phase == "final" {
+        test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
+    }
     let exact = if selected {
         let current = sqlx::query_as::<_, (String, String, String, String, Option<String>)>(
             "SELECT provider, channel_id, target_instance_id, status, claim_owner

@@ -135,7 +135,10 @@ struct Running(Arc<AtomicUsize>);
 
 type RepostCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
-fn source_delivery_allowed(channel: u64, sources: impl IntoIterator<Item = SourceId>) -> bool {
+pub(super) fn source_delivery_allowed(
+    channel: u64,
+    sources: impl IntoIterator<Item = SourceId>,
+) -> bool {
     crate::services::tui_prompt_dedupe::codex_verified_channel_delivery_allowed(channel)
         && sources.into_iter().all(|source| {
             crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(channel, &source)

@@ -36,6 +36,19 @@ pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
     ) {
         return None;
     }
+    let ordinary = super::super::deliver::source_delivery_allowed(
+        store.init().channel,
+        store
+            .cursors()
+            .filter(|cursor| !cursor.retired)
+            .map(|cursor| cursor.source.clone()),
+    );
+    #[cfg(test)]
+    let ordinary =
+        ordinary && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-boot-ordinary");
+    if ordinary {
+        return None;
+    }
     if store.cursors().next().is_some() && !matches!(store.binding_checkpoint(), Ok(Some(_))) {
         return Some("store_metadata_unready");
     }

@@ -31,6 +31,7 @@ const OLD_REPLY: &str = "B1b suspended historical reply";
 mod delegated_tests;
 #[path = "b1b_terminal_tests.rs"]
 mod native_output;
+mod ordinary_restart_tests;
 #[path = "b1b_repeated_absence_tests.rs"]
 mod repeated_absence;
 #[path = "b1b_restart_phase_tests.rs"]
@@ -54,6 +55,7 @@ struct Discord {
     http: Arc<serenity::Http>,
     messages: Arc<Mutex<Vec<serde_json::Value>>>,
     server: tokio::task::AbortHandle,
+    history_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Discord {
@@ -65,15 +67,19 @@ impl Discord {
         };
         let messages: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
         let recorded = Arc::clone(&messages);
+        let history_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = Arc::clone(&history_reads);
         let app = axum::Router::new().fallback(axum::routing::any(
             move |method: Method, uri: Uri, body: Bytes| {
                 let recorded = Arc::clone(&recorded);
+                let reads = Arc::clone(&reads);
                 async move {
                     if uri.path().ends_with("/users/@me") {
                         return axum::Json(json!({"id":"1", "username":"o-bot",
                             "discriminator":"0001", "avatar":null, "bot":true})).into_response();
                     }
                     if method == Method::GET {
+                        reads.fetch_add(1, Ordering::SeqCst);
                         return axum::Json(json!(*recorded.lock().unwrap())).into_response();
                     }
                     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -104,6 +110,7 @@ impl Discord {
             http,
             messages,
             server: server.abort_handle(),
+            history_reads,
         }
     }
 

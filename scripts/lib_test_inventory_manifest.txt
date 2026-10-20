@@ -7297,6 +7297,9 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::native_output::native_terminal_fixture_has_a_postable_stable_unit_and_idle_boundary
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_settles_prepared_once_without_duplicate_post_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_not_found_local_retry_registers_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_operator_approval_hosts_and_sends_once_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_clear_recovers_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_recovers_absence_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_same_actor_repeats_absence_fresh_provider_and_post_pg
@@ -12831,6 +12834,7 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
 services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::a_new_exact_root_cannot_rescope_an_actual_owed_piece_into_permission
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_scans
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::fresh_startup_proof_resumes_with_old_cursor_untouched
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::gc_waiting::current_waiting_incident_clears_after_post_with_suspended_old_source
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::gc_waiting::scoped_current_source_gc_runs_without_collecting_old_segments

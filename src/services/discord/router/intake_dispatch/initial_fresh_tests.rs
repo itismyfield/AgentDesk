@@ -836,7 +836,7 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
             case,
             WorkerCase::FinalPaneAppeared | WorkerCase::UnprovedFinal
         ) {
-            test_executor::Checkpoint::BeforeFinalO
+            test_executor::Checkpoint::PreAccept
         } else {
             test_executor::Checkpoint::AfterClaim
         };
@@ -918,9 +918,16 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
             );
             assert_eq!(recorder.channels(), [CANARY_CHANNEL]);
             assert_eq!(transitions, (true, true));
+            assert_eq!(
+                checkpoints
+                    .iter()
+                    .filter(|point| **point == test_executor::Checkpoint::PreAccept)
+                    .count(),
+                2,
+                "both final O and accept boundaries must run"
+            );
             for checkpoint in [
                 test_executor::Checkpoint::AfterClaim,
-                test_executor::Checkpoint::BeforeFinalO,
                 test_executor::Checkpoint::PreAccept,
                 test_executor::Checkpoint::Spawned,
                 test_executor::Checkpoint::FinalDb,
@@ -958,7 +965,7 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         WorkerCase::FinalPaneAppeared | WorkerCase::UnprovedFinal
     ) {
         assert!(
-            checkpoints.contains(&test_executor::Checkpoint::BeforeFinalO),
+            checkpoints.contains(&test_executor::Checkpoint::PreAccept),
             "the race must reach the real final O check: {checkpoints:?}"
         );
     }

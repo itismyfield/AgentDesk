@@ -442,7 +442,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn observe_waiting(&mut self, restored: bool) {
-        if self.writer.is_stopped() {
+        if self.writer.is_stopped() || self.scope_hold == Some("new_root_waiting") {
             return;
         }
         let now = tokio::time::Instant::now();
