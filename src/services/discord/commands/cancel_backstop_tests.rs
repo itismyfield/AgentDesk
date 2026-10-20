@@ -30,6 +30,29 @@ async fn acknowledge(
     StatusCode::NO_CONTENT
 }
 
+async fn followup(
+    State(state): State<ActionProxyState>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::Json<Value> {
+    state
+        .replies
+        .lock()
+        .expect("slash responses")
+        .push(json!({"type":"followup", "data":body}));
+    let response = state
+        .client
+        .post(format!(
+            "{}/api/v10/channels/{}/messages",
+            state.backend,
+            discord_mock::CHANNEL_ID
+        ))
+        .json(&body)
+        .send()
+        .await
+        .expect("followup response");
+    axum::Json(response.json().await.expect("followup message"))
+}
+
 async fn relay(State(state): State<ActionProxyState>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let suffix = parts.uri.path_and_query().expect("mock request path");
@@ -84,6 +107,7 @@ impl ActionTransport {
                 "/api/v10/interactions/{id}/{token}/callback",
                 post(acknowledge),
             )
+            .route("/api/v10/webhooks/{application}/{token}", post(followup))
             .fallback(relay)
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -298,9 +322,13 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
         invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
         {
             let replies = transport.replies.lock().expect("command responses");
-            assert_eq!(replies.len(), 1);
-            assert_eq!(replies[0]["type"], 4);
-            assert_eq!(replies[0]["data"]["content"], super::STOPPING_RESPONSE);
+            assert_eq!(replies.len(), 2);
+            assert_eq!(
+                replies[0]["type"], 5,
+                "defer precedes asynchronous stop confirmation"
+            );
+            assert_eq!(replies[1]["type"], "followup");
+            assert_eq!(replies[1]["data"]["content"], super::STOPPING_RESPONSE);
         }
         assert!(
             token.cancelled.load(Ordering::SeqCst),
