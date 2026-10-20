@@ -228,6 +228,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/delegated_tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_repeated_absence_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_restart_phase_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs
@@ -598,6 +599,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase
 services::discord::runtime_bootstrap::orphan_recovery::tests
@@ -2123,6 +2125,9 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_restart_before_proof_preserves_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_settles_prepared_once_without_duplicate_post_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_not_found_local_retry_registers_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_operator_approval_hosts_and_sends_once_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_clear_recovers_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_ordinary_full_resume_recovers_absence_in_place_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence::actual_gateway_same_actor_repeats_absence_fresh_provider_and_post_pg

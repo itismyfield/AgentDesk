@@ -1,6 +1,7 @@
 //! Normal verified recovery keeps its approved and uncertain delivery paths at host boot.
 
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::CanaryFixture;
 use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{LedgerEntry, LocalRetryMark, PieceOutcome};
 
@@ -47,6 +48,25 @@ async fn ordinary_restart(pending: Pending) {
     let fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
+    let pool: &sqlx::PgPool = fixture.shared.pg_pool.as_ref().unwrap();
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &fixture.shared.token_hash,
+        &ProviderKind::Codex,
+        CANARY_TMUX,
+    );
+    let persisted = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT provider, channel_id, raw_provider_session_id FROM sessions WHERE session_key=$1",
+    )
+    .bind(session_key)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted.0, "codex");
+    assert_eq!(persisted.1, Some(CANARY_CHANNEL.to_string()));
+    assert_eq!(
+        persisted.2.as_deref(),
+        Some(fixture.old_source.session_id.as_str())
+    );
     let _routing = fixture.scoped_test_env("ADK_INTAKE_ROUTING_MODE", "disabled".as_ref());
     let _writer = fixture.scoped_test_env(test_override::CHILD_ENV, "1".as_ref());
     let channels = serde_json::to_string(&[(CANARY_CHANNEL, CodexTui)]).unwrap();
