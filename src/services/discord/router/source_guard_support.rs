@@ -128,3 +128,18 @@ pub(in crate::services::discord) fn swap(source: &str, first: &str, second: &str
         &source[b + second.len()..]
     )
 }
+
+#[test]
+fn as_written_matching_skips_prose_and_quoted_copies() {
+    let source = "// call(\n/* call( */ let s = \"call(\";\n\
+                  fn f() { call(\"x\"); if s.ends_with('{') { call(\"{\") } }\n";
+    let lexed = Lexed::new(source);
+    assert_eq!(lexed.text().matches("call(").count(), 3);
+    assert_eq!((lexed.count("call("), lexed.count("call(\"x\")")), (2, 1));
+    let body = lexed
+        .block("fn f()")
+        .expect("braces inside literals do not end the item");
+    assert!(body.text().ends_with("{ call(\"{\") } }"));
+    let forged = forge(source, "call(\"x\")", CommentForgery::NestedBlock);
+    assert_eq!(Lexed::new(&forged).count("call("), 1);
+}

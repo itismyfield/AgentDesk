@@ -4,11 +4,11 @@
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
 
-pub(super) const INTAKE_TURN: &str = include_str!("../intake_turn.rs");
-pub(super) const RUNTIME_TRANSITION: &str = include_str!("runtime_transition.rs");
-pub(super) const BUSY_RETRY: &str = include_str!("../busy_retry.rs");
-pub(super) const TUI_FOLLOWUP: &str = include_str!("../tui_followup.rs");
-pub(super) const STALE_GUARD: &str = include_str!("stale_dispatch_guard.rs");
+pub(crate) const INTAKE_TURN: &str = include_str!("../../intake_turn.rs");
+pub(crate) const RUNTIME_TRANSITION: &str = include_str!("../runtime_transition.rs");
+pub(crate) const BUSY_RETRY: &str = include_str!("../../busy_retry.rs");
+pub(crate) const TUI_FOLLOWUP: &str = include_str!("../../tui_followup.rs");
+pub(crate) const STALE_GUARD: &str = include_str!("../stale_dispatch_guard.rs");
 
 const HANDLER: &str = "pub(super) async fn handle_text_message(";
 const TRANSITION: [&str; 2] = [
@@ -35,9 +35,9 @@ const BRIDGE_IDS: [&str; 3] = [
 ];
 const STALE_CALL: &str = "abort_terminal_dispatch_at_turn_start(";
 const EXECUTED: &str = "return Ok(IntakeExecution::Executed);";
-pub(super) const CONTEXT_TAKE: &str =
+pub(crate) const CONTEXT_TAKE: &str =
     "let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));";
-pub(super) const REMINDER_TAKE: &str =
+pub(crate) const REMINDER_TAKE: &str =
     "take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);";
 const RACE_LOSS: &str = "return race_loss::handle_race_loss_enqueue(";
 const PLACEHOLDER_POSTED: &str = "intake_latency.mark_placeholder_posted();";
@@ -77,7 +77,7 @@ fn need(present: bool, label: &str) -> Vec<String> {
 
 /// The role-override transition keeps the original provider for native clear, and the
 /// runtime transition forwards the recovered fresh flag.
-pub(super) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<String> {
+pub(crate) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<String> {
     let src = match item(intake, HANDLER) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -104,7 +104,7 @@ pub(super) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<Strin
 }
 
 /// One bridge spawn in the handler, with the dispatch stamp within the 20 lines above it.
-pub(super) fn bridge_stamp_gaps(intake: &str) -> Vec<String> {
+pub(crate) fn bridge_stamp_gaps(intake: &str) -> Vec<String> {
     let src = match item(intake, HANDLER) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -128,7 +128,7 @@ pub(super) fn bridge_stamp_gaps(intake: &str) -> Vec<String> {
 
 /// Busy pre-submit enqueue goes through the shared finalize helper, whose accepted
 /// branch reacts as queued and only the refusal branch clears the pending view.
-pub(super) fn busy_enqueue_view_gaps(intake: &str, busy_retry: &str) -> Vec<String> {
+pub(crate) fn busy_enqueue_view_gaps(intake: &str, busy_retry: &str) -> Vec<String> {
     let mut gaps = match item(intake, HANDLER) {
         Ok(src) => {
             let log = src.text().find(BUSY_LOG);
@@ -167,7 +167,7 @@ pub(super) fn busy_enqueue_view_gaps(intake: &str, busy_retry: &str) -> Vec<Stri
 }
 
 /// The Discord-origin bridge context keeps the user and placeholder ids apart.
-pub(super) fn bridge_context_gaps(intake: &str) -> Vec<String> {
+pub(crate) fn bridge_context_gaps(intake: &str) -> Vec<String> {
     let context = match item(intake, HANDLER).map(|src| src.block(BRIDGE_CONTEXT)) {
         Ok(Some(context)) => context,
         Ok(None) => return vec![format!("missing {BRIDGE_CONTEXT}")],
@@ -181,7 +181,7 @@ pub(super) fn bridge_context_gaps(intake: &str) -> Vec<String> {
 }
 
 /// The stale-dispatch abort returns before the destructive recovery-context take.
-pub(super) fn stale_abort_take_gaps(intake: &str) -> Vec<String> {
+pub(crate) fn stale_abort_take_gaps(intake: &str) -> Vec<String> {
     item(intake, HANDLER).map_or_else(
         |gaps| gaps,
         |src| {
@@ -199,7 +199,7 @@ pub(super) fn stale_abort_take_gaps(intake: &str) -> Vec<String> {
 
 /// One destructive take after the race-loss return and before the placeholder mark and
 /// every prompt use; `uses` lists the uses that consume this take.
-pub(super) fn take_once_gaps(intake: &str, take: &str, uses: &[&str]) -> Vec<String> {
+pub(crate) fn take_once_gaps(intake: &str, take: &str, uses: &[&str]) -> Vec<String> {
     let src = match item(intake, HANDLER) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -216,12 +216,12 @@ pub(super) fn take_once_gaps(intake: &str, take: &str, uses: &[&str]) -> Vec<Str
     gaps
 }
 
-pub(super) const CONTEXT_USES: [&str; 2] = [PROMPT_USE, MANIFEST_USE];
-pub(super) const REMINDER_USES: [&str; 1] = [PROMPT_USE];
+pub(crate) const CONTEXT_USES: [&str; 2] = [PROMPT_USE, MANIFEST_USE];
+pub(crate) const REMINDER_USES: [&str; 1] = [PROMPT_USE];
 
 /// The refusal routes through the put-back helper, which restores the taken input
 /// before rendering the refusal notice.
-pub(super) fn refusal_put_back_gaps(
+pub(crate) fn refusal_put_back_gaps(
     busy_retry: &str,
     tui_followup: &str,
     (forward, put_back): (&str, &str),
@@ -244,11 +244,11 @@ pub(super) fn refusal_put_back_gaps(
     gaps
 }
 
-pub(super) const CONTEXT_PUT_BACK_PAIR: (&str, &str) = (REFUSAL, CONTEXT_PUT_BACK);
-pub(super) const REMINDER_PUT_BACK_PAIR: (&str, &str) = (FORWARD_REMINDER, REMINDER_PUT_BACK);
+pub(crate) const CONTEXT_PUT_BACK_PAIR: (&str, &str) = (REFUSAL, CONTEXT_PUT_BACK);
+pub(crate) const REMINDER_PUT_BACK_PAIR: (&str, &str) = (FORWARD_REMINDER, REMINDER_PUT_BACK);
 
 /// The turn-start guard gates its raw stale-text lookup on `!preserve_on_cancel`.
-pub(super) fn preserve_gate_gaps(guard: &str) -> Vec<String> {
+pub(crate) fn preserve_gate_gaps(guard: &str) -> Vec<String> {
     item(guard, GUARD_FN).map_or_else(
         |gaps| gaps,
         |src| {
@@ -263,7 +263,7 @@ pub(super) fn preserve_gate_gaps(guard: &str) -> Vec<String> {
 
 /// The gated lookup feeds the abort branch, which finishes the mailbox turn and signals
 /// abort within its byte budget; the intake caller returns early on that signal.
-pub(super) fn abort_branch_gaps(guard: &str, intake: &str) -> Vec<String> {
+pub(crate) fn abort_branch_gaps(guard: &str, intake: &str) -> Vec<String> {
     let mut gaps = match item(guard, GUARD_FN) {
         Ok(src) => {
             let abort = src
@@ -309,7 +309,7 @@ pub(super) fn abort_branch_gaps(guard: &str, intake: &str) -> Vec<String> {
 
 /// The handler's `preserve_on_cancel` parameter flows unmodified into the guard call,
 /// and the guard still gates on it.
-pub(super) fn preserve_param_gaps(intake: &str, guard: &str) -> Vec<String> {
+pub(crate) fn preserve_param_gaps(intake: &str, guard: &str) -> Vec<String> {
     let mut gaps = match item(intake, HANDLER) {
         Ok(src) => {
             let call = src

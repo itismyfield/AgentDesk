@@ -4,8 +4,8 @@
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
 
-pub(super) const TEXT_COMMANDS: &str = include_str!("../text_commands.rs");
-pub(super) const INTAKE_GATE: &str = include_str!("../../router/intake_gate.rs");
+pub(super) const TEXT_COMMANDS: &str = include_str!("../../text_commands.rs");
+pub(super) const INTAKE_GATE: &str = include_str!("../../../router/intake_gate.rs");
 
 const DISPATCHER: &str =
     "pub(in crate::services::discord) async fn handle_text_command_with_uploads(";

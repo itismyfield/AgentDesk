@@ -960,8 +960,9 @@ src/
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   ├── clear_refusal_reply_tests.rs
-│   │   │   │   └── source_guard_tests.rs
+│   │   │   │   ├── command_dispatch_contract_tests/
+│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   └── clear_refusal_reply_tests.rs
 │   │   │   ├── voice/
 │   │   │   │   └── alert.rs
 │   │   │   ├── cancel_backstop_tests.rs
@@ -1515,6 +1516,8 @@ src/
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
+│   │   │   │   ├── live_intake_preserve_wiring_tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── queue_effects/
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
@@ -1524,7 +1527,6 @@ src/
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
-│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
@@ -1534,10 +1536,11 @@ src/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests/
+│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── process_mailbox.rs
-│   │   │   │   │   ├── routine_metadata.rs
-│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── dispatch_stamp/
 │   │   │   │   │   │   └── tests.rs
@@ -1546,6 +1549,8 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests/
+│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── runtime_transition/
 │   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
@@ -1564,7 +1569,6 @@ src/
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
-│   │   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs

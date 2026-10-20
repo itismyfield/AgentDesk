@@ -4,7 +4,7 @@
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
 
-pub(super) const HEADLESS_TURN: &str = include_str!("../headless_turn.rs");
+pub(crate) const HEADLESS_TURN: &str = include_str!("../../headless_turn.rs");
 
 const ENTRY: &str = "async fn start_reserved_headless_turn_admitted(";
 const SPAWN: &str = "tokio::task::spawn_blocking";
@@ -41,7 +41,7 @@ fn ordered(label: &str, earlier: Option<usize>, later: Option<usize>) -> Vec<Str
 }
 
 /// The durable-row refusal returns before any provider or bridge spawn.
-pub(super) fn row_refusal_gaps(source: &str) -> Vec<String> {
+pub(crate) fn row_refusal_gaps(source: &str) -> Vec<String> {
     entry(source).map_or_else(
         |gaps| gaps,
         |src| {
@@ -55,7 +55,7 @@ pub(super) fn row_refusal_gaps(source: &str) -> Vec<String> {
 }
 
 /// Between the provider spawn and the Started return, no retryable start error exists.
-pub(super) fn post_spawn_gaps(source: &str) -> Vec<String> {
+pub(crate) fn post_spawn_gaps(source: &str) -> Vec<String> {
     let src = match entry(source) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -73,7 +73,7 @@ pub(super) fn post_spawn_gaps(source: &str) -> Vec<String> {
 }
 
 /// The lifecycle branch's Consumed return comes before the destructive context take.
-pub(super) fn lifecycle_take_gaps(source: &str) -> Vec<String> {
+pub(crate) fn lifecycle_take_gaps(source: &str) -> Vec<String> {
     entry(source).map_or_else(
         |gaps| gaps,
         |src| {
@@ -90,7 +90,7 @@ pub(super) fn lifecycle_take_gaps(source: &str) -> Vec<String> {
 }
 
 /// One destructive take, before both prompt uses of the recovered context.
-pub(super) fn take_once_gaps(source: &str) -> Vec<String> {
+pub(crate) fn take_once_gaps(source: &str) -> Vec<String> {
     let src = match entry(source) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -106,7 +106,7 @@ pub(super) fn take_once_gaps(source: &str) -> Vec<String> {
 }
 
 /// The actual prompt assembly call selects the headless profile, never foreground.
-pub(super) fn headless_profile_gaps(source: &str) -> Vec<String> {
+pub(crate) fn headless_profile_gaps(source: &str) -> Vec<String> {
     let src = match entry(source) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -128,7 +128,7 @@ pub(super) fn headless_profile_gaps(source: &str) -> Vec<String> {
 }
 
 /// Scheduled snapshots stay out of channel-clearing severance and cold-start locally.
-pub(super) fn snapshot_severance_gaps(source: &str) -> Vec<String> {
+pub(crate) fn snapshot_severance_gaps(source: &str) -> Vec<String> {
     let src = match entry(source) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -146,7 +146,7 @@ pub(super) fn snapshot_severance_gaps(source: &str) -> Vec<String> {
 }
 
 /// Snapshot metadata gates the legacy channel session-key refresh.
-pub(super) fn snapshot_refresh_gaps(source: &str) -> Vec<String> {
+pub(crate) fn snapshot_refresh_gaps(source: &str) -> Vec<String> {
     entry(source).map_or_else(
         |gaps| gaps,
         |src| match src.contains(GUARDED_REFRESH) {

@@ -1754,7 +1754,8 @@ mod reply_context_tests {
 /// pass that same value into both request and submission envelopes.
 #[cfg(test)]
 mod live_intake_preserve_wiring_tests {
-    use super::source_guard_tests::{INTAKE_GATE, admission_guard_gaps, preservation_gaps};
+    pub(super) mod source_guard_tests;
+    use source_guard_tests::{INTAKE_GATE, admission_guard_gaps, preservation_gaps};
 
     #[test]
     fn live_human_preservation_precedes_stale_dispatch_suppression() {
@@ -1771,10 +1772,8 @@ mod live_intake_preserve_wiring_tests {
 mod command_recognition_tests {
     #[test]
     fn command_outcomes_end_before_restore_and_preserve_upload_conditions() {
-        use super::source_guard_tests::{INTAKE_GATE, command_boundary_gaps};
+        use super::live_intake_preserve_wiring_tests::source_guard_tests as guard;
+        use guard::{INTAKE_GATE, command_boundary_gaps};
         assert_eq!(command_boundary_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }
-
-#[cfg(test)]
-mod source_guard_tests;

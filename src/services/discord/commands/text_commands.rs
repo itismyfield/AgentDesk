@@ -1310,7 +1310,8 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
 #[cfg(test)]
 mod command_dispatch_contract_tests {
-    use super::source_guard_tests::{INTAKE_GATE, TEXT_COMMANDS, dispatch_gaps, skill_alias_gaps};
+    mod source_guard_tests;
+    use source_guard_tests::{INTAKE_GATE, TEXT_COMMANDS, dispatch_gaps, skill_alias_gaps};
 
     #[test]
     fn production_selection_drives_the_same_exhaustive_dispatch_id() {
@@ -1323,9 +1324,6 @@ mod command_dispatch_contract_tests {
         assert_eq!(gaps, Vec::<String>::new());
     }
 }
-
-#[cfg(test)]
-mod source_guard_tests;
 
 #[cfg(test)]
 mod home_command_tests {

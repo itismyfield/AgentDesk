@@ -31,11 +31,10 @@ mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
-mod source_guard_tests;
-
-#[cfg(test)]
 mod input_effect_tests {
-    use super::source_guard_tests::{INTAKE_TURN, RUNTIME_TRANSITION, transition_provider_gaps};
+    use super::recovery_context_take_order_tests::source_guard_tests::{
+        INTAKE_TURN, RUNTIME_TRANSITION, transition_provider_gaps,
+    };
 
     #[test]
     fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
@@ -165,7 +164,9 @@ mod intake_outbox_state_builder_tests {
     /// 호출 인접성·개수 검사이지 등록 성공 증명이 아님.
     #[test]
     fn bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge() {
-        use super::source_guard_tests::{INTAKE_TURN, bridge_stamp_gaps};
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            INTAKE_TURN, bridge_stamp_gaps,
+        };
         assert_eq!(bridge_stamp_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 }
@@ -2448,7 +2449,9 @@ pub(super) async fn handle_text_message(
 mod tui_busy_pre_submit_queue_reaction_tests {
     #[test]
     fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
-        use super::source_guard_tests::{BUSY_RETRY, INTAKE_TURN, busy_enqueue_view_gaps};
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            BUSY_RETRY, INTAKE_TURN, busy_enqueue_view_gaps,
+        };
         assert_eq!(
             busy_enqueue_view_gaps(INTAKE_TURN, BUSY_RETRY),
             Vec::<String>::new()
@@ -2458,7 +2461,8 @@ mod tui_busy_pre_submit_queue_reaction_tests {
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {
-    use super::source_guard_tests::{
+    pub(super) mod source_guard_tests;
+    use source_guard_tests::{
         BUSY_RETRY, CONTEXT_PUT_BACK_PAIR, CONTEXT_TAKE, CONTEXT_USES, INTAKE_TURN, TUI_FOLLOWUP,
         bridge_context_gaps, refusal_put_back_gaps, stale_abort_take_gaps, take_once_gaps,
     };
@@ -2494,7 +2498,7 @@ mod recovery_context_take_order_tests {
 /// source-order invariants as the session-retry recovery context it rides.
 #[cfg(test)]
 mod feedback_reminder_take_order_tests {
-    use super::source_guard_tests::{
+    use super::recovery_context_take_order_tests::source_guard_tests::{
         BUSY_RETRY, INTAKE_TURN, REMINDER_PUT_BACK_PAIR, REMINDER_TAKE, REMINDER_USES,
         TUI_FOLLOWUP, refusal_put_back_gaps, take_once_gaps,
     };
@@ -2540,7 +2544,7 @@ mod queue_pending_reaction_clear_tests {
 
 #[cfg(test)]
 mod turn_start_dispatch_guard_preservation_tests {
-    use super::source_guard_tests::{
+    use super::recovery_context_take_order_tests::source_guard_tests::{
         INTAKE_TURN, STALE_GUARD, abort_branch_gaps, preserve_gate_gaps, preserve_param_gaps,
     };
 

@@ -600,11 +600,15 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass
+  services::discord::router::intake_dispatch::tests::source_guard_tests::central_admission_guards_reject_commented_calls
+  services::discord::router::intake_dispatch::tests::source_guard_tests::queued_promotion_guard_rejects_commented_and_reordered_steps
+  services::discord::router::intake_dispatch::tests::source_guard_tests::worker_bypass_guard_rejects_commented_bodies_and_counts_coded_reentry
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_foreign_owner_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_fresh_pending_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
+  services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::handoff_path_guard_rejects_commented_anchors_and_coded_stamps
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
@@ -827,6 +831,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
   services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
   services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
+  services::discord::turn_teardown_clearance::tests::last_step_guard_rejects_commented_steps_and_code_before_spawn
   services::discord::voice_barge_in::tests::background_handoff_refuses_publish_when_pg_reservation_fails
   services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries

@@ -4,7 +4,7 @@
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
 
-pub(super) const INTAKE_GATE: &str = include_str!("../intake_gate.rs");
+pub(crate) const INTAKE_GATE: &str = include_str!("../../intake_gate.rs");
 
 const HANDLE_EVENT: &str = "pub(in crate::services::discord) async fn handle_event(";
 const TEST_BOUNDARY: &str = "#[cfg(test)]\nmod reply_context_tests";
@@ -45,7 +45,7 @@ fn production(source: &str) -> Option<Lexed> {
 
 /// Human preservation is computed once, gates the stale lookup, and the same value
 /// feeds both raw-attachment and live request/submission envelopes.
-pub(super) fn preservation_gaps(source: &str) -> Vec<String> {
+pub(crate) fn preservation_gaps(source: &str) -> Vec<String> {
     let Some(event) = Lexed::new(source).block(HANDLE_EVENT) else {
         return vec![format!("missing {HANDLE_EVENT}")];
     };
@@ -76,7 +76,7 @@ pub(super) fn preservation_gaps(source: &str) -> Vec<String> {
 
 /// One outer admission guard precedes every soft-intervention queue entrypoint, and no
 /// production branch decides the sender on its own.
-pub(super) fn admission_guard_gaps(source: &str) -> Vec<String> {
+pub(crate) fn admission_guard_gaps(source: &str) -> Vec<String> {
     let Some(production) = production(source) else {
         return vec![format!("missing {TEST_BOUNDARY}")];
     };
@@ -96,7 +96,7 @@ pub(super) fn admission_guard_gaps(source: &str) -> Vec<String> {
 
 /// Command outcomes end the event before session restore while keeping the upload
 /// conditions; the legacy `!` boundary is a fixed denial followed by a return.
-pub(super) fn command_boundary_gaps(source: &str) -> Vec<String> {
+pub(crate) fn command_boundary_gaps(source: &str) -> Vec<String> {
     let Some(production) = production(source) else {
         return vec![format!("missing {TEST_BOUNDARY}")];
     };

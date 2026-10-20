@@ -3739,10 +3739,10 @@ services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_cl
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
+services::discord::commands::text_commands::command_dispatch_contract_tests::source_guard_tests::dispatch_guard_counts_ok_false_in_code_but_not_in_comments
+services::discord::commands::text_commands::command_dispatch_contract_tests::source_guard_tests::dispatch_guards_reject_commented_selection_and_arms
+services::discord::commands::text_commands::command_dispatch_contract_tests::source_guard_tests::skill_alias_guard_rejects_commented_aliases_and_actions
 services::discord::commands::text_commands::home_command_tests::command_text_and_alias_dispatch_refuse_before_stop_publication
-services::discord::commands::text_commands::source_guard_tests::dispatch_guard_counts_ok_false_in_code_but_not_in_comments
-services::discord::commands::text_commands::source_guard_tests::dispatch_guards_reject_commented_selection_and_arms
-services::discord::commands::text_commands::source_guard_tests::skill_alias_guard_rejects_commented_aliases_and_actions
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local
@@ -6741,6 +6741,9 @@ services::discord::router::intake_gate::live_entry_tests::actual_live_entry_keep
 services::discord::router::intake_gate::live_entry_tests::text_skill_aliases_keep_lookup_and_control_dispatch
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::live_human_preservation_precedes_stale_dispatch_suppression
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
+services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::admission_guard_rejects_commented_guard_and_counts_coded_sender_checks
+services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::command_boundary_guard_rejects_commented_outcomes_and_denial
+services::discord::router::intake_gate::live_intake_preserve_wiring_tests::source_guard_tests::preservation_guard_rejects_commented_and_reordered_wiring
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::different_author_reuses_existing_channel_card
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::falls_back_to_any_card_when_no_live_owner
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::identical_resend_outside_dedup_window_reuses_card
@@ -6765,9 +6768,6 @@ services::discord::router::intake_gate::queue_effects::source_guard_tests::reuse
 services::discord::router::intake_gate::reply_context_tests::attachment_only_empty_check_ignores_leading_bot_mention
 services::discord::router::intake_gate::reply_context_tests::attachment_only_turn_accepts_any_saved_file_without_prompt
 services::discord::router::intake_gate::reply_context_tests::attachment_reply_context_keeps_canonical_message_id_and_all_files
-services::discord::router::intake_gate::source_guard_tests::admission_guard_rejects_commented_guard_and_counts_coded_sender_checks
-services::discord::router::intake_gate::source_guard_tests::command_boundary_guard_rejects_commented_outcomes_and_denial
-services::discord::router::intake_gate::source_guard_tests::preservation_guard_rejects_commented_and_reordered_wiring
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
@@ -6867,10 +6867,10 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::source_guard_tests::headless_guards_reject_commented_steps
+services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::source_guard_tests::headless_guards_reject_reordered_steps_and_count_coded_bans
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
-services::discord::router::message_handler::headless_turn::source_guard_tests::headless_guards_reject_commented_steps
-services::discord::router::message_handler::headless_turn::source_guard_tests::headless_guards_reject_reordered_steps_and_count_coded_bans
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_inherited_route_is_republished_by_its_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_lost_claim_replays_its_resolved_route
@@ -6916,6 +6916,9 @@ services::discord::router::message_handler::intake_turn::race_loss::race_loss_re
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::recovery_context_survives_intake_stale_dispatch_abort
+services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::source_guard_tests::handler_guards_reject_commented_steps
+services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::source_guard_tests::helper_guards_reject_commented_steps
+services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::source_guard_tests::intake_guards_reject_reordered_steps_and_count_coded_bans
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn
 services::discord::router::message_handler::intake_turn::replay_start_tests::exact_retry_starts_only_through_its_continuation_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::held_dispatch_is_not_inherited_by_an_active_start_pg
@@ -6941,9 +6944,6 @@ services::discord::router::message_handler::intake_turn::runtime_transition::nat
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::handoff_ownership_guard_ignores_comments
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
-services::discord::router::message_handler::intake_turn::source_guard_tests::handler_guards_reject_commented_steps
-services::discord::router::message_handler::intake_turn::source_guard_tests::helper_guards_reject_commented_steps
-services::discord::router::message_handler::intake_turn::source_guard_tests::intake_guards_reject_reordered_steps_and_count_coded_bans
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
@@ -7143,6 +7143,7 @@ services::discord::router::response_format::tests::voluntary_feedback_reminder_i
 services::discord::router::response_format::tests::wip_warning_is_injected_into_reply_context_when_uncommitted_changes_exist
 services::discord::router::response_format::tests::wrap_user_prompt_with_author_keeps_single_line_body_inline
 services::discord::router::response_format::tests::wrap_user_prompt_with_author_preserves_multiline_body
+services::discord::router::source_guard_support::as_written_matching_skips_prose_and_quoted_copies
 services::discord::runtime_bootstrap::bootstrap_tests::bootstrap_session_reset_pending_excludes_restored_model_overrides
 services::discord::runtime_bootstrap::bootstrap_tests::delete_stale_queued_placeholder_cards_with_deletes_only_supplied_stale_cards
 services::discord::runtime_bootstrap::bootstrap_tests::filter_restored_queued_placeholders_preserves_live_and_reports_stale

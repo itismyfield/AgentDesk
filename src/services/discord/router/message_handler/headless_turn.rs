@@ -15,8 +15,6 @@ use routine_metadata::persist_boundary_before_provider_clear;
 
 mod entrypoints;
 pub(in crate::services::discord) use entrypoints::*;
-#[cfg(test)]
-mod source_guard_tests;
 
 #[allow(clippy::too_many_arguments)]
 async fn start_reserved_headless_turn_admitted(
@@ -1204,7 +1202,9 @@ mod foreign_row_refusal_tests {
 
     #[test]
     fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
-        use super::source_guard_tests::{HEADLESS_TURN, row_refusal_gaps};
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            HEADLESS_TURN, row_refusal_gaps,
+        };
         assert_eq!(row_refusal_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 }
@@ -1215,10 +1215,12 @@ mod recovery_context_take_order_tests {
         DispatchProfile, PromptProfiles, build_system_prompt_with_manifest,
     };
     use super::super::super::super::settings::RoleBinding;
-    use super::source_guard_tests::{
+    use poise::serenity_prelude::ChannelId;
+    use source_guard_tests::{
         HEADLESS_TURN, headless_profile_gaps, lifecycle_take_gaps, post_spawn_gaps, take_once_gaps,
     };
-    use poise::serenity_prelude::ChannelId;
+
+    pub(super) mod source_guard_tests;
 
     #[tokio::test(start_paused = true)]
     async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue() {
@@ -1500,7 +1502,9 @@ mod fresh_routine_tests {
     // `|| scheduled_snapshot_turn` to fresh_context_severance and this fails.
     #[test]
     fn scheduled_snapshot_turn_stays_out_of_channel_mutating_severance() {
-        use super::source_guard_tests::{HEADLESS_TURN, snapshot_severance_gaps};
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            HEADLESS_TURN, snapshot_severance_gaps,
+        };
         assert_eq!(snapshot_severance_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
@@ -1510,7 +1514,9 @@ mod fresh_routine_tests {
     // live channel row by channel_id.
     #[test]
     fn scheduled_snapshot_skips_channel_session_key_refresh() {
-        use super::source_guard_tests::{HEADLESS_TURN, snapshot_refresh_gaps};
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            HEADLESS_TURN, snapshot_refresh_gaps,
+        };
         assert_eq!(snapshot_refresh_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
