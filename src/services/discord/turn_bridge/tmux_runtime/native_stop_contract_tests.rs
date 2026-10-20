@@ -503,7 +503,7 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
         let home = HomeGate::new(&id, "mini");
         home.confirm(
             &HeldHome::for_test(&id, "mini", 1, HomeState::Worker),
-            std::time::Instant::now(),
+            tokio::time::Instant::now(),
         )
         .unwrap();
         let permit = home.admit_command("claude").unwrap();
