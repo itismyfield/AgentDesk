@@ -736,15 +736,7 @@ pub(super) async fn build_health_snapshot_with_options(
     registry: &HealthRegistry,
     options: HealthSnapshotOptions,
 ) -> DiscordHealthSnapshot {
-    build_health_snapshot_until(registry, options, health_observation::caller_deadline()).await
-}
-
-/// The snapshot whose mailbox reads all end by `deadline`.
-async fn build_health_snapshot_until(
-    registry: &HealthRegistry,
-    options: HealthSnapshotOptions,
-    deadline: tokio::time::Instant,
-) -> DiscordHealthSnapshot {
+    let deadline = health_observation::snapshot_deadline();
     let HealthSnapshotOptions {
         include_mailbox_details,
         mut tmux,

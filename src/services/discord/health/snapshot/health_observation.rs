@@ -20,7 +20,7 @@ use super::super::reachability::composite::{
 };
 use super::super::redaction;
 use super::super::session_enrichment::{
-    self, ExecutorWitness, HealthSnapshotOptions, SessionEnrichment, TmuxObservationBudget,
+    self, ExecutorWitness, SessionEnrichment, TmuxObservationBudget,
 };
 use super::super::stall_verdict;
 use super::super::unpaired_active_token::{
@@ -45,14 +45,22 @@ pub(super) type Observations =
 /// The first reads end this soon at the latest, so the reads after them keep some of the deadline.
 const FIRST_READS_CAP: Duration = Duration::from_secs(1);
 
-/// The mailbox-read deadline of a snapshot whose caller carries none.
+/// The mailbox-read deadline of a snapshot built outside `health_snapshot_by`.
 const UNBOUNDED_CALLER_BUDGET: Duration = Duration::from_millis(1_500);
 
 /// The degraded reason for a snapshot in which some actor read did not answer.
 const MAILBOX_SNAPSHOT_UNAVAILABLE: &str = "mailbox_snapshot_unavailable";
 
-pub(super) fn caller_deadline() -> Instant {
-    Instant::now() + UNBOUNDED_CALLER_BUDGET
+tokio::task_local! {
+    /// The deadline of the `/api/health` request whose snapshot this task is building.
+    static REQUEST_DEADLINE: Instant;
+}
+
+/// The request's deadline inside `health_snapshot_by`; any other build gets its own budget.
+pub(super) fn snapshot_deadline() -> Instant {
+    REQUEST_DEADLINE
+        .try_with(|deadline| *deadline)
+        .unwrap_or_else(|_| Instant::now() + UNBOUNDED_CALLER_BUDGET)
 }
 
 /// A mailbox read that did not answer; its channel gets no idle snapshot or proof from it.
@@ -82,8 +90,14 @@ impl HealthRegistry {
         include_details: bool,
         deadline: Instant,
     ) -> DiscordHealthSnapshot {
-        let options = HealthSnapshotOptions::new(include_details);
-        super::build_health_snapshot_until(self, options, deadline).await
+        let build = async {
+            if include_details {
+                super::build_health_snapshot(self).await
+            } else {
+                super::build_public_health_snapshot(self).await
+            }
+        };
+        REQUEST_DEADLINE.scope(deadline, build).await
     }
 }
 
