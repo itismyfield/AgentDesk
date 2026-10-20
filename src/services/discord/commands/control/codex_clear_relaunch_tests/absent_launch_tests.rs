@@ -236,7 +236,12 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         .is_none()
     );
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
-    let activity = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let activity = settled_owner_observation(
+        "B1_AFTER_ABSENCE superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
     assert_eq!(
         (activity.activity, activity.reason),
         (Activity::Idle, "no_session")

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::turn_presence::activity::{Reading, reading_now};
 use std::sync::atomic::AtomicBool;
@@ -86,7 +87,12 @@ async fn registered_rig(id: u64) -> (Rig, Arc<HealthRegistry>) {
 }
 
 async fn idle_reading(rig: &Rig) -> Reading {
-    let reading = reading_now(&rig.shared, &ProviderKind::Claude, rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&rig.shared, &ProviderKind::Claude, rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     reading
 }

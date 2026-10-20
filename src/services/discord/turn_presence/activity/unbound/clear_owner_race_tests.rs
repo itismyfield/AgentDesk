@@ -1,5 +1,8 @@
 //! Actual clear, watcher exit and automatic kickoff; provider entry is a deterministic stand-in.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::{
+    owner_epoch_error, settled_owner_observation,
+};
 use crate::services::discord::queue_dispatch::kickoff::{
     install_owner_race_pause, owner_race_kick_attempts,
 };
@@ -708,11 +711,17 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool, failed_
         let ports = Arc::new(LivePorts {
             root: Some(fixture.rig.root.path().to_owned()),
         });
-        let (snapshot, namespace, next) = Snapshot::collect_pair(
-            &fixture.rig.shared,
-            &fixture.provider,
-            fixture.rig.channel,
-            ports,
+        let (snapshot, namespace, next) = settled_owner_observation(
+            "A2_STABLE_PAIR owner_epoch_retries",
+            || {
+                Snapshot::collect_pair(
+                    &fixture.rig.shared,
+                    &fixture.provider,
+                    fixture.rig.channel,
+                    ports.clone(),
+                )
+            },
+            owner_epoch_error,
         )
         .await
         .unwrap();

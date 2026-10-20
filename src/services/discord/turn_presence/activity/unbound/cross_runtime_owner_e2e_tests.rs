@@ -1,5 +1,6 @@
 //! Registered runtime ownership through the real Codex restore producer and live readings.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_presence::activity::{activity_now, reading_now};
@@ -454,7 +455,12 @@ impl Fixture {
         );
     }
     pub(super) async fn observed(&self) -> Observed {
-        let answer = activity_now(&self.rig.shared, &self.provider, self.rig.channel).await;
+        let answer = settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || activity_now(&self.rig.shared, &self.provider, self.rig.channel),
+            |sample| sample.reason == "superseded",
+        )
+        .await;
         if answer.activity == Activity::Unknown {
             let ports = Arc::new(LivePorts {
                 root: Some(self.rig.root.path().to_owned()),
@@ -546,7 +552,12 @@ async fn a2_actual_reading_rejects_owner_aba_and_new_runtime_pg() {
     }
     let fixture = Fixture::connect_and_migrate_fixture(69_184_102, ProviderKind::Claude).await;
     fixture.produce_owners();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     assert!(reading.publish_if_current(|| ()).await.is_some());
     fixture.foreign[1]
@@ -577,7 +588,12 @@ async fn a2_actual_reading_rejects_owner_aba_and_new_runtime_pg() {
         ),
         Some(fixture.foreign_channel.get())
     );
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed.activity, Activity::Idle);
     fixture.registry.register("codex".into(), replacement).await;
     assert!(
@@ -599,7 +615,12 @@ async fn a2_final_publication_rejects_unrelated_owner_epoch_change_pg() {
     }
     let fixture = Fixture::connect_and_migrate_fixture(69_184_103, ProviderKind::Claude).await;
     fixture.produce_owners();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     let changed = Arc::new(AtomicUsize::new(0));
     let changed_hook = changed.clone();

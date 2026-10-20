@@ -1,5 +1,6 @@
 //! Actual foreign-watcher release during a kick's Activity read, followed by live supervisor drain.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
 
 // The third actual wake closes admission; the absolute bound also covers a claimed dispatch stall.
@@ -1493,7 +1494,12 @@ async fn no_core_stale_canonical_phase(periodic_only: bool) {
     inflight::seed_session_row_hashed(pool, &key, id, &fixture.rig.shared.token_hash, None).await;
     sqlx::query("UPDATE sessions SET status='idle', active_turn_nonce='stable-terminal-nonce' WHERE session_key=$1")
         .bind(&key).execute(pool).await.unwrap();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     let snapshot = reading.unbound.as_ref().unwrap().snapshot.as_ref().unwrap();
     assert!(snapshot.basis.is_none());

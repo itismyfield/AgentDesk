@@ -1,5 +1,6 @@
 //! File and receipt changes must invalidate a saved real Reading without another Activity read.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 
 #[tokio::test(flavor = "current_thread")]
 async fn a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg() {
@@ -15,7 +16,12 @@ async fn a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg() 
     assert!(marker.starts_with(fixture.rig.root.path()));
     std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
     std::fs::write(&marker, b"opaque-before").unwrap();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     let control = AtomicUsize::new(0);
     assert!(
@@ -49,7 +55,12 @@ async fn a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg() 
         "nonce-only change reused the old Idle"
     );
     assert_eq!(stale_calls.load(Ordering::SeqCst), 0);
-    let fresh = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let fresh = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(fresh.observed, observed(Activity::Idle, "no_session"));
     let fresh_calls = AtomicUsize::new(0);
     assert!(
@@ -62,9 +73,13 @@ async fn a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg() 
     for bad in [&b" \n"[..], &[0xff][..]] {
         std::fs::write(&marker, bad).unwrap();
         assert_eq!(
-            reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
-                .await
-                .observed,
+            settled_owner_observation(
+                "A2_STABLE_OBSERVATION superseded_retries",
+                || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+                |sample| sample.observed.reason == "superseded"
+            )
+            .await
+            .observed,
             observed(Activity::Unknown, "session_identity_unresolved"),
             "unreadable nonce must not authorize foreign owner evidence"
         );
@@ -75,9 +90,13 @@ async fn a2_foreign_spawn_nonce_only_change_rejects_saved_idle_publication_pg() 
         .tmux_watchers
         .restore_owner_channel_for_tmux_session(&fixture.foreign_name, fixture.foreign_channel);
     assert_eq!(
-        reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
-            .await
-            .observed,
+        settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+            |sample| sample.observed.reason == "superseded"
+        )
+        .await
+        .observed,
         observed(Activity::Idle, "no_session"),
         "the optional nonce diagnostic must preserve existing local watcher truth"
     );
@@ -111,7 +130,12 @@ async fn a2_foreign_receipt_only_self_change_rejects_saved_idle_publication_pg()
             .await
             .unwrap();
     assert_eq!(initial_rows, 0);
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     assert!(reading.publish_if_current(|| ()).await.is_some());
     let epoch = crate::services::discord::tmux_watcher_registry::owner_observation_epoch();
@@ -146,7 +170,12 @@ async fn a2_foreign_receipt_only_self_change_rejects_saved_idle_publication_pg()
         "receipt-only self change reused the old Idle"
     );
     assert_eq!(stale_calls.load(Ordering::SeqCst), 0);
-    let fresh = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let fresh = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(
         fresh.observed,
         observed(Activity::Unknown, "watcher_unbound")

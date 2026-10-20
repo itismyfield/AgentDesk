@@ -1,6 +1,7 @@
 //! Restored binding-only state reads durable identity without starting or clearing a session.
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
 use crate::services::platform::tmux::session_inventory::tests::{
     ChannelCommand, ChannelProbeTrace,
@@ -154,11 +155,17 @@ impl RecoveryFixture {
 
     async fn read(&self) -> (Observed, Stamp, Arc<Mutex<Watch>>) {
         let watch = Arc::new(Mutex::new(Watch::default()));
-        let (answer, stamp) = read(
-            &self.shared,
-            &ProviderKind::Claude,
-            self.channel,
-            watch.clone(),
+        let (answer, stamp) = settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || {
+                read(
+                    &self.shared,
+                    &ProviderKind::Claude,
+                    self.channel,
+                    watch.clone(),
+                )
+            },
+            |sample| sample.0.reason == "superseded",
         )
         .await;
         (answer, stamp, watch)

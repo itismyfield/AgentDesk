@@ -40,9 +40,19 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
     );
     let history = fs::read(fixture.history()).unwrap();
     assert_eq!(
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await
-            .unwrap(),
+        settled_owner_observation(
+            "B1_UNPROVED_FOREIGN owner_epoch_retries",
+            || {
+                activity::tests::unbound_verdict_for_tests(
+                    &fixture.shared,
+                    &ProviderKind::Codex,
+                    channel,
+                )
+            },
+            owner_epoch_error,
+        )
+        .await
+        .unwrap(),
         "Hold(\"owner_unresolved\")"
     );
     let absence_observation =
@@ -56,8 +66,12 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
         !dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
         "absence alone must not satisfy the explicit-clear queue exception"
     );
-    let public_activity =
-        activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let public_activity = settled_owner_observation(
+        "B1_UNPROVED_FOREIGN superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
     assert_eq!(public_activity.activity, activity::Activity::Unknown);
     assert_eq!(public_activity.reason, "session_identity_unresolved");
     fixture.fake.take_calls();

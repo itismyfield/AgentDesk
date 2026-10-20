@@ -671,6 +671,92 @@ async fn clear_and_first_input(
     }
 }
 
+pub(in crate::services::discord) async fn settled_owner_observation<T, F, Fut>(
+    counter: &str,
+    mut observe: F,
+    transient: impl Fn(&T) -> bool,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let mut retries = 0;
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        for read in 0..50 {
+            let sample = observe().await;
+            if !transient(&sample) {
+                return Some(sample);
+            }
+            retries += 1;
+            if read + 1 < 50 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        None
+    })
+    .await;
+    eprintln!("{counter}={retries}");
+    observed
+        .expect("owner observation remained transient past the bounded reread timeout")
+        .expect("owner observation remained transient through the bounded reread limit")
+}
+
+pub(in crate::services::discord) fn owner_epoch_error<T, E: AsRef<str>>(
+    observed: &Result<T, E>,
+) -> bool {
+    matches!(observed, Err(reason) if reason.as_ref() == "owner_epoch")
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_keeps_unrelated_error_on_first_observation() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT unrelated_error_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("fixture_io".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Err("fixture_io".to_owned()),
+        "a non-owner-epoch error must remain the first observation"
+    );
+    assert_eq!(calls.get(), 1, "an unrelated error must not be reread");
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_rechecks_one_transient_before_stable_hold() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT transient_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("owner_epoch".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Ok("Hold(\"owner_unresolved\")".to_owned()),
+        "an owner-epoch error must be reread before accepting the observation"
+    );
+    assert_eq!(calls.get(), 2, "only the transient observation is retried");
+}
+
 async fn clear_and_first_input_at_tick(
     external_inventory: bool,
     without_core: bool,
@@ -793,27 +879,12 @@ async fn clear_and_first_input_at_tick(
         clear_persist_failure_tests::queue_len(&fixture.shared, channel).await,
         0
     );
-    const SUPERSEDED_READ_LIMIT: usize = 50;
-    let mut superseded_retries = 0;
-    let observed = tokio::time::timeout(Duration::from_secs(5), async {
-        for read in 0..SUPERSEDED_READ_LIMIT {
-            let sample =
-                activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
-            if sample.reason != "superseded" {
-                return Some(sample);
-            }
-            superseded_retries += 1;
-            if read + 1 < SUPERSEDED_READ_LIMIT {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-        None
-    })
+    let observed = settled_owner_observation(
+        "E51_AFTER_CLEAR superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
     .await;
-    eprintln!("E51_AFTER_CLEAR superseded_retries={superseded_retries}");
-    let observed = observed
-        .expect("E51 activity remained superseded past the bounded reread timeout")
-        .expect("E51 activity remained superseded through the bounded reread limit");
     assert_eq!(
         (observed.activity, observed.reason),
         if external_inventory {
@@ -827,9 +898,18 @@ async fn clear_and_first_input_at_tick(
     let clear_preflight_open =
         crate::services::codex_tui::verified_hold::preflight(CANARY_TMUX, Some(&cancelled_probe))
             .is_none();
-    let underlying =
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await;
+    let underlying = settled_owner_observation(
+        "E51_AFTER_CLEAR underlying_owner_epoch_retries",
+        || {
+            activity::tests::unbound_verdict_for_tests(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+        },
+        owner_epoch_error,
+    )
+    .await;
     eprintln!(
         "E51_AFTER_CLEAR activity={:?} reason={} underlying={underlying:?}",
         observed.activity, observed.reason

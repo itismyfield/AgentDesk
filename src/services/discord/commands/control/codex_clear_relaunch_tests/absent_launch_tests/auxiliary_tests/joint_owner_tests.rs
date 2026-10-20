@@ -262,10 +262,24 @@ async fn make_binding_only(fixture: &CanaryFixture, assert_absent: bool) {
     if !assert_absent {
         return;
     }
-    let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
-    let unbound =
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await;
+    let observed = settled_owner_observation(
+        "BUNDLE_NO_CORE_PRECONDITIONS superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
+    let unbound = settled_owner_observation(
+        "BUNDLE_NO_CORE_PRECONDITIONS owner_epoch_retries",
+        || {
+            activity::tests::unbound_verdict_for_tests(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+        },
+        owner_epoch_error,
+    )
+    .await;
     eprintln!(
         "BUNDLE_NO_CORE_PRECONDITIONS canonical_name={derived} activity={observed:?} unbound={unbound:?}"
     );
@@ -437,9 +451,18 @@ async fn missing_proof_holds(evidence: Evidence) {
     let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
         &fixture.old_source.path,
     );
-    let verdict =
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await;
+    let verdict = settled_owner_observation(
+        "BUNDLE_OWNER_REFUSAL owner_epoch_retries",
+        || {
+            activity::tests::unbound_verdict_for_tests(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+        },
+        owner_epoch_error,
+    )
+    .await;
     match evidence.metadata {
         Metadata::Exact => assert_eq!(verdict.unwrap(), "Hold(\"owner_unresolved\")"),
         Metadata::Missing => assert_eq!(verdict.unwrap(), "Hold(\"current_unresolved\")"),
@@ -458,8 +481,12 @@ async fn missing_proof_holds(evidence: Evidence) {
         !dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
         "absence alone must not satisfy the explicit-clear queue exception"
     );
-    let public_activity =
-        activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let public_activity = settled_owner_observation(
+        "BUNDLE_OWNER_REFUSAL superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
     assert_eq!(public_activity.activity, activity::Activity::Unknown);
     assert_eq!(
         public_activity.reason,
