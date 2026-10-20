@@ -16,6 +16,74 @@ struct Fixture {
     lease: ExternalInputRelayLease,
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_nonce_pinned_tmux_input_keeps_the_non_herdr_production_claim_available() {
+    use dedupe::hosted_source::tests::{CHANNEL, Fixture as SourceFixture, LOGICAL, N1};
+    let source_fixture = SourceFixture::new();
+    let source = source_fixture.source(N1, "native-tmux-input");
+    crate::services::tmux_common::host_marker::record_tmux_host_marker(LOGICAL);
+    dedupe::register_tmux_runtime_binding(
+        LOGICAL,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: source.path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(source.session_id.clone()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let mut lease = ExternalInputRelayLease::unassigned(Some(CHANNEL));
+    lease.turn_id = Some("native-tmux-input-turn".into());
+    lease.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+    lease.hosted_source = Some(
+        dedupe::hosted_source::capture("claude", LOGICAL, CHANNEL, &source.path, None)
+            .expect("a normal tmux execution also has durable source nonce history"),
+    );
+    let mut fixture = Fixture {
+        shared: crate::services::discord::make_shared_data_for_tests(),
+        provider: ProviderKind::Claude,
+        channel: ChannelId::new(CHANNEL),
+        logical: LOGICAL.into(),
+        output: source.path,
+        anchor: MessageId::new(CHANNEL + 1),
+        lease: dedupe::record_external_input_turn_lease("claude", LOGICAL, lease),
+    };
+    let original_pin = fixture.lease.hosted_source.clone().unwrap();
+    let mut old_pin = serde_json::to_value(&original_pin).unwrap();
+    old_pin
+        .as_object_mut()
+        .unwrap()
+        .remove("hosted_admission_required");
+    let marker = crate::services::tmux_common::session_temp_path(LOGICAL, "host_kind");
+    std::fs::write(&marker, b"herdr").unwrap();
+    let hosted_pin =
+        dedupe::hosted_source::capture("claude", LOGICAL, CHANNEL, &fixture.output, None).unwrap();
+    std::fs::remove_file(&marker).unwrap();
+    for pin in [hosted_pin, serde_json::from_value(old_pin).unwrap()] {
+        fixture.lease.hosted_source = Some(pin);
+        assert!(
+            !claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None))
+                .await
+                .claimed,
+            "original hosted or unknown host evidence must survive a missing current marker"
+        );
+        fixture.assert_quiet().await;
+    }
+    fixture.lease.hosted_source = Some(original_pin);
+    crate::services::tmux_common::host_marker::record_tmux_host_marker(LOGICAL);
+    let claim = claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)).await;
+    assert!(
+        claim.claimed,
+        "a source nonce alone must not require a Herdr endpoint"
+    );
+    let row = inflight::load_inflight_state_read_only(&fixture.provider, CHANNEL).unwrap();
+    assert_eq!(row.user_msg_id, fixture.anchor.get());
+    assert!(row.hosted_execution_nonce.is_none());
+}
+
 impl Fixture {
     fn new(root: &Path, id: u64) -> Self {
         let shared = crate::services::discord::make_shared_data_for_tests();

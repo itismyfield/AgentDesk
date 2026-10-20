@@ -99,7 +99,7 @@ impl<'a> AdmissionFence<'a> {
             return Err("synthetic host marker is unreadable or unrecognized".into());
         }
         let herdr = endpoint.is_some()
-            || pin.is_some()
+            || pin.is_some_and(|pin| pin.hosted_admission_required)
             || tui_prompt_dedupe::herdr_execution_listed(&self.logical)
             || marker == HostKindMarker::Known(HostKind::Herdr);
         let (pool, key) = match (

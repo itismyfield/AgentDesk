@@ -9159,6 +9159,7 @@ services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reo
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::delegated_actor_proofs_do_not_accumulate
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_leaves_row_and_lease_untouched_when_a_proof_fails
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_takes_a_legacy_watcher_row_and_the_result_resumes_after_restart
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::a_nonce_pinned_tmux_input_keeps_the_non_herdr_production_claim_available
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::failed_existing_actor_readoption_preserves_the_original_actor_and_saved_row
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the_caller
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_rejects_a_guard_for_another_channel_runtime_or_mutex

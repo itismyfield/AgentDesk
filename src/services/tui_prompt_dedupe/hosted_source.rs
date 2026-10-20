@@ -21,7 +21,13 @@ pub(crate) struct HostedSourcePin {
     pub(crate) channel_id: u64,
     pub(crate) logical_key: String,
     pub(crate) execution_nonce: String,
+    #[serde(default = "default_hosted_admission_required")]
+    pub(crate) hosted_admission_required: bool,
     pub(crate) source: SourceId,
+}
+
+fn default_hosted_admission_required() -> bool {
+    true
 }
 
 /// Reads the original file's binding history; a current binding cannot supply a missing origin.
@@ -148,8 +154,11 @@ pub(crate) fn validate(pin: &HostedSourcePin) -> bool {
         Some(&pin.source.session_id),
         Some(&pin.execution_nonce),
     )
-    .as_ref()
-        == Some(pin)
+    .is_some_and(|mut observed| {
+        // Host evidence belongs to the original capture, not a later source validation.
+        observed.hosted_admission_required = pin.hosted_admission_required;
+        observed == *pin
+    })
 }
 
 /// An old pending record may name its original file even when it predates the nonce carrier.
@@ -178,6 +187,14 @@ fn capture_native(
         return None;
     }
     let events = binding_events::records_strict(channel).ok()?.ok()?;
+    use crate::services::session_host::HostKind;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+    let hosted_admission_required = crate::config::session_hosts::herdr_endpoint(channel).is_some()
+        || super::herdr_execution_listed(logical)
+        || !matches!(
+            read_host_kind_marker(logical),
+            HostKindMarker::Known(HostKind::Tmux | HostKind::Process)
+        );
     let mut pinned = None;
     for event in events {
         if event.provider != provider
@@ -205,6 +222,7 @@ fn capture_native(
             channel_id: channel,
             logical_key: logical.to_owned(),
             execution_nonce,
+            hosted_admission_required,
             source,
         };
         if pinned.as_ref().is_some_and(|old| old != &candidate) {
