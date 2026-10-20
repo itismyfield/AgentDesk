@@ -302,7 +302,7 @@ pub(super) async fn assert_bridge_once(
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             sent.extend(api.take());
-            if sent.iter().any(|call| {
+            let completed = sent.iter().any(|call| {
                 let mut parts = call.splitn(3, ' ');
                 let method = parts.next().unwrap_or_default();
                 let path = parts.next().unwrap_or_default();
@@ -311,7 +311,21 @@ pub(super) async fn assert_bridge_once(
                     && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
                     && serde_json::from_str::<serde_json::Value>(body)
                         .is_ok_and(|value| value["content"] == "clear relaunch completed")
-            }) {
+            });
+            let summary = sent.iter().any(|call| {
+                let mut parts = call.splitn(3, ' ');
+                let method = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
+                let body = parts.next().unwrap_or_default();
+                method == "POST"
+                    && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
+                    && serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| {
+                        value["content"]
+                            .as_str()
+                            .is_some_and(|content| content.starts_with("-# ✅ "))
+                    })
+            });
+            if completed && summary {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

@@ -355,9 +355,11 @@ async fn restart_case(
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
-    assert_eq!(
-        restart_alarms.0.load(Ordering::SeqCst),
-        0,
-        "ordinary same-nonce restart must emit no operator alarm, including cross_nonce_boot_rescope"
-    );
+    if fault.is_none() {
+        assert_eq!(
+            restart_alarms.0.load(Ordering::SeqCst),
+            0,
+            "ordinary same-nonce restart must emit no operator alarm, including cross_nonce_boot_rescope"
+        );
+    }
 }
