@@ -190,6 +190,7 @@ pub async fn is_recent_cluster_worker(
 }
 
 #[cfg(test)]
+#[path = "health_diagnostics/pg_wire_proxy_tests.rs"]
 pub(crate) mod pg_wire_proxy;
 mod request_batch;
 mod session_state;
