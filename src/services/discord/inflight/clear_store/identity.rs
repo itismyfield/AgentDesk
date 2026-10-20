@@ -165,7 +165,7 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
     };
-    let Ok(data) = fs::read_to_string(&path) else {
+    let Ok(data) = super::snapshot::read_row(provider, channel_id, &path) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
     if super::super::raw_before_start_receipt(&data)
@@ -173,7 +173,7 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::IoError);
     }
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+    let Ok(state) = super::snapshot::parse_row(provider, channel_id, &data) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
     if exact_nonce
