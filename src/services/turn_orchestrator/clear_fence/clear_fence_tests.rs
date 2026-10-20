@@ -290,11 +290,33 @@ fn clear_rejects_late_queue_and_marker_restore_without_dropping_a_current_input(
         let handle = registry.handle(channel);
         let old = item(831);
         assert!(handle.enqueue(old.clone(), context()).await.enqueued);
-        handle.discard_waiting_or_refused(context()).await.unwrap();
+        let cleared = handle.discard_waiting_or_refused(context()).await.unwrap();
+        assert!(cleared.persistence.failed.is_empty());
         assert!(handle.enqueue(item(832), context()).await.enqueued);
+        save_channel_pending_dispatch_marker(
+            &ProviderKind::Claude,
+            "clear-preserve",
+            channel,
+            &old,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            load_channel_pending_dispatch_marker_checked(
+                &ProviderKind::Claude,
+                "clear-preserve",
+                channel,
+            )
+            .unwrap()
+            .unwrap()
+            .0
+            .message_id,
+            old.message_id
+        );
         let merged = handle
             .merge_restored_dispatch_marker(old.clone(), None, context())
             .await;
+        assert!(merged.persistence_error.is_none());
         assert_eq!(merged.absorbed, 0);
         save_channel_queue(
             &ProviderKind::Claude,
