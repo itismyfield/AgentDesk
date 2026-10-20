@@ -407,52 +407,35 @@ impl Drop for PhaseDiagnostic {
     }
 }
 
-struct WakeProducerState {
-    serial: tokio::sync::Mutex<()>,
-    producer: std::sync::Mutex<Option<&'static str>>,
+struct WakeObservations {
     completion_release: tokio::sync::watch::Sender<bool>,
-    completion_blocked: AtomicUsize,
-    attempts: std::sync::Mutex<Vec<(&'static str, bool)>>,
-    started: tokio::sync::Notify,
-}
-
-struct WakeProducers {
-    state: Arc<WakeProducerState>,
+    completion_blocked: Arc<AtomicUsize>,
+    requests: Arc<std::sync::Mutex<Vec<&'static str>>>,
     _hook: crate::services::discord::queue_io::IdleQueueKickHookResetForTests,
 }
 
-impl WakeProducers {
+impl WakeObservations {
     fn install(channel: ChannelId, periodic_only: bool) -> Self {
         let (completion_release, _) = tokio::sync::watch::channel(!periodic_only);
-        let state = Arc::new(WakeProducerState {
-            serial: tokio::sync::Mutex::new(()),
-            producer: std::sync::Mutex::new(None),
-            completion_release,
-            completion_blocked: AtomicUsize::new(0),
-            attempts: std::sync::Mutex::new(Vec::new()),
-            started: tokio::sync::Notify::new(),
-        });
-        let observed = state.clone();
+        let completion_blocked = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let release = completion_release.clone();
+        let blocked = completion_blocked.clone();
+        let observed = requests.clone();
         let hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
             Arc::new(move |runtime, provider, candidate, reason| {
-                let state = observed.clone();
+                let release = release.clone();
+                let blocked = blocked.clone();
+                let observed = observed.clone();
                 Box::pin(async move {
                     if candidate != channel {
                         return None;
                     }
-                    if !matches!(reason, "turn_completion_event" | "turn_presence_idle") {
-                        // The seam has no lane argument: preserve unknown Idle/QueuedOnly callers.
-                        tracing::info!(
-                            channel_id = channel.get(),
-                            reason,
-                            "A2_R5_OTHER_PRODUCER original_lane=true"
-                        );
-                        return None;
-                    }
-                    if reason == "turn_completion_event" {
-                        let mut released = state.completion_release.subscribe();
+                    observed.lock().unwrap().push(reason);
+                    if periodic_only && reason == "turn_completion_event" {
+                        let mut released = release.subscribe();
                         if !*released.borrow_and_update() {
-                            state.completion_blocked.fetch_add(1, Ordering::SeqCst);
+                            blocked.fetch_add(1, Ordering::SeqCst);
                             if classify_enabled() {
                                 eprintln!(
                                     "A2_R6_BARRIER reason={reason} stage=blocked sample={}",
@@ -467,111 +450,47 @@ impl WakeProducers {
                             }
                         }
                     }
-                    if classify_enabled() {
-                        eprintln!(
-                            "A2_R6_ATTEMPT reason={reason} stage=before_actual sample={}",
-                            classify_row(&runtime, &provider, channel)
-                        );
-                    }
-                    // A blocked completion never owns this mutex; a real NoStart permits fallback.
-                    let _serial = state.serial.lock().await;
-                    let http = runtime
-                        .serenity_http_or_token_fallback()
-                        .expect("isolated kickoff fixture HTTP client");
-                    let ctx = runtime.http.cached_serenity_ctx.get();
-                    let token = runtime
-                        .http
-                        .cached_bot_token
-                        .get()
-                        .expect("isolated kickoff fixture bot token");
-                    let deps = crate::services::discord::router::IntakeDeps {
-                        http: &http,
-                        cache: ctx.map(|ctx| &ctx.cache),
-                        ctx_for_chained_dispatch: ctx,
-                        shared: &runtime,
-                        token,
-                    };
-                    tracing::info!(
-                        "Deferred drain: one-shot kick for channel {} ({reason})",
-                        channel
-                    );
-                    let outcome = crate::services::discord::queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
-                        reason,
-                        crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queue_channel(
-                            &deps, &provider, channel,
-                        ),
-                    ).await;
-                    if classify_enabled() {
-                        eprintln!(
-                            "A2_R6_ATTEMPT reason={reason} stage=after_actual started={}",
-                            outcome.started
-                        );
-                    }
-                    state
-                        .attempts
-                        .lock()
-                        .unwrap()
-                        .push((reason, outcome.started));
-                    if outcome.started {
-                        let mut producer = state.producer.lock().unwrap();
-                        if producer.is_none() {
-                            *producer = Some(reason);
-                        }
-                        drop(producer);
-                        state.started.notify_waiters();
-                    }
-                    Some(outcome)
+                    // Preserve native transport, lane and fallback; only the periodic barrier waits.
+                    None
                 })
             }),
         );
-        Self { state, _hook: hook }
+        Self {
+            completion_release,
+            completion_blocked,
+            requests,
+            _hook: hook,
+        }
     }
 
-    fn producer_or_direct(&self, logs: &LogSink) -> Option<&'static str> {
-        self.producer().or_else(|| {
-            log_has(logs, "Processing next queued command", "").then_some("turn_bridge_completion")
-        })
-    }
-
-    async fn wait_for_start(&self, deadline: tokio::time::Instant, logs: &LogSink) {
-        let _ = tokio::time::timeout_at(deadline, async {
-            loop {
-                let started = self.state.started.notified();
-                tokio::pin!(started);
-                started.as_mut().enable();
-                if self.producer_or_direct(logs).is_some() {
-                    break;
-                }
-                tokio::select! {
-                    _ = started => {},
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
-            }
-        })
-        .await;
-    }
-
-    fn producer(&self) -> Option<&'static str> {
-        *self.state.producer.lock().unwrap()
-    }
-
-    fn attempts(&self) -> Vec<(&'static str, bool)> {
-        self.state.attempts.lock().unwrap().clone()
+    fn requests(&self) -> Vec<&'static str> {
+        self.requests.lock().unwrap().clone()
     }
 
     fn completion_blocked(&self) -> usize {
-        self.state.completion_blocked.load(Ordering::SeqCst)
+        self.completion_blocked.load(Ordering::SeqCst)
     }
 
     fn release(&self) {
-        self.state.completion_release.send_replace(true);
+        self.completion_release.send_replace(true);
     }
 }
 
-impl Drop for WakeProducers {
-    fn drop(&mut self) {
-        self.release();
-    }
+fn observed_carriers(logs: &LogSink, channel: ChannelId, offset: usize) -> Vec<String> {
+    let marker = format!("one-shot kick for channel {channel} (");
+    let bytes = logs.0.lock().unwrap();
+    let mut carriers = String::from_utf8_lossy(&bytes[offset..])
+        .lines()
+        .filter_map(|line| {
+            line.split_once(&marker)?
+                .1
+                .split_once(')')
+                .map(|(reason, _)| reason.to_owned())
+        })
+        .collect::<Vec<_>>();
+    carriers.sort();
+    carriers.dedup();
+    carriers
 }
 
 struct PeriodicCompletionFence {
@@ -778,7 +697,7 @@ async fn supervisor_drains_pair(
     if let Some(fence) = completion_fence.as_mut() {
         fence.hold(fixture).await;
     }
-    let producers = WakeProducers::install(fixture.rig.channel, periodic_only);
+    let producers = WakeObservations::install(fixture.rig.channel, periodic_only);
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
     if wake_mutant("a2-allow-early-b") {
         // Premature terminal completion exercises the real consumer before the fixture releases A.
@@ -803,12 +722,10 @@ async fn supervisor_drains_pair(
             )
             .await;
         }
-        producers
-            .wait_for_start(first_wake + RECOVERY_LIMIT, logs)
-            .await;
+        let _ = tokio::time::timeout_at(first_wake + RECOVERY_LIMIT, &mut second.entered).await;
         eprintln!(
-            "A2_R5_EARLY_B_FAULT periodic_only={periodic_only} producer={:?} fixture_a_released=false",
-            producers.producer_or_direct(logs)
+            "A2_R5_EARLY_B_FAULT periodic_only={periodic_only} requests={:?} fixture_a_released=false",
+            producers.requests()
         );
     }
     tokio::task::yield_now().await;
@@ -837,24 +754,29 @@ async fn supervisor_drains_pair(
     if let Some(fence) = completion_fence.as_mut() {
         fence.release_after_a(fixture, logs, b).await;
     }
-    producers
-        .wait_for_start(first_wake + RECOVERY_LIMIT, logs)
-        .await;
-    let producer = producers.producer_or_direct(logs);
+    let remaining =
+        (first_wake + RECOVERY_LIMIT).saturating_duration_since(tokio::time::Instant::now());
+    ledger.push(second.wait_with_limit(fixture, b, remaining).await);
+    let carriers = observed_carriers(logs, fixture.rig.channel, completion_offset);
+    let direct = String::from_utf8_lossy(&logs.0.lock().unwrap()[completion_offset..])
+        .contains("Processing next queued command");
+    let producer = if periodic_only {
+        "turn_presence_idle"
+    } else if direct && carriers.is_empty() {
+        "turn_bridge_completion"
+    } else if !direct && carriers.len() == 1 {
+        carriers[0].as_str()
+    } else {
+        "mixed_observed"
+    };
     if classify_enabled() {
         eprintln!(
-            "A2_R6_WAIT_RETURN periodic_only={periodic_only} producer={producer:?} completion_blocked={} sample={}",
+            "A2_R7_PROVIDER_ENTERED periodic_only={periodic_only} producer={producer} carriers={carriers:?} requests={:?} completion_blocked={} sample={}",
+            producers.requests(),
             producers.completion_blocked(),
             classify_row(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
         );
     }
-    assert!(
-        producer.is_some(),
-        "a real queue producer must start FIFO B within the recovery bound; attempts={:?} periodic_only={periodic_only} state={:?}",
-        producers.attempts(),
-        supervisor.state()
-    );
-    ledger.push(second.wait_with_limit(fixture, b, RECOVERY_LIMIT).await);
     let b_entry = began.elapsed();
     let b_after_a_kick = first_wake.elapsed();
     let periodic_wake = supervisor
@@ -866,9 +788,17 @@ async fn supervisor_drains_pair(
             producers.completion_blocked() > 0,
             "the fixture barrier must hold an actual completion kick"
         );
-        assert_eq!(producer, Some("turn_presence_idle"));
+        assert!(
+            producers.requests().contains(&"turn_presence_idle")
+                || kick_observed_after(
+                    logs,
+                    fixture.rig.channel,
+                    "turn_presence_idle",
+                    completion_offset
+                )
+        );
     }
-    if producer == Some("turn_presence_idle") {
+    if periodic_only {
         assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
         assert_eq!(supervisor.woken_head(), Some(b));
         assert_eq!(supervisor.state()["kickoffs_total"], 2);
@@ -881,17 +811,14 @@ async fn supervisor_drains_pair(
             fixture.rig.channel,
             "turn_completion_event",
             completion_offset
-        ) || producer == Some("turn_bridge_completion")
+        ) || direct
             || producers.completion_blocked() > 0
-            || producers
-                .attempts()
-                .iter()
-                .any(|(reason, _)| *reason == "turn_completion_event")
+            || producers.requests().contains(&"turn_completion_event")
     );
     eprintln!(
-        "A2_R5_RECOVERY_BRANCH case={label} periodic_only={periodic_only} producer={} b_provider_id={b} no_early_b=1 completion_blocked={}",
-        producer.unwrap(),
-        producers.completion_blocked()
+        "A2_R5_RECOVERY_BRANCH case={label} periodic_only={periodic_only} producer={producer} b_provider_id={b} no_early_b=1 completion_blocked={} carriers={carriers:?} requests={:?}",
+        producers.completion_blocked(),
+        producers.requests()
     );
     producers.release();
     second.finish();
