@@ -20,6 +20,7 @@ mod evidence;
 mod external_delivery;
 pub(crate) mod provider_targets;
 mod push_handoff;
+use push_handoff::fire_push;
 mod timing;
 
 #[cfg(test)]
@@ -181,25 +182,6 @@ pub async fn fire_claimed(
         other => {
             let error = format!("unknown delivery_kind '{other}'");
             finish_terminal_failure(pool, &fire, &error).await;
-        }
-    }
-}
-
-async fn fire_push(pool: &PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
-    match push_handoff::commit(pool, fire, now).await {
-        Ok(push_handoff::PushHandoffOutcome::Committed) => {}
-        Ok(push_handoff::PushHandoffOutcome::Canceled) => tracing::info!(
-            id = fire.message.id,
-            delivery_id = fire.delivery_id,
-            "[smsg] push handoff skipped after claim cancellation"
-        ),
-        Err(push_handoff::PushHandoffError::Invalid(error)) => {
-            finish_terminal_failure(pool, fire, error).await;
-        }
-        Err(push_handoff::PushHandoffError::Transient(error)) => {
-            let error = format!("outbox enqueue failed: {error}");
-            tracing::warn!(id = fire.message.id, "[smsg] {error}");
-            interrupt_for_retry(pool, fire, &error).await;
         }
     }
 }
@@ -1191,6 +1173,7 @@ mod tests {
     #[test]
     fn agent_prompt_includes_instruction_and_content() {
         let message = ScheduledMessageRow {
+            image_attachment: None,
             id: "smsg_test".to_string(),
             content: "내일 배포 예정".to_string(),
             discord_mention_user_ids: Vec::new(),
@@ -1226,7 +1209,6 @@ mod tests {
         assert!(prompt.contains("내일 배포 예정"));
         assert!(prompt.contains("배포 공지"));
     }
-
     #[test]
     fn booting_discord_runtime_errors_defer_without_consuming_retry() {
         for message in [

@@ -191,13 +191,19 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/scheduled-messages",
                 get(scheduled_messages::list_scheduled_messages)
-                    .post(scheduled_messages::create_scheduled_message),
+                    .post(scheduled_messages::create_scheduled_message)
+                    .layer(axum::extract::DefaultBodyLimit::max(
+                        scheduled_messages::IMAGE_BODY_LIMIT,
+                    )),
             )
             .route(
                 "/scheduled-messages/{id}",
                 get(scheduled_messages::get_scheduled_message)
                     .patch(scheduled_messages::patch_scheduled_message)
-                    .delete(scheduled_messages::cancel_scheduled_message),
+                    .delete(scheduled_messages::cancel_scheduled_message)
+                    .layer(axum::extract::DefaultBodyLimit::max(
+                        scheduled_messages::IMAGE_BODY_LIMIT,
+                    )),
             )
             .route(
                 "/scheduled-messages/{id}/trigger-now",

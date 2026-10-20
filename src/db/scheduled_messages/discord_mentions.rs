@@ -29,7 +29,7 @@ pub(super) async fn declare_discord_mention_consumer_v1_tx(
             'agentdesk.scheduled_discord_mention_consumer_v1', \
             'enabled', \
             true\
-         )",
+         ), set_config('agentdesk.scheduled_image_consumer_v1', 'enabled', true)",
     )
     .execute(&mut **tx)
     .await?;
