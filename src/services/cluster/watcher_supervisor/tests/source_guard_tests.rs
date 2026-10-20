@@ -1,6 +1,5 @@
-//! Classification 2: shutdown observation sites, judged inside the real supervisor loop and
-//! helper items with comments blanked. Lexical tripwire only: boot teardown is empty, and
-//! lagged is not exercised by R1.
+//! Classification 2: shutdown sites judged inside the real loop and helper, comments blanked.
+//! Lexical tripwire only: boot teardown is empty; lagged is not exercised by R1.
 
 use crate::test_support::{
     CommentForgery, braced_item_span, comment_out_code, rust_code_mask, strip_rust_comments,

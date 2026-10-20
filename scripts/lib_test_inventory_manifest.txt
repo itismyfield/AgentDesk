@@ -340,6 +340,7 @@ db::auto_queue::entries::tests::reactivate_done_entry_rejects_unapproved_transit
 db::auto_queue::entries::tests::reactivate_rechecks_cancelled_run_after_waiting_for_token_pg
 db::auto_queue::entries::tests::reactivate_reentry_rejects_competing_dispatch_identity_pg
 db::auto_queue::entries::tests::restoring_run_allows_dispatched_transition_pg
+db::auto_queue::entries::tests::source_guard_tests::pinned_identity_guard_rejects_commented_and_loop_scoped_pins
 db::auto_queue::entries::tests::terminal_dispatch_commit_blocks_and_rejects_late_attachment_pg
 db::auto_queue::phase_gate_verdict::tests::canonical_snapshot_infers_pass
 db::auto_queue::phase_gate_verdict::tests::deploy_gate_never_accepts_agent_supplied_deploy_verified
@@ -706,6 +707,7 @@ db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
 db::intake_outbox_status::tests::operator_retry_classifies_every_status
 db::intake_outbox_status::tests::status_strings_round_trip
 db::intake_outbox_status::tests::unknown_status_preserves_rejected_spelling
+db::intake_outbox_status::tests::variant_census_ignores_commented_variants_at_any_nesting
 db::o_channel_activation::fence_tests::fence_blocks_actual_sweep_backend_until_release_or_drop_pg
 db::o_channel_activation::fence_tests::fenced_rows_count_pending_and_processing_headless_bodies_only_pg
 db::o_channel_activation::fence_tests::fenced_rows_preserve_all_open_status_and_legacy_session_predicates_pg
@@ -1241,6 +1243,7 @@ server::rate_limit_sync::tests::api_key_429_keeps_pressure_buckets_and_the_backo
 server::rate_limit_sync::tests::classifies_claude_sync_results_for_backoff
 server::rate_limit_sync::tests::effective_config_comes_from_the_persisted_runtime_overrides
 server::rate_limit_sync::tests::pressure_keeps_the_base_cadence_whatever_the_tick_spacing
+server::rate_limit_sync::tests::tick_wiring_guard_rejects_commented_calls
 server::rate_limit_sync::tests::unreadable_runtime_config_resolves_to_no_threshold
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
@@ -1777,6 +1780,7 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::implementation_latest_dispatch_is_attachable_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_completion_does_not_finalize_pending_entry_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_latest_dispatch_is_not_attachable_pg
+services::auto_queue::route::campaign_handoff::minute_tick_wiring_tests::handoff_order_guard_rejects_commented_and_reordered_steps
 services::auto_queue::route::campaign_handoff::minute_tick_wiring_tests::the_minute_tick_hands_off_campaigns_before_the_auto_queue_tick
 services::auto_queue::route::campaign_handoff::tests::postgres_activate_does_not_complete_a_run_the_handoff_is_filling_pg
 services::auto_queue::route::campaign_handoff::tests::postgres_campaign_handoff_drops_nodes_when_a_newer_save_lands_first_pg
@@ -2116,6 +2120,7 @@ services::claude_tui::hook_relay::ordered_queue::tests::published_request_is_dra
 services::claude_tui::hook_relay::ordered_queue::tests::receiver_in_flight_response_retries_same_request_until_receipt_is_cached
 services::claude_tui::hook_relay::ordered_queue::tests::receiver_pin_mismatch_is_quarantined_and_later_request_continues
 services::claude_tui::hook_relay::ordered_queue::tests::recovery_scan_reports_idle_queue_cardinality_with_bounded_latency
+services::claude_tui::hook_relay::ordered_queue::tests::source_guard_tests::atomic_sync_guard_rejects_commented_calls
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_receiver_panic_after_its_last_request_fails_the_test_once_state_is_reset
 services::claude_tui::hook_relay::ordered_queue::tests::tq_tests::a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepted
@@ -2734,9 +2739,11 @@ services::cluster::intake_routing_config::unit_tests::effective_intake_routing_c
 services::cluster::intake_routing_telemetry::tests::observe_decision_emits_info_level_structured_fields
 services::cluster::intake_routing_telemetry::tests::observe_planner_telemetry_is_stable_and_complete
 services::cluster::intake_routing_telemetry::tests::owner_failure_uses_stable_reason_and_resolution_codes
+services::cluster::intake_worker::dispatch_stamp_tests::classifier_branch_guard_rejects_commented_calls
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_dispatched_is_not_a_divergence_pg
 services::cluster::intake_worker::dispatch_stamp_tests::worker_mark_done_false_on_missing_row_is_a_divergence_pg
 services::cluster::intake_worker::drain_tests::cancelled_waiter_does_not_block_survivor
+services::cluster::intake_worker::drain_tests::drain_order_guard_rejects_commented_and_reordered_steps
 services::cluster::intake_worker::drain_tests::drain_registers_before_checking_active_ticks
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
@@ -2816,6 +2823,8 @@ services::cluster::intake_worker::tests::marker_between_claim_and_accept_require
 services::cluster::intake_worker::tests::marker_between_loop_check_and_claim_stops_before_claim
 services::cluster::intake_worker::tests::parse_turn_kind_accepts_standard_and_foreground_aliases
 services::cluster::intake_worker::tests::restart_fence_rejects_all_future_tick_admissions_after_active_tick_drains
+services::cluster::intake_worker::tests::source_guard_tests::done_writer_guard_rejects_commented_arms_and_counts_coded_err_writes
+services::cluster::intake_worker::tests::source_guard_tests::preservation_forwarding_guard_rejects_commented_bit_and_counts_coded_false
 services::cluster::intake_worker::tests::worker_executor_forwards_restored_preservation_instead_of_literal_false
 services::cluster::intake_worker::tests::worker_ok_branch_textually_contains_done_writer_once_and_err_branch_contains_none
 services::cluster::intake_worker_capabilities::tests::non_preserving_request_allows_legacy_provider_worker
@@ -2953,6 +2962,8 @@ services::cluster::watcher_supervisor::tests::shutdown_observation_logs_classifi
 services::cluster::watcher_supervisor::tests::shutdown_observation_production_loop_emits_change_and_drain
 services::cluster::watcher_supervisor::tests::shutdown_observation_sites_are_branch_scoped
 services::cluster::watcher_supervisor::tests::shutdown_observation_waits_before_reporting
+services::cluster::watcher_supervisor::tests::source_guard_tests::shutdown_guards_reject_commented_sites_and_reordered_drain
+services::cluster::watcher_supervisor::tests::source_guard_tests::shutdown_site_pattern_matches_only_its_awaited_site
 services::cluster::watcher_supervisor::tests::supervisor_publishes_producer_for_each_spawn
 services::cluster::watcher_supervisor::tests::supervisor_teardown_completes_with_outliving_producer_clone
 services::codex::actual_submit_tests::s2b1b_actual_driver_missing_episode_refuses_before_transport
@@ -3172,6 +3183,7 @@ services::codex_tui::input::tests::run_actions_stops_after_load_buffer_before_pa
 services::codex_tui::input::tests::run_actions_stops_before_first_tmux_action_when_token_is_pre_cancelled
 services::codex_tui::input::tests::run_actions_stops_between_literal_chunks_when_token_flips
 services::codex_tui::input::tests::session_dead_error_is_classified
+services::codex_tui::input::tests::source_guard_tests::steering_submit_guard_rejects_commented_submit_and_counts_coded_executor
 services::codex_tui::input::tests::split_literal_chunks_preserves_multibyte_char_boundaries
 services::codex_tui::input::tests::stale_composer_scrolled_deep_into_history_is_not_ready
 services::codex_tui::input::tests::startup_update_tests::final_submit_gate_requires_a_live_empty_canonical_snapshot
@@ -3300,6 +3312,7 @@ services::codex_tui::rollout_tail::tests::resumed_tail_can_follow_new_rollout_fo
 services::codex_tui::rollout_tail::tests::resumed_tail_reads_prior_rollout_append_from_known_offset
 services::codex_tui::rollout_tail::tests::short_foreground_busy_veto_survives_until_completion
 services::codex_tui::rollout_tail::tests::single_codex_message_streams_without_injected_separator
+services::codex_tui::rollout_tail::tests::source_guard_tests::handoff_options_guard_rejects_commented_entries_and_constructor_calls
 services::codex_tui::rollout_tail::tests::starts_at_known_offset_to_avoid_stale_replay
 services::codex_tui::rollout_tail::tests::streamed_accumulation_mirrors_final_text
 services::codex_tui::rollout_tail::tests::stuck_tool_call_deadline_emits_recovery_done
@@ -11458,6 +11471,7 @@ services::provider::prompt_reuse_tests::provider_registry_exposes_managed_tmux_w
 services::provider::provider_conformance_invariant_tests::antigravity_runtime_probe_resolves_its_cli_name
 services::provider::provider_conformance_invariant_tests::provider_exec_registry_conformance_invariant
 services::provider::provider_conformance_invariant_tests::unsupported_provider_preserves_generic_readiness_fallback
+services::provider::provider_conformance_invariant_tests::wildcard_arm_guard_rejects_commented_bodies_and_counts_only_coded_arms
 services::provider::ready_input_prompt_tests::detects_claude_tui_prompt_above_footer
 services::provider::ready_input_prompt_tests::detects_codex_tui_prompt_for_codex_only
 services::provider::ready_input_prompt_tests::detects_provider_scoped_wrapper_ready_marker
@@ -11968,6 +11982,7 @@ services::session_forwarding::tests::redirect_is_not_followed_and_bearer_never_r
 services::session_forwarding::tests::resolve_forward_target_keeps_missing_and_local_sessions_local
 services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owner_and_local_instance_ids
 services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
+services::session_forwarding::tests::source_guard_tests::trusted_request_guard_rejects_commented_calls_and_counts_coded_bypasses
 services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
 services::session_forwarding::trusted_target::tests::address_policy_rejects_unsafe_ipv4_ipv6_and_mixed_dns
 services::session_forwarding::trusted_target::tests::canonical_origin_and_endpoint_preserve_authority
@@ -14131,9 +14146,11 @@ test_support::source_text_tests::braces_inside_literals_and_comments_do_not_move
 test_support::source_text_tests::byte_and_c_string_prefixes_follow_the_same_transitions
 test_support::source_text_tests::comment_blanking_preserves_offsets_and_token_separation
 test_support::source_text_tests::lifetimes_do_not_open_char_literals
+test_support::source_text_tests::literal_suffix_is_not_the_next_raw_string_prefix
 test_support::source_text_tests::nested_block_comments_are_blank_only_inside_comments
 test_support::source_text_tests::ordinary_strings_preserve_slashes_and_escapes
 test_support::source_text_tests::raw_hash_strings_preserve_comment_markers
+test_support::source_text_tests::rust_whitespace_ends_a_word_before_raw_string_prefixes
 test_support::source_text_tests::slash_char_is_not_a_comment
 test_support::source_text_tests::unterminated_source_is_rejected
 ui::ai_screen::tests::sanitize_user_input_filters_dangerous_patterns

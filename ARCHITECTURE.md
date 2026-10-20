@@ -115,6 +115,8 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── dispatch_failure.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -667,6 +669,7 @@ src/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
+│   │   │   │       ├── source_guard_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
@@ -773,6 +776,8 @@ src/
 │   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── route_pg_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
@@ -803,6 +808,9 @@ src/
 │   │   │   ├── source_read_proof.rs
 │   │   │   ├── source_read_proof_tests.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── watcher_supervisor/
+│   │   │   └── tests/
+│   │   │       └── source_guard_tests.rs
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
@@ -858,6 +866,7 @@ src/
 │   │   │   └── screen.rs
 │   │   ├── input/
 │   │   │   ├── tests/
+│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
@@ -870,6 +879,8 @@ src/
 │   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
@@ -2734,6 +2745,8 @@ src/
 │   ├── session_forwarding/
 │   │   ├── probe/
 │   │   │   └── tests.rs
+│   │   ├── tests/
+│   │   │   └── source_guard_tests.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs

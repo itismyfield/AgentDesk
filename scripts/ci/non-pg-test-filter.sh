@@ -265,6 +265,7 @@ NON_PG_FILTER_REPLAY=(
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
+  db::auto_queue::entries::tests::source_guard_tests::pinned_identity_guard_rejects_commented_and_loop_scoped_pins
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::explicit_phase_gate_verdict_key_blocks_inference
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::non_string_explicit_verdict_preserves_checks_inference
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::parse_phase_gate_context_handles_string_batch_phase
@@ -426,6 +427,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_router_hook::o_route_tests::unavailable_delegation_blocks_before_a_home_read_or_local_fallback
   services::cluster::intake_router_hook::owner_record::tests::advisory_lock_key_is_stable
   services::cluster::intake_router_hook::owner_record::tests::idempotency_key_is_composed_and_normalized
+  services::cluster::intake_worker::dispatch_stamp_tests::classifier_branch_guard_rejects_commented_calls
   services::cluster::intake_worker::home_route_tests::s3_real::harness::a_commit_publishes_before_it_unlocks_the_events
   services::cluster::intake_worker::home_route_tests::s3_real::harness::a_ready_stretch_restarts_after_any_false_sample
   services::cluster::intake_worker::home_route_tests::s3_real::harness::a_watch_with_a_window_long_gap_is_too_thin
@@ -885,6 +887,7 @@ NON_PG_FILTER_REPLAY=(
   services::session_forwarding::tests::resolve_forward_target_keeps_missing_and_local_sessions_local
   services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owner_and_local_instance_ids
   services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
+  services::session_forwarding::tests::source_guard_tests::trusted_request_guard_rejects_commented_calls_and_counts_coded_bypasses
   services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
   services::session_host::herdr_gate::tests::a_failed_gate_check_writes_nothing_and_names_why
   services::session_host::herdr_gate::tests::a_herdr_followup_retire_is_refused_and_kills_nothing
