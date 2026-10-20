@@ -781,9 +781,10 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
     let fx = Fixture::new();
 
     run(async {
-        for (n, (probe_failed, row_error)) in [(false, false), (true, false), (false, true)]
-            .into_iter()
-            .enumerate()
+        for (n, (probe_failed, row_error)) in
+            [(false, false), (true, false), (false, true), (false, false)]
+                .into_iter()
+                .enumerate()
         {
             fx.serve(if probe_failed {
                 Server::Missing
@@ -798,7 +799,22 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
             let (shared, registry) = runtime().await;
             let channel = ChannelId::new(7_193_801 + n as u64 * 3);
             let session = format!("native-unconfirmed-api-recovery-{n}");
-            let (token, _) = generating_turn(&fx, &session);
+            let (token, transcript) = generating_turn(&fx, &session);
+            if n == 3 {
+                eprintln!("NATIVE_TAIL_UNOBSERVED bytes=300000 same_recorded_input=true");
+                fx.pane(&running());
+                append(
+                    &transcript,
+                    serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"x".repeat(300_000)}]}}),
+                );
+                assert!(
+                    super::super::super::claude_stop_delivery::ClaudeStopTurnIdentity::capture(
+                        transcript.to_str().unwrap()
+                    )
+                    .is_none(),
+                    "current user is beyond the bounded tail"
+                );
+            }
             start(&shared, channel, &token).await;
             let row = native_inflight_row(channel, &token, &session);
             if row_error {

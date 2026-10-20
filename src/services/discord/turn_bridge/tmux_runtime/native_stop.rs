@@ -80,15 +80,21 @@ fn owns_native_turn(
     {
         return Some(false);
     }
-    let Some(identity) = ClaudeStopTurnIdentity::capture(&binding.output_path) else {
+    let Some((path, offset)) = row.output_path.as_deref().zip(row.turn_start_offset) else {
         return Some(false);
     };
-    Some(
-        row.output_path
-            .as_deref()
-            .zip(row.turn_start_offset)
-            .is_some_and(|(path, offset)| identity.matches_start(path, offset)),
-    )
+    let first = match ClaudeStopTurnIdentity::capture_start(&binding.output_path, offset) {
+        Ok(Some(first)) => first,
+        Ok(None) => return Some(false),
+        Err(_) => return None,
+    };
+    match first.matches_start(path, offset) {
+        Ok(true) => {}
+        Ok(false) => return Some(false),
+        Err(_) => return None,
+    }
+    // A bounded tail missing its user line cannot disprove this recorded Native input.
+    Some(ClaudeStopTurnIdentity::capture(&binding.output_path)? == first)
 }
 
 impl NativeStop {
