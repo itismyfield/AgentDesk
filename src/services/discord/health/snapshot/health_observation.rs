@@ -427,16 +427,7 @@ pub(super) async fn relay_thread_proof_for_channel(
     current_channel_has_live_evidence: bool,
     deadline: Option<Instant>,
 ) -> (RelayThreadProofSnapshot, Option<MailboxObservationFailure>) {
-    let thread_channel_id = shared
-        .dispatch
-        .thread_parents
-        .get(&channel_id)
-        .map(|entry| entry.value().get());
-    let parent_channel_id = shared
-        .dispatch
-        .thread_parents
-        .iter()
-        .find_map(|entry| (*entry.value() == channel_id).then_some(entry.key().get()));
+    let (thread_channel_id, parent_channel_id) = super::thread_pair(shared, channel_id);
 
     let mut unanswered = None;
     let child_has_live_evidence = match thread_channel_id {

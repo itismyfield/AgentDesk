@@ -725,6 +725,21 @@ async fn watcher_state_snapshot_for_shared(
     })
 }
 
+/// The channel's paired thread and parent as `dispatch.thread_parents` records them.
+fn thread_pair(shared: &SharedData, channel_id: ChannelId) -> (Option<u64>, Option<u64>) {
+    let thread_channel_id = shared
+        .dispatch
+        .thread_parents
+        .get(&channel_id)
+        .map(|entry| entry.value().get());
+    let parent_channel_id = shared
+        .dispatch
+        .thread_parents
+        .iter()
+        .find_map(|entry| (*entry.value() == channel_id).then_some(entry.key().get()));
+    (thread_channel_id, parent_channel_id)
+}
+
 /// What one channel's relay verdict is composed from.
 #[cfg(unix)]
 struct ChannelVerdictInput<'a> {
