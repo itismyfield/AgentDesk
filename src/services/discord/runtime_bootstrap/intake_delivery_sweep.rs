@@ -2,7 +2,7 @@
 
 use super::intake_delivery_capability::SettlementCapabilities;
 use crate::db::intake_outbox_delivery_proof::{
-    DURABLE_INFLIGHT_SESSION_SCOPE_SQL, durable_inflight_liveness_case_sql, list_stale_dispatched,
+    DurableInflightLiveness, durable_inflight_liveness_sql, list_stale_dispatched,
     list_stale_spawned, open_stamp_debt_exists, settle_dispatched_unknown, settle_spawned_unknown,
 };
 use crate::services::discord::SharedData;
@@ -82,21 +82,16 @@ async fn live_signal(
     heartbeat_fresh: DateTime<Utc>,
     absence_cutoff: DateTime<Utc>,
 ) -> Result<LiveSignal, sqlx::Error> {
-    let liveness = durable_inflight_liveness_case_sql(2, 3);
-    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
-    let statement = format!(
-        "SELECT COALESCE(MAX({liveness}), 0)::smallint
-           FROM public.intake_outbox io
-           JOIN public.sessions s ON {session_scope}
-          WHERE io.id = $1"
-    );
-    let signal: i16 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+    let statement = durable_inflight_liveness_sql();
+    let row: (i64, i64, i16) = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .bind(outbox_id)
         .bind(heartbeat_fresh)
         .bind(absence_cutoff)
         .fetch_one(pool)
         .await?;
-    Ok(match signal {
+    let signal = DurableInflightLiveness::from(row);
+    signal.record_absence(outbox_id, "preflight");
+    Ok(match signal.grade {
         0 => LiveSignal::Absent,
         2 => LiveSignal::Live,
         _ => LiveSignal::Ambiguous,
