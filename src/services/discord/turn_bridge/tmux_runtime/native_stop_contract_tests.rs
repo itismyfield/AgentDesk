@@ -7,6 +7,12 @@ use crate::services::discord::{self as discord, Data};
 use poise::serenity_prelude as serenity;
 use std::io::Write;
 
+fn run<F: std::future::Future>(future: F) -> F::Output {
+    // This fixture owns Legacy delivery with a verified empty O selection.
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    super::run(future)
+}
+
 fn running() -> String {
     include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.293-tool-running.txt")
         .lines()
