@@ -300,9 +300,21 @@ fn a_hook_pin_uses_native_payload_source_and_the_supported_session_alias() {
     let pin = capture_hook("claude", LOGICAL, CHANNEL, &payload, None).unwrap();
     assert_eq!(pin.execution_nonce, N1);
     assert_eq!(pin.source, source);
+    assert_eq!(
+        capture_hook(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &serde_json::json!({"session_id":"native-two"}),
+            None,
+        )
+        .unwrap()
+        .execution_nonce,
+        N2
+    );
     assert!(
         capture_hook(
-            "codex",
+            "claude",
             LOGICAL,
             CHANNEL,
             &serde_json::json!({"thread_id":"native-two"}),
