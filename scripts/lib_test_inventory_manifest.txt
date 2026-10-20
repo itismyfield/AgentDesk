@@ -8738,8 +8738,11 @@ services::discord::tmux_reaper::host_guard_tests::receipt_backstop_keeps_same_na
 services::discord::tmux_reaper::host_guard_tests::receipt_backstop_kills_only_the_admitted_exact_session_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
+services::discord::tmux_reaper::retirement_await_tests::host_gate_pg_tests::keyed_host_gate_heal_retires_a_drifted_same_episode_row_pg
 services::discord::tmux_reaper::retirement_await_tests::intake_finalizes_after_final_probe
+services::discord::tmux_reaper::retirement_await_tests::intake_heal_retires_a_drifted_same_episode_row
 services::discord::tmux_reaper::retirement_await_tests::periodic_finalizes_after_final_probe
+services::discord::tmux_reaper::retirement_await_tests::periodic_heal_retires_a_drifted_same_episode_row
 services::discord::tmux_reaper::tests::a_failed_presence_probe_never_reads_as_absent
 services::discord::tmux_reaper::tests::accepts_persistent_runtime_session_paths
 services::discord::tmux_reaper::tests::extracts_tmux_session_name_from_legacy_output_path
@@ -10493,6 +10496,15 @@ services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
 services::discord::turn_finalizer::episode::host_terminated_tests::m1_host_terminated_enqueues_no_abandoned_card
 services::discord::turn_finalizer::episode::host_terminated_tests::m1_natural_terminal_wins_preserves_successor
+services::discord::turn_finalizer::episode::row_retirement_tests::a_cleanup_less_finalize_releases_without_retiring_the_drifted_row
+services::discord::turn_finalizer::episode::row_retirement_tests::a_same_episode_save_after_the_read_keeps_the_row_and_names_its_version
+services::discord::turn_finalizer::episode::row_retirement_tests::an_already_finalized_compensation_retires_with_its_own_release
+services::discord::turn_finalizer::episode::row_retirement_tests::an_unreadable_row_is_named_and_kept_while_the_shared_clear_keeps_its_answer
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_refuses_a_row_of_another_provider_or_channel
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_requires_every_proof_axis
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_requires_the_released_token_to_be_the_observed_actor
+services::discord::turn_finalizer::episode::row_retirement_tests::the_pre_panel_release_never_retires_a_drifted_row
+services::discord::turn_finalizer::episode::row_retirement_tests::turns_admitted_around_the_retirement_keep_their_input_and_row
 services::discord::turn_finalizer::episode::tests::a_retained_cleanup_row_names_the_gate_that_kept_it
 services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
 services::discord::turn_finalizer::episode::tests::normal_successor_keeps_admission_and_cleanup_for_modern_and_legacy_episode

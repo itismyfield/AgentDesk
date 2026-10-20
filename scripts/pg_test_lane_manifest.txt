@@ -246,6 +246,7 @@ src/services/discord/terminal_delivery_custody/pg_tests.rs
 src/services/discord/terminal_ui_obligation.rs
 src/services/discord/terminal_ui_obligation/sweep_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
+src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs
 src/services/discord/tmux_watcher/path_b_record_tests.rs
@@ -635,6 +636,7 @@ services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests
 services::discord::tmux_reaper::host_guard_tests
+services::discord::tmux_reaper::retirement_await_tests::host_gate_pg_tests
 services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
@@ -2247,6 +2249,7 @@ services::discord::tmux_reaper::host_guard_tests::receipt_backstop_keeps_same_na
 services::discord::tmux_reaper::host_guard_tests::receipt_backstop_kills_only_the_admitted_exact_session_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
+services::discord::tmux_reaper::retirement_await_tests::host_gate_pg_tests::keyed_host_gate_heal_retires_a_drifted_same_episode_row_pg
 services::discord::tui_prompt_relay::herdr_source::tests::a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg
 services::discord::tui_prompt_relay::herdr_source::tests::a_refused_restart_attach_withholds_hook_switches_until_a_match_pg
 services::discord::tui_prompt_relay::herdr_source::tests::herdr_launch_attach_logs_before_it_publishes_and_binds_only_on_its_own_source_pg
