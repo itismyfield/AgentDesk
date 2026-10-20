@@ -39,6 +39,10 @@ async fn deliver_with_bot(
     row: &PendingMessageOutboxRow,
     bot: &str,
 ) -> (&'static str, String) {
+    let attachment = match &row.attachment {
+        Ok(attachment) => attachment.clone(),
+        Err(error) => return ("400 Bad Request", error.to_string()),
+    };
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
     crate::services::discord::health::send_message_with_backends_and_delivery_options(
@@ -56,6 +60,7 @@ async fn deliver_with_bot(
         crate::services::discord::health::ManualOutboundOptions {
             allow_unbound_internal_channel: true,
             trusted_internal_outbox: true,
+            image_attachment: attachment,
             ..Default::default()
         },
     )
@@ -104,7 +109,7 @@ pub(super) async fn deliver(
 }
 
 pub(super) fn failure_action(row: &PendingMessageOutboxRow) -> super::MessageOutboxFailureAction {
-    if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+    if row.attachment.is_err() || RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
         super::MessageOutboxFailureAction::Fail {
             retry_count: row.retry_count,
         }

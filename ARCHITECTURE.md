@@ -363,6 +363,8 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── outbox_worker/
+│   │   └── attachment_pg_tests.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -1264,9 +1266,13 @@ src/
 │   │   │   │   ├── rollout.rs
 │   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
+│   │   │   │   ├── compatibility_tests.rs
 │   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
-│   │   │   │   └── production_nonce_tests.rs
+│   │   │   │   ├── image_delivery.rs
+│   │   │   │   ├── image_delivery_tests.rs
+│   │   │   │   ├── production_nonce_tests.rs
+│   │   │   │   └── resolved.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
@@ -2563,7 +2569,9 @@ src/
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
-│   │   └── identity.rs
+│   │   ├── attachments.rs
+│   │   ├── identity.rs
+│   │   └── identity_tests.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs

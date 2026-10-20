@@ -6,6 +6,8 @@ use sqlx::{Postgres, QueryBuilder};
 
 use super::ScheduledMessagePatch;
 
+pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
 pub(super) const IMAGE_COLUMNS: &str = "image_filename, image_content_type, image_data, \
     octet_length(image_data)::bigint AS image_size_bytes";
 pub(super) const LIST_IMAGE_COLUMNS: &str = "image_filename, image_content_type, \
@@ -25,6 +27,22 @@ pub struct ScheduledMessageImage {
     pub content_type: String,
     pub size_bytes: i64,
     pub data: Option<Vec<u8>>,
+}
+
+impl ScheduledMessageImage {
+    pub fn require_loaded(&self) -> Result<&[u8], io::Error> {
+        self.data
+            .as_deref()
+            .filter(|data| {
+                data.len() as i64 == self.size_bytes && (1..=MAX_IMAGE_BYTES).contains(&data.len())
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "scheduled image bytes are not loaded",
+                )
+            })
+    }
 }
 
 impl fmt::Debug for ScheduledMessageImageAttachment {
@@ -70,7 +88,7 @@ impl TryFrom<ImageColumns> for Option<ScheduledMessageImage> {
         ) {
             (None, None, None, None) => Ok(None),
             (Some(filename), Some(content_type), Some(size_bytes), data)
-                if (1..=8_388_608).contains(&size_bytes)
+                if (1..=MAX_IMAGE_BYTES as i64).contains(&size_bytes)
                     && data
                         .as_ref()
                         .is_none_or(|bytes| bytes.len() as i64 == size_bytes) =>

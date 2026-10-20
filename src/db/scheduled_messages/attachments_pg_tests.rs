@@ -416,3 +416,70 @@ async fn postgres_image_attachment_legacy_text_rows_keep_api_shape() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn postgres_image_decoder_rejects_corrupt_metadata_projection() {
+    let (db, pool) = image_test_pool("agentdesk_image_projection").await;
+    let row = insert_scheduled_message_pg(&pool, &new_image_message(vec![1, 2, 3]))
+        .await
+        .unwrap();
+    for projection in [
+        "'image.png'::text AS image_filename, NULL::text AS image_content_type, NULL::bytea AS image_data, NULL::bigint AS image_size_bytes",
+        "'image.png'::text AS image_filename, 'image/png'::text AS image_content_type, NULL::bytea AS image_data, 0::bigint AS image_size_bytes",
+        "'image.png'::text AS image_filename, 'image/png'::text AS image_content_type, NULL::bytea AS image_data, 8388609::bigint AS image_size_bytes",
+        "'image.png'::text AS image_filename, 'image/png'::text AS image_content_type, decode('0001','hex') AS image_data, 1::bigint AS image_size_bytes",
+    ] {
+        let sql = format!(
+            "SELECT {DEFINITION_COLUMNS}, {projection} FROM scheduled_messages WHERE id=$1"
+        );
+        let result = sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(sql))
+            .bind(&row.id)
+            .fetch_one(&pool)
+            .await;
+        assert!(result.is_err(), "corrupt image projection must fail closed");
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_image_list_cannot_enter_attachment_handoff() {
+    let (db, pool) = image_test_pool("agentdesk_image_loaded").await;
+    let row = insert_scheduled_message_pg(&pool, &new_image_message(vec![0, 255, 42]))
+        .await
+        .unwrap();
+    let listed = list_scheduled_messages_pg(&pool, &ListFilters::default())
+        .await
+        .unwrap();
+    let image = listed
+        .iter()
+        .find(|r| r.id == row.id)
+        .unwrap()
+        .image_attachment
+        .as_ref()
+        .unwrap();
+    let result = crate::services::message_outbox::OutboxAttachment::try_from(image);
+    assert!(
+        result.is_err(),
+        "metadata-only list row must not enter binary handoff"
+    );
+    let image = row.image_attachment.as_ref().unwrap();
+    let loaded = crate::services::message_outbox::OutboxAttachment::try_from(image).unwrap();
+    assert_eq!(loaded.data, &[0, 255, 42]);
+    pool.close().await;
+    db.drop().await;
+}
+
+#[test]
+fn image_byte_limit_matches_immutable_definition_and_outbox_migrations() {
+    let check = format!("BETWEEN 1 AND {}", MAX_IMAGE_BYTES);
+    for migration in [
+        include_str!("../../../migrations/postgres/0143_scheduled_message_image_attachments.sql"),
+        include_str!("../../../migrations/postgres/0144_message_outbox_image_attachments.sql"),
+    ] {
+        assert!(
+            migration.contains(&check),
+            "immutable image checks must share MAX_IMAGE_BYTES"
+        );
+    }
+}

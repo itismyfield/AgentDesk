@@ -327,6 +327,7 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
   db::scheduled_messages::attachments_pg_tests::image_attachment_create_input_is_dormant
+  db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
   db::session_transcripts::native_clear_pg_tests::record_and_classification_agree_on_every_row_shape
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key

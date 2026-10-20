@@ -1777,6 +1777,8 @@ struct PendingMessageOutboxRow {
     reason_code: Option<String>,
     session_key: Option<String>,
     retry_count: i64,
+    attachment:
+        Result<Option<Arc<crate::services::message_outbox::StoredOutboxAttachment>>, &'static str>,
     claim_owner: String,
     claimed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -2281,27 +2283,6 @@ mod message_outbox_retry_tests {
     }
 }
 
-impl PendingMessageOutboxRow {
-    fn delivery_ids(&self) -> (String, String) {
-        let reason = self
-            .reason_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("message");
-        let session = self
-            .session_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(self.target.as_str());
-        (
-            format!("message_outbox:{}:{reason}:{session}", self.source),
-            format!("message_outbox:{}:deliver", self.id),
-        )
-    }
-}
-
 async fn mark_message_outbox_sent_pg(
     pool: &PgPool,
     outbox_id: i64,
@@ -2493,7 +2474,8 @@ async fn claim_pending_message_outbox_batch_pg(
                error = NULL
           FROM claimed
          WHERE mo.id = claimed.id
-        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count, mo.claim_owner, mo.claimed_at",
+        RETURNING mo.id, mo.target, mo.content, mo.bot, mo.source, mo.reason_code, mo.session_key, mo.retry_count, mo.claim_owner, mo.claimed_at,
+                  mo.attachment_filename, mo.attachment_content_type, mo.attachment_data",
     )
     .bind(MESSAGE_OUTBOX_CLAIM_STALE_SECS)
     .bind(claim_owner)
@@ -2519,6 +2501,7 @@ async fn claim_pending_message_outbox_batch_pg(
                 reason_code: row.try_get::<Option<String>, _>("reason_code").ok()?,
                 session_key: row.try_get::<Option<String>, _>("session_key").ok()?,
                 retry_count: row.try_get::<i64, _>("retry_count").unwrap_or(0),
+                attachment: crate::services::message_outbox::decode_claimed_attachment(&row),
                 claim_owner: row.try_get::<String, _>("claim_owner").ok()?,
                 claimed_at: row
                     .try_get::<chrono::DateTime<chrono::Utc>, _>("claimed_at")
@@ -2584,7 +2567,10 @@ where
                 continue;
             }
         }
-        let (status, err_text) = deliver(row.clone()).await;
+        let (status, err_text) = match &row.attachment {
+            Err(error) => ("invalid_attachment".to_string(), error.to_string()),
+            Ok(_) => deliver(row.clone()).await,
+        };
         if status == "200 OK" {
             if mark_message_outbox_sent_pg(pg_pool, row.id, &row.claim_owner, row.claimed_at)
                 .await

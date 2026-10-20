@@ -59,7 +59,18 @@ async fn send(
 ) -> ManualDeliveryOutcome {
     let dedup = OutboundDeduper::new();
     deliver_manual_notification(
-        client, &dedup, CHANNEL, content, bot, "test", None, None, false,
+        client,
+        &dedup,
+        super::ManualNotification {
+            channel_id: CHANNEL,
+            content,
+            bot,
+            source: "test",
+            summary: None,
+            delivery_id: None,
+            headless_nonce_enabled: false,
+            attachment: None,
+        },
     )
     .await
 }

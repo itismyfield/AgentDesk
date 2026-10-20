@@ -146,6 +146,8 @@ jobs:
               - 'src/server/routes/dispatched_sessions.rs'
               - 'src/server/routes/dispatches/**'
               - 'src/server/outbox_actionable_delivery.rs'
+              - 'src/server/outbox_worker.rs'
+              - 'src/server/outbox_worker/**'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
               - 'src/server/routes/scheduled_messages/**'
@@ -169,6 +171,7 @@ jobs:
               - 'src/services/hang_forensics/**'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
+              - 'src/services/message_outbox/**'
               # #5232 R3: these five, and `outbound/source_registry.rs` above
               # (already covered by `src/services/discord/**`), match no target
               # among this job's 21 `cargo test --lib` invocations. They stay as
@@ -277,6 +280,7 @@ jobs:
               - 'src/server/issue_specs.rs'
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
+              - 'src/server/outbox_worker/attachment_pg_tests.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver/pg_tests.rs'

@@ -16,7 +16,7 @@ use uuid::Uuid;
 mod agent;
 mod attachments;
 use attachments::{IMAGE_COLUMNS, LIST_IMAGE_COLUMNS};
-pub use attachments::{ScheduledMessageImage, ScheduledMessageImageAttachment};
+pub use attachments::{MAX_IMAGE_BYTES, ScheduledMessageImage, ScheduledMessageImageAttachment};
 mod api_json;
 mod discord_mentions;
 mod external_delivery;
@@ -487,11 +487,12 @@ pub async fn claim_due_fires_pg(
 
     let mut claimed = Vec::with_capacity(due.len());
     for message in due {
+        let scheduled_at = message.scheduled_at;
         let Some(fire) = arm_delivery_slot_tx(
             &mut tx,
-            &message,
-            message.scheduled_at,
-            message.scheduled_at,
+            message,
+            scheduled_at,
+            scheduled_at,
             claim_owner,
             lease_secs,
             now,
@@ -512,7 +513,7 @@ pub async fn claim_due_fires_pg(
 /// case the parent is finalized directly so it stops matching the due scan.
 async fn arm_delivery_slot_tx(
     tx: &mut Transaction<'_, Postgres>,
-    message: &ScheduledMessageRow,
+    mut message: ScheduledMessageRow,
     fire_scheduled_at: DateTime<Utc>,
     resume_scheduled_at: DateTime<Utc>,
     claim_owner: &str,
@@ -603,10 +604,9 @@ async fn arm_delivery_slot_tx(
     .execute(&mut **tx)
     .await?;
 
-    let mut claimed_message = message.clone();
-    claimed_message.scheduled_at = resume_scheduled_at;
+    message.scheduled_at = resume_scheduled_at;
     Ok(Some(ClaimedFire {
-        message: claimed_message,
+        message,
         delivery_id: armed_id,
         claim_token,
         fire_scheduled_at,
@@ -642,7 +642,7 @@ pub async fn trigger_now_pg(
     let now = Utc::now();
     let claimed = arm_delivery_slot_tx(
         &mut tx,
-        &message,
+        message,
         now,
         original_scheduled_at,
         claim_owner,

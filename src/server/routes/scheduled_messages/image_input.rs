@@ -32,9 +32,9 @@ pub struct CreateScheduledMessageBody {
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
     pub provider_targets: Option<JsonValue>,
-    /// 'fresh' or a source-channel context `snapshot`.
+    /// #4658: 'fresh' or a source-channel context `snapshot`.
     pub context_strategy: Option<String>,
-    /// 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
+    /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
     pub on_context_failure: Option<String>,
 }
 
