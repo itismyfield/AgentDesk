@@ -284,6 +284,8 @@ pub(super) async fn apply_restore_state_changes_pg(
         .begin()
         .await
         .map_err(|error| format!("open postgres restore transaction failed: {error}"))?;
+    // Reopening skipped entries waits on the run token, so take it before the first row write.
+    crate::db::auto_queue::run_admission::lock_run_token_on_pg_tx(&mut tx, run_id).await?;
     if run_status == Some("cancelled") {
         let restored_run = sqlx::query(
             "UPDATE auto_queue_runs
