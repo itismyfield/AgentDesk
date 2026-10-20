@@ -1191,6 +1191,7 @@ mod tests {
     #[test]
     fn agent_prompt_includes_instruction_and_content() {
         let message = ScheduledMessageRow {
+            image_attachment: None,
             id: "smsg_test".to_string(),
             content: "내일 배포 예정".to_string(),
             discord_mention_user_ids: Vec::new(),
@@ -1226,7 +1227,6 @@ mod tests {
         assert!(prompt.contains("내일 배포 예정"));
         assert!(prompt.contains("배포 공지"));
     }
-
     #[test]
     fn booting_discord_runtime_errors_defer_without_consuming_retry() {
         for message in [

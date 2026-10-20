@@ -22,6 +22,8 @@ use crate::db::scheduled_messages::{
 use crate::error::{AppError, AppResult, ErrorCode};
 
 mod discord_mentions;
+mod image_input;
+pub use image_input::CreateScheduledMessageBody;
 mod provider_targets;
 mod snapshot_capture;
 
@@ -30,7 +32,6 @@ use discord_mentions::{
     ensure_rollout_ready as ensure_discord_mentions_rollout_ready,
     required_from_state as required_discord_mentions,
     validate_rendered_content_length as validate_discord_rendered_content_length,
-    validate_user_ids as validate_discord_mention_user_ids,
 };
 
 #[cfg(test)]
@@ -84,33 +85,6 @@ fn scheduled_message_bot_or_default(bot: Option<&str>) -> String {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateScheduledMessageBody {
-    pub content: String,
-    #[serde(default)]
-    pub discord_mention_user_ids: Option<Vec<String>>,
-    pub title: Option<String>,
-    pub target_channel_id: Option<String>,
-    pub bot: Option<String>,
-    pub delivery_kind: Option<String>,
-    pub agent_id: Option<String>,
-    pub agent_instruction: Option<String>,
-    pub on_agent_failure: Option<String>,
-    pub scheduled_at: String,
-    pub schedule: Option<String>,
-    pub timezone: Option<String>,
-    pub expires_at: Option<String>,
-    pub source: Option<String>,
-    pub created_by: Option<String>,
-    pub dedupe_key: Option<String>,
-    pub provider_targets: Option<JsonValue>,
-    /// #4658: 'fresh' or a source-channel context `snapshot`.
-    pub context_strategy: Option<String>,
-    /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
-    pub on_context_failure: Option<String>,
-}
-
 /// POST /api/scheduled-messages
 pub async fn create_scheduled_message(
     State(state): State<AppState>,
@@ -318,6 +292,7 @@ async fn validate_create(
     .await?;
 
     Ok(NewScheduledMessage {
+        image_attachment: None,
         content: content.to_string(),
         discord_mention_user_ids,
         title: body.title.clone().filter(|value| !value.trim().is_empty()),
@@ -686,6 +661,7 @@ async fn build_patch(
     existing: &ScheduledMessageRow,
     required_discord_mention_user_ids: &[String],
 ) -> Result<ScheduledMessagePatch, AppError> {
+    image_input::reject_patch(body)?;
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
 
@@ -997,6 +973,7 @@ mod delivery_render;
 
 #[cfg(test)]
 mod tests {
+    use super::discord_mentions::validate_user_ids as validate_discord_mention_user_ids;
     use super::*;
     use chrono::TimeZone;
 

@@ -725,6 +725,11 @@
       "path": "migrations/postgres/0142_relay_dead_letter_redelivery_state_check.sql",
       "sha256": "da14c5d6da7840ecd1e8fb96502a5337b6d7c4bdf3cf1349f535ac2b86dedac2",
       "version": 142
+    },
+    {
+      "path": "migrations/postgres/0143_scheduled_message_image_attachments.sql",
+      "sha256": "6f0d11c011b931efcd132bc14653cc08c77ec45b52481aa7a93684d1b321709c",
+      "version": 143
     }
   ],
   "version": 1

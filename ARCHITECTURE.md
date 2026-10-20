@@ -211,6 +211,8 @@ src/
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
 │   │   ├── api_json.rs
+│   │   ├── attachments.rs
+│   │   ├── attachments_pg_tests.rs
 │   │   ├── discord_mentions.rs
 │   │   ├── external_delivery.rs
 │   │   ├── outbox.rs
@@ -432,6 +434,8 @@ src/
 │   │   ├── scheduled_messages/
 │   │   │   ├── delivery_render.rs
 │   │   │   ├── discord_mentions.rs
+│   │   │   ├── dormant_image_tests.rs
+│   │   │   ├── image_input.rs
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs

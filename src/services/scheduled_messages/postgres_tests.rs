@@ -3,6 +3,8 @@ use chrono::Duration;
 use serde_json::json;
 use sqlx::Row;
 
+type OptionalTimestamp = Option<DateTime<Utc>>;
+
 tokio::task_local! {
     pub(super) static START_TARGET: std::cell::RefCell<Option<(crate::services::provider::ProviderKind, u64, u64)>>;
 }
@@ -88,6 +90,7 @@ async fn insert_agent_message(
     db::insert_scheduled_message_pg(
         pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: format!("scheduled agent payload for {agent_id}"),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -135,6 +138,7 @@ async fn insert_due_push_message(pool: &PgPool) -> ScheduledMessageRow {
     db::insert_scheduled_message_pg(
         pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "guarded push payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -305,6 +309,7 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "Kakao keeps this exact body".to_string(),
             discord_mention_user_ids: vec![
                 "1469509284508340276".to_string(),
@@ -600,6 +605,7 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -688,6 +694,7 @@ async fn postgres_resume_anchor_compat_migration_preserves_active_trigger_now_an
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "legacy trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -805,9 +812,9 @@ async fn postgres_launch_compat_migration_backfills_legacy_turn_as_ambiguous() {
 
     let (started_at, turn_intent_at, launch_committed_at, turn_started_at): (
         DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
+        OptionalTimestamp,
+        OptionalTimestamp,
+        OptionalTimestamp,
     ) = sqlx::query_as(
         "SELECT started_at, turn_intent_at, launch_committed_at, turn_started_at
          FROM scheduled_message_deliveries
@@ -857,6 +864,7 @@ async fn postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_pol
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "agent trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
