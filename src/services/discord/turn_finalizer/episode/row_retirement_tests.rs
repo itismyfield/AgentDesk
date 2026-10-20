@@ -1,7 +1,7 @@
 //! Drifted-row retirement at the claim: proof axes, CAS outcomes, callers and nearby turns.
 //! The drifted rows are synthetic; no production writer of that drift is known.
 
-use super::row_retirement::{RuntimeWitness, retire_drifted_row, test_hooks};
+use super::row_retirement::{RuntimeWitness, retire_drifted_row, set_before_cas};
 use super::*;
 use crate::services::discord::inflight::{
     self, GuardedSaveOutcome, InflightTurnState, load_inflight_state, save_inflight_state,
@@ -317,7 +317,7 @@ async fn a_same_episode_save_after_the_read_keeps_the_row_and_names_its_version(
         let channel = ChannelId::new(648_490);
         busy(&shared, channel, Some("episode-a")).await;
         let row = drifted_row(channel, Some("episode-a"));
-        test_hooks::set_before_cas(
+        set_before_cas(
             channel.get(),
             Box::new(move || {
                 let mut progressed = load_inflight_state(&ProviderKind::Codex, channel.get())
@@ -362,7 +362,7 @@ async fn an_unreadable_row_is_named_and_kept_while_the_shared_clear_keeps_its_an
         let row = drifted_row(channel, Some("episode-a"));
         let path = row_path(channel);
         let damaged = path.clone();
-        test_hooks::set_before_cas(
+        set_before_cas(
             channel.get(),
             Box::new(move || std::fs::write(&damaged, b"{not json").unwrap()),
         );
@@ -612,7 +612,7 @@ async fn turns_admitted_around_the_retirement_keep_their_input_and_row() {
             let deferred = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let (hook_shared, hook_deferred) = (shared.clone(), deferred.clone());
             let runtime = tokio::runtime::Handle::current();
-            test_hooks::set_before_cas(
+            set_before_cas(
                 channel.get(),
                 Box::new(move || {
                     tokio::task::block_in_place(|| {

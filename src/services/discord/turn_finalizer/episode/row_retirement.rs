@@ -100,7 +100,7 @@ pub(super) fn retire_drifted_row(
         return;
     }
     #[cfg(test)]
-    test_hooks::before_cas(key.channel_id.get());
+    before_cas(key.channel_id.get());
     let (outcome, detail) = GuardedClearOutcome::for_snapshot_with_detail(provider, row);
     match (outcome, detail.reason) {
         (GuardedClearOutcome::Cleared, _) | (GuardedClearOutcome::Missing, "not_found") => {
@@ -179,25 +179,24 @@ fn nonce_fingerprint(nonce: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) mod test_hooks {
-    use std::sync::Mutex;
+type CasHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static BEFORE_CAS: std::sync::Mutex<Vec<(u64, CasHook)>> = std::sync::Mutex::new(Vec::new());
 
-    type Hook = Box<dyn FnOnce() + Send>;
-    static BEFORE_CAS: Mutex<Vec<(u64, Hook)>> = Mutex::new(Vec::new());
+/// Runs `hook` once, between the proven release and the snapshot CAS on `channel`.
+#[cfg(test)]
+pub(super) fn set_before_cas(channel: u64, hook: CasHook) {
+    BEFORE_CAS.lock().unwrap().push((channel, hook));
+}
 
-    /// Runs `hook` once, between the proven release and the snapshot CAS on `channel`.
-    pub(in crate::services::discord) fn set_before_cas(channel: u64, hook: Hook) {
-        BEFORE_CAS.lock().unwrap().push((channel, hook));
-    }
-
-    pub(super) fn before_cas(channel: u64) {
-        let hook = {
-            let mut hooks = BEFORE_CAS.lock().unwrap();
-            let at = hooks.iter().position(|(id, _)| *id == channel);
-            at.map(|at| hooks.remove(at).1)
-        };
-        if let Some(hook) = hook {
-            hook();
-        }
+#[cfg(test)]
+fn before_cas(channel: u64) {
+    let hook = {
+        let mut hooks = BEFORE_CAS.lock().unwrap();
+        let at = hooks.iter().position(|(id, _)| *id == channel);
+        at.map(|at| hooks.remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
     }
 }
