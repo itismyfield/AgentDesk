@@ -269,12 +269,16 @@ fn handle_send_with_backend(
     }
 
     let bytes = req.text.len();
-    // Serialize paste and Enter with composer steering so their writes cannot interleave.
-    // This handler acquires no other lock.
-    type ComposerMutation = Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)>;
+    // F1: hold the SAME per-pane composer mutation lock `/compact` steering uses
+    // across the paste + Enter, so a `/tui/send` and a busy-pane auto `/compact`
+    // cannot interleave their key sends — otherwise the two could co-mingle into
+    // a single corrupt `/compact<user text>` submission (or `/compact` could be
+    // Enter-submitted mid-paste). This HTTP handler holds no other lock, so the
+    // composer lock is the outermost acquisition here (one-directional order, no
+    // deadlock). The hold is narrowed to just the paste + Enter mutation.
     let mutation = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
         &session_name,
-        || -> ComposerMutation {
+        || -> Result<(bool, Option<DateTime<Utc>>), (StatusCode, Json<Value>)> {
             let protected = crate::services::claude_tui::composer_lock::admit_composer_write(
                 &session_name,
                 || backend.capture(&session_name),
@@ -964,8 +968,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         #[tokio::main(flavor = "current_thread")]
         async fn run() {
-            let command = "echo-wait-command";
-            let alias = "echo-wait-alias";
+            let (command, alias) = ("echo-wait-command", "echo-wait-alias");
             for sid in [command, alias] {
                 crate::services::tui_prompt_dedupe::register_provider_session(
                     "claude",
@@ -1002,21 +1005,18 @@ mod tests {
                 assert_eq!(event.session_id, alias);
                 assert_eq!(event.payload, primary.payload);
                 assert_eq!(event.received_at, primary.received_at);
-                let wire = serde_json::to_value(&event).unwrap();
-                assert!(wire.get("fanout").is_none());
-                let mode = if kind == "Notification" {
-                    "token"
-                } else {
-                    "stop"
+                assert!(json!(event).get("fanout").is_none());
+                let mode = match kind {
+                    "Notification" => "token",
+                    _ => "stop",
                 };
-                let boundary = Some(event.received_at);
                 assert!(event_matches(
                     &event,
                     Some("claude"),
                     Some(alias),
                     mode,
                     Some("ready-alias-token"),
-                    boundary
+                    Some(event.received_at)
                 ));
                 assert!(!event_matches(
                     &event,
@@ -1032,7 +1032,7 @@ mod tests {
                     Some(alias),
                     "token",
                     Some(command),
-                    boundary
+                    Some(event.received_at)
                 ));
                 let replay = global()
                     .claim_matching_once(key.clone(), |candidate| {
@@ -1042,7 +1042,7 @@ mod tests {
                             Some(alias),
                             mode,
                             Some("ready-alias-token"),
-                            boundary,
+                            Some(event.received_at),
                         )
                     })
                     .expect("alias-only registry waiter");

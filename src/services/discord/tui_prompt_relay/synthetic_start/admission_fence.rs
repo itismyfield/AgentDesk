@@ -16,8 +16,6 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::discord::SharedData;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::provider::ProviderKind;
-use crate::services::session_host::HostKind;
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 use crate::services::tui_prompt_dedupe::{self, ExternalInputRelayLease};
 
 pub(super) struct AdmissionFence<'a> {
@@ -91,17 +89,13 @@ impl<'a> AdmissionFence<'a> {
     async fn read_current(&self) -> Result<Option<HostedObservation>, String> {
         let endpoint = crate::config::session_hosts::herdr_endpoint(self.channel.get());
         let pin = self.lease.hosted_source.as_ref();
-        let marker = read_host_kind_marker(&self.logical);
-        if matches!(
-            marker,
-            HostKindMarker::ReadFailed(_) | HostKindMarker::Unrecognized(_)
-        ) {
-            return Err("synthetic host marker is unreadable or unrecognized".into());
-        }
-        let herdr = endpoint.is_some()
-            || pin.is_some_and(|pin| pin.hosted_admission_required)
-            || tui_prompt_dedupe::herdr_execution_listed(&self.logical)
-            || marker == HostKindMarker::Known(HostKind::Herdr);
+        let herdr = tui_prompt_dedupe::hosted_source::herdr_evidence(
+            self.channel.get(),
+            &self.logical,
+            None,
+        )
+        .map_err(str::to_owned)?
+            || pin.is_some_and(|pin| pin.hosted_admission_required);
         let (pool, key) = match (
             self.shared.pg_pool.as_ref(),
             self.lease.session_key.as_deref(),
@@ -110,6 +104,24 @@ impl<'a> AdmissionFence<'a> {
             _ if !herdr => return Ok(None),
             _ => return Err("synthetic Herdr admission has no database or session key".into()),
         };
+        if !herdr {
+            let exact = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await;
+            match exact {
+                HostedLookup::Missing => return Ok(None),
+                HostedLookup::Found(observed) => {
+                    if !tui_prompt_dedupe::hosted_source::herdr_evidence(
+                        self.channel.get(),
+                        &self.logical,
+                        Some(&observed.record),
+                    )
+                    .map_err(str::to_owned)?
+                    {
+                        return Ok(None);
+                    }
+                }
+                other => return Err(format!("synthetic exact hosted lookup: {other:?}")),
+            }
+        }
         if let Some(pin) = pin {
             let original = pin.clone();
             #[cfg(test)]
@@ -141,15 +153,12 @@ impl<'a> AdmissionFence<'a> {
                 return Err("synthetic original source changed".into());
             }
         }
+        // Re-read after source I/O so the saved identity uses a fresh exact observation.
         let exact = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await;
         let observed = match exact {
             HostedLookup::Found(observed) => observed,
-            HostedLookup::Missing if !herdr => return Ok(None),
             other => return Err(format!("synthetic exact hosted lookup: {other:?}")),
         };
-        if observed.record == HostedRecord::Legacy && !herdr {
-            return Ok(None);
-        }
         let HostedRecord::Known(record) = &observed.record else {
             return Err("synthetic hosted execution is unreadable".into());
         };

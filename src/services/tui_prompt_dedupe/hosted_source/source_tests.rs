@@ -336,6 +336,51 @@ fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
 }
 
 #[test]
+fn a_resume_scanner_rejects_pretime_records_when_only_the_current_execution_is_logged() {
+    let fx = Fixture::new();
+    let source = fx.source(N2, "native-resumed-only");
+    let context = fx.context(N2, "native-resumed-only");
+    let history = binding_events::records_strict(CHANNEL).unwrap().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].execution_nonce.as_deref(), Some(N2));
+    let pin = capture_in_context("claude", LOGICAL, CHANNEL, &source.path, None, &context).unwrap();
+    for created_at in [
+        context.created_at,
+        context.created_at + chrono::TimeDelta::seconds(1),
+    ] {
+        assert_eq!(
+            capture_scanned(
+                "claude",
+                LOGICAL,
+                CHANNEL,
+                &source.path,
+                Some(&context),
+                Some(created_at),
+            ),
+            Some(pin.clone()),
+            "a normal N2 record remains owned by its captured incarnation"
+        );
+    }
+    assert_eq!(
+        capture("claude", LOGICAL, CHANNEL, &source.path, None),
+        Some(pin),
+        "path-only capture keeps its existing behavior"
+    );
+    assert!(
+        capture_scanned(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &source.path,
+            Some(&context),
+            Some(context.created_at - chrono::TimeDelta::seconds(1)),
+        )
+        .is_none(),
+        "an input older than N2 cannot adopt N2 when N1 left no source history"
+    );
+}
+
+#[test]
 fn a_hook_pin_uses_native_payload_source_and_the_supported_session_alias() {
     let fx = Fixture::new();
     let source = fx.source(N1, "native-one");

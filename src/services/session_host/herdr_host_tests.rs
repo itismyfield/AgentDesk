@@ -1900,10 +1900,6 @@ const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 fn herdr_items_have_no_production_caller() {
     const ESCAPE_DELIVERY: &str =
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs";
-    const SYNTHETIC_ADMISSION_OBSERVER: &str =
-        "src/services/discord/tui_prompt_relay/synthetic_start/admission_fence.rs";
-    const PENDING_ORIGIN_OBSERVER: &str =
-        "src/services/discord/tui_prompt_relay/synthetic_start/pending_claim.rs";
     const HOSTED_SOURCE_OBSERVER: &str = "src/services/tui_prompt_dedupe/hosted_source.rs";
     const OWNERS: &[(&str, usize)] = &[
         ("src/services/session_host.rs", 0),
@@ -1950,9 +1946,8 @@ fn herdr_items_have_no_production_caller() {
         ),
         // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
         (WATCH_HOST, 1),
-        // Synthetic admission and pending origin only read the marker; neither builds a host.
-        (SYNTHETIC_ADMISSION_OBSERVER, 1),
-        (PENDING_ORIGIN_OBSERVER, 1),
+        // The shared synthetic evidence reader names Herdr but never builds a host.
+        (HOSTED_SOURCE_OBSERVER, 1),
         // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
         // Operator transition context: checks the row sits on a registered endpoint, never a host.
@@ -2030,8 +2025,6 @@ fn herdr_items_have_no_production_caller() {
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
                 UNBOUND_ADAPTER,
-                SYNTHETIC_ADMISSION_OBSERVER,
-                PENDING_ORIGIN_OBSERVER,
                 HOSTED_SOURCE_OBSERVER,
             ],
         ),
@@ -2050,8 +2043,6 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
-                SYNTHETIC_ADMISSION_OBSERVER,
-                PENDING_ORIGIN_OBSERVER,
                 HOSTED_SOURCE_OBSERVER,
             ],
         ),
@@ -2070,8 +2061,6 @@ fn herdr_items_have_no_production_caller() {
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
-                SYNTHETIC_ADMISSION_OBSERVER,
-                PENDING_ORIGIN_OBSERVER,
                 HOSTED_SOURCE_OBSERVER,
             ],
         ),

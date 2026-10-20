@@ -8,6 +8,9 @@ use super::binding_context::{
     self, BindingContext, CapturedContext, HookBindingEnvelope, SpawnNonceMarker,
 };
 use super::binding_events::{self, BindingTarget, SourceId};
+use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
+use crate::services::session_host::HostKind;
+use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 
 mod observation;
@@ -28,6 +31,30 @@ pub(crate) struct HostedSourcePin {
 
 fn default_hosted_admission_required() -> bool {
     true
+}
+
+/// Only affirmative host evidence selects hosted admission; unreadable evidence stays unresolved.
+pub(crate) fn herdr_evidence(
+    channel: u64,
+    logical: &str,
+    record: Option<&HostedRecord>,
+) -> Result<bool, &'static str> {
+    let marker = read_host_kind_marker(logical);
+    if matches!(
+        marker,
+        HostKindMarker::ReadFailed(_) | HostKindMarker::Unrecognized(_)
+    ) {
+        return Err("synthetic host marker is unreadable or unrecognized");
+    }
+    if matches!(record, Some(HostedRecord::Unknown(_))) {
+        return Err("synthetic hosted execution is unreadable");
+    }
+    Ok(
+        crate::config::session_hosts::herdr_endpoint(channel).is_some()
+            || super::herdr_execution_listed(logical)
+            || marker == HostKindMarker::Known(HostKind::Herdr)
+            || matches!(record, Some(HostedRecord::Known(_))),
+    )
 }
 
 /// Reads the original file's binding history; a current binding cannot supply a missing origin.
@@ -97,7 +124,7 @@ fn context_current(provider: &str, logical: &str, channel: u64, context: &Bindin
     })
 }
 
-/// A reused transcript needs the native record's time, so an old buffered input stays unowned.
+/// A scanner's record must belong to its captured execution, even if older history is missing.
 pub(crate) fn capture_scanned(
     provider: &str,
     logical: &str,
@@ -111,19 +138,7 @@ pub(crate) fn capture_scanned(
     };
     context_current(provider, logical, channel, context).then_some(())?;
     let pin = capture_in_context(provider, logical, channel, path, None, context)?;
-    let events = binding_events::records_strict(channel).ok()?.ok()?;
-    let reused = events.iter().any(|event| {
-        event.provider == provider
-            && event.tmux_session == logical
-            && event.execution_nonce.as_deref() != Some(&pin.execution_nonce)
-            && match &event.new {
-                BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                    source == &pin.source
-                }
-                _ => false,
-            }
-    });
-    if reused && !record_created_at.is_some_and(|created| created >= context.created_at) {
+    if !record_created_at.is_some_and(|created| created >= context.created_at) {
         return None;
     }
     Some(pin)
@@ -195,14 +210,7 @@ fn capture_native(
         return None;
     }
     let events = binding_events::records_strict(channel).ok()?.ok()?;
-    use crate::services::session_host::HostKind;
-    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
-    let hosted_admission_required = crate::config::session_hosts::herdr_endpoint(channel).is_some()
-        || super::herdr_execution_listed(logical)
-        || !matches!(
-            read_host_kind_marker(logical),
-            HostKindMarker::Known(HostKind::Tmux | HostKind::Process)
-        );
+    let hosted_admission_required = herdr_evidence(channel, logical, None).ok()?;
     let mut pinned = None;
     for event in events {
         if event.provider != provider

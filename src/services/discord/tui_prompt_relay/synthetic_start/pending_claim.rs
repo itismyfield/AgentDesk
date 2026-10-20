@@ -225,16 +225,12 @@ async fn legacy_herdr_pending(
     record: &super::super::super::tui_direct_pending_start::TuiDirectPendingStart,
 ) -> bool {
     use crate::db::dispatched_sessions::hosted_execution::{
-        HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
+        HostedLookup, HostedLookupKey, load_hosted_execution_pg,
     };
-    use crate::services::session_host::HostKind;
-    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+    use crate::services::tui_prompt_dedupe::hosted_source::herdr_evidence;
 
-    if crate::config::session_hosts::herdr_endpoint(record.channel_id).is_some()
-        || crate::services::tui_prompt_dedupe::herdr_execution_listed(&record.tmux_session_name)
-        || read_host_kind_marker(&record.tmux_session_name)
-            == HostKindMarker::Known(HostKind::Herdr)
-    {
+    // A read error keeps the legacy origin unresolved rather than proving a different host.
+    if herdr_evidence(record.channel_id, &record.tmux_session_name, None).unwrap_or(true) {
         return true;
     }
     let (Some(pool), Some(key)) = (shared.pg_pool.as_ref(), record.lease_session_key.as_deref())
@@ -242,7 +238,12 @@ async fn legacy_herdr_pending(
         return false;
     };
     match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {
-        HostedLookup::Found(observed) => observed.record != HostedRecord::Legacy,
+        HostedLookup::Found(observed) => herdr_evidence(
+            record.channel_id,
+            &record.tmux_session_name,
+            Some(&observed.record),
+        )
+        .unwrap_or(true),
         HostedLookup::Missing => false,
         _ => true,
     }

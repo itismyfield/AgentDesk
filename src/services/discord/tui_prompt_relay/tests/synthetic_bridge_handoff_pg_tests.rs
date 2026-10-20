@@ -1632,6 +1632,191 @@ mod herdr_synthetic_identity_pg_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_pinned_known_tmux_pending_worker_keeps_claiming_after_source_rotation_pg() {
+        use dedupe::hosted_source::tests::{
+            CHANNEL as SOURCE_CHANNEL, Fixture as SourceFixture, LOGICAL as SOURCE_LOGICAL,
+            N1 as SOURCE_N1, N2 as SOURCE_N2,
+        };
+
+        let source_fixture = SourceFixture::new();
+        let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        crate::services::tmux_common::host_marker::record_tmux_host_marker(SOURCE_LOGICAL);
+        let original = source_fixture.source(SOURCE_N1, "original-tmux-transcript");
+        let pin = dedupe::hosted_source::capture(
+            "claude",
+            SOURCE_LOGICAL,
+            SOURCE_CHANNEL,
+            &original.path,
+            Some(&original.session_id),
+        )
+        .unwrap();
+        assert!(!pin.hosted_admission_required);
+        assert!(crate::config::session_hosts::herdr_endpoint(SOURCE_CHANNEL).is_none());
+        assert!(!dedupe::herdr_execution_listed(SOURCE_LOGICAL));
+        dedupe::register_tmux_runtime_binding(
+            SOURCE_LOGICAL,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: original.path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(original.session_id.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let channel = ChannelId::new(SOURCE_CHANNEL);
+        let channel_key = SOURCE_CHANNEL.to_string();
+        let key = crate::services::discord::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &ProviderKind::Claude,
+            SOURCE_LOGICAL,
+        );
+        canonical::upsert_hook_session_with_identity_pg(
+            &pool,
+            crate::db::dispatched_sessions::HookSessionUpsert {
+                instance_id: None,
+                ..canonical_fixture::params(&key, &channel_key)
+            },
+            Some(canonical::CanonicalSessionIdentity {
+                kind: canonical::SessionIdentityKind::DiscordChannel,
+                discord_token_hash: &shared.token_hash,
+                channel_id: &channel_key,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(canonical_fixture::raw_of(&pool, &key).await.is_none());
+        let record: pending::TuiDirectPendingStart = serde_json::from_value(serde_json::json!({
+            "provider": "claude", "channel_id": SOURCE_CHANNEL,
+            "tmux_session_name": SOURCE_LOGICAL, "prompt_text": "an input waiting across rotation",
+            "anchor_message_id": SOURCE_CHANNEL + 1, "lease_relay_owner": "tmux_watcher",
+            "lease_runtime_kind": "claude_tui", "lease_turn_id": "tmux-original-observed-turn",
+            "lease_session_key": key, "generation": shared.restart.current_generation,
+            "created_at_ms": 0, "observed_at_ms": 0, "captured_source": null,
+            "hosted_source_checked": true, "hosted_source": pin.clone()
+        }))
+        .unwrap();
+        pending::persist(&record).unwrap();
+        let next = source_fixture.source(SOURCE_N2, "rotated-tmux-transcript");
+        dedupe::register_tmux_runtime_binding(
+            SOURCE_LOGICAL,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: next.path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(next.session_id.clone()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        shared.tmux_watchers.insert(
+            channel,
+            crate::services::discord::session_relay_sink::tests::idle_relay_harness::live_watcher(
+                SOURCE_LOGICAL,
+                next.path.to_str().unwrap(),
+            ),
+        );
+        assert_ne!(original.path, next.path);
+        assert_eq!(record.hosted_source.as_ref(), Some(&pin));
+        pending::spawn_worker(
+            shared.clone(),
+            record.clone(),
+            synthetic_start::pending_start_view_fn(),
+            synthetic_start::pending_start_claim_fn(),
+            synthetic_start::pending_start_abort_cleanup_fn(),
+            synthetic_orphan_reclaim::pending_start_reclaim_orphan_fn(),
+        );
+        let (saved, retained) = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved =
+                    inflight::load_inflight_state_read_only(&ProviderKind::Claude, SOURCE_CHANNEL);
+                let retained = pending::load_all()
+                    .into_iter()
+                    .find(|saved| saved.channel_id == SOURCE_CHANNEL);
+                if (saved.is_some() && retained.is_none())
+                    || retained
+                        .as_ref()
+                        .is_some_and(|saved| saved.attempt_count >= 1)
+                {
+                    break (saved, retained);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the actual deferred worker completed a production claim attempt");
+        assert!(
+            saved.is_some() && retained.is_none(),
+            "a known non-Herdr pinned input must keep the base deferred claim after source rotation"
+        );
+        let saved = saved.unwrap();
+        assert_eq!(saved.user_msg_id, record.anchor_message_id);
+        assert_eq!(saved.output_path.as_deref(), next.path.to_str());
+        assert!(saved.hosted_record_id.is_none());
+        assert!(saved.hosted_execution_nonce.is_none());
+        assert_eq!(
+            dedupe::external_input_relay_lease("claude", SOURCE_LOGICAL, SOURCE_CHANNEL)
+                .unwrap()
+                .hosted_source,
+            Some(pin)
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pinned_herdr_pending_refuses_a_rotated_current_source_pg() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let _binding = crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(
+            root.path(),
+        );
+        let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let channel = ChannelId::new(7_186_782);
+        let _hosts =
+            crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+        let fixture = Fixture::new(root.path(), channel).await;
+        let mut record = fixture.pending(N1, &fixture.source, 7_186_783);
+        record.captured_source = None;
+        assert!(
+            record
+                .hosted_source
+                .as_ref()
+                .unwrap()
+                .hosted_admission_required
+        );
+        let original_pin = record.hosted_source.clone();
+        let hosted_before = fixture.hosted_json().await;
+        let path = root
+            .path()
+            .join("rotated-source-in-the-same-hosted-execution.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let next = crate::services::tui_o::shadow::binding_reader::source_id_for(
+            "rotated-native-session",
+            &path,
+        )
+        .unwrap();
+        fixture.publish_source(&next, N1, 2);
+        assert!(dedupe::herdr_claim_admission(&fixture.logical, true).is_ok());
+        assert_eq!(fixture.hosted_json().await, hosted_before);
+        assert!(
+            !fixture.claim(&record).await,
+            "Herdr must still refuse the original pin when its current transcript rotates"
+        );
+        fixture.assert_quiet().await;
+        assert_eq!(record.hosted_source, original_pin);
+        assert_eq!(fixture.hosted_json().await, hosted_before);
+        fixture.close().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn a_pending_claim_from_n1_refuses_retired_n1_and_bound_n2_but_accepts_n2_pg() {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());

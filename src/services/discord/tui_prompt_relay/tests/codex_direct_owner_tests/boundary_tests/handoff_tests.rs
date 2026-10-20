@@ -1725,21 +1725,23 @@ fn codex_scan_of_an_earlier_discord_prompt_record_binds_nothing() {
     });
 }
 
-/// After a Discord turn ended with no input, a later direct input the scan reads first owns
-/// its turn.
+/// The Codex scanner owns the next input after a Discord turn without a host-kind marker.
+/// Its native source evidence keeps the tmux claim outside hosted admission.
 #[test]
 fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
     run(|root| {
         Box::pin(async move {
+            use crate::services::tmux_common::host_marker::{
+                HostKindMarker, read_host_kind_marker,
+            };
+
             let _bindings = dedupe::hosted_source::tests::BindingRoot::at(&root);
             let nonce = crate::services::tui_prompt_dedupe::hosted_source::tests::N1;
             let logical = "AgentDesk-codex-5845-scan";
-            crate::services::tmux_common::host_marker::record_tmux_host_marker(logical);
             assert_eq!(
-                crate::services::tmux_common::host_marker::read_host_kind_marker(logical),
-                crate::services::tmux_common::host_marker::HostKindMarker::Known(
-                    crate::services::session_host::HostKind::Tmux
-                )
+                read_host_kind_marker(logical),
+                HostKindMarker::Absent,
+                "the production Codex tmux path has no host-kind marker"
             );
             let marker = crate::services::tmux_common::session_temp_path(logical, "spawn_nonce");
             std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
@@ -1800,13 +1802,41 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
                 .expect("the actual idle rollout scanner carried its source");
             assert_eq!(pin.execution_nonce, nonce);
             assert_eq!(pin.source, source);
-            assert!(!pin.hosted_admission_required);
+            let hosted_admission_required = pin.hosted_admission_required;
             assert_eq!(event.prompt, PROMPT3);
             assert_eq!(event.tmux_session_name, fx.codex.tmux);
             assert!(!event.steer_echo);
             assert_eq!(event.native_turn_id.as_deref(), Some(t2.as_str()));
+            assert_eq!(read_host_kind_marker(logical), HostKindMarker::Absent);
             super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
-            let anchor = fx.codex.row().expect("the input's row").user_msg_id;
+            let saved = fx
+                .codex
+                .row()
+                .expect("the markerless scanner input claimed and saved its inflight");
+            let anchor = saved.user_msg_id;
+            assert_eq!(saved.provider, "codex");
+            assert_eq!(saved.channel_id, fx.codex.channel.get());
+            assert_eq!(saved.tmux_session_name.as_deref(), Some(logical));
+            assert_eq!(saved.output_path.as_deref(), fx.codex.rollout.to_str());
+            assert_eq!(saved.native_turn_id.as_deref(), Some(t2.as_str()));
+            assert_eq!(
+                saved.turn_source,
+                crate::services::discord::inflight::TurnSource::ExternalInput
+            );
+            assert!(saved.hosted_record_id.is_none());
+            assert!(saved.hosted_execution_nonce.is_none());
+            let actor =
+                crate::services::discord::mailbox_snapshot(&fx.shared, fx.codex.channel).await;
+            assert_eq!(
+                actor.active_user_message_id.map(|id| id.get()),
+                Some(anchor)
+            );
+            assert!(actor.cancel_token.is_some());
+            assert_eq!(read_host_kind_marker(logical), HostKindMarker::Absent);
+            assert!(
+                !hosted_admission_required,
+                "the markerless native source must not require hosted admission"
+            );
             fx.append(&answer_for(&t2, RESPONSE3));
             resume.notify_one();
             fx.assert_answers_in_order(&[RESPONSE3], Some(1)).await;

@@ -367,6 +367,9 @@ async fn original_source_matches(
     output: Option<&Path>,
     lease: &ExternalInputRelayLease,
 ) -> bool {
+    if fence.hosted_identity().is_none() {
+        return true;
+    }
     match (lease.hosted_source.as_ref(), output) {
         (Some(pin), Some(path)) => {
             fence

@@ -154,6 +154,33 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_markerless_endpoint_still_refuses_an_unpinned_prepared_claim() {
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let channel = 7_186_772;
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("endpoint-evidence-node"),
+        &[(channel, "endpoint-evidence-node")],
+    );
+    let fixture = Fixture::new(root.path(), channel);
+    assert!(crate::config::session_hosts::herdr_endpoint(channel).is_some());
+    assert_eq!(
+        read_host_kind_marker(&fixture.logical),
+        HostKindMarker::Absent
+    );
+    assert!(!dedupe::herdr_execution_listed(&fixture.logical));
+    assert!(fixture.lease.hosted_source.is_none());
+    let claim = claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)).await;
+    assert!(
+        !claim.claimed,
+        "a configured Herdr endpoint still requires its original hosted source without a marker"
+    );
+    fixture.assert_quiet().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the_caller() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
