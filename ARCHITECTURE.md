@@ -268,6 +268,8 @@ src/
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
+│   │   ├── auto_queue_terminal_sync_policy_tests.rs
+│   │   ├── migration_value_pg_tests.rs
 │   │   └── terminal_timestamp_tests.rs
 │   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
@@ -2656,6 +2658,7 @@ src/
 │   │   ├── watcher_latency.rs
 │   │   └── worker.rs
 │   ├── onboarding/
+│   │   ├── canonical_status_tests.rs
 │   │   ├── channel.rs
 │   │   ├── mod.rs
 │   │   └── provider.rs
