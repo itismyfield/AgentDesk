@@ -40,7 +40,7 @@ capture-pane)
     while [ ! -f "$d/go" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
   fi
   if [ -f "$d/pasted" ]; then cat "$d/cap.pasted"; else cat "$d/cap.before"; fi ;;
-load-buffer) for last do :; done; cp "$last" "$d/buffer" ;;
+load-buffer) for last do :; done; cp "$last" "$d/buffer"; printf '%s\n' "${4#agentdesk-busy-inject-}" > "$d/nonce" ;;
 if-shell)
   a=$(cat "$d/attach")
   if [ "$a" != 0 ]; then echo "agentdesk-busy-inject-vetoed $a"; exit 0; fi
@@ -58,7 +58,8 @@ if-shell)
   paste-buffer*)
     touch "$d/pasted"
     [ -f "$d/draw" ] && {
-      cat "$d/draw"; printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"
+      cat "$d/draw"
+      if [ -f "$d/draw.first" ]; then cat "$d/draw.first"; else printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"; fi
       if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
       cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
   send-keys*) python3 -c 'import json,os,sys; b=open(sys.argv[1]).read(); t=sys.argv[2]
@@ -97,7 +98,7 @@ impl InjectPane {
             "cap.before",
             &format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯\u{00a0}\n{BORDER}\n{FOOTER}"),
         );
-        pane.fold_paste(1);
+        pane.draw_paste(None);
         let program = pane.path("tmux");
         pane.set(
             "tmux",
@@ -232,11 +233,9 @@ impl InjectPane {
         (row.started_at, row.turn_start_offset)
     }
 
-    /// The nonce in the header line of the last buffer the server loaded.
+    /// The hidden attempt id from the tmux buffer name; it is absent from visible input.
     pub(crate) fn nonce(&self) -> Option<String> {
-        let buffer = self.read("buffer")?;
-        let header = buffer.lines().next()?.strip_suffix(']')?;
-        Some(header.rsplit(" · ").next()?.to_string())
+        self.read("nonce").map(|id| id.trim().to_string())
     }
 
     /// Leaves only the channel name to name the pane.
@@ -265,6 +264,11 @@ impl InjectPane {
 
     /// The composer after the paste shows a folded placeholder of `lines` line breaks.
     pub(crate) fn fold_paste(&self, lines: usize) {
+        match fs::remove_file(self.path("draw")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove fixture flat drawing: {error}"),
+        }
         let folded = format!("[Pasted text #1 +{lines} lines]");
         let pane =
             format!("⏺ Working on it.\n\n{SPINNER}\n\n{BORDER}\n❯ {folded}\n{BORDER}\n{FOOTER}");
@@ -528,9 +532,7 @@ async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
     let records = pane.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0], pane.read("buffer").unwrap());
-    let header = "[User: Ann (ops) (ID: 200) · 📱 v1 mode=inject source=discord · ";
-    assert!(records[0].starts_with(header), "{records:?}");
-    assert!(records[0].ends_with("\ndiscord status?"), "{records:?}");
+    assert_eq!(records[0], "[User: Ann (ops) (ID: 200)] discord status?");
     assert!(queue_texts(&shared, ch).await.is_empty());
     assert!(claim_source(&provider, message, std::time::Instant::now()).is_none());
     assert_eq!(pane.records(), records);
@@ -854,11 +856,7 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
     let registry = HealthRegistry::new();
     let shared = register_inject_runtime(&registry, &[wrapped, unpredictable], Some(pool)).await;
     let words = |n: usize| ["가나다"; 25][..n].join(" ");
-    let measured = [
-        format!("  {}", words(11)),
-        format!("  {}", words(10)),
-        format!("  {} 끝", words(4)),
-    ];
+    let measured = [format!("  {}", words(11)), format!("  {} 끝", words(8))];
     let emoji = [format!("  {}", "😀a".repeat(25)), "  😀a".to_string()];
     let mut observed = Vec::new();
     for (ch, text, rows) in [
@@ -867,6 +865,12 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
     ] {
         let pane = InjectPane::new(ch, "all");
         pane.draw_paste(Some(rows));
+        if ch == wrapped {
+            pane.set(
+                "draw.first",
+                &format!("❯\u{00a0}[User: imessage:200 (ID: 200)] {}\n", words(6)),
+            );
+        }
         let outcome = deliver_text(&registry, ch, &text).await;
         let queue = queue_texts(&shared, ch).await.len();
         let (keys, seen) = (pane.keys().join("+"), pane.transcript_recorded_the_paste());
@@ -890,9 +894,9 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
     let pool = pg_db.connect_and_migrate().await;
     let x = |n: usize| "x".repeat(n);
     let cases = [
-        (6_687_021, "─".to_string(), None),
-        (6_687_022, "───".to_string(), None),
-        (6_687_023, "❯ hello".to_string(), None),
+        (6_687_021, "line\n─".to_string(), None),
+        (6_687_022, "line\n───".to_string(), None),
+        (6_687_023, "line\n❯ hello".to_string(), None),
         (6_687_024, "status?".to_string(), Some(("size", ""))),
         (6_687_025, x(77), Some(("live", "79,24"))),
     ];
@@ -905,7 +909,7 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
     let channels = cases.each_ref().map(|case| case.0);
     let shared = register_inject_runtime(&registry, &channels, Some(pool)).await;
     // The 79-column rows Claude would draw, so a paste the guard let through is not owned.
-    let resized = [format!("  {}", x(75)), "  xx".to_string()];
+    let resized = [format!("  {}", x(33))];
     let mut observed = Vec::new();
     for (ch, text, file) in cases {
         let pane = InjectPane::new(ch, "all");
@@ -913,6 +917,12 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
             file.is_some_and(|(name, _)| name == "live")
                 .then_some(&resized[..]),
         );
+        if file.is_some_and(|(name, _)| name == "live") {
+            pane.set(
+                "draw.first",
+                &format!("❯\u{00a0}[User: imessage:200 (ID: 200)] {}\n", x(44)),
+            );
+        }
         if let Some((name, value)) = file {
             pane.set(name, value);
         }

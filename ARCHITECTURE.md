@@ -674,8 +674,11 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
+│   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
+│   │   │   ├── receipt_interleave_tests.rs
 │   │   │   ├── screen.rs
+│   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
 │   │   │   ├── stash_tests.rs
@@ -1104,6 +1107,8 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
+│   │   │   │   │   ├── catch_up_race.rs
+│   │   │   │   │   ├── catch_up_race_tests.rs
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
@@ -1557,9 +1562,12 @@ src/
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
+│   │   │   │   ├── busy_inject/
+│   │   │   │   │   └── payload_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
+│   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
@@ -1568,7 +1576,11 @@ src/
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
 │   │   │   │   └── thread_guard_release.rs
+│   │   │   ├── intake_queue_transaction/
+│   │   │   │   └── queue_payload.rs
 │   │   │   ├── message_handler/
+│   │   │   │   ├── attachments/
+│   │   │   │   │   └── busy_inject.rs
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
@@ -2874,6 +2886,11 @@ src/
 │   │   │   │   └── submit_tests.rs
 │   │   │   ├── gate.rs
 │   │   │   └── pane.rs
+│   │   ├── human_frame/
+│   │   │   ├── history/
+│   │   │   │   ├── screen.rs
+│   │   │   │   └── screen_tests.rs
+│   │   │   └── history.rs
 │   │   ├── submission_tmux/
 │   │   │   ├── guarded/
 │   │   │   │   ├── protocol_tests.rs

@@ -73,6 +73,17 @@ impl TurnViewReconciler {
         let _target_guard = target_lock.lock().await;
 
         if desired.is_queue_marker()
+            && target.kind == TurnViewTargetKind::IntakeUserMessage
+            && super::super::inject_disposition::terminal(
+                Some(&shared.provider),
+                target.message_id,
+                time::Instant::now(),
+            ) == Some(super::super::inject_disposition::InjectionOutcome::Observed)
+        {
+            return (TurnViewDelivery::Delivered, None);
+        }
+
+        if desired.is_queue_marker()
             && self.recently_finalized_blocks_queued(target, owner.generation)
             && !queue_repair::allows(shared, target, None, source).await
         {
