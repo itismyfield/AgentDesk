@@ -183,14 +183,30 @@ pub(super) fn extract<T>(
         } else {
             error.status()
         };
-        crate::error::AppError::new(
-            status,
-            crate::error::ErrorCode::Validation,
-            "invalid scheduled message JSON",
-        )
+        let message = match data_error_detail(&error) {
+            Some(detail) => format!("invalid scheduled message JSON: {detail}"),
+            None => "invalid scheduled message JSON".to_owned(),
+        };
+        crate::error::AppError::new(status, crate::error::ErrorCode::Validation, message)
     })
+}
+
+/// Field-level serde detail, withheld whenever it touches imageAttachment so base64 never echoes.
+fn data_error_detail(error: &axum::extract::rejection::JsonRejection) -> Option<String> {
+    let axum::extract::rejection::JsonRejection::JsonDataError(error) = error else {
+        return None;
+    };
+    let detail = std::error::Error::source(error)?.to_string();
+    if detail.contains("imageAttachment") || detail.contains("dataBase64") {
+        return None;
+    }
+    Some(detail.chars().take(200).collect())
 }
 
 #[cfg(test)]
 #[path = "image_activation_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "image_json_error_tests.rs"]
+mod json_error_tests;
