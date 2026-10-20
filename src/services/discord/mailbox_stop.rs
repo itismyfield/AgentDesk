@@ -52,11 +52,25 @@ pub(super) async fn mailbox_cancel_active_turn(
         .channel_binding(&channel_id)
         .map(|binding| binding.tmux_session_name)
         .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
+    // Issue #2374 — the reason-write and the `cancelled` flip are now
+    // performed atomically by the mailbox actor (see
+    // `ChannelMailboxMsg::CancelActiveTurnWithReason`). The previous
+    // design (introduced by PR #2373 for issue #2335) read the active
+    // token from the actor, wrote `cancel_source` on it from the caller
+    // task, then sent the actor a `CancelActiveTurn`. That kept the
+    // ordering correct for a single canceller but allowed two concurrent
+    // cancellers to both fetch the same token, race on
+    // `set_cancel_source`, and lose one of the reasons. Owning the write
+    // inside the actor serializes both transitions per channel and
+    // removes the small ordering window.
     let result = shared
         .mailbox(channel_id)
         .cancel_active_turn_with_reason(reason.into())
         .await;
     if result.token.is_some() {
+        // #2549: in-memory publish remains immediate, while the matching PG
+        // mirror is awaited before the cancel path returns so a quick
+        // dcserver restart cannot drop the durable tombstone.
         record_turn_stop_tombstone(channel_id, session.as_deref(), reason).await;
     }
     result
@@ -70,6 +84,16 @@ pub(super) async fn mailbox_cancel_active_turn_with_reason(
     guarded_cancel(shared, channel_id, None, reason).await
 }
 
+/// #2374 Codex round-1 fix (HIGH-1) — identity-guarded variant for the
+/// voice handoff cancel path. Cancels the active turn on `channel_id`
+/// ONLY when its `user_message_id` matches `handoff_message_id`. An
+/// unguarded cancel from the tombstone retry path could otherwise kill
+/// an unrelated turn that happened to start on the same target channel
+/// after the original handoff turn finalized.
+///
+/// Recording the tombstone is the caller's responsibility (see
+/// [`record_voice_handoff_cancel_tombstone`]) so a tombstone can be
+/// written even when no active turn is present (HIGH-2 fix).
 pub(crate) async fn mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
     shared: &SharedData,
     channel_id: ChannelId,

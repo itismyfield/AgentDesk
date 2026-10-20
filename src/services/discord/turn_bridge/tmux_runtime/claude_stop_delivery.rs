@@ -192,18 +192,12 @@ pub(super) fn classify_tui_interrupt_phase(
 
 /// Pane evidence at a Claude TUI stop: `(prompt painted, interruptible turn, editable draft)`.
 pub(super) fn claude_tui_stop_pane_evidence(pane: &str) -> (bool, bool, bool) {
-    use crate::services::tmux_common as screen;
-    // Claude keeps its empty composer painted through generation and foreground tools, so spinner
-    // chrome counts as active only above an exactly empty composer, never over composer text.
-    let active = !super::claude_stop_pane::veto(pane)
-        && (screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
-            || (screen::tmux_capture_indicates_claude_tui_structured_spinner(pane)
-                && screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane))
-            || super::claude_stop_pane::foreground_tool_running(pane));
+    let (ready, active, draft) = super::claude_stop_pane::legacy_evidence(pane);
     (
-        screen::tmux_capture_indicates_claude_tui_ready_for_input(pane),
-        active,
-        screen::tmux_capture_indicates_claude_tui_prompt_draft(pane),
+        ready,
+        !super::claude_stop_pane::veto(pane)
+            && (active || super::claude_stop_pane::foreground_tool_running(pane)),
+        draft,
     )
 }
 
@@ -311,6 +305,7 @@ pub(super) async fn interrupt_claude_session(
         None => None,
     };
 
+    let protected_delivery = expected_identity.is_some() || token.is_none();
     let session_for_probe = session_name.clone();
     let token_for_probe = token.cloned();
     let probe_result = tokio::task::spawn_blocking(move || {
@@ -363,9 +358,14 @@ pub(super) async fn interrupt_claude_session(
         } else {
             None
         };
-        let (pane_ready, pane_active, pane_has_draft) = pane
-            .as_deref()
-            .map_or((false, false, false), claude_tui_stop_pane_evidence);
+        let (pane_ready, pane_active, pane_has_draft) =
+            pane.as_deref().map_or((false, false, false), |pane| {
+                if protected_delivery {
+                    claude_tui_stop_pane_evidence(pane)
+                } else {
+                    super::claude_stop_pane::legacy_evidence(pane)
+                }
+            });
         let phase = match delivery {
             ClaudeTurnInterruptDelivery::TuiEscape => classify_tui_interrupt_phase(
                 structured_state,
@@ -482,7 +482,7 @@ pub(super) async fn interrupt_claude_session(
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
         let recheck = || {
-            if delivery != ClaudeTurnInterruptDelivery::TuiEscape {
+            if !protected_delivery || delivery != ClaudeTurnInterruptDelivery::TuiEscape {
                 return Ok(());
             }
             let pane = crate::services::platform::tmux::capture_pane(&session_for_task, -160)

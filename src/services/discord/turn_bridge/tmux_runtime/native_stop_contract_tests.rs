@@ -669,3 +669,230 @@ fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
         }
     });
 }
+
+#[test]
+fn preserve_stop_idle_native_api_uses_existing_runtime_recovery() {
+    let fx = Fixture::new();
+    run(async {
+        let (shared, registry) = runtime().await;
+        let channel = ChannelId::new(7_193_800);
+        let session = "native-idle-api-recovery";
+        let (token, path) = generating_turn(&fx, session);
+        append(
+            &path,
+            serde_json::json!({"type":"system","subtype":"turn_duration"}),
+        );
+        fx.ready(session);
+        start(&shared, channel, &token).await;
+        let target = TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: session.into(),
+        };
+        let result = crate::services::turn_lifecycle::stop_turn_preserving_queue(
+            Some(&registry),
+            &target,
+            "native_idle_api",
+        )
+        .await;
+        assert!(
+            !result.host_guard_kept(),
+            "idle native API is a tmux recovery, not a host refusal"
+        );
+        assert_eq!(result.mailbox_foreground_free, Some(true));
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+        for done_first in [false, true] {
+            let channel = ChannelId::new(7_193_810 + u64::from(done_first));
+            let token = Arc::new(CancelToken::new());
+            start(&shared, channel, &token).await;
+            let idle = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let observed = idle.clone();
+            assert!(
+                token
+                    .native_stop
+                    .handoff_idle(Arc::new(move || observed.load(Ordering::Acquire)))
+            );
+            if done_first {
+                token.native_stop.completed();
+            } else {
+                idle.store(false, Ordering::Release);
+            }
+            let result = shared
+                .mailbox(channel)
+                .cancel_active_turn_if_current_unless_herdr(
+                    token.clone(),
+                    "idle_publish_race".into(),
+                )
+                .await;
+            assert!(matches!(result,crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent),"idle handoff rechecks Done and resumed execution at the actor");
+            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert!(mailbox_holds(&shared, channel, &token).await);
+        }
+    });
+}
+
+#[test]
+fn preserve_stop_raw_draft_matches_main_escape() {
+    let fx = Fixture::new();
+    let pane = "· Actioning… (4m 7s · esc to interrupt)\n❯ draft";
+    assert!(
+        crate::services::tmux_common::tmux_capture_indicates_claude_tui_actively_streaming(pane)
+    );
+    fx.pane(pane);
+    run(async {
+        let session = "native-raw-draft-control";
+        let (token, _) = generating_turn(&fx, session);
+        let _ = fx.take_calls();
+        discord::turn_bridge::stop_active_turn(
+            &ProviderKind::Claude,
+            &token,
+            TmuxCleanupPolicy::PreserveSession,
+            "raw_control",
+        )
+        .await;
+        assert_eq!(
+            fx.take_calls()
+                .iter()
+                .filter(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+                .count(),
+            1,
+            "raw draft Escape matches main"
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
+    let fx = Fixture::new();
+    fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+    run(async {
+        let (shared, registry) = runtime().await;
+        let channel = ChannelId::new(7_193_801);
+        let session = "native-unconfirmed-api-recovery";
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        let row = inflight_row(&ProviderKind::Claude, channel, session, false);
+        let before = file_state(&row);
+        let target = TurnLifecycleTarget {
+            provider: Some(ProviderKind::Claude),
+            channel_id: Some(channel),
+            tmux_name: session.into(),
+        };
+        let result = crate::services::turn_lifecycle::stop_turn_preserving_queue(
+            Some(&registry),
+            &target,
+            "native_unconfirmed_api",
+        )
+        .await;
+        assert_eq!(
+            result.refusal_reason(),
+            "native_stop_unconfirmed",
+            "a native delivery failure is not a non-tmux host"
+        );
+        assert!(mailbox_holds(&shared, channel, &token).await);
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(file_state(&row), before);
+        assert_eq!(tombstone(channel), None);
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn preserve_stop_native_published_rearms_drain_after_watcher_cleanup() {
+    let fx = Fixture::new();
+    fx.pane(&running());
+    run(async {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_802);
+        let session = "native-published-queue-drain";
+        let (token, path) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        inflight_row(&ProviderKind::Claude, channel, session, false);
+        let generation = discord::runtime_store::process_generation();
+        let message = MessageId::new(channel.get() + 3);
+        let pending = crate::services::turn_orchestrator::Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: message,
+            queued_generation: generation,
+            source_message_ids: vec![message],
+            source_message_queued_generations: vec![],
+            source_text_segments: vec![],
+            text: "queued after native stop".into(),
+            mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: vec![],
+            voice_announcement: None,
+        };
+        shared
+            .mailbox(channel)
+            .replace_queue(
+                vec![pending],
+                discord::queue_persistence_context(&shared, &ProviderKind::Claude, channel),
+            )
+            .await;
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        let _hook =
+            discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(move |_, _, at, _| {
+                let seen = seen.clone();
+                Box::pin(async move {
+                    if at != channel {
+                        return None;
+                    }
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Some(discord::IdleQueueKickoffChannelOutcome { started: true })
+                })
+            }));
+        let (_, ctx, server, data) = transport(&shared, channel).await;
+        let _ = fx.take_calls();
+        let watcher = async {
+            until(|| {
+                fx.calls()
+                    .iter()
+                    .any(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+            })
+            .await;
+            append(
+                &path,
+                serde_json::json!({"type":"system","subtype":"turn_duration"}),
+            );
+            fx.ready(session);
+            until(|| token.cancelled.load(Ordering::Acquire)).await;
+            assert!(discord::clear_inflight_state(
+                &ProviderKind::Claude,
+                channel.get()
+            ));
+            discord::mailbox_finish_turn(&shared, &ProviderKind::Claude, channel).await;
+        };
+        tokio::join!(command(&ctx, &data, channel), watcher);
+        until(|| count.load(Ordering::SeqCst) > 0).await;
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "native publication rearms one queued drain"
+        );
+        assert_eq!(
+            fx.take_calls()
+                .iter()
+                .filter(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+                .count(),
+            1,
+            "post-publish recovery must not interrupt again"
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+        server.abort();
+    });
+}

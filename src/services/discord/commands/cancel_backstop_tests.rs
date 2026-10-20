@@ -368,3 +368,119 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
         db.drop().await;
     });
 }
+
+fn native_idle_slash_recovery(missing: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let _tmux = missing_tmux(&root);
+    if !missing {
+        std::fs::write(root.path().join("tmux"), "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in capture-pane) printf 'Ready for input (type message + Enter)\\n❯\\n' ;; esac\nexit 0\n").unwrap();
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
+    let author = serenity::UserId::new(42);
+    shared.settings.write().await.owner_user_id = Some(author.get());
+    let session = "native-idle-slash-recovery";
+    let transcript = root.path().join("native.jsonl");
+    let mut content = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n".to_string();
+    if !missing {
+        content.push_str("{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n");
+    }
+    std::fs::write(&transcript, content).unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let token = Arc::new(CancelToken::new());
+    token.bind_claude_tmux_session(session);
+    assert!(
+        shared
+            .mailbox(channel)
+            .try_start_turn(token.clone(), author, serenity::MessageId::new(71930001))
+            .await
+    );
+    shared
+        .mailbox(channel)
+        .replace_queue(
+            vec![pending(author, serenity::MessageId::new(71930002))],
+            crate::services::discord::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+            ),
+        )
+        .await;
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |_, _, at, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                if at != channel {
+                    return None;
+                }
+                seen.fetch_add(1, Ordering::SeqCst);
+                Some(crate::services::discord::IdleQueueKickoffChannelOutcome { started: true })
+            })
+        },
+    ));
+    let mut events = shared.turn_completion_events.subscribe();
+    let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
+    let voice_config = crate::voice::VoiceConfig::default();
+    let data = Data {
+        shared: shared.clone(),
+        token: "test-token".into(),
+        provider: ProviderKind::Claude,
+        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+        voice_config,
+        ingress_shadow: None,
+    };
+    invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
+    assert!(
+        shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none(),
+        "idle native slash must release the zombie foreground"
+    );
+    let mut releases = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.phase==crate::services::discord::turn_completion_events::TurnCompletionPhase::MailboxReleased {releases+=1;}
+    }
+    assert_eq!(releases, 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while count.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "zombie release schedules one queue kickoff"
+    );
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn preserve_stop_idle_native_slash_recovers_zombie_and_queue() {
+    native_idle_slash_recovery(false);
+}
+
+#[test]
+fn preserve_stop_missing_native_slash_recovers_zombie_and_queue() {
+    native_idle_slash_recovery(true);
+}

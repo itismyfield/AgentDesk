@@ -31,7 +31,7 @@ async fn cancel_text_stop_token_mailbox(
 /// call so the three cancel surfaces (`!stop`, `!cc stop`, and the
 /// REST cancel endpoint) all share the same post-cancel drain
 /// semantics.
-fn schedule_text_stop_pending_queue_drain(
+pub(super) fn schedule_text_stop_pending_queue_drain(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: serenity::ChannelId,
@@ -1086,7 +1086,9 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     match stop_lookup {
                         CommandStop::Native(stop) => {
                             if stop.should_reply() { let _ = msg.reply(&ctx.http, stop.text()).await; }
-                            stop.finish().await;
+                            if stop.finish().await.token.is_some() {
+                                super::stop::after_native_publish(&data.shared, &data.provider, channel_id, Some(stop_reason)).await;
+                            }
                         }
                         CommandStop::Observed(sent) => {
                             let _ = msg.reply(&ctx.http, super::super::turn_bridge::NativeStop::observed_text(sent)).await;

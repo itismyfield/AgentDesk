@@ -70,7 +70,11 @@ impl StopReply {
     ) {
         crate::services::cluster::channel_home::command_scope(self.permit, async {
             match self.stop {
-            CommandStop::Native(stop) => { stop.finish().await; }
+            CommandStop::Native(stop) => {
+                if stop.finish().await.token.is_some() {
+                    after_native_publish(shared, provider, channel, None).await;
+                }
+            }
             CommandStop::Observed(_) => {}
             CommandStop::Session(stop) => {
                 stop.interrupt("/stop").await;
@@ -78,31 +82,7 @@ impl StopReply {
             CommandStop::Stop(stop) => {
                 stop.stop(turn_bridge::TmuxCleanupPolicy::PreserveSession, "/stop")
                     .await;
-                let release =
-                    super::super::zombie_foreground_release::release_zombie_foreground_turn(
-                        shared, provider, channel, "/stop",
-                    )
-                    .await;
-                if matches!(
-                    release.verdict,
-                    Some(super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldInflightPresent
-                        | super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldTuiNotIdle)
-                ) {
-                    super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
-                        shared, provider, channel, "slash_stop_held_release",
-                    )
-                    .await;
-                }
-                log_info_event!(
-                    "discord_cancel_signal_sent",
-                    channel_id = channel.get(),
-                    provider = provider.as_str(),
-                    status = if release.released { "released" } else { "sent" },
-                    mailbox_foreground_released = release.released,
-                    zombie_verdict = release.verdict_str(),
-                    queue_depth_after = release.queue_depth_after,
-                    queue_kickoff_scheduled = release.queue_kickoff_scheduled,
-                );
+                after_native_publish(shared, provider, channel, None).await;
             }
             #[cfg(unix)]
             CommandStop::Herdr(_) =>
@@ -276,4 +256,56 @@ fn holder_reply(answer: &serde_json::Value) -> String {
         _ => return format!("holder 노드가 중지를 거절했어요 ({}).", field("reason")),
     };
     fixed.to_owned()
+}
+
+/// Preserve the existing recovery and queue consequences after a confirmed native publish.
+pub(in crate::services::discord) async fn after_native_publish(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    text_source: Option<&'static str>,
+) {
+    if let Some(source) = text_source {
+        crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                provider.clone(),
+                channel,
+                source,
+                true,
+            ),
+        );
+        super::text_commands::schedule_text_stop_pending_queue_drain(
+            shared, provider, channel, source,
+        );
+        return;
+    }
+    let release = super::super::zombie_foreground_release::release_zombie_foreground_turn(
+        shared, provider, channel, "/stop",
+    )
+    .await;
+    if matches!(
+        release.verdict,
+        Some(
+            super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldInflightPresent
+                | super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldTuiNotIdle
+        )
+    ) {
+        super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            shared,
+            provider,
+            channel,
+            "slash_stop_held_release",
+        )
+        .await;
+    }
+    log_info_event!(
+        "discord_cancel_signal_sent",
+        channel_id = channel.get(),
+        provider = provider.as_str(),
+        status = if release.released { "released" } else { "sent" },
+        mailbox_foreground_released = release.released,
+        zombie_verdict = release.verdict_str(),
+        queue_depth_after = release.queue_depth_after,
+        queue_kickoff_scheduled = release.queue_kickoff_scheduled,
+    );
 }

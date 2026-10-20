@@ -58,3 +58,17 @@ pub(super) fn veto(pane: &str) -> bool {
 }
 
 pub(super) use crate::services::provider::native_stop::mutant;
+
+pub(super) fn legacy_evidence(pane: &str) -> (bool, bool, bool) {
+    use crate::services::tmux_common as screen;
+    // Claude keeps its empty composer painted through generation and foreground tools, so spinner
+    // chrome counts as active only above an exactly empty composer, never over composer text.
+    let active = screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
+        || (screen::tmux_capture_indicates_claude_tui_structured_spinner(pane)
+            && screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane));
+    (
+        screen::tmux_capture_indicates_claude_tui_ready_for_input(pane),
+        active,
+        screen::tmux_capture_indicates_claude_tui_prompt_draft(pane),
+    )
+}

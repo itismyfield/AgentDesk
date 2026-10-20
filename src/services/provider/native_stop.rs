@@ -13,6 +13,7 @@ pub(crate) struct State {
 pub(crate) struct Inner {
     attempt: Option<Arc<Attempt>>,
     completed: bool,
+    idle: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 pub(crate) struct Attempt {
@@ -33,6 +34,7 @@ impl State {
         if inner.completed {
             return None;
         }
+        inner.idle = None;
         if let Some(attempt) = &inner.attempt {
             if attempt.key != key {
                 return None;
@@ -52,6 +54,17 @@ impl State {
         Some(attempt)
     }
 
+    /// Main's idle recovery keeps a terminal witness through the actor's publication.
+    pub(crate) fn handoff_idle(&self, terminal: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.completed {
+            return false;
+        }
+        inner.idle = Some(terminal);
+        inner.attempt = None;
+        true
+    }
+
     pub(crate) fn is_completed(&self) -> bool {
         self.inner
             .lock()
@@ -68,6 +81,13 @@ impl State {
 
     pub(crate) fn admit(&self) -> Result<MutexGuard<'_, Inner>, ()> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner
+            .idle
+            .as_ref()
+            .is_some_and(|terminal| inner.completed || !terminal())
+        {
+            return Err(());
+        }
         if let Some(attempt) = &inner.attempt
             && (inner.completed
                 || (!mutant("unconfirmed_cancel")

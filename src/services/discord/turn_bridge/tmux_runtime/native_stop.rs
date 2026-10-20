@@ -74,9 +74,10 @@ impl NativeStop {
             stop.finished = true;
             return Some(stop);
         }
-        if !crate::services::discord::host_liveness::local_tmux(session, None) {
-            stop.notify = token.native_stop.claim_notice();
-            return Some(stop);
+        if !crate::services::discord::host_liveness::local_tmux(session, None)
+            || !crate::services::platform::tmux::has_session(session)
+        {
+            return None;
         }
         let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session);
         let identity = binding
@@ -112,6 +113,11 @@ impl NativeStop {
             });
             stop.terminal = terminal.clone();
             if terminal() {
+                if !super::claude_stop_pane::mutant("idle_short_circuit")
+                    && token.native_stop.handoff_idle(terminal.clone())
+                {
+                    return None;
+                }
                 stop.finished = true;
             } else if token.tmux_session_name().as_deref() == Some(session)
                 && let Some(attempt) = token.native_stop.attempt(key, terminal)
@@ -182,6 +188,16 @@ impl NativeStop {
             UNCONFIRMED
         } else {
             "같은 중단 요청의 결과를 이미 안내했어요."
+        }
+    }
+
+    pub(in crate::services::discord) fn lifecycle_path(&self) -> &'static str {
+        if self.finished {
+            "native-stop-completed"
+        } else if self.sent {
+            "native-stop-pending"
+        } else {
+            "native-stop-unconfirmed"
         }
     }
 

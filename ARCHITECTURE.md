@@ -2227,6 +2227,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery.rs
 │   │   │   ├── thinking.rs
 │   │   │   ├── tmux_runtime.rs
+│   │   │   ├── tmux_runtime_tests.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   ├── two_message_panel.rs
 │   │   │   ├── voice_completion.rs
@@ -2676,6 +2677,7 @@ src/
 │   │   ├── cancel_token_codex_owed.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── claude_interrupt_tests.rs
 │   │   ├── herdr_before_start.rs
 │   │   ├── native_stop.rs
 │   │   ├── output_reader.rs
@@ -3170,6 +3172,8 @@ src/
 │   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
+│   ├── turn_lifecycle/
+│   │   └── stop_result.rs
 │   ├── turn_orchestrator/
 │   │   ├── dispatch_reservation/
 │   │   │   ├── tests/
@@ -3294,6 +3298,7 @@ src/
 │   ├── provider_hosting.rs
 │   ├── provider_output_guard.rs
 │   ├── provider_output_guard_tests.rs
+│   ├── provider_poll_output_file_tests.rs
 │   ├── provider_runtime.rs
 │   ├── provider_teardown.rs
 │   ├── provider_teardown_tests.rs

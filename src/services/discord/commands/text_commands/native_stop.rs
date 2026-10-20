@@ -18,7 +18,9 @@ pub(super) async fn handle(
             match stop_lookup {
                 CommandStop::Native(stop) => {
                     if stop.should_reply() { let _ = msg.reply(&ctx.http, stop.text()).await; }
-                    stop.finish().await;
+                    if stop.finish().await.token.is_some() {
+                        super::super::stop::after_native_publish(&data.shared, &data.provider, channel_id, Some("!stop")).await;
+                    }
                 }
                 CommandStop::Observed(sent) => {
                     let _ = msg.reply(&ctx.http, super::super::super::turn_bridge::NativeStop::observed_text(sent)).await;
