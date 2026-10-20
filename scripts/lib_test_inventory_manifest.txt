@@ -13067,6 +13067,10 @@ services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until
 services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
 services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::a_new_exact_root_cannot_rescope_an_actual_owed_piece_into_permission
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::bootstrap_cross_nonce_preserves_announced_source_and_warns_once
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::deriver_compat::fresh_proof_preserves_tool_cards_and_turn_summary_after_deriver_reset
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::deriver_compat::pending_card_and_summary_hold_new_proof_without_suspending_their_source
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::deriver_compat::task_started_without_first_eligible_summary_allows_same_actor_fresh_q1
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_scans
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::fresh_startup_proof_resumes_with_old_cursor_untouched
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::gc_waiting::current_waiting_incident_clears_after_post_with_suspended_old_source

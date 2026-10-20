@@ -3060,6 +3060,7 @@ src/
 │   │   │   ├── fork_lineage_tests.rs
 │   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
+│   │   │   ├── fresh_deriver_compat_tests.rs
 │   │   │   ├── fresh_gc_waiting_tests.rs
 │   │   │   ├── fresh_obligation_tests.rs
 │   │   │   ├── fresh_resume_tests.rs
@@ -3634,6 +3635,12 @@ This table is generated from the current `src/` root and fails CI when a new top
 1. Message intake: `src/services/discord/router/message_handler.rs`
 2. Session spawn: `src/services/session_backend.rs`
 3. Cleanup: `src/services/process.rs`
+
+### Verified Codex fresh placement (B1b)
+
+N4 stamp 뒤 N3 잔여는 배달하지 않는다. 같은 actor는 Hold와 경보로, 재시작은 경보와 함께 진행으로 끝난다. 원본은 보존된다.
+
+Fresh placement and source consumption use separate gates. A proven fresh root may suspend denied historical cursors; their bytes and cursor metadata remain intact. Tool card rows and eligible unfinished summaries hold in-place rescope, while a cross-nonce bootstrap emits a preservation warning and continues without replaying denied sources.
 
 ### Session runtime state (issue #892)
 

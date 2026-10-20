@@ -290,7 +290,7 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
         new = fixture.wait_new_context() => {
             assert_ne!(new.execution_nonce, fixture.context.execution_nonce);
             assert!(!dedupe::codex_verified_o_source_allowed(CANARY_CHANNEL, &fixture.old_source));
-            Some(fixture.publish_context(new))
+            Some(fixture.publish_context(new, &api, false, &mut Vec::new()).await)
         }
         held_tmux = held => {
             assert_eq!(held_tmux, CANARY_TMUX);

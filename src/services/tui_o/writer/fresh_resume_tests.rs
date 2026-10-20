@@ -1,6 +1,8 @@
 use super::*;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 
+#[path = "fresh_deriver_compat_tests.rs"]
+mod deriver_compat;
 #[path = "fresh_gc_waiting_tests.rs"]
 mod gc_waiting;
 #[path = "fresh_scope_negative_tests.rs"]
@@ -201,7 +203,7 @@ async fn scenario(in_place: bool, retired_old: bool) {
     assert!(*ready.borrow(), "fresh proof restores the scoped writer");
     assert_eq!(
         harness.port.posts(),
-        ["Q1"],
+        ["Q1", "-# ✅ 완료"],
         "O2/O2-W: a fresh source posts behind a denied old cursor"
     );
     let n3_before = harness.channel().cursor(&n3).unwrap().clone();
@@ -213,7 +215,7 @@ async fn scenario(in_place: bool, retired_old: bool) {
     polls(6).await;
     assert_eq!(
         harness.port.posts(),
-        ["Q1", "Q2"],
+        ["Q1", "-# ✅ 완료", "Q2", "-# ✅ 완료"],
         "O7-2X: one actor resumes the next exact incarnation"
     );
     assert_eq!(
@@ -320,7 +322,7 @@ async fn first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_
     answer(&source, "Q1");
     polls(6).await;
     assert!(*ready.borrow());
-    assert_eq!(harness.port.posts(), ["Q1"]);
+    assert_eq!(harness.port.posts(), ["Q1", "-# ✅ 완료"]);
     assert_eq!(
         selection.nonce().as_deref(),
         Some(current.execution_nonce.as_str()),
@@ -349,7 +351,7 @@ async fn a_new_exact_root_cannot_rescope_an_actual_owed_piece_into_permission() 
     )) {
         return;
     }
-    held_work(false, false).await;
+    held_work(false, false, false).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -358,7 +360,7 @@ async fn retired_source_with_an_actual_owed_piece_cannot_enter_suspension() {
         module_path!(),
         "::retired_source_with_an_actual_owed_piece_cannot_enter_suspension"
     )) {
-        held_work(true, false).await;
+        held_work(true, false, false).await;
     }
 }
 
@@ -368,11 +370,11 @@ async fn unsealed_current_native_unit_holds_in_place_rescope_without_dropping_wo
         module_path!(),
         "::unsealed_current_native_unit_holds_in_place_rescope_without_dropping_work"
     )) {
-        held_work(false, true).await;
+        held_work(false, true, false).await;
     }
 }
 
-async fn held_work(retired: bool, unsealed: bool) {
+async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe_lock = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -450,10 +452,155 @@ async fn held_work(retired: bool, unsealed: bool) {
         harness.channel().set_retired(&n3, true).unwrap();
     }
     let before = harness.channel().cursor(&n3).unwrap().clone();
+    if restart_before_replay {
+        assert_eq!(
+            crate::services::tui_o::writer::actor::work_for_tests(),
+            (0, true)
+        );
+        assert_eq!(
+            before.captured_through,
+            std::fs::metadata(&n3.path).unwrap().len()
+        );
+        assert!(harness.channel().ledger().unresolved().is_none());
+        assert!(harness.channel().ledger().resume_pieces().next().is_none());
+        assert_eq!(
+            harness.channel().fresh_selection().unwrap().unwrap().nonce,
+            n3_context.execution_nonce
+        );
+    }
+    let boot_bytes = restart_before_replay.then(|| std::fs::read(&n3.path).unwrap());
     let io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&n3.path);
     let (n4_context, n4) = proven(root.path());
     if unsealed {
         answer(&n4, "held N4 answer");
+    }
+    if restart_before_replay {
+        assert!(unsealed && !retired);
+        assert_ne!(n4_context.execution_nonce, n3_context.execution_nonce);
+        assert!(dedupe::codex_verified_channel_delivery_allowed(
+            CANARY_CHANNEL
+        ));
+        // No await follows N4 proof until the old actor is stopped, so it cannot rescope first.
+        stop.send_replace(true);
+        assert_eq!(task.await.unwrap(), None);
+        harness.gate.acquired();
+        let writer = harness.writer();
+        let boot_selection = writer.suspension.clone();
+        let (boot_stop, boot_stopped) = watch::channel(false);
+        let (boot_resumed, _boot_ready) = watch::channel(false);
+        let boot = tokio::spawn(run_channel(
+            writer,
+            ShadowProvider::Codex,
+            Arc::new(ChannelBindingLog::new(
+                CANARY_CHANNEL,
+                ShadowProvider::Codex,
+            )),
+            boot_stopped,
+            boot_resumed,
+        ));
+        polls(6).await;
+        let posts = harness.port.posts();
+        let alarms = harness.alarms.taken();
+        boot_stop.send_replace(true);
+        assert_eq!(boot.await.unwrap(), None);
+        let native_read_bytes = io.stats().read_bytes;
+        assert_eq!(harness.channel().cursor(&n3), Some(&before));
+        assert_eq!(
+            std::fs::read(&n3.path).unwrap(),
+            *boot_bytes.as_ref().unwrap()
+        );
+        assert_eq!(
+            native_read_bytes, 0,
+            "bootstrap must not read the denied N3 body"
+        );
+        assert!(
+            boot_selection.contains(&n3),
+            "cross-nonce bootstrap must preserve denied N3 by suspension"
+        );
+        assert_eq!(
+            boot_selection.nonce().as_deref(),
+            Some(n4_context.execution_nonce.as_str())
+        );
+        assert_eq!(
+            posts
+                .iter()
+                .filter(|post| post.as_str() == "held N4 answer")
+                .count(),
+            1,
+            "cross-nonce bootstrap must POST the fresh N4 answer exactly once: {posts:?}"
+        );
+        assert_eq!(
+            alarms
+                .iter()
+                .filter(|alarm| matches!(alarm,
+            WriterAlarm::WaitingTooLong { incident, .. }
+                if incident.starts_with("cross_nonce_boot_rescope:")))
+                .count(),
+            1,
+            "cross-nonce bootstrap rescope must raise one preservation warning: {alarms:?}"
+        );
+        eprintln!(
+            "BUNDLE_BOOTSTRAP_CHARACTERIZATION old_announced=true old_owed=0 ledger_pending=0 current_scope_n4=1 old_suspended=1 fresh_body_posts=1 old_cursor_preserved=1 old_bytes_preserved=1 old_read_bytes={native_read_bytes} cross_nonce_warnings=1"
+        );
+
+        // The installed N4 selection is an ordinary same-nonce restart, with no new warning.
+        let writer = harness.writer();
+        let restored_selection = writer.suspension.clone();
+        let (same_stop, same_stopped) = watch::channel(false);
+        let (same_resumed, same_ready) = watch::channel(false);
+        let same = tokio::spawn(run_channel(
+            writer,
+            ShadowProvider::Codex,
+            Arc::new(ChannelBindingLog::new(
+                CANARY_CHANNEL,
+                ShadowProvider::Codex,
+            )),
+            same_stopped,
+            same_resumed,
+        ));
+        polls(6).await;
+        let same_ready = *same_ready.borrow();
+        let same_alarms = harness.alarms.taken();
+        same_stop.send_replace(true);
+        assert_eq!(same.await.unwrap(), None);
+        assert!(
+            same_ready,
+            "an installed N4 selection must resume at the same nonce"
+        );
+        assert_eq!(
+            restored_selection.nonce().as_deref(),
+            Some(n4_context.execution_nonce.as_str())
+        );
+        assert!(restored_selection.contains(&n3));
+        assert_eq!(
+            harness.port.posts(),
+            posts,
+            "same-N4 restart must not duplicate the fresh answer"
+        );
+        assert_eq!(
+            same_alarms
+                .iter()
+                .filter(|alarm| matches!(alarm,
+            WriterAlarm::WaitingTooLong { incident, .. }
+                if incident.starts_with("cross_nonce_boot_rescope:")))
+                .count(),
+            0,
+            "same-N4 restart must not raise a cross-nonce preservation warning: {same_alarms:?}"
+        );
+        assert_eq!(harness.channel().cursor(&n3), Some(&before));
+        assert_eq!(
+            std::fs::read(&n3.path).unwrap(),
+            *boot_bytes.as_ref().unwrap()
+        );
+        assert_eq!(
+            io.stats().read_bytes,
+            0,
+            "same-N4 restart must not read the denied N3 body"
+        );
+        dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
+        dedupe::binding_events::set_test_root(None);
+        dedupe::reset_state_for_tests();
+        return;
     }
     assert_ne!(n4_context.execution_nonce, n3_context.execution_nonce);
     assert!(
@@ -565,7 +712,7 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
         CANARY_TMUX,
         &n3_context.execution_nonce,
         || {
-            assert_eq!(harness.port.posts(), ["Q1 before transition"]);
+            assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
             assert!(selection.contains(&n2));
             assert_eq!(alarm_count(), 0);
             let (context, n4) = proven(root.path());
@@ -579,7 +726,7 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
                 0,
                 "new_root_waiting must not clear while the transition job still exists"
             );
-            assert_eq!(harness.port.posts(), ["Q1 before transition"]);
+            assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
             assert_eq!(
                 selection.nonce().as_deref(),
                 Some(n3_context.execution_nonce.as_str()),
@@ -593,7 +740,12 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
     assert!(selection.contains(&n3));
     assert_eq!(
         harness.port.posts(),
-        ["Q1 before transition", "Q2 after transition"]
+        [
+            "Q1 before transition",
+            "-# ✅ 완료",
+            "Q2 after transition",
+            "-# ✅ 완료"
+        ]
     );
     assert_eq!(alarm_count(), 1, "resolving the hold must not re-alarm");
     assert_eq!(
@@ -795,7 +947,10 @@ async fn selection_install_fault(after_rename: bool) {
             Some(current.execution_nonce.as_str())
         );
         assert!(restored_selection.contains(&old));
-        assert_eq!(harness.port.posts(), ["answer after durable selection"]);
+        assert_eq!(
+            harness.port.posts(),
+            ["answer after durable selection", "-# ✅ 완료"]
+        );
         assert_eq!(std::fs::read(&selection_path).unwrap(), published);
     } else {
         assert!(
@@ -832,5 +987,15 @@ async fn selection_rename_sync_failure_restores_whole_record_before_fresh_post()
         "::selection_rename_sync_failure_restores_whole_record_before_fresh_post"
     )) {
         selection_install_fault(true).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bootstrap_cross_nonce_preserves_announced_source_and_warns_once() {
+    if crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::bootstrap_cross_nonce_preserves_announced_source_and_warns_once"
+    )) {
+        held_work(false, true, true).await;
     }
 }

@@ -275,7 +275,12 @@ pub(super) async fn repeat_absence(
     b1::wait_completion(&third_token).await;
     b1::wait_idle(fixture).await;
     eventually(
-        || output.texts().iter().any(|text| text.contains(THIRD_REPLY)),
+        || {
+            output
+                .texts()
+                .windows(2)
+                .any(|pair| pair[0].contains(THIRD_REPLY) && pair[1] == "-# ✅ 완료")
+        },
         "same O actor second fresh source HTTP POST",
     )
     .await;

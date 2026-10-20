@@ -79,8 +79,17 @@ pub(super) async fn restart(
                             ))
                         )
                     })
+                    && channel.ledger().piece(1).is_some_and(|piece| {
+                        piece.payload == "-# ✅ 완료"
+                            && matches!(
+                                piece.outcome,
+                                Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                                    _
+                                ))
+                            )
+                    })
             },
-            "the actual first POST ledger to settle before restart",
+            "the actual first body and summary ledger to settle before restart",
         )
         .await;
         assert_eq!(
@@ -90,7 +99,7 @@ pub(super) async fn restart(
                 .unwrap()
                 .ledger()
                 .next_serial(),
-            1
+            2
         );
         assert_eq!(
             output

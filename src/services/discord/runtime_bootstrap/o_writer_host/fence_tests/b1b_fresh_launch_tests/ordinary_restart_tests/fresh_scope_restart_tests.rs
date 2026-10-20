@@ -160,10 +160,9 @@ pub(super) async fn install(
         );
         eventually(
             || {
-                output
-                    .texts()
-                    .iter()
-                    .any(|text| text.contains(FIRST_INCARNATION_REPLY))
+                output.texts().windows(2).any(|pair| {
+                    pair[0].contains(FIRST_INCARNATION_REPLY) && pair[1] == "-# ✅ 완료"
+                })
             },
             "the actual N1 response POST before clear",
         )
@@ -217,7 +216,7 @@ pub(super) async fn install(
         eventually(
             || {
                 let channel = store.open_channel(era, CANARY_CHANNEL).unwrap().unwrap();
-                channel.ledger().unresolved().is_none() && channel.ledger().next_serial() == 3
+                channel.ledger().unresolved().is_none() && channel.ledger().next_serial() == 6
             },
             "both N2 actual responses to settle after actor selection install",
         )
@@ -228,9 +227,16 @@ pub(super) async fn install(
             &fixture.old_source
         ));
         assert_eq!(
-            output.texts().len(),
-            3,
-            "N1 and both actual fresh N2 responses must POST"
+            output.texts(),
+            [
+                FIRST_INCARNATION_REPLY,
+                "-# ✅ 완료",
+                FIRST_REPLY,
+                "-# ✅ 완료",
+                SECOND_REPLY,
+                "-# ✅ 완료"
+            ],
+            "N1 and both actual fresh N2 responses must each POST one body and summary"
         );
         Preserved {
             source: fixture.old_source.clone(),

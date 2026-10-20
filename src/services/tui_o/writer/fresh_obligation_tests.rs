@@ -142,7 +142,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
         assert!(live, "{obligation:?}: actor must hold rather than stop");
         if obligation == Obligation::None {
             assert!(ready);
-            assert_eq!(posts, ["fresh current answer"]);
+            assert_eq!(posts, ["fresh current answer", "-# ✅ 완료"]);
             assert_eq!(selection.nonce(), Some(current_context.execution_nonce));
             assert!(selection.contains(&old));
         } else {

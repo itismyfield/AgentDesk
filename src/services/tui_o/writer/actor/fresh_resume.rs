@@ -47,6 +47,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
         let quiescent = self.owed.is_empty()
             && !self.deriver.has_unsealed()
+            && !self.deriver.has_pending_projection_probe()
             && !self.writer.has_local_retry()
             && self.writer.resume_pieces().is_empty()
             && self.writer.store().ledger().unresolved().is_none()
@@ -86,9 +87,31 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             Ok(changed) => {
                 self.scope_hold = None;
                 if changed {
-                    self.deriver = UnitDeriver::new(
+                    let boot_cross_nonce =
+                        self.boot_previous_nonce.take().is_some_and(|previous| {
+                            selection.nonce().is_some_and(|current| current != previous)
+                        });
+                    #[cfg(test)]
+                    let boot_cross_nonce = boot_cross_nonce
+                        && !crate::services::claude_tui::source_verify::n2b_mutant(
+                            "b1b-boot-xnonce-alarm",
+                        );
+                    if boot_cross_nonce {
+                        tracing::warn!(
+                            channel,
+                            reason = "cross_nonce_boot_rescope",
+                            "[tui_o] previous incarnation remains suspended"
+                        );
+                        self.writer.alarm(WriterAlarm::WaitingTooLong {
+                            incident: format!("cross_nonce_boot_rescope:{}", uuid::Uuid::new_v4()),
+                            ready: self.owed.len(),
+                            prepared: None,
+                        });
+                    }
+                    self.deriver = configured_deriver(
                         channel,
                         crate::services::tui_o::shadow::ShadowProvider::Codex,
+                        self.writer.store().ledger(),
                     );
                 }
                 changed
@@ -130,4 +153,32 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         }
     }
+}
+
+/// Startup and incarnation rebuilds retain the same durable projection dispositions.
+pub(super) fn configured_deriver(
+    channel: u64,
+    provider: ShadowProvider,
+    ledger: &crate::services::tui_o::store::ledger::LedgerState,
+) -> UnitDeriver {
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-bare-deriver") {
+        return UnitDeriver::new(channel, provider);
+    }
+    let inputs = super::super::pieces::ToolCardInputs {
+        known: ledger.non_card_tool_keys(),
+        recorded_cards: ledger.card_tool_keys(),
+        switch: crate::services::tui_o::store::tool_card_switch::ToolCardSwitch::for_channel(
+            channel,
+        ),
+    };
+    let summary = super::super::pieces::SummaryInputs {
+        turn_marks: ledger.summary_turn_marks(),
+        disposed: ledger.disposed_unit_hashes(),
+        context_window: (provider == ShadowProvider::Claude)
+            .then(|| crate::services::provider::ProviderKind::Claude.resolve_context_window(None)),
+    };
+    UnitDeriver::new(channel, provider)
+        .with_tool_cards(inputs)
+        .with_turn_summary(summary)
 }

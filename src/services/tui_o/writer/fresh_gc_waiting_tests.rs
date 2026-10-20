@@ -127,7 +127,10 @@ async fn scenario(case: Case) {
             answer(&current, "gc first");
             answer(&current, "gc second");
             polls(10).await;
-            assert_eq!(harness.port.posts(), ["gc first", "gc second"]);
+            assert_eq!(
+                harness.port.posts(),
+                ["gc first", "-# ✅ 완료", "gc second", "-# ✅ 완료"]
+            );
             let current_store = harness.channel();
             assert!(
                 !current_store.ledger().gc_segments(&current).is_empty(),
@@ -154,7 +157,7 @@ async fn scenario(case: Case) {
             harness.gate.acquired();
             wake(&stop, Duration::ZERO).await;
             polls(4).await;
-            assert_eq!(harness.port.posts(), ["current waited"]);
+            assert_eq!(harness.port.posts(), ["current waited", "-# ✅ 완료"]);
             assert_eq!(
                 harness.alarms.cleared.load(Ordering::SeqCst),
                 1,

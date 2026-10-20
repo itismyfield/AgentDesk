@@ -320,7 +320,12 @@ async fn exercise(case: Case) {
                     assert!(*ready.borrow());
                     assert_eq!(
                         harness.port.posts(),
-                        ["resolved first answer", "same nonce warm answer"]
+                        [
+                            "resolved first answer",
+                            "-# ✅ 완료",
+                            "same nonce warm answer",
+                            "-# ✅ 완료"
+                        ]
                     );
                     assert_eq!(
                         selection.nonce().as_deref(),
@@ -409,7 +414,12 @@ async fn restart_after_warm(harness: &Harness, context: &BindingContext, root_se
         );
         assert_eq!(
             harness.port.posts(),
-            ["resolved first answer", "same nonce warm answer"],
+            [
+                "resolved first answer",
+                "-# ✅ 완료",
+                "same nonce warm answer",
+                "-# ✅ 완료"
+            ],
             "restart must not POST either settled current unit again",
         );
         answer(&warm.source, "current answer after warm restart");
@@ -418,8 +428,11 @@ async fn restart_after_warm(harness: &Harness, context: &BindingContext, root_se
             harness.port.posts(),
             [
                 "resolved first answer",
+                "-# ✅ 완료",
                 "same nonce warm answer",
-                "current answer after warm restart"
+                "-# ✅ 완료",
+                "current answer after warm restart",
+                "-# ✅ 완료"
             ],
             "the restored warm proof must still admit new current output exactly once",
         );

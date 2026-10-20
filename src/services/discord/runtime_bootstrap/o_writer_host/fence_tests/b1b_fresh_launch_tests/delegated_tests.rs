@@ -333,7 +333,12 @@ async fn drive_fifo(
     )
     .await;
     eventually(
-        || output.texts().iter().any(|text| text.contains(FIRST_REPLY)),
+        || {
+            output
+                .texts()
+                .windows(2)
+                .any(|pair| pair[0].contains(FIRST_REPLY) && pair[1] == "-# ✅ 완료")
+        },
         "delegated O Q1 POST",
     )
     .await;
@@ -382,8 +387,8 @@ async fn drive_fifo(
         || {
             output
                 .texts()
-                .iter()
-                .any(|text| text.contains(SECOND_REPLY))
+                .windows(2)
+                .any(|pair| pair[0].contains(SECOND_REPLY) && pair[1] == "-# ✅ 완료")
         },
         "delegated O Q2 POST",
     )
@@ -414,6 +419,10 @@ async fn drive_fifo(
     );
     assert_eq!(old_io.stats(), Default::default());
     assert!(new_io.stats().read_bytes > 0);
+    assert_eq!(
+        output.texts(),
+        [FIRST_REPLY, "-# ✅ 완료", SECOND_REPLY, "-# ✅ 완료"]
+    );
     done.store(true, Ordering::SeqCst);
 }
 

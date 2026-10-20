@@ -179,6 +179,7 @@ struct Actor<P, L, A, B> {
     waiting: Waiting,
     clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
     scope_hold: Option<&'static str>,
+    boot_previous_nonce: Option<String>,
 }
 
 #[derive(Default)]
@@ -253,24 +254,8 @@ where
     B: BindingEvents,
 {
     let mut writer = writer.with_repost_stop(stop.clone());
-    let channel = writer.channel();
-    let ledger = writer.store().ledger();
-    let inputs = super::pieces::ToolCardInputs {
-        known: ledger.non_card_tool_keys(),
-        recorded_cards: ledger.card_tool_keys(),
-        switch: crate::services::tui_o::store::tool_card_switch::ToolCardSwitch::for_channel(
-            channel,
-        ),
-    };
-    let summary = super::pieces::SummaryInputs {
-        turn_marks: ledger.summary_turn_marks(),
-        disposed: ledger.disposed_unit_hashes(),
-        context_window: (provider == ShadowProvider::Claude)
-            .then(|| crate::services::provider::ProviderKind::Claude.resolve_context_window(None)),
-    };
-    let deriver = UnitDeriver::new(channel, provider)
-        .with_tool_cards(inputs)
-        .with_turn_summary(summary);
+    let deriver =
+        fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
         .with_suspension(writer.suspension.clone());
     if let Some(readers) = readers {
@@ -290,6 +275,7 @@ where
         notice: None,
         waiting: Waiting::default(),
         scope_hold: None,
+        boot_previous_nonce: None,
         clock: (
             tokio::time::Instant::now(),
             utc.unwrap_or_else(chrono::Utc::now),
@@ -300,11 +286,30 @@ where
     #[cfg(test)]
     let restore =
         restore && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-selection-restore");
-    if restore && let Err(error) = selection.restore_current(actor.writer.store()) {
-        actor.writer.stop(WriterAlarm::Halted {
-            detail: format!("fresh selection restore: {error:?}"),
-        });
-        return actor.writer.stop_cause().cloned();
+    if restore {
+        match selection.restore_current(actor.writer.store()) {
+            Ok(restored) => {
+                if !restored
+                    && crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_eligible(
+                        actor.writer.channel(),
+                    )
+                {
+                    actor.boot_previous_nonce = actor
+                        .writer
+                        .store()
+                        .fresh_selection()
+                        .ok()
+                        .flatten()
+                        .map(|record| record.nonce);
+                }
+            }
+            Err(error) => {
+                actor.writer.stop(WriterAlarm::Halted {
+                    detail: format!("fresh selection restore: {error:?}"),
+                });
+                return actor.writer.stop_cause().cloned();
+            }
+        }
     }
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
@@ -326,6 +331,7 @@ where
             }
             sources_resumed = true;
             if !actor.writer.is_stopped() {
+                actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
                 resumed.send_replace(true);
             }
@@ -766,6 +772,7 @@ mod test_support {
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),
             scope_hold: None,
+            boot_previous_nonce: None,
         };
         actor
             .sources

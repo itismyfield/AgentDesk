@@ -583,16 +583,34 @@ async fn scenario(retained: bool, before: BeforeInput) {
         1
     );
     assert!(output.texts().iter().all(|text| !text.contains(OLD_REPLY)));
-    assert!(recovered.ledger().unresolved().is_none());
     assert_eq!(
-        recovered.ledger().next_serial(),
+        output
+            .texts()
+            .iter()
+            .filter(|text| text.as_str() == "-# ✅ 완료")
+            .count(),
         if matches!(before, BeforeInput::RepeatAbsent) {
             3
         } else {
             2
+        },
+        "each actual fresh response has one completion summary"
+    );
+    assert!(recovered.ledger().unresolved().is_none());
+    assert_eq!(
+        recovered.ledger().next_serial(),
+        if matches!(before, BeforeInput::RepeatAbsent) {
+            6
+        } else {
+            4
         }
     );
-    for (serial, reply) in [(0, FIRST_REPLY), (1, SECOND_REPLY)] {
+    for (serial, reply) in [
+        (0, FIRST_REPLY),
+        (1, "-# ✅ 완료"),
+        (2, SECOND_REPLY),
+        (3, "-# ✅ 완료"),
+    ] {
         let piece = recovered.ledger().piece(serial).unwrap();
         assert!(piece.payload.contains(reply));
         assert!(matches!(
@@ -797,7 +815,12 @@ async fn run_fifo(
     )
     .await;
     eventually(
-        || output.texts().iter().any(|text| text.contains(FIRST_REPLY)),
+        || {
+            output
+                .texts()
+                .windows(2)
+                .any(|pair| pair[0].contains(FIRST_REPLY) && pair[1] == "-# ✅ 완료")
+        },
         "actual O first HTTP POST",
     )
     .await;
@@ -867,8 +890,8 @@ async fn run_fifo(
         || {
             output
                 .texts()
-                .iter()
-                .any(|text| text.contains(SECOND_REPLY))
+                .windows(2)
+                .any(|pair| pair[0].contains(SECOND_REPLY) && pair[1] == "-# ✅ 완료")
         },
         "actual O second HTTP POST",
     )

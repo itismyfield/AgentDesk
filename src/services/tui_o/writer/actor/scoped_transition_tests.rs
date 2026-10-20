@@ -55,6 +55,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
             waiting: Waiting::default(),
             clock: (Instant::now(), chrono::Utc::now()),
             scope_hold: None,
+            boot_previous_nonce: None,
         };
         if freeze {
             actor
@@ -81,7 +82,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
 
 /// A preexisting operator job isolates the quiescence gate; Codex mailbox admission stays closed.
 pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
-    writer: ChannelWriter<P, L, A>,
+    mut writer: ChannelWriter<P, L, A>,
     bindings: Arc<B>,
     tmux: &str,
     initial_nonce: &str,
@@ -96,10 +97,15 @@ where
 {
     let channel = writer.channel();
     let suspension = writer.suspension.clone();
+    let deriver = super::super::fresh_resume::configured_deriver(
+        channel,
+        ShadowProvider::Codex,
+        writer.store().ledger(),
+    );
     let (_stop, stopped) = watch::channel(false);
     let mut actor = Actor {
         writer,
-        deriver: UnitDeriver::new(channel, ShadowProvider::Codex),
+        deriver,
         owed: VecDeque::new(),
         verified: None,
         sources: Sources::new(channel, ShadowProvider::Codex, bindings.clone())
@@ -110,6 +116,7 @@ where
         waiting: Waiting::default(),
         clock: (Instant::now(), chrono::Utc::now()),
         scope_hold: None,
+        boot_previous_nonce: None,
     };
     assert!(
         actor.rescope(),

@@ -7,6 +7,20 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, LocalRetryMark, PieceOu
 
 const PAYLOAD: &str = "ordinary verified canary saved piece";
 
+#[derive(Default)]
+struct RestartAlarms(std::sync::atomic::AtomicUsize);
+
+impl crate::services::tui_o::alarm::AlarmNotifier for RestartAlarms {
+    fn notify(
+        &self,
+        _alert_channel: u64,
+        _alarm: crate::services::tui_o::alarm::AlarmNotification,
+        _attempt: crate::services::tui_o::alarm::NotificationAttempt,
+    ) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 mod fresh_scope_restart_tests;
 
 #[derive(Clone, Copy)]
@@ -195,12 +209,18 @@ async fn restart_case(
     if let Some(fault) = fault {
         fresh_scope_restart_tests::corrupt(&fixture, fault);
     }
-    let prepared = parts(
+    let mut prepared = parts(
         &fixture.shared,
         &ProviderKind::Codex,
         None,
         Some(Arc::clone(&output.http)),
     );
+    let restart_alarms = Arc::new(RestartAlarms::default());
+    Arc::get_mut(&mut prepared.io).unwrap().alarms = Arc::new(AlarmRouter::new(
+        Some(CANARY_CHANNEL + 9900),
+        Some(restart_alarms.clone()),
+        Arc::new(crate::services::tui_o::alarm::AlarmHealth::default()),
+    ));
     prepared.gate.acquired();
     let readiness = host::process_readiness();
     let mut hosts = host::start_managed(
@@ -335,4 +355,9 @@ async fn restart_case(
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
+    assert_eq!(
+        restart_alarms.0.load(Ordering::SeqCst),
+        0,
+        "ordinary same-nonce restart must emit no operator alarm, including cross_nonce_boot_rescope"
+    );
 }

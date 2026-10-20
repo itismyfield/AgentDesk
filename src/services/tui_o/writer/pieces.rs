@@ -187,6 +187,17 @@ impl UnitDeriver {
         !self.seals.unsealed().is_empty()
     }
 
+    /// Projection buffers must be empty before a fresh-incarnation rebuild drops this deriver.
+    pub(super) fn has_pending_projection_probe(&self) -> bool {
+        self.cards
+            .as_ref()
+            .is_some_and(|run| run.has_pending_projection_probe())
+            || self
+                .summary
+                .as_ref()
+                .is_some_and(|run| run.has_pending_projection_probe())
+    }
+
     fn unit(
         &mut self,
         unit_key: UnitKey,
