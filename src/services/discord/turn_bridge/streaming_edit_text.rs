@@ -327,10 +327,7 @@ mod streaming_edit_text_tests {
             &ProviderKind::Codex,
         );
 
-        assert_eq!(
-            rendered,
-            "E2E-CODEX-1-OK\n- Working on the backend now\n\n⠙ 계속 처리 중"
-        );
+        assert_eq!(rendered, "E2E-CODEX-1-OK\n- Working on the backend now");
     }
 
     #[test]
@@ -342,7 +339,7 @@ mod streaming_edit_text_tests {
             &ProviderKind::Codex,
         );
 
-        assert_eq!(rendered, "Partial answer\n\n⠙ 계속 처리 중");
+        assert_eq!(rendered, "Partial answer");
     }
 
     #[test]
@@ -360,7 +357,7 @@ mod streaming_edit_text_tests {
         assert!(rendered.contains("Subagent completed"));
         assert!(rendered.contains("Read-only review complete."));
         assert!(rendered.contains("VERDICT: CLEAN"));
-        assert!(rendered.ends_with("⠙ 계속 처리 중"));
+        assert!(!rendered.contains("계속 처리 중"));
         assert!(!rendered.contains("<subagent_notification>"));
         assert!(!rendered.contains("agent_path"));
         assert!(!rendered.contains("/tmp/agent"));
@@ -416,7 +413,7 @@ mod streaming_edit_text_tests {
         let rendered =
             build_turn_bridge_streaming_edit_text(true, "", "⠙ 계속 처리 중", &ProviderKind::Codex);
 
-        assert_eq!(rendered, "⠙ 계속 처리 중");
+        assert_eq!(rendered, "⠋ 계속 처리 중");
     }
 
     // ---- #3813 Phase 1b: first-output fast-lane status-edit gate ----

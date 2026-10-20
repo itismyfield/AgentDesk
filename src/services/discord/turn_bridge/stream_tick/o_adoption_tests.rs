@@ -197,8 +197,8 @@ fn panel_with_last_tool(channel: ChannelId) -> Arc<SharedData> {
     shared
 }
 
-/// On O's channel the placeholder is the live panel: a status frame with the last tool and no
-/// body, edited under its own id whether or not O has posted below it.
+/// O-owned body bytes leave the Legacy placeholder untouched after status retirement.
+/// Its anchor identity stays stable even when O has posted below it.
 #[tokio::test(flavor = "current_thread")]
 async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
     let temp = tempfile::TempDir::new().expect("runtime root");
@@ -216,12 +216,14 @@ async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
             ..Default::default()
         });
         let shared = panel_with_last_tool(channel);
-        let state = tick_with(shared, channel, BODY, gateway.clone(), false, true).await;
+        let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+        let state = tick_with(shared, channel, BODY, gateway.clone(), false, footer).await;
         let edits = gateway.edits.lock().unwrap().clone();
         assert!(
-            matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
-            "{edits:?}"
+            edits.is_empty(),
+            "retired O footer makes no legacy panel PATCH: {edits:?}"
         );
+        assert_eq!(state.response_sent_offset, BODY.len());
         assert!(
             gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty()
         );
@@ -229,8 +231,8 @@ async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
     }
 }
 
-/// The last tick that shows a still unshown tool edits it into the panel in place, though O has
-/// posted below it.
+/// A terminal tick also leaves O's Legacy placeholder untouched after status retirement.
+/// O still owns and consumes the full body range.
 #[tokio::test(flavor = "current_thread")]
 async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
     let temp = tempfile::TempDir::new().expect("runtime root");
@@ -244,12 +246,14 @@ async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
         ..Default::default()
     });
     let shared = panel_with_last_tool(channel);
-    let state = tick_with(shared, channel, BODY, gateway.clone(), true, true).await;
+    let footer = crate::services::discord::turn_bridge::single_message_footer::bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled);
+    let state = tick_with(shared, channel, BODY, gateway.clone(), true, footer).await;
     let edits = gateway.edits.lock().unwrap().clone();
     assert!(
-        matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
-        "{edits:?}"
+        edits.is_empty(),
+        "retired O footer makes no legacy panel PATCH: {edits:?}"
     );
+    assert_eq!(state.response_sent_offset, BODY.len());
     assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
     assert_eq!(state.current_msg_id, 18);
 }

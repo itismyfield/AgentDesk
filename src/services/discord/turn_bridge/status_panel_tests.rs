@@ -7,6 +7,7 @@ use super::{
     status_panel_completion_ready_after_terminal_body, status_panel_message_id_for_turn,
     status_panel_wip_inflight_for_completion,
 };
+use crate::services::discord::footer_retirement::legacy_for_test;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::{
@@ -23,7 +24,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-
 type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 struct StatusPanelFallbackGateway {
@@ -678,7 +678,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(1509350490461180105);
     let mut last_status_panel_text = String::new();
-
+    let _legacy = legacy_for_test();
     if status_panel_completion_ready_after_terminal_body(true, false, false) {
         let _ = complete_status_panel_v2(
             shared.as_ref(),
@@ -782,7 +782,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(5_464_341);
     let user_msg_id = 5_464_342;
-    let panel_msg_id = MessageId::new(9_100_000_000_000_000_341);
+    let panel_msg_id = MessageId::new(5_464_346);
     let successor = Arc::new(CancelToken::new());
     assert!(
         crate::services::discord::mailbox_try_start_turn_kinded(
@@ -860,7 +860,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             permitted_channel,
             MessageId::new(user_msg_id),
             Some(MessageId::new(user_msg_id)),
-            None,
+            Some(panel_msg_id),
             &provider,
             1_700_000_000,
             &mut permitted_text,
@@ -877,15 +877,10 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
         .await
     );
     assert!(!permitted_text.is_empty());
-    assert_eq!(
-        permitted_gateway
-            .sent_messages
-            .lock()
-            .expect("sent messages lock")
-            .len(),
-        1,
-        "the permits=true control must exercise the same two-message effect arm"
-    );
+    let sends = permitted_gateway.sent_messages.lock().unwrap();
+    let edits = permitted_gateway.edited_message_ids.lock().unwrap();
+    assert!(sends.is_empty(), "retired completion creates no panel");
+    assert_eq!(*edits, [panel_msg_id], "the owned existing panel is edited");
 }
 
 #[tokio::test]
@@ -1020,7 +1015,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(1509350490461180105);
     let mut last_status_panel_text = String::new();
-
+    let _legacy = legacy_for_test();
     let committed = complete_status_panel_v2(
         shared.as_ref(),
         &gateway,
@@ -1093,7 +1088,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
     fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
 
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-
+    let _legacy = legacy_for_test();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
@@ -1176,7 +1171,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
         return;
     };
     fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
-
+    let _legacy = legacy_for_test();
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_status_panel_v2_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
@@ -1416,7 +1411,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
     let channel_id = ChannelId::new(1509350490461180105);
     let stale_status_msg_id = MessageId::new(1_500_000_000_000_111);
     let mut last_status_panel_text = String::new();
-
+    let _legacy = legacy_for_test();
     let committed = complete_status_panel_v2(
         shared.as_ref(),
         &gateway,

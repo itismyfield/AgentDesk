@@ -8,11 +8,13 @@ directory. Reclassifying live scenarios as fixtures is separate work.
 
 ## Classification and CI evidence
 
-The current inventory is **41 YAML files: 36 live, 2 fixture, 3 unsupported**.
+The current inventory is **41 active YAML files: 36 live, 2 fixture, 3 unsupported**.
 The [original audit in #6026](https://github.com/itismyfield/AgentDesk/issues/6026)
 counted 35 files, including 30 live specifications; those counts are historical.
-The six live specifications added since (`E-37`, `E-50`–`E-54`) account for the
-difference; fixture and known-gap counts are unchanged.
+The six live specifications added since (`E-37`, `E-50`–`E-54`), retirement of
+`E-32`–`E-34`, and addition of `E-60`–`E-62` account for the difference. Retired
+manual specifications are archived in `retired/` and excluded from the active
+top-level scan; fixture and known-gap counts are unchanged.
 
 | `coverage_class` | Meaning | CI execution |
 | --- | --- | --- |

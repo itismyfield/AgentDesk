@@ -63,3 +63,45 @@ pub(crate) async fn send_command_confirmation_message(
 fn confirmation_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     std::io::Error::other(message.into()).into()
 }
+
+pub(in crate::services::discord) async fn send_terminal_notice<G>(
+    gateway: &G,
+    channel_id: ChannelId,
+    content: &str,
+) -> Result<MessageId, String>
+where
+    G: crate::services::discord::gateway::TurnGateway + ?Sized,
+{
+    gateway.send_notice_once(channel_id, content).await
+}
+
+pub(in crate::services::discord) async fn send_terminal_notice_http_once(
+    http: &poise::serenity_prelude::Http,
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    channel_id: ChannelId,
+    content: &str,
+) -> Result<MessageId, String> {
+    // The producer consumes its latch before sending, including an uncertain response.
+    // Keep SDK rate-limit retries and client redirects/retries out of this attempt.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut builder = poise::serenity_prelude::HttpBuilder::new(http.token())
+        .client(client)
+        .ratelimiter_disabled(true);
+    if let Some(proxy) = &http.proxy {
+        builder = builder.proxy(proxy);
+    }
+    let notice_http = builder.build();
+    crate::services::discord::rate_limit_wait(shared, channel_id).await;
+    crate::services::discord::http::send_channel_message(&notice_http, channel_id, content)
+        .await
+        .map(|message| message.id)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+#[path = "confirmation/terminal_notice_tests.rs"]
+mod terminal_notice_tests;

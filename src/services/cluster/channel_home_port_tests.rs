@@ -414,7 +414,8 @@ mod hosted {
 
         scene.gate.lost();
         append(&scene.transcript, &row("m1", "one"));
-        assert_eq!(port.owed().await, owed(1), "held while not Owned");
+        // The first body also owes its durable turn-summary opening mark.
+        assert_eq!(port.owed().await, owed(2), "held body and opening mark");
         let full = fault::plant(&scene.spool(), At::Append(Keep::Nothing), StorageFull, None);
         append(&scene.transcript, &row("m2", "two"));
         scene.until(Scene::halted).await;

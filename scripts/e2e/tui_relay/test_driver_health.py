@@ -3429,6 +3429,14 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         path = next((ROOT / "tests/e2e/tui_relay/scenarios").glob(f"{scenario_id}-*.yaml"))
         return driver.yaml.safe_load(path.read_text())
 
+    def feature_fixture(self, name="E-FEATURE", *, scenario_gate=True):
+        scenario = self.scenario(name)
+        if scenario_gate:
+            scenario["requires_features"] = ["two_message_panel", "e2e_discord_control"]
+        else:
+            scenario["assertions"] = [{"requires_feature": "two_message_panel", "single_status_panel": True}]
+        return scenario
+
     def test_phase_entry_lease_error_counts_unevaluable(self):
         self.args.phase_deadline_s = 1
         with patch.object(driver.lease, "acquire", side_effect=OSError("offline lease unavailable")), patch.object(
@@ -3452,41 +3460,30 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
         self.assertIsNone(outcome["passed"])
         self.assertEqual(outcome["required_feature"], "two_message_panel")
 
-    def test_e9_e15_off_on_and_broken_panel_use_real_oracles(self):
+    def test_e9_e15_require_summary_and_reject_retired_panels_without_feature_gates(self):
         self.stub(driver, "restart_dcserver_for_e2e")
         self.stub(driver, "assert_health", return_value={"status": "healthy"})
         for scenario_id in ("E-9", "E-15"):
-            for enabled, panel in ((False, "absent"), (True, "valid"), (True, "absent"), (True, "duplicate")):
-                with self.subTest(scenario=scenario_id, enabled=enabled, panel=panel):
+            for terminal in ("-# ✅ 1분", "absent", "✅ 응답 완료"):
+                with self.subTest(scenario=scenario_id, terminal=terminal):
                     self.client.send_prompt.reset_mock()
                     markers = (["[E2E:E9:STREAM_OK]", "[E2E:E9:END]"] if scenario_id == "E-9" else
                                ["[E2E:E15:BEGIN]", "E15-LINE-010", "[E2E:E15:MID]", "E15-LINE-150", "[E2E:E15:END]"])
-                    rows = [{"id": "120", "content": "\n".join(markers), "author": {"id": "provider", "bot": True}}]
-                    if panel != "absent":
-                        rows.append({"id": "130", "content": "✅ 응답 완료", "author": {"id": "provider", "bot": True}})
-                    if panel == "duplicate":
-                        rows.append({**rows[-1], "id": "140"})
+                    stamp = driver.dt.datetime.now(driver.dt.timezone.utc)
+                    rows = [{"id": "120", "content": "\n".join(markers), "timestamp": (stamp + driver.dt.timedelta(seconds=1)).isoformat(),
+                             "author": {"id": "provider", "bot": True}}]
+                    if terminal != "absent":
+                        rows.append({**rows[0], "id": "130", "content": terminal, "timestamp": (stamp + driver.dt.timedelta(seconds=2)).isoformat()})
                     self.client.fetch_messages.side_effect = lambda *a, **k: [
-                        r for r in rows if self.client.send_prompt.called and int(r["id"]) > int(k.get("after_id") or 0)]
-                    with patch.dict(driver.os.environ, {"AGENTDESK_E2E_FEATURES": "two_message_panel" if enabled else ""}):
-                        rc, report, _ = self.main_result(self.load(scenario_id))
+                        row for row in rows if self.client.send_prompt.called and int(row["id"]) > int(k.get("after_id") or 0)]
+                    rc, report, _ = self.main_result(self.load(scenario_id))
                     result = report["scenarios"][0]
-                    gated = [r for r in result["assertions"] if r.get("spec", {}).get("requires_feature")]
-                    expected_pass = not enabled or panel == "valid"
-                    self.assertEqual((rc, result["status"]), (0, "pass") if expected_pass else (1, "fail"))
-                    if expected_pass:
-                        self.assertEqual(sum(r.get("passed") is True for r in gated), 2 if enabled else 0)
-                        self.assertEqual(sum(r.get("status") == "skipped" for r in gated), 0 if enabled else 2)
-                        self.assertEqual(result["assertion_coverage"], "complete" if enabled else "partial")
-                    else:
-                        self.assertEqual(sum(r.get("status") == "fail" for r in gated), 1)
-                        self.assertEqual(result["assertion_totals"]["fail"], 1)
-                        self.assertEqual(result["assertion_coverage"], "partial")
-                    self.assertEqual(report["totals"]["executed"], 1)
-                    self.assertEqual(report["totals"]["skipped_assertions"], 0 if enabled else 2)
+                    self.assertEqual((rc, result["status"]), (0, "pass") if terminal == "-# ✅ 1분" else (1, "fail"), result)
+                    self.assertEqual(report["totals"]["skipped_assertions"], 0)
+                    self.assertFalse(any(row.get("spec", {}).get("requires_feature") for row in result["assertions"]))
 
-    def test_e32_e34_dormant_and_unknown_are_disjoint(self):
-        scenarios = [self.load(f"E-{i}") for i in (32, 33, 34)]
+    def test_generic_feature_dormancy_and_unknown_are_disjoint(self):
+        scenarios = [self.feature_fixture(f"E-FEATURE-{i}") for i in (1, 2, 3)]
         with patch.dict(driver.os.environ, {"AGENTDESK_E2E_FEATURES": ""}):
             rc, report, _ = self.main_result(*scenarios)
         self.assertEqual(rc, 0)
@@ -3502,8 +3499,8 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
     def test_missing_malformed_unreadable_features_stop_without_dormancy(self):
         real_get = driver.os.environ.get
         for value in (None, "two_message_panel,,bad", OSError("feature evidence unreadable")):
-            for scenario_id in ("E-15", "E-32"):
-                with self.subTest(value=value, scenario=scenario_id):
+            for scenario_gate in (False, True):
+                with self.subTest(value=value, scenario_gate=scenario_gate):
                     def get(key, default=None):
                         if key == "AGENTDESK_E2E_FEATURES":
                             if isinstance(value, Exception):
@@ -3513,7 +3510,7 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
                     with patch.object(driver.os.environ, "get", side_effect=get), patch.object(
                         driver, "run_one_cell", side_effect=AssertionError("feature preflight must refuse execution")
                     ):
-                        rc, report, _ = self.main_result(self.load(scenario_id), self.scenario("E-NEXT"))
+                        rc, report, _ = self.main_result(self.feature_fixture(scenario_gate=scenario_gate), self.scenario("E-NEXT"))
                     self.assertEqual((rc, len(report["scenarios"])), (1, 1))
                     self.assert_unevaluable(report["scenarios"][0])
                     self.assertEqual(report["totals"]["dormant"], 0)
@@ -3523,7 +3520,7 @@ class FeatureOutcomeContract(_OutcomeFixture, unittest.TestCase):
     def test_dormant_cannot_satisfy_required_observed_coverage(self):
         for field, required in (("required_agent_mode", "real_live"), ("required_coverage_class", "live")):
             with self.subTest(field=field), patch.object(self.args, field, required), patch.dict(driver.os.environ, {"AGENTDESK_E2E_FEATURES": ""}):
-                rc, report, _ = self.main_result(self.load("E-32"))
+                rc, report, _ = self.main_result(self.feature_fixture())
             self.assertEqual((rc, report["scenarios"][0]["status"]), (1, "fail"))
             self.assertEqual(report["totals"]["executed"], 0)
             self.assertEqual(report["totals"]["dormant"], 1)

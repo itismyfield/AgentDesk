@@ -15,6 +15,42 @@ use crate::services::provider::CancelToken;
 
 mod replay_turn_tests;
 
+pub(super) fn assert_completed_summary(summary: &str) {
+    let shape =
+        regex::Regex::new(r"\A-# ✅ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)\z")
+            .unwrap();
+    assert!(
+        shape.is_match(summary),
+        "unexpected terminal notice: {summary:?}"
+    );
+}
+
+pub(super) fn assert_body_and_summary(shown: &[String], body: &str, summary: bool) {
+    assert_eq!(shown.len(), 1 + usize::from(summary), "{shown:?}");
+    assert_eq!(shown[0], body, "{shown:?}");
+    if summary {
+        assert_completed_summary(&shown[1]);
+    }
+}
+
+pub(super) fn assert_terminal_publications(driver: &TerminalDeliveryDriver, summary: bool) {
+    let bodies = driver.published_bodies.lock().unwrap();
+    assert_eq!(driver.completed_publications(), bodies.len());
+    assert_body_and_summary(&bodies, DRIVER_BODY, summary);
+}
+
+pub(super) fn assert_panel_completion_publications(
+    driver: &TerminalDeliveryDriver,
+    o_channel: bool,
+) {
+    if o_channel {
+        assert_eq!(driver.completed_publications(), 0);
+        assert!(driver.published_bodies.lock().unwrap().is_empty());
+    } else {
+        assert_terminal_publications(driver, true);
+    }
+}
+
 /// Counts retry-with-history scheduling and records the placeholder edits and replacements.
 struct RetryCounter(Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>);
 
@@ -25,6 +61,16 @@ impl TurnGateway for RetryCounter {
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         panic!("recovery retry must not send a message")
+    }
+
+    fn send_notice_once<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        assert_completed_summary(content);
+        self.1.lock().unwrap().push(content.to_string());
+        Box::pin(async { Ok(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID)) })
     }
 
     fn edit_message<'a>(
@@ -481,7 +527,20 @@ async fn resume_failure_turn(
         calls.iter().filter(|(path, _)| path == clear).count()
     };
     let terminal_clears = clears(api);
+    let expects_summary = output.terminal_delivery_committed
+        && output.status_panel_terminal_committed
+        && output.bridge_should_emit_completion;
     run_bridge_postlude(&driver, output, trigger).await;
+    assert_eq!(
+        edits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|text| text.starts_with("-# "))
+            .count(),
+        usize::from(expects_summary),
+        "one notice only after the committed terminal projection"
+    );
 
     let core_sid = shared.core.lock().await.sessions[&channel_id]
         .session_id

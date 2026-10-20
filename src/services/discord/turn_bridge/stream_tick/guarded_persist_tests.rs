@@ -1083,7 +1083,7 @@ fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
     );
 
     let rollover_send = production_tick
-        .find("TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block)")
+        .find("TurnGateway::send_message(gateway.as_ref(), channel_id, visible_anchor)")
         .expect("rollover creates a fresh tail candidate");
     let immediate_rollover_bind = production_tick[rollover_send..]
         .find("turn_bridge::stream_tick::rollover_candidate_bind")
