@@ -577,6 +577,12 @@ fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
     }
 }
 
+// Fake tmux subprocesses can be delayed by compiler load; use the production receipt window.
+const MULTILINE_TIMING: Timing = Timing {
+    confirm_window: Duration::from_secs(3),
+    ..FAST
+};
+
 fn multiline_payload() -> String {
     format!(
         "Please inspect these files:\n{}\n\n  Preserve this indentation.\nReport one result per file.",
@@ -616,7 +622,7 @@ fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
             )
             .unwrap();
             assert_eq!(
-                fake.run_text(&payload, &FAST),
+                fake.run_text(&payload, &MULTILINE_TIMING),
                 Outcome::Injected,
                 "{record}"
             );
@@ -658,7 +664,7 @@ fn multiline_folded_paste_keeps_foreign_input_contaminated() {
             fake.caps(&[busy_empty(), screen(&folded, "")]);
             fs::write(fake.dir.path().join("on_enter"), enqueue_record(&body)).unwrap();
             assert_eq!(
-                fake.run_text(&payload, &FAST),
+                fake.run_text(&payload, &MULTILINE_TIMING),
                 Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
                 "{body}"
             );

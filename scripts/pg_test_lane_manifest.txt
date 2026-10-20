@@ -196,6 +196,7 @@ src/services/discord/router/intake_dispatch/replay_admission_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
+src/services/discord/router/intake_gate/busy_inject/payload_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
@@ -560,6 +561,7 @@ services::discord::router::intake_dispatch::replay_admission_tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_dispatch::tests::codex_turn_hold
 services::discord::router::intake_dispatch::tests::replay_hold
+services::discord::router::intake_gate::busy_inject::payload_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -1921,6 +1923,12 @@ services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_
 services::discord::router::intake_dispatch::tests::replay_hold::replay_admission_dormant_and_other_identity_keeps_local_policy_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::multiline_input_chunks_match_normal_turn_and_confirm_native_padding_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::multiple_attachment_input_chunks_match_normal_turn_and_confirm_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::one_attachment_input_chunks_match_normal_turn_and_confirm_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::retained_bundle_files_outlive_preparation_and_confirm_as_normal_input_chunks_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg

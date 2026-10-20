@@ -1530,9 +1530,12 @@ src/
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
+│   │   │   │   ├── busy_inject/
+│   │   │   │   │   └── payload_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
+│   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
@@ -1541,7 +1544,11 @@ src/
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
 │   │   │   │   └── thread_guard_release.rs
+│   │   │   ├── intake_queue_transaction/
+│   │   │   │   └── queue_payload.rs
 │   │   │   ├── message_handler/
+│   │   │   │   ├── attachments/
+│   │   │   │   │   └── busy_inject.rs
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs

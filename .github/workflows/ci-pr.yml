@@ -406,6 +406,7 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs'
               - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
+              - 'src/services/discord/router/intake_gate/busy_inject/payload_tests.rs'
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
