@@ -467,10 +467,10 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
                 );
                 let next =
                     begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
-                assert!(
-                    matches!(next, CommandStop::Native(_)),
-                    "a new native identity cannot reuse the previous proof"
-                );
+                let CommandStop::Native(next) = next else {
+                    panic!("a new native identity cannot reuse the previous proof");
+                };
+                assert_eq!(next.wire()["effect_started"], false);
                 assert!(!token.cancelled.load(Ordering::Acquire));
                 assert!(
                     !fx.take_calls()
