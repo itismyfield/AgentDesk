@@ -170,7 +170,7 @@ fn retired_hold_permission_error_keeps_the_hold() {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(&path, "N1 hold").unwrap();
     let fault = SyncFault::new(&path);
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o0)).unwrap();
     let result = release("permission-n1");
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
