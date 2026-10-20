@@ -249,13 +249,33 @@ async fn restart_case(
         if fresh {
             fresh_scope_restart_tests::assert_selection(&fixture);
         }
-        eventually(
-            || readiness.accepts(CANARY_CHANNEL),
-            "ordinary verified source restoration",
-        )
-        .await;
+        for _ in 0..2000 {
+            if readiness.accepts(CANARY_CHANNEL) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let accepts = readiness.accepts(CANARY_CHANNEL);
+        let route = cutover::intake_route::for_input_placement("codex", CANARY_CHANNEL).await;
+        let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+        let posts = output.texts();
+        let saved_posts = posts.iter().filter(|text| text.as_str() == PAYLOAD).count();
+        assert!(
+            accepts,
+            "P1-1R: installed suspension must restore ordinary delivery; \
+             accepts={accepts} route={route:?} posts={} saved_posts={saved_posts} \
+             next_serial={} unresolved={:?} approval_consumed={:?}",
+            posts.len(),
+            channel.ledger().next_serial(),
+            channel.ledger().unresolved().map(|(serial, _)| serial),
+            channel
+                .ledger()
+                .approval(blocked_serial)
+                .map(|approval| approval.consumed_serial),
+        );
+        drop(channel);
         assert_eq!(
-            cutover::intake_route::for_input_placement("codex", CANARY_CHANNEL).await,
+            route,
             cutover::intake_route::IntakeRoute::Gateway,
             "normal verified recovery must admit input through the existing writer gate"
         );
