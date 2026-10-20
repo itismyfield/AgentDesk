@@ -16,42 +16,6 @@ fn canonical_dispatch_status_set_rejects_typos() {
 }
 
 #[test]
-fn task_dispatches_status_check_migration_quarantines_unknown_statuses() {
-    let sql = include_str!("../../../migrations/postgres/0067_task_dispatches_status_check.sql");
-    assert!(
-        sql.contains("ELSE 'failed'"),
-        "dirty historical task_dispatches.status values must converge before CHECK install"
-    );
-    assert!(sql.contains("task_dispatches_status_known_check"));
-}
-
-#[test]
-fn core_status_check_migration_normalizes_before_constraining() {
-    let sql = include_str!("../../../migrations/postgres/0068_core_status_constraints.sql");
-    let final_sql = include_str!("../../../migrations/postgres/0089_drop_agent_archive.sql");
-    assert!(
-        sql.contains("agents_status_known_check")
-            && sql.contains("status IN ('idle', 'working', 'archived')"),
-        "the immutable core migration must retain its original closed CHECK"
-    );
-    assert!(
-        final_sql.contains("WHERE status = 'archived'")
-            && final_sql.contains("status IN ('idle', 'working')"),
-        "the archive removal migration must normalize archived agents before narrowing the CHECK"
-    );
-    assert!(
-        sql.contains("WHEN lower(btrim(status)) IN ('active') THEN 'idle'"),
-        "legacy onboarding agents.status='active' must normalize to canonical idle before CHECK install"
-    );
-    assert!(
-        sql.contains("kanban_cards_status_slug_check")
-            && sql.contains("regexp_replace(lower(btrim(status))")
-            && sql.contains("qa_test"),
-        "kanban_cards.status must normalize fixture/runtime states before slug CHECK install"
-    );
-}
-
-#[test]
 fn review_enabled_work_dispatches_hold_auto_queue_entry_until_card_terminal() {
     let result = serde_json::json!({"summary": "implemented"});
 

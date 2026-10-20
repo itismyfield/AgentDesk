@@ -1494,6 +1494,8 @@ fn infer_phase_gate_verdict(
 #[cfg(test)]
 mod auto_queue_terminal_sync_policy_tests;
 #[cfg(test)]
+mod migration_value_pg_tests;
+#[cfg(test)]
 mod terminal_timestamp_tests;
 
 #[cfg(test)]
