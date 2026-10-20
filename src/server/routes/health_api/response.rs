@@ -239,12 +239,18 @@ async fn assemble(
             .as_ref()
             .map(|kv| kv.dispatch_gate_overrides())
             .unwrap_or((None, None));
-        json["rate_limit_dispatch_gate"] =
+        let mut gate =
             serde_json::to_value(crate::services::dispatch_gate::diagnostics_with_overrides(
                 gate_enabled_override,
                 gate_danger_override,
             ))
             .unwrap_or_else(|_| serde_json::json!({}));
+        // A cut kv read leaves the persisted overrides unknown, so no fallback is shown as effective.
+        if let (None, Some(gate)) = (&kv, gate.as_object_mut()) {
+            gate.remove("enabled");
+            gate.remove("danger_pct");
+        }
+        json["rate_limit_dispatch_gate"] = gate;
         json["delivery_record_rollout"] = delivery_record_rollout_health_json();
         json["release_source"] = release_source;
         attach_runtime_profile(&mut json, &state.config);
@@ -356,3 +362,7 @@ async fn assemble(
         (status, Json(json)).into_response()
     }
 }
+
+#[cfg(test)]
+#[path = "kv_gate_tests.rs"]
+mod kv_gate_tests;

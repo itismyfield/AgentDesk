@@ -12,7 +12,20 @@ pub(super) fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
         .with_subsystem("dispatch_outbox")
         .with_fix_safety(FixSafety::NotFixable);
     };
-    let stats = body.get("dispatch_outbox");
+    // A missing block is a read cut at the health deadline, not an empty outbox.
+    let Some(stats) = body
+        .get("dispatch_outbox")
+        .filter(|stats| stats.is_object())
+    else {
+        let issue = health::measurement::FieldIssue::new(
+            "dispatch_outbox",
+            body.get("dispatch_outbox"),
+            "object",
+        );
+        return observation_checks::unmeasured_check("dispatch_outbox", &issue)
+            .with_path(health_detail_endpoint(&snapshot.base));
+    };
+    let stats = Some(stats);
     let pending = stats
         .and_then(|v| v.get("pending"))
         .and_then(Value::as_i64)
@@ -82,3 +95,7 @@ pub(super) fn check_dispatch_outbox(snapshot: &HealthSnapshot) -> Check {
         .with_evidence(evidence)
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "dispatch_outbox_tests.rs"]
+mod tests;
