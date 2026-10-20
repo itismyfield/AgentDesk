@@ -34,6 +34,8 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── dispatch_outbox.rs
+│   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
 │   │   │   ├── observation_checks.rs
@@ -412,6 +414,7 @@ src/
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
+│   │   │   ├── kv_gate_tests.rs
 │   │   │   ├── public_projection.rs
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
@@ -1044,6 +1047,7 @@ src/
 │   │   │   │   │   │   └── tests/
 │   │   │   │   │   │       └── mod.rs
 │   │   │   │   │   ├── tests/
+│   │   │   │   │   │   ├── health_response.rs
 │   │   │   │   │   │   └── mod.rs
 │   │   │   │   │   ├── driver.rs
 │   │   │   │   │   └── policy.rs
@@ -1071,6 +1075,9 @@ src/
 │   │   │   │   ├── refusal_dispatch_tests.rs
 │   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
+│   │   │   │   ├── health_observation.rs
+│   │   │   │   ├── health_observation_pg_tests.rs
+│   │   │   │   ├── health_observation_tests.rs
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs

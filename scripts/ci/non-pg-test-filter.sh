@@ -16,6 +16,7 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::doctor::orchestrator::dispatch_outbox::tests
   --skip cli::doctor::orchestrator::observation_tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
@@ -56,6 +57,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::escalation::manual_decision_gate_tests
   --skip server::routes::health_api::db_deadline_tests
   --skip server::routes::health_api::host_guard_tests
+  --skip server::routes::health_api::response::kv_gate_tests
   --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
@@ -107,6 +109,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
+  --skip services::discord::health::recovery::self_watchdog::tests::health_response
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject::herdr::tests
