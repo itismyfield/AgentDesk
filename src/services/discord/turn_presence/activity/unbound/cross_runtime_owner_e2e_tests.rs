@@ -58,7 +58,8 @@ pub(super) fn isolated(test: &str) -> bool {
     if std::env::var(CHILD).ok().as_deref() == Some(test) {
         return true;
     }
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    use std::io::Read;
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture", "--test-threads=1"])
         .env(CHILD, test)
         .env(
@@ -72,15 +73,48 @@ pub(super) fn isolated(test: &str) -> bool {
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("AGENTDESK_CONFIG")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    let collect = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = collect(Box::new(child.stdout.take().unwrap()));
+    let stderr = collect(Box::new(child.stderr.take().unwrap()));
+    let began = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if began.elapsed() >= Duration::from_secs(300) {
+            timed_out = true;
+            child.kill().unwrap();
+            break child.wait().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
     let logs = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     eprintln!("{logs}");
-    assert!(result.status.success(), "{logs}");
+    if timed_out {
+        eprintln!("A2_ISOLATED_BOUND timed_out=true limit_ms=300000 test={test}");
+    }
+    assert!(
+        !timed_out,
+        "isolated owner test exceeded its OS bound: {logs}"
+    );
+    assert!(status.success(), "{logs}");
     assert!(
         logs.contains("1 passed; 0 failed; 0 ignored;"),
         "child did not execute exactly one test: {logs}"
@@ -172,7 +206,14 @@ pub(super) struct Fixture {
     _turn: TestConfirmation,
 }
 impl Fixture {
+    pub(super) fn spawn_watcher<F>(&self, future: F) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(future)
+    }
     pub(super) async fn connect_and_migrate_fixture(id: u64, provider: ProviderKind) -> Self {
+        eprintln!("A2_PREP fixture_start channel={id}");
         let _ = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
@@ -181,7 +222,15 @@ impl Fixture {
         let live = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
         );
+        eprintln!("A2_PREP migrate_start channel={id}");
         let mut rig = Rig::with_live_guard(id, false, false, live).await;
+        eprintln!("A2_PREP migrate_done channel={id}");
+        if crate::services::claude_tui::source_verify::n2b_mutant("a2-prep-stall") {
+            eprintln!("A2_PREP forced_stall channel={id}");
+            loop {
+                std::thread::park();
+            }
+        }
         let registry = Arc::new(HealthRegistry::new());
         let root = rig.root.path();
         let config_path = crate::runtime_layout::config_file_path(root);

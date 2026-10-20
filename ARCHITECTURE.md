@@ -2340,7 +2340,8 @@ src/
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
 │   │   │   │   │   ├── stale_binding_tests.rs
 │   │   │   │   │   ├── superseded_measurement_tests.rs
-│   │   │   │   │   └── unit_tests.rs
+│   │   │   │   │   ├── unit_tests.rs
+│   │   │   │   │   └── watcher_runtime_tests.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
 │   │   │   │   ├── tail_tests.rs

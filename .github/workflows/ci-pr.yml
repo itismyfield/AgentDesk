@@ -534,6 +534,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/superseded_measurement_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/watcher_runtime_tests.rs'
               - 'src/services/discord/turn_presence/activity_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'

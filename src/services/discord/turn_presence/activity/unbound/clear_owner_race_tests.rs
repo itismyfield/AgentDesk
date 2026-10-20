@@ -10,6 +10,8 @@ use std::sync::mpsc;
 
 #[path = "midread_owner_tests.rs"]
 mod midread_owner_tests;
+#[path = "watcher_runtime_tests.rs"]
+mod watcher_runtime_tests;
 
 const DRAIN_LIMIT: Duration = Duration::from_secs(3 * 6);
 
@@ -165,7 +167,9 @@ async fn until(mut ready: impl AsyncFnMut() -> bool) {
 }
 
 impl Fixture {
-    async fn attach_old_watcher(&self) -> tokio::task::JoinHandle<()> {
+    async fn prepare_old_watcher(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
         let name = self.rig.shared.core.lock().await.sessions[&self.rig.channel]
             .channel_name
             .clone()
@@ -212,7 +216,7 @@ impl Fixture {
             handle.last_heartbeat_ts_ms.clone(),
         );
         drop(handle);
-        let task = tokio::spawn(
+        Box::pin(
             crate::services::discord::tmux::tmux_output_watcher_with_restore(
                 self.rig.channel,
                 self.ctx.http.clone(),
@@ -228,11 +232,19 @@ impl Fixture {
                 flags.5,
                 None,
             ),
-        );
+        )
+    }
+    async fn attach_old_watcher(&self) -> tokio::task::JoinHandle<()> {
+        let task = self.spawn_watcher(self.prepare_old_watcher().await);
         assert!(!task.is_finished(), "actual watcher must run before clear");
+        eprintln!(
+            "A2_PREP watcher_attached channel={}",
+            self.rig.channel.get()
+        );
         task
     }
     async fn clear(&self) {
+        eprintln!("A2_PREP clear_entered channel={}", self.rig.channel.get());
         use poise::serenity_prelude::{Message, UserId};
         let mut message = Message::default();
         message.id = MessageId::new(self.rig.channel.get() + 1);
@@ -282,6 +294,7 @@ impl Fixture {
                 .intervention_queue
                 .is_empty()
         );
+        eprintln!("A2_PREP clear_done channel={}", self.rig.channel.get());
     }
     async fn enqueue_pair(&self, a: u64, b: u64) {
         let context =

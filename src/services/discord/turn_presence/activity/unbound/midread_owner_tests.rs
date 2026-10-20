@@ -72,7 +72,7 @@ impl ForeignWatcher {
             handle.last_heartbeat_ts_ms.clone(),
         );
         drop(handle);
-        let task = tokio::spawn(
+        let task = fixture.spawn_watcher(
             crate::services::discord::tmux::tmux_output_watcher_with_restore(
                 channel,
                 fixture.ctx.http.clone(),
