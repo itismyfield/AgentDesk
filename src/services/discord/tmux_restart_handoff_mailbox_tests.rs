@@ -110,3 +110,6 @@ async fn watcher_death_handoff_releases_only_the_relinquished_turn_token() {
     })
     .await;
 }
+
+#[path = "tmux_restart_handoff_mailbox_tests/fresh_start_failure_tests.rs"]
+mod fresh_start_failure_tests;
