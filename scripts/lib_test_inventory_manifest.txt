@@ -3650,8 +3650,8 @@ services::discord::catch_up::classification_order_tests::unconfigured_utility_id
 services::discord::catch_up::frontier_evidence::tests::an_absorbed_active_turn_refusal_is_not_evidence
 services::discord::catch_up::frontier_evidence::tests::only_the_active_turn_arm_is_dispatch_evidence
 services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg
-services::discord::commands::cancel_backstop_tests::preserve_stop_idle_native_slash_recovers_zombie_and_queue
-services::discord::commands::cancel_backstop_tests::preserve_stop_missing_native_slash_recovers_zombie_and_queue
+services::discord::commands::cancel_backstop_tests::preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg
+services::discord::commands::cancel_backstop_tests::preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg
 services::discord::commands::command_policy::command_policy_tests::cancel_queued_is_registered_as_mutating_and_not_high_risk
 services::discord::commands::command_policy::command_policy_tests::common_registered_slash_surfaces_keep_the_same_risk
 services::discord::commands::command_policy::command_policy_tests::help_formatter_preserves_provider_and_risk_placeholders

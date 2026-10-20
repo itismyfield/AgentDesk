@@ -769,10 +769,6 @@ impl CancelToken {
         }
     }
 
-    pub fn turn_nonce(&self) -> Option<&str> {
-        self.turn_nonce.as_deref()
-    }
-
     pub(crate) fn replay_attempt(
         &self,
     ) -> Option<&std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>> {

@@ -425,6 +425,10 @@ fn file_identity(_: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 impl CancelToken {
+    pub fn turn_nonce(&self) -> Option<&str> {
+        self.turn_nonce.as_deref()
+    }
+
     /// [`Self::try_prepare_herdr_interrupt`] for a test turn that must take its state.
     #[cfg(test)]
     pub(crate) fn prepare_herdr_interrupt(

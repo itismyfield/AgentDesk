@@ -486,11 +486,11 @@ fn native_idle_slash_recovery(missing: bool) {
 }
 
 #[test]
-fn preserve_stop_idle_native_slash_recovers_zombie_and_queue() {
+fn preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg() {
     native_idle_slash_recovery(false);
 }
 
 #[test]
-fn preserve_stop_missing_native_slash_recovers_zombie_and_queue() {
+fn preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg() {
     native_idle_slash_recovery(true);
 }
