@@ -174,6 +174,10 @@ impl Fake {
     }
 
     fn run(&self, timing: &Timing) -> Outcome {
+        self.run_text("are you there?", timing)
+    }
+
+    fn run_text(&self, text: &str, timing: &Timing) -> Outcome {
         let session = self.session();
         let pane = Pane::with_program(&session, self.dir.path().join("tmux"));
         let request = Request {
@@ -183,7 +187,7 @@ impl Fake {
             author: "200",
             name: "ann",
             nonce: NONCE,
-            text: "are you there?",
+            text,
         };
         inject(&pane, &request, timing)
     }
@@ -570,6 +574,100 @@ fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
         );
         let paste = &fake.calls("paste-buffer")[0];
         assert!(paste.contains(" -p ") && paste.contains(&format!("={}:", fake.session())));
+    }
+}
+
+fn multiline_payload() -> String {
+    format!(
+        "Please inspect these files:\n{}\n\n  Preserve this indentation.\nReport one result per file.",
+        (0..24)
+            .map(|i| format!("/tmp/downloads/design-reference-{i:02}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn paste_block(inner: &str) -> String {
+    format!("<pasted_content id=\"dfd9\">\n{inner}\n</pasted_content id=\"dfd9\">")
+}
+
+#[test]
+fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
+    let payload = multiline_payload();
+    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
+    assert!(expected.encode_utf16().count() > 800);
+    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
+    let wrapped = paste_block(&expected);
+    for body in [
+        expected.clone(),
+        wrapped.clone(),
+        format!("\n\n{wrapped}\n"),
+    ] {
+        for record in [
+            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": body}),
+            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": body}}),
+            serde_json::json!({"type": "user", "message": {"content": body}}),
+        ] {
+            let fake = Fake::new();
+            fake.caps(&[busy_empty(), screen(&folded, "")]);
+            fs::write(
+                fake.dir.path().join("on_enter"),
+                real(record.clone()) + "\n",
+            )
+            .unwrap();
+            assert_eq!(
+                fake.run_text(&payload, &FAST),
+                Outcome::Injected,
+                "{record}"
+            );
+            assert_eq!(fake.keys(), (1, 1, 0), "{record}");
+            assert_eq!(
+                fs::read_to_string(fake.dir.path().join("buffer")).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn multiline_folded_paste_keeps_foreign_input_contaminated() {
+    let payload = multiline_payload();
+    let expected = frame("iMessage", "200", "ann", NONCE, &payload);
+    let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
+    let wrapped = paste_block(&expected);
+    for body in [
+        format!("{expected}\noperator input"),
+        paste_block(&format!("{expected}\noperator input")),
+        format!("operator input\n{wrapped}"),
+        format!("{wrapped}\noperator input"),
+        wrapped.replace(
+            "</pasted_content id=\"dfd9\">",
+            "</pasted_content id=\"abcd\">",
+        ),
+        paste_block(&wrapped),
+        format!("{wrapped}\n{}", paste_block("operator input")),
+        format!("\n{wrapped}\n"),
+        format!("\n\n\n{wrapped}\n"),
+        format!("\n\n{wrapped}"),
+        format!("\n\n{wrapped}\n\n"),
+        format!("\n\n{expected}\n"),
+        format!("\r\n\r\n{wrapped}\r\n"),
+    ] {
+        for body in [body.clone(), format!("\n\n{body}\n")] {
+            let fake = Fake::new();
+            fake.caps(&[busy_empty(), screen(&folded, "")]);
+            fs::write(fake.dir.path().join("on_enter"), enqueue_record(&body)).unwrap();
+            assert_eq!(
+                fake.run_text(&payload, &FAST),
+                Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
+                "{body}"
+            );
+            assert_eq!(
+                fake.keys(),
+                (1, 1, 0),
+                "a contaminated receipt never resubmits"
+            );
+        }
     }
 }
 
