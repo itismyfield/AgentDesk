@@ -501,20 +501,19 @@ impl CancelToken {
 pub(crate) enum StopCancel {
     /// The token was not the channel's turn: nothing was published.
     NotCurrent,
-    /// The token was already cancelling: nothing was published.
     AlreadyStopping(Arc<CancelToken>),
-    /// This stop published the cancel.
     Published(Arc<CancelToken>),
-    /// The turn's Herdr state was installed first: nothing was published, the stop takes the
-    /// turn's intent path.
+    /// Herdr owns the stop intent; no cancellation was published.
     Herdr(Arc<CancelToken>),
 }
 
 impl StopCancel {
-    /// The mailbox's cancel of its current `token`, under the slot lock a Herdr prepare takes;
-    /// without settlement it is the existing guarded cancel and takes no slot.
+    /// Publish on the current token after its native stop, if any, observes termination.
     pub(crate) fn decide(token: Option<Arc<CancelToken>>, reason: String) -> Self {
         let Some(token) = token else {
+            return Self::NotCurrent;
+        };
+        let Ok(native_admission) = token.native_stop.admit() else {
             return Self::NotCurrent;
         };
         let settled = herdr_stop_settlement_available();
@@ -552,6 +551,7 @@ impl StopCancel {
         #[cfg(test)]
         run_publish_hook();
         drop(slot);
+        drop(native_admission);
         Self::Published(token)
     }
 }

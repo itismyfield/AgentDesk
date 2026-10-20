@@ -968,7 +968,8 @@ src/
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   └── clear_refusal_reply_tests.rs
+│   │   │   │   ├── clear_refusal_reply_tests.rs
+│   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
 │   │   │   │   └── alert.rs
 │   │   │   ├── cancel_backstop_tests.rs
@@ -2144,6 +2145,8 @@ src/
 │   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
+│   │   │   │   ├── claude_stop_identity.rs
+│   │   │   │   ├── claude_stop_pane.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
@@ -2154,6 +2157,8 @@ src/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
 │   │   │   │   ├── judged_stop_tests.rs
+│   │   │   │   ├── native_stop.rs
+│   │   │   │   ├── native_stop_contract_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
@@ -2295,6 +2300,7 @@ src/
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
+│   │   │   ├── handoff_cancel.rs
 │   │   │   ├── live_cut_playback.rs
 │   │   │   ├── progress_playback.rs
 │   │   │   ├── receive_hook.rs
@@ -2392,6 +2398,7 @@ src/
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
 │   │   ├── mailbox_probe.rs
+│   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
@@ -2670,6 +2677,7 @@ src/
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
 │   │   ├── herdr_before_start.rs
+│   │   ├── native_stop.rs
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs

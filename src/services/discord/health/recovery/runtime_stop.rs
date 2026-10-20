@@ -66,7 +66,7 @@ pub(super) async fn stop_judged_channel_runtime(
     stop: discord::turn_bridge::ChannelJudgement,
     reason: &str,
     cleanup_policy: discord::TmuxCleanupPolicy,
-    approved: Option<Option<&str>>,
+    _approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
     // A turn that could not be read is kept as a refused host's is.
     let Ok(stop) = stop else {
@@ -82,9 +82,19 @@ pub(super) async fn stop_judged_channel_runtime(
 
     if let Some(stop) = stop.as_ref() {
         // A refused host, or a turn that moved on since the verdict, is left unchanged.
-        let result = match stop.refused() {
-            false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
-            true => None,
+        let native = if !cleanup_requested {
+            stop.native(reason).await
+        } else {
+            None
+        };
+        let result = if let Some(native) = native {
+            native.notice(&shared).await;
+            Some(native.finish().await).filter(|result| result.token.is_some())
+        } else {
+            match stop.refused() {
+                false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
+                true => None,
+            }
         };
         let Some(result) = result else {
             return host_guard_preserved(&shared, channel_id).await;

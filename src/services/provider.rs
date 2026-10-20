@@ -1,6 +1,5 @@
 use crate::services::platform::BinaryResolution;
 use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
-use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -11,6 +10,7 @@ mod cancel_token_codex_owed;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
 pub(crate) mod herdr_before_start;
+pub(crate) mod native_stop;
 mod output_reader;
 mod registry;
 pub(crate) mod session_probe;
@@ -22,8 +22,7 @@ pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
     ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,
-    frozen_first_counterpart_id, intern_provider_id, provider_registry, public_provider_catalog,
-    supported_provider_ids,
+    intern_provider_id, provider_registry, public_provider_catalog, supported_provider_ids,
 };
 pub(crate) use session_probe::SessionProbe;
 
@@ -698,10 +697,7 @@ pub struct CancelToken {
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
     /// Tmux binding for cleanup on cancel.
     pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
-    /// Normal turn-completion cleanup marker. The Discord bridge may flip
-    /// `cancelled` after a terminal frame only to release lingering token
-    /// observers; provider cancel watchdogs must not treat that as a live
-    /// mid-stream cancel that should kill the child process.
+    /// Post-terminal cleanup releases observers without a live child-process cancel.
     completion_cleanup: AtomicBool,
     /// Claude turn-interrupt fence. Each `CancelToken` is a turn generation.
     /// `0 -> 1` reserves one delivery attempt; a skipped or failed attempt
@@ -712,8 +708,7 @@ pub struct CancelToken {
     /// Durable episode identity shared with the Discord mailbox actor and inflight row.
     /// `None` is reserved for explicitly restored legacy rows.
     turn_nonce: Option<String>,
-    /// Wrapper prompt handoff completed before its JSONL user envelope appeared.
-    /// The stop path must treat this window as submitted, not as prior-turn idle.
+    /// Submitted prompt awaiting its JSONL envelope.
     claude_interrupt_submit_pending: AtomicBool,
     /// Herdr-only input observation and user-stop intent; absent on all existing paths.
     herdr_interrupt:
@@ -722,7 +717,7 @@ pub struct CancelToken {
     replay_attempt: std::sync::OnceLock<
         std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
     >,
-    /// Lifecycle-aware restart/handoff mode for inflight preservation.
+    pub(crate) native_stop: native_stop::State,
     pub restart_mode: AtomicU8,
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
     pub(crate) pid_kill_claim: AtomicU8,
@@ -761,6 +756,7 @@ impl CancelToken {
             claude_interrupt_submit_pending: AtomicBool::new(false),
             herdr_interrupt: Mutex::new(None),
             replay_attempt: std::sync::OnceLock::new(),
+            native_stop: Default::default(),
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),

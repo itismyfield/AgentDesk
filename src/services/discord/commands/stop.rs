@@ -20,6 +20,8 @@ impl StopReply {
             };
         }
         match &self.stop {
+            CommandStop::Native(stop) => stop.text(),
+            CommandStop::Observed(sent) => turn_bridge::NativeStop::observed_text(*sent),
             CommandStop::Session(_) | CommandStop::Stop(_) => super::STOPPING_RESPONSE,
             #[cfg(unix)]
             CommandStop::Herdr(stop) => stop.reply(),
@@ -39,6 +41,10 @@ impl StopReply {
             return refused;
         }
         match &self.stop {
+            CommandStop::Native(stop) => stop.wire(),
+            CommandStop::Observed(sent) => {
+                serde_json::json!({"outcome": if *sent {"native_pending"} else {"unconfirmed"}, "effect_started": sent})
+            }
             CommandStop::Session(_) | CommandStop::Stop(_) => {
                 serde_json::json!({"outcome": "stopping", "effect_started": true})
             }
@@ -64,6 +70,8 @@ impl StopReply {
     ) {
         crate::services::cluster::channel_home::command_scope(self.permit, async {
             match self.stop {
+            CommandStop::Native(stop) => { stop.finish().await; }
+            CommandStop::Observed(_) => {}
             CommandStop::Session(stop) => {
                 stop.interrupt("/stop").await;
             }
@@ -237,6 +245,9 @@ pub(in crate::services::discord) async fn gateway_stop_reply(
 }
 
 fn holder_reply(answer: &serde_json::Value) -> String {
+    if answer["outcome"] == "unconfirmed" && answer["notice"] == false {
+        return "같은 중단 요청의 결과를 이미 안내했어요.".into();
+    }
     let field = |key: &str| {
         answer
             .get(key)
@@ -255,6 +266,9 @@ fn holder_reply(answer: &serde_json::Value) -> String {
             );
         }
         ("herdr", _) => "holder 노드의 중지 키 전달 결과를 확인하지 못했어요. 다시 보내지 않아요.",
+        ("unconfirmed", _) => turn_bridge::NativeStop::observed_text(false),
+        ("native_pending", _) => turn_bridge::NativeStop::observed_text(true),
+        ("completed", _) => "중단 대상 작업이 이미 끝났거나 바뀌었어요.",
         ("stopping", _) => super::STOPPING_RESPONSE,
         ("already_stopping", _) => super::ALREADY_STOPPING_RESPONSE,
         ("host_refused", _) => super::HOST_REFUSED_STOP_RESPONSE,

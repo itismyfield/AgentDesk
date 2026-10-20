@@ -77,7 +77,7 @@ where
 
 pub(in crate::services::discord) async fn send_terminal_notice_http_once(
     http: &poise::serenity_prelude::Http,
-    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    shared: &crate::services::discord::SharedData,
     channel_id: ChannelId,
     content: &str,
 ) -> Result<MessageId, String> {

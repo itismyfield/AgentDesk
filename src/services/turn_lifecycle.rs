@@ -401,11 +401,6 @@ async fn stop_turn_with_policy(
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
         backfill_inflight_after_guard(provider, channel);
     }
-    if let Some(channel_id) = target.channel_id {
-        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
-        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
-            .await;
-    }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
     let mut lifecycle_path = DIRECT_FALLBACK_PATH;
@@ -487,6 +482,11 @@ async fn stop_turn_with_policy(
         _ => {}
     }
 
+    if let Some(channel_id) = target.channel_id {
+        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
+        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
+            .await;
+    }
     let tmux_killed = if cleanup_tmux {
         let kill_target = if !probe_session_owned.is_empty() {
             probe_session_owned.as_str()

@@ -13,6 +13,12 @@ use std::time::Duration;
 // async orchestration + session-teardown logic stays here and reaches the
 // moved items by their original bare names via these glob/explicit re-imports.
 mod claude_stop_delivery;
+mod claude_stop_identity;
+mod claude_stop_pane;
+mod native_stop;
+pub(in crate::services::discord) use native_stop::{
+    NativeStop, empty as empty_native_stop, protected as native_preserve_stop,
+};
 #[cfg(unix)]
 mod codex_stop_delivery;
 mod interrupt_policy;
@@ -159,6 +165,7 @@ async fn interrupt_session_on(
             Some(name.as_str().to_string()),
             reason,
             Some(observed_open),
+            None,
         )
         .await;
     }
@@ -538,22 +545,7 @@ fn register_legacy_pid(
     provider_pid
 }
 
-/// Standard turn-stop sequence: send the provider abort key (e.g. C-c) FIRST,
-/// give the CLI ~750ms to settle / send SIGINT fallback, and THEN flip the
-/// cooperative cancel flag + SIGKILL the wrapper PID.
-///
-/// #1218: When `cancel_active_token` runs first, `kill_pid_tree(child_pid)`
-/// kills the agentdesk tmux-wrapper, which is the foreground process of the
-/// tmux session. The session then dies, and the subsequent
-/// `tmux send-keys -t =name C-c` fails with "can't find pane". For Claude
-/// streaming this is masked because the session teardown also stops claude;
-/// but for handoff/restart turns where `child_pid` is `None` (Codex/Qwen TUI,
-/// resumed runs) the SIGKILL is a no-op and only the C-c can stop the CLI.
-/// In that case the wrong order leaves the provider running and the user
-/// sees stop "fail".
-///
-/// Every user-initiated stop (⏳ reaction removal, `/stop`, `!stop`, `/clear`, watchdog timeouts)
-/// runs this sequence, here or through a judged `ChannelStop`, never by pairing the primitives.
+/// The legacy stop sequence; native preserve stops confirm exit before publishing cancellation.
 pub(in crate::services::discord) async fn stop_active_turn(
     provider: &ProviderKind,
     token: &Arc<CancelToken>,
