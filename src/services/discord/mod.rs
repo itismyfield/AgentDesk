@@ -628,6 +628,7 @@ pub(crate) async fn should_defer_thread_archive_pg(
 /// sessions survive process restart, so this helper no longer waits for
 /// `global_active` / `global_finalizing` to drain. Callers must persist cheap
 /// queue/checkpoint state before invoking it.
+#[cfg(test)]
 pub(super) fn check_deferred_restart(shared: &SharedData) {
     if !shared
         .restart
