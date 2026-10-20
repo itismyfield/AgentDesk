@@ -527,16 +527,25 @@ impl WakeProducers {
         Self { state, _hook: hook }
     }
 
-    async fn wait_for_start(&self, deadline: tokio::time::Instant) {
+    fn producer_or_direct(&self, logs: &LogSink) -> Option<&'static str> {
+        self.producer().or_else(|| {
+            log_has(logs, "Processing next queued command", "").then_some("turn_bridge_completion")
+        })
+    }
+
+    async fn wait_for_start(&self, deadline: tokio::time::Instant, logs: &LogSink) {
         let _ = tokio::time::timeout_at(deadline, async {
             loop {
                 let started = self.state.started.notified();
                 tokio::pin!(started);
                 started.as_mut().enable();
-                if self.producer().is_some() {
+                if self.producer_or_direct(logs).is_some() {
                     break;
                 }
-                started.await;
+                tokio::select! {
+                    _ = started => {},
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
             }
         })
         .await;
@@ -562,6 +571,94 @@ impl WakeProducers {
 impl Drop for WakeProducers {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+struct PeriodicCompletionFence {
+    channel: ChannelId,
+    finished: Option<tokio::sync::oneshot::Receiver<()>>,
+    transition: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl PeriodicCompletionFence {
+    fn install(channel: ChannelId) -> Self {
+        let (finished, received) = tokio::sync::oneshot::channel();
+        assert!(
+            crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+                .lock()
+                .unwrap()
+                .replace((channel, finished))
+                .is_none()
+        );
+        Self {
+            channel,
+            finished: Some(received),
+            transition: None,
+        }
+    }
+
+    async fn hold(&mut self, fixture: &Fixture) {
+        self.transition = Some(
+            fixture
+                .rig
+                .shared
+                .session_transition_lock(self.channel)
+                .lock_owned()
+                .await,
+        );
+    }
+
+    async fn release_after_a(&mut self, fixture: &Fixture, logs: &LogSink, b: u64) {
+        let Some(finished) = self.finished.take() else {
+            return;
+        };
+        let result = tokio::time::timeout(DRAIN_LIMIT, finished).await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "A bridge must exit behind the direct-completion fixture fence: {result:?}"
+        );
+        assert!(
+            matches!(
+                inflight::load_inflight_state_read_only_result(
+                    &fixture.provider,
+                    self.channel.get()
+                ),
+                Ok(None)
+            ),
+            "A must naturally settle its own inflight row before releasing the periodic fixture fence"
+        );
+        assert_eq!(fixture.disk_ids(), [b]);
+        assert!(
+            INPUT_EFFECT_PROBE.lock().unwrap().is_some(),
+            "the periodic fixture fence must leave B unstarted"
+        );
+        assert!(
+            log_has(
+                logs,
+                "QUEUE-GUARD: session transition owns channel; preserving queued head",
+                ""
+            ),
+            "the actual finalizer must preserve the FIFO head behind the fixture barrier"
+        );
+        self.transition.take();
+        eprintln!(
+            "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released=1"
+        );
+    }
+}
+
+impl Drop for PeriodicCompletionFence {
+    fn drop(&mut self) {
+        let mut slot =
+            crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|(channel, _)| *channel == self.channel)
+        {
+            slot.take();
+        }
     }
 }
 
@@ -633,6 +730,9 @@ async fn supervisor_drains_pair(
     } = case;
     let _failure_logs = FailureLogs(logs.clone());
     let _diagnostic = PhaseDiagnostic::install(fixture, periodic_only, logs);
+    // Capture A before its spawn; the existing transition fence suppresses direct finalizer dequeue.
+    let mut completion_fence =
+        periodic_only.then(|| PeriodicCompletionFence::install(fixture.rig.channel));
     let baseline = supervisor.state();
     assert_eq!(baseline["activity"], "idle");
     assert_eq!(baseline["generation"], 1);
@@ -675,11 +775,17 @@ async fn supervisor_drains_pair(
             .collect::<Vec<_>>(),
         [b]
     );
+    if let Some(fence) = completion_fence.as_mut() {
+        fence.hold(fixture).await;
+    }
     let producers = WakeProducers::install(fixture.rig.channel, periodic_only);
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
     if wake_mutant("a2-allow-early-b") {
         // Premature terminal completion exercises the real consumer before the fixture releases A.
         first.release.send(()).unwrap();
+        if let Some(fence) = completion_fence.as_mut() {
+            fence.release_after_a(fixture, logs, b).await;
+        }
         until(async || {
             inflight::load_inflight_state(&fixture.provider, fixture.rig.channel.get())
                 .is_none_or(|row| row.user_msg_id == b)
@@ -694,10 +800,12 @@ async fn supervisor_drains_pair(
             )
             .await;
         }
-        producers.wait_for_start(first_wake + RECOVERY_LIMIT).await;
+        producers
+            .wait_for_start(first_wake + RECOVERY_LIMIT, logs)
+            .await;
         eprintln!(
             "A2_R5_EARLY_B_FAULT periodic_only={periodic_only} producer={:?} fixture_a_released=false",
-            producers.producer()
+            producers.producer_or_direct(logs)
         );
     }
     tokio::task::yield_now().await;
@@ -723,8 +831,13 @@ async fn supervisor_drains_pair(
     let completion_offset = logs.0.lock().unwrap().len();
     eprintln!("A2_S3_A_HELD a_entered=1 no_early_b=1");
     first.finish();
-    producers.wait_for_start(first_wake + RECOVERY_LIMIT).await;
-    let producer = producers.producer();
+    if let Some(fence) = completion_fence.as_mut() {
+        fence.release_after_a(fixture, logs, b).await;
+    }
+    producers
+        .wait_for_start(first_wake + RECOVERY_LIMIT, logs)
+        .await;
+    let producer = producers.producer_or_direct(logs);
     if classify_enabled() {
         eprintln!(
             "A2_R6_WAIT_RETURN periodic_only={periodic_only} producer={producer:?} completion_blocked={} sample={}",
@@ -765,7 +878,8 @@ async fn supervisor_drains_pair(
             fixture.rig.channel,
             "turn_completion_event",
             completion_offset
-        ) || producers.completion_blocked() > 0
+        ) || producer == Some("turn_bridge_completion")
+            || producers.completion_blocked() > 0
             || producers
                 .attempts()
                 .iter()
