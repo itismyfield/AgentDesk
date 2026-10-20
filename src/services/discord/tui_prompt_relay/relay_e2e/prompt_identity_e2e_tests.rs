@@ -275,6 +275,7 @@ async fn post_aliased_hook(hooks: &HookServerState, command: &str, session: &str
 
 fn hook_event(session: &str) -> HookEvent {
     HookEvent {
+        original_context: None,
         provider: PROVIDER_KEY.to_string(),
         session_id: session.to_string(),
         kind: HookEventKind::UserPromptSubmit,

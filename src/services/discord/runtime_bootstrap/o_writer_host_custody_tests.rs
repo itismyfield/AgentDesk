@@ -54,6 +54,7 @@ fn pending(provider: ShadowProvider, channel: u64) -> TuiDirectPendingStart {
         Codex => "codex",
     };
     TuiDirectPendingStart {
+        hosted_source: None,
         provider: provider.into(),
         channel_id: channel,
         tmux_session_name: "takeover-custody".into(),

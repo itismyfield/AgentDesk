@@ -5,7 +5,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast};
@@ -14,6 +14,9 @@ use crate::services::claude_tui::memento_feedback::{
     PendingMementoFeedbackTracker, PendingMementoFeedbackTransition,
 };
 
+mod hook_event;
+pub use hook_event::HookEvent;
+pub(crate) use hook_event::HookFanout;
 pub(crate) mod adoption_retry;
 pub(crate) mod observation_ingress;
 pub(crate) mod relay_receipts;
@@ -107,23 +110,6 @@ impl HookEventKind {
             Self::Unknown(value) => value.as_str(),
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct HookEvent {
-    pub provider: String,
-    pub session_id: String,
-    pub kind: HookEventKind,
-    pub received_at: DateTime<Utc>,
-    pub payload: Value,
-    #[serde(skip)]
-    pub(crate) fanout: Option<HookFanout>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HookFanout {
-    pub(crate) origin_session_id: String,
-    pub(crate) primary_discarded: bool,
 }
 
 #[cfg(test)]
@@ -411,6 +397,7 @@ async fn receive_hook(
         session_id: session_id.clone(),
         kind,
         received_at: Utc::now(),
+        original_context: hook_event::original_context(&headers),
         payload,
         fanout: None,
     };

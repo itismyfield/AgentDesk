@@ -209,6 +209,7 @@ fn synthetic_bridge_handoff_fixture(
                     // An existing directory makes the actual guarded atomic save fail.
                     std::fs::create_dir_all(&inflight_path).unwrap();
                     let observed = ObservedTuiPrompt {
+                        hosted_source: None,
                         provider: provider.as_str().into(), tmux_session_name: tmux.into(),
                         prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
                         source_event_id: None, external_input_lease_generation: lease.generation,

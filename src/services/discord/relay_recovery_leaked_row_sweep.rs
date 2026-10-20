@@ -55,6 +55,7 @@ async fn recover_candidate(
         attempt_count: 0,
         captured_source: None,
         native_turn_id: None,
+        hosted_source: None,
     };
     tui_direct_pending_start::demote_leaked_foreign_inflight_if_current(&shared, &record).await
 }

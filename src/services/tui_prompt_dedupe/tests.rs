@@ -1360,6 +1360,7 @@ fn external_input_turn_lease_carries_owner_and_trace_fields() {
             relay_owner: ExternalInputRelayOwner::SessionBoundRelay,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
             generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            hosted_source: None,
         },
     );
 
@@ -1392,6 +1393,7 @@ fn clear_external_input_relay_lease_if_matches_preserves_newer_turn() {
         relay_owner: ExternalInputRelayOwner::BridgeAdapter,
         runtime_kind: Some(RuntimeHandoffKind::CodexTui),
         generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        hosted_source: None,
     };
     let newer = ExternalInputRelayLease {
         turn_id: Some("external:codex:42:tmux-trace:2".to_string()),
@@ -1690,6 +1692,7 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
+        hosted_source: None,
     });
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1758,6 +1761,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
+        hosted_source: None,
     };
 
     record_local_only_entry_id_after_note_delivery(&nonlocal);

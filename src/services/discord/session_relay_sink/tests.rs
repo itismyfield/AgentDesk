@@ -341,6 +341,7 @@ fn session_relay_trace_context_uses_external_input_lease_without_inflight() {
         ProviderKind::Codex.as_str(),
         tmux,
         crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+            hosted_source: None,
             channel_id: Some(4242),
             turn_id: Some("external:codex:4242:trace:1".to_string()),
             session_key: Some("host:AgentDesk-codex-external-trace".to_string()),
@@ -378,6 +379,7 @@ fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() 
         .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-codex-bridge-owned-direct";
     let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(4243),
         turn_id: Some("external:codex:4243:trace:1".to_string()),
         session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
@@ -1000,12 +1002,7 @@ fn idle_jsonl_should_not_skip_none_tmux_inflight_wildcard() {
     inflight.tmux_session_name = None;
     let mut last_inflight_seen_at = HashMap::new();
     last_inflight_seen_at.insert(matched.expected_session_name.clone(), Instant::now());
-    let mut offset = 128;
-    let wake_payload = concat!(
-        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"wake-none\"}\n",
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer\"}]}}\n"
-    );
-    let end = offset + wake_payload.len() as u64;
+    let offset = 128;
 
     assert!(idle_jsonl::idle_jsonl_inflight_mismatches_session(
         &inflight,
@@ -1856,7 +1853,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
     // REFUSES → NotDelivered AND the committed offset does NOT advance.
     // A mutation that hard-codes advance=`true` would advance here and Deliver.
     let shared2 = super::super::make_shared_data_for_tests();
-    let sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+    let _sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
     let mismatched = inflight_with_identity_offset(
         channel.get(),
         session,
@@ -3332,6 +3329,7 @@ fn external_input_delivery(session_name: &str, channel_id: u64) -> SessionRelayD
 
 fn session_bound_lease(channel_id: u64, session: &str, turn_seq: u64) -> ExternalInputRelayLease {
     ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id),
         turn_id: Some(format!("external:claude:{channel_id}:{session}:{turn_seq}")),
         session_key: Some(format!("host:{session}")),

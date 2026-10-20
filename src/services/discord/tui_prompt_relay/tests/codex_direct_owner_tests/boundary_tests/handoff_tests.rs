@@ -1431,6 +1431,7 @@ fn send_captured_hook_on(
             received_at: chrono::Utc::now(),
             payload,
             fanout: None,
+            original_context: None,
         })
         .expect("hook observer listening");
 }
@@ -1730,7 +1731,33 @@ fn codex_scan_of_an_earlier_discord_prompt_record_binds_nothing() {
 fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
     run(|root| {
         Box::pin(async move {
+            let _bindings = dedupe::hosted_source::tests::BindingRoot::at(&root);
+            let nonce = crate::services::tui_prompt_dedupe::hosted_source::tests::N1;
+            let logical = "AgentDesk-codex-5845-scan";
+            let marker = crate::services::tmux_common::session_temp_path(logical, "spawn_nonce");
+            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(marker, nonce).unwrap();
+            dedupe::register_tmux_channel(logical, 5_845_050);
             let mut fx = Fixture::start(&root, 5_845_050, "AgentDesk-codex-5845-scan").await;
+            let source = crate::services::tui_o::shadow::binding_reader::source_id_for(
+                "s-5704",
+                &fx.codex.rollout,
+            )
+            .unwrap();
+            dedupe::binding_events::record_verified(
+                &dedupe::binding_events::Proposal {
+                    channel_id: fx.codex.channel.get(),
+                    provider: "codex",
+                    tmux_session: &fx.codex.tmux,
+                    session_id: Some("s-5704"),
+                    path: fx.codex.rollout.to_str().unwrap(),
+                    replaced: None,
+                    cause: dedupe::binding_events::CauseSource::Observed,
+                    hook: None,
+                },
+                &source,
+            )
+            .unwrap();
             let (t1, t2) = (turn(1), turn(2));
             discord_row(&fx, 5_845_051);
             let guard = reserve(&fx);
@@ -1760,6 +1787,12 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
                 .await
                 .unwrap()
                 .unwrap();
+            let pin = event
+                .hosted_source
+                .as_ref()
+                .expect("the actual idle rollout scanner carried its source");
+            assert_eq!(pin.execution_nonce, nonce);
+            assert_eq!(pin.source, source);
             assert_eq!(event.prompt, PROMPT3);
             assert_eq!(event.tmux_session_name, fx.codex.tmux);
             assert!(!event.steer_echo);

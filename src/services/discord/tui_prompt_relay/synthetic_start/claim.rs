@@ -1,4 +1,6 @@
 use super::*;
+mod admitted;
+use admitted::claim_tui_direct_synthetic_turn_prepared;
 
 #[cfg(test)]
 #[path = "intake_placeholder_retirement_tests.rs"]
@@ -15,6 +17,7 @@ pub(super) struct SyntheticClaimIdentity<'a> {
     pub(super) lease: &'a ExternalInputRelayLease,
     pub(super) register_deferred_start: bool,
     pub(super) native_turn: Option<&'a str>,
+    pub(super) transition: Option<&'a tokio::sync::OwnedMutexGuard<()>>,
 }
 
 pub(super) struct SyntheticClaimPreparation<'a> {
@@ -183,6 +186,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
             lease,
             register_deferred_start: DEFERRED,
             native_turn,
+            transition: None,
         },
         output_path,
         start_offset,

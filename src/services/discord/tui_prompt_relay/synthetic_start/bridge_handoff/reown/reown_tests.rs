@@ -201,6 +201,7 @@ impl Turn {
         &self,
     ) -> ExternalInputRelayLease {
         let prompt = ObservedTuiPrompt {
+            hosted_source: None,
             provider: CLAUDE.to_string(),
             tmux_session_name: self.tmux.clone(),
             prompt: PROMPT.to_string(),

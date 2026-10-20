@@ -129,6 +129,7 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 }
 
 /// Codex entry for a live hook naming the native turn the input opens or steers.
+#[cfg(test)]
 pub(crate) fn observe_codex_prompt_in_turn_at(
     tmux_session_name: &str,
     prompt: &str,
@@ -143,7 +144,7 @@ pub(crate) fn observe_codex_prompt_in_turn_at(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        handoff::Evidence::Live,
+        (handoff::Evidence::Live, None),
     )
 }
 
@@ -165,7 +166,7 @@ pub(crate) fn observe_codex_record_prompt_at(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        handoff::Evidence::Record(record),
+        (handoff::Evidence::Record(record), None),
     )
 }
 
@@ -176,23 +177,14 @@ pub(crate) fn observe_restored_codex_record_prompt_at(
     (prompt, entry, inferred): (&str, Option<&str>, Option<&str>),
     at: DateTime<Utc>,
 ) -> PromptObservation {
-    let turn = record.turn_id.as_deref().or(inferred);
-    if !handoff::codex_record_admission(tmux, path, start, prompt, (entry, turn), record) {
-        return PromptObservation::Ignored;
-    }
-    observe_inner(
-        "codex",
+    let pin = owner_channel_for_tmux_session(tmux)
+        .and_then(|channel| hosted_source::capture("codex", tmux, channel, path, None));
+    hosted_source::observe_codex_record_at(
         tmux,
-        &[prompt.to_string()],
-        (entry, None, turn),
-        PromptObservationEffect::NotifyAndLease,
+        (path, start, record),
+        (prompt, entry, inferred),
         at,
-        handoff::Evidence::Restored {
-            record,
-            path,
-            start,
-            entry,
-        },
+        pin,
     )
 }
 
@@ -204,6 +196,7 @@ pub(super) fn observe_held_prompt(
     entry_id: Option<&str>,
     native_turn: Option<&str>,
     observed_at: DateTime<Utc>,
+    hosted_source: Option<hosted_source::HostedSourcePin>,
 ) -> PromptObservation {
     observe_inner(
         provider,
@@ -212,7 +205,7 @@ pub(super) fn observe_held_prompt(
         (entry_id, None, native_turn),
         PromptObservationEffect::NotifyAndLease,
         observed_at,
-        handoff::Evidence::Live,
+        (handoff::Evidence::Live, hosted_source),
     )
 }
 
@@ -316,21 +309,24 @@ fn observe_prompt_candidates_by_tmux_inner(
         ids,
         effect,
         observed_at,
-        evidence,
+        (evidence, None),
     )
 }
 
 /// `(entry_id, prompt_id, native_turn)` of one observation.
-type ObservationIds<'a> = (Option<&'a str>, Option<ClaudePromptId<'a>>, Option<&'a str>);
+pub(super) type ObservationIds<'a> = (Option<&'a str>, Option<ClaudePromptId<'a>>, Option<&'a str>);
 
-fn observe_inner(
+pub(super) fn observe_inner(
     provider: &str,
     tmux_session_name: &str,
     prompts: &[String],
     (entry_id, prompt_id, native_turn): ObservationIds<'_>,
     effect: PromptObservationEffect,
     observed_at: DateTime<Utc>,
-    evidence: handoff::Evidence<'_>,
+    (evidence, hosted_source): (
+        handoff::Evidence<'_>,
+        Option<hosted_source::HostedSourcePin>,
+    ),
 ) -> PromptObservation {
     handoff::drain_expired_handoffs();
     let provider = normalize_provider(provider);
@@ -436,6 +432,7 @@ fn observe_inner(
             row_prompt_id: None,
             native_turn_id: None,
             steer_echo: false,
+            hosted_source,
         };
         let _ = OBSERVED_PROMPTS.send(event);
         return PromptObservation::PublishedTaskNotification;
@@ -536,6 +533,7 @@ fn observe_inner(
             may_park: record.is_none() && effect == PromptObservationEffect::NotifyAndLease,
             effect,
             observed_at,
+            hosted_source: hosted_source.as_ref(),
         };
         (decide_observation(&mut state, &key, &observation), released)
     };
@@ -560,6 +558,7 @@ fn observe_inner(
                     row_prompt_id: None,
                     native_turn_id: Some(turn),
                     steer_echo: true,
+                    hosted_source,
                 });
             }
             return PromptObservation::JoinedNativeTurn;
@@ -607,6 +606,7 @@ fn observe_inner(
             .map(|(prompt_id, _)| prompt_id.to_string()),
         native_turn_id: native_turn.map(str::to_string),
         steer_echo: false,
+        hosted_source,
     };
     #[cfg(test)]
     handoff::tests::before_owning_publish(&event.prompt);

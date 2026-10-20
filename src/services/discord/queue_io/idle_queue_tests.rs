@@ -16,6 +16,7 @@ fn pending_record(
     channel_id: ChannelId,
 ) -> super::super::tui_direct_pending_start::TuiDirectPendingStart {
     super::super::tui_direct_pending_start::TuiDirectPendingStart {
+        hosted_source: None,
         provider: provider.as_str().to_string(),
         channel_id: channel_id.get(),
         tmux_session_name: format!("tmux-{}", channel_id.get()),

@@ -234,6 +234,7 @@ fn abandoned_presence_clear_keeps_durable_record() {
 #[test]
 fn record_roundtrips_through_json() {
     let record = TuiDirectPendingStart {
+        hosted_source: None,
         provider: "claude".to_string(),
         channel_id: 42,
         tmux_session_name: "tmux-abc".to_string(),
@@ -303,6 +304,7 @@ fn never_reclaim_orphan() -> ReclaimOrphanFn {
 
 fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart {
     TuiDirectPendingStart {
+        hosted_source: None,
         provider: provider.to_string(),
         channel_id,
         tmux_session_name: format!("tmux-{channel_id}"),

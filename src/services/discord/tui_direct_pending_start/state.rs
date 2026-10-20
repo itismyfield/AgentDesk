@@ -66,6 +66,7 @@ pub(in crate::services::discord) enum PendingStartState {
 /// All fields are primitives so the JSON survives a dcserver version swap; the
 /// lease is rehydrated from these fields on restart
 /// (`record_external_input_turn_lease`), never from a serialized lease struct.
+#[cfg_attr(test, derive(Default))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct TuiDirectPendingStart {
     pub provider: String,
@@ -95,6 +96,8 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
     /// Codex native turn the deferred input opened, so the worker's claim starts at its record.
     #[serde(default)]
     pub native_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_source: Option<crate::services::tui_prompt_dedupe::hosted_source::HostedSourcePin>,
 }
 
 impl TuiDirectPendingStart {

@@ -938,7 +938,7 @@ mod tests {
             kind,
             received_at: Utc::now(),
             payload,
-            fanout: None,
+            ..Default::default()
         }
     }
 

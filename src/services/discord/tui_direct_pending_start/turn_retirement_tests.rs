@@ -52,6 +52,7 @@ fn save(row: &InflightTurnState) -> PathBuf {
 }
 fn pending(channel: u64) -> TuiDirectPendingStart {
     TuiDirectPendingStart {
+        hosted_source: None,
         provider: "claude".into(),
         channel_id: channel,
         tmux_session_name: "n1a-retirement-fixture".into(),

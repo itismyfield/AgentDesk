@@ -52,6 +52,7 @@ fn token_count_line() -> String {
 /// Codex's Stop hook for `turn` on the live hook broadcast the rollout tail reads.
 fn publish_stop(tmux: &str, turn: &str) {
     crate::services::claude_tui::hook_server::publish_hook_event_for_tests(HookEvent {
+        original_context: None,
         provider: "codex".to_string(),
         session_id: tmux.to_string(),
         kind: HookEventKind::Stop,
@@ -186,6 +187,7 @@ impl Fixture {
     fn send_hook(&self, prompt: &str, turn: &str) {
         self.hooks
             .send(HookEvent {
+                original_context: None,
                 provider: "codex".to_string(),
                 session_id: self.codex.tmux.clone(),
                 kind: HookEventKind::UserPromptSubmit,

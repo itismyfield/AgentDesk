@@ -40,6 +40,7 @@ async fn observed(
     );
     assert!(started.await, "the takeover turn holds the mailbox");
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: "codex".into(),
         tmux_session_name: tmux.into(),
         prompt: "next".into(),
@@ -57,6 +58,7 @@ async fn observed(
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert!(decision.starts_external_turn_lifecycle());
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(CHANNEL),
         turn_id: Some(format!("external:codex:{CHANNEL}:{tmux}:test")),
         session_key: Some(format!("session:{tmux}")),
