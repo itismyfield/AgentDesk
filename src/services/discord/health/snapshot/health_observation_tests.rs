@@ -328,9 +328,8 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
     });
 }
 
-/// A stalled tracked actor and a tracked channel with no actor keep their park source lists, an
-/// episode replaced between the first read and the reconfirm is not confirmed, and the health
-/// read changes no actor, park source or file.
+/// Stalled or missing tracked actors keep their park sources, a replaced episode is not confirmed,
+/// and the read changes no actor, park source or file.
 #[test]
 fn health_snapshot_timeout_preserves_park_and_episode() {
     let _root = crate::config::TestRuntimeRootGuard::new();

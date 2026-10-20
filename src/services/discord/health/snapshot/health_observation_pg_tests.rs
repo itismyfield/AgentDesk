@@ -123,9 +123,8 @@ pub(in crate::services::discord::health) async fn gateway(
     shared
 }
 
-/// A 800ms actor, a reconfirm that never answers and a 300ms database: the snapshot spends the
-/// deadline on the actor reads, so the late database read finds none left, and the whole
-/// response still ends under 2s.
+/// An 800ms actor, a silent reconfirm and a 300ms database: the actor reads spend the deadline,
+/// the late database read finds none left, and the response still ends under 2s.
 #[test]
 fn health_handler_actor_and_db_share_one_deadline() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -230,9 +229,8 @@ fn deploy_ready(body: &Value, jq: bool) -> bool {
     }
 }
 
-/// A stalled actor's public body: deploy readiness refuses it with and without jq, and the public
-/// body names no channel. The same node without the stalled actor is ready, so the new reason is
-/// what refuses it.
+/// Deploy readiness refuses a stalled actor's public body with and without jq, which names no
+/// channel; the same node without that actor is ready, so the new reason is what refuses it.
 #[test]
 fn health_timeout_consumers_keep_existing_gates() {
     let _root = crate::config::TestRuntimeRootGuard::new();
