@@ -1716,4 +1716,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "entry_abort_mailbox_tests.rs"]
-mod entry_abort_mailbox_tests;
+pub(super) mod entry_abort_mailbox_tests;

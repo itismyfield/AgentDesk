@@ -425,7 +425,7 @@ fn may_join(c: char) -> bool {
 /// paste whose rows differ is still proven by its whitespace-free body.
 fn measured_width(c: char) -> Option<usize> {
     match c {
-        ' '..='~' | '\u{b7}' => Some(1),
+        ' '..='~' | '\u{b7}' | '\u{2192}' => Some(1),
         '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' | '\u{1f4f1}' => Some(2),
         _ => None,
     }

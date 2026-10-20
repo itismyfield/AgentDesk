@@ -261,9 +261,11 @@ async fn refresh_claimed_runtime_for_launch(
 
 #[cfg(test)]
 pub(super) use self::attachments::TEST_DOWNLOADS;
+#[cfg(all(test, unix))]
+pub(super) use self::attachments::retain_busy_uploads;
 pub(super) use self::attachments::{
     AttachmentDescriptor, LocalAttachmentPreparationPermit, describe_attachments,
-    prepare_admitted_local_attachment, prepare_portable_attachments,
+    prepare_admitted_local_attachment, prepare_busy_inject_uploads, prepare_portable_attachments,
 };
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
@@ -333,6 +335,7 @@ pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
 
 mod turn_context;
 use turn_context::TurnContext;
+pub(super) use turn_context::render_input_chunks;
 
 #[cfg(test)]
 pub(in crate::services::discord) fn input_result_for_tests(at: (u64, String)) -> impl Drop {

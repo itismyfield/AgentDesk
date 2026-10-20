@@ -1,14 +1,14 @@
-//! Admitted Discord text, from a person or a bot, offered to a busy Claude TUI pane before intake
+//! Admitted Discord input, from a person or a bot, offered to a busy Claude TUI pane before intake
 //! queues or starts it, behind its own channel gate, the message claimed until the injection ends.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
-use super::super::intake_queue_transaction::SoftInterventionSpec;
 use crate::services::discord::health::{
     HumanInputRequest, InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input,
 };
@@ -136,15 +136,15 @@ pub(super) struct LiveText<'a> {
     pub(super) text: &'a str,
     pub(super) reply_context: Option<&'a str>,
     pub(super) has_reply_boundary: bool,
-    /// Attachments, uploads or a voice transcript ride with the text.
-    pub(super) carries_more_than_text: bool,
+    pub(super) uploads: &'a [crate::services::cluster::attachment_transfer::uploads::Upload],
+    pub(super) voice_announcement: Option<&'a crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    pub(super) merge_consecutive: bool,
 }
 
-/// Only plain text, whoever sent it, outside startup recovery and restart drain, is offered.
+/// Admitted text and completed uploads outside recovery and restart drain may be offered.
 fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
     let restart = &shared.restart;
-    !live.carries_more_than_text
-        && !live.text.trim().is_empty()
+    (!live.text.trim().is_empty() || !live.uploads.is_empty())
         && !crate::services::discord::catch_up::handled_command::is_text_command(live.text)
         && !NOT_TYPED.iter().any(|prefix| live.text.starts_with(prefix))
         && restart.reconcile_done.load(Relaxed)
@@ -152,53 +152,96 @@ fn offerable(live: &LiveText<'_>, shared: &SharedData) -> bool {
         && !restart.shutting_down.load(Relaxed)
 }
 
-/// A turn prompt joins the rendered reply context to the text with a blank line; so does the paste.
-fn body(live: &LiveText<'_>) -> String {
-    match live.reply_context {
-        Some(reply) => format!("{reply}\n\n{}", live.text),
-        None => live.text.to_string(),
+fn readiness(live: &LiveText<'_>) -> Option<&'static str> {
+    use crate::services::cluster::attachment_transfer::uploads::Upload;
+    if live.voice_announcement.is_some()
+        || crate::voice::prompt::is_readable_voice_transcript_announcement(live.text)
+        || crate::voice::prompt::is_voice_transcript_announcement_candidate(live.text)
+    {
+        return Some("voice_claim_deferred");
     }
+    let completed: u64 = live
+        .uploads
+        .iter()
+        .map(|upload| match upload {
+            Upload::Local(_) => 1,
+            Upload::Bundle(reference) => u64::from(reference.source_count),
+        })
+        .sum();
+    (completed != live.message.attachments.len() as u64).then_some("uploads_not_ready")
 }
 
-/// The queue entry intake would have made, which a vetoed paste becomes at the queue front.
+fn body(live: &LiveText<'_>, uploads: &[String]) -> String {
+    super::super::message_handler::render_input_chunks(
+        uploads,
+        live.reply_context.map(str::to_string),
+        live.text.to_string(),
+    )
+}
+
 fn handback(live: &LiveText<'_>) -> (crate::services::turn_orchestrator::Intervention, String) {
-    let spec = SoftInterventionSpec {
-        channel_id: live.channel_id,
-        author_id: live.message.author.id,
-        author_is_bot: live.message.author.bot,
-        author_is_allowed_automation: live.author_is_allowed_automation,
-        message_id: live.message.id,
-        text: live.text.to_string(),
-        reply_context: live.reply_context.map(str::to_string),
-        has_reply_boundary: live.has_reply_boundary,
-        merge_consecutive: false,
-        pending_uploads: Default::default(),
-        voice_announcement: None,
-    };
+    let spec = super::busy_queue::spec(live);
     let turn = format!("discord:{}:{}", live.channel_id, live.message.id);
     (spec.into_intervention(), turn)
 }
 
-/// True when intake must stop: the pane took the text or may have, the message was handed back
-/// or is owned elsewhere, or a handback failed. False keeps the intake path.
+fn declined(live: &LiveText<'_>, veto: &'static str) {
+    tracing::info!(
+        channel_id = live.channel_id.get(),
+        message_id = live.message.id.get(),
+        veto,
+        "discord input injection declined"
+    );
+}
+
+/// True when the message reached the pane, its handback, or another owner.
 pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveText<'_>) -> bool {
     if !covers(live.channel_id, live.parent) {
         return false;
     }
     #[cfg(test)]
     test_support::note_offer(live.message.id.get()).await;
-    if !offerable(live, &data.shared) {
-        return false;
-    }
-    let message = live.message.id;
-    let Some(guard) = inject_disposition::claim_source(&data.provider, message, Instant::now())
-    else {
+    let Some(attempt) = attempt(&data.shared, &data.provider, live).await else {
         return false;
     };
+    #[cfg(test)]
+    test_support::note_outcome(live.message.id.get(), &attempt);
+    settle(ctx, data, live, attempt).await
+}
+
+async fn attempt(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    live: &LiveText<'_>,
+) -> Option<InjectAttempt> {
+    if !offerable(live, shared) {
+        return None;
+    }
+    if let Some(veto) = readiness(live) {
+        declined(live, veto);
+        return None;
+    }
+    let message = live.message.id;
+    let guard = inject_disposition::claim_source(provider, message, Instant::now())?;
+    if !shared.has_inject_turn(provider, live.channel_id).await {
+        return None;
+    }
+    let prepare = super::super::message_handler::prepare_busy_inject_uploads;
+    let uploads = match prepare(live.channel_id, live.uploads, shared.pg_pool.as_ref()).await {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(%error, channel_id = live.channel_id.get(), "busy upload preparation failed");
+            declined(live, "upload_materialization_failed");
+            return None;
+        }
+    };
+    if !offerable(live, shared) {
+        return None;
+    }
     let request = HumanInputRequest {
         channel_id: live.channel_id,
-        provider: data.provider.clone(),
-        text: body(live),
+        provider: provider.clone(),
+        text: body(live, &uploads),
         author_id: live.message.author.id.get(),
         source: format!("discord:{}:{}", live.channel_id, live.message.id),
         metadata: None,
@@ -211,10 +254,7 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         guard,
         name: shown_name(live.message).to_string(),
     };
-    let attempt = inject_human_input(&data.shared, &request, origin).await;
-    #[cfg(test)]
-    test_support::note_outcome(message.get(), &attempt);
-    settle(ctx, data, live, attempt).await
+    Some(inject_human_input(shared, &request, origin).await)
 }
 
 /// The sender's name as this message shows it in Discord.
@@ -337,3 +377,6 @@ mod tests {
         assert_eq!(parsed, expected);
     }
 }
+
+#[cfg(all(test, unix))]
+mod payload_tests;

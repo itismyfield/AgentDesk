@@ -368,7 +368,13 @@ pub(super) fn observe_inner(
         return PromptObservation::Ignored;
     }
     // An injected input is settled once, by the first observation that names its native turn.
-    let claim = claim_injected_steer(&provider, tmux_session_name, &candidates, native_turn);
+    let claim = claim_injected_steer(
+        &provider,
+        tmux_session_name,
+        &candidates,
+        native_turn,
+        entry_id,
+    );
     // A Codex inject header no ledger entry vouches for (expired, restarted or never recorded)
     // opens no turn below; Claude records no entry, so its pastes keep the ordinary path.
     let unvouched = claim.is_none()

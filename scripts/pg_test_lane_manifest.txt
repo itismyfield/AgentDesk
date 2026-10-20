@@ -161,6 +161,7 @@ src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/self_watchdog/tests/health_response.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/snapshot/health_observation_pg_tests.rs
+src/services/discord/health/turn_deliver/inject/catch_up_race_tests.rs
 src/services/discord/health/turn_deliver/inject/herdr_tests.rs
 src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
@@ -206,6 +207,7 @@ src/services/discord/router/intake_dispatch/replay_admission_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
+src/services/discord/router/intake_gate/busy_inject/payload_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
@@ -294,6 +296,7 @@ src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_test
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs
+src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
@@ -541,6 +544,7 @@ services::discord::health::recovery::self_watchdog::tests::health_response
 services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::snapshot::health_observation::pg_tests
+services::discord::health::turn_deliver::inject::catch_up_race_tests
 services::discord::health::turn_deliver::inject::herdr::tests
 services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
@@ -588,6 +592,7 @@ services::discord::router::intake_dispatch::replay_admission_tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_dispatch::tests::codex_turn_hold
 services::discord::router::intake_dispatch::tests::replay_hold
+services::discord::router::intake_gate::busy_inject::payload_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -686,6 +691,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::http_cancel
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -766,6 +772,7 @@ cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoc
 cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
 cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
+cli::doctor::orchestrator::observation_tests::doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair
 cli::herdr::tests::a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg
 cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg
@@ -1726,6 +1733,9 @@ services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::phase2_exhausted_recovery_unresolved_dispatch_is_preserved_at_ttl_pg
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::production_sweep_too_old_drops_leave_no_outbox_notice_pg
 services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg
+services::discord::commands::cancel_backstop_tests::preserve_stop_completed_native_zombie_slash_recovers_queue_pg
+services::discord::commands::cancel_backstop_tests::preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg
+services::discord::commands::cancel_backstop_tests::preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
 services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transition_until_the_session_has_ended_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
@@ -1776,6 +1786,11 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
 services::discord::health::snapshot::health_observation::pg_tests::health_handler_actor_and_db_share_one_deadline
 services::discord::health::snapshot::health_observation::pg_tests::health_timeout_consumers_keep_existing_gates
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_mended_head_clears_pending_marker_without_another_paste_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reserved_head_live_offer_keeps_one_pending_entry_without_a_notice_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reuse_keeps_foreign_merged_rich_and_disabled_heads_queued_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
+services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
@@ -1993,6 +2008,14 @@ services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_
 services::discord::router::intake_dispatch::tests::replay_hold::replay_admission_dormant_and_other_identity_keeps_local_policy_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::attachment_only_input_has_no_empty_trailing_chunk_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::idle_bundle_precheck_never_reads_storage_or_retains_files_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::multiline_input_chunks_match_normal_turn_and_confirm_native_padding_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::multiple_attachment_input_chunks_match_normal_turn_and_confirm_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::one_attachment_input_chunks_match_normal_turn_and_confirm_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::pane_veto_hands_back_one_normal_busy_queue_payload_with_uploads_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::plain_text_bytes_and_unregistered_command_routes_stay_unchanged_pg
+services::discord::router::intake_gate::busy_inject::payload_tests::retained_bundle_files_outlive_preparation_and_confirm_as_normal_input_chunks_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
@@ -2470,6 +2493,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_s
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::http_cancel::herdr_http_cancel_with_the_switch_off_records_and_sends_nothing_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests::force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_runtime_clear_refuses_another_hosts_session_before_any_change_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg

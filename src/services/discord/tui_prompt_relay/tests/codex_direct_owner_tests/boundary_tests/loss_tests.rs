@@ -17,6 +17,14 @@ fn user_line_of_kind(text: &str, turn: &str, kind: &str) -> String {
             "turn_id": turn, "content_item_kinds": [kind]}}}))
 }
 
+fn completed_user_line(text: &str, turn: &str) -> String {
+    event_line(
+        serde_json::json!({"type": "item_completed", "turn_id": turn,
+        "item": {"type": "UserMessage", "id": uuid::Uuid::new_v4().to_string(),
+            "content": [{"type": "text", "text": text, "text_elements": []}]}}),
+    )
+}
+
 /// A direct input's turn with its prompt, the tail reading at the rollout end, its anchor.
 async fn claimed_turn(fx: &mut Fixture, t1: &str) -> u64 {
     if fx.automatic {
@@ -353,7 +361,7 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
         "type": "task_complete", "turn_id": a, "last_agent_message": RESPONSE})),
             completed,
         ) + &timestamped(
-            &(model_opening(&b, &prompt) + &item_completed_line_for(&b)),
+            &(model_opening(&b, &prompt) + &completed_user_line(&prompt, &b)),
             completed + chrono::Duration::milliseconds(8),
         ),
     )
@@ -387,7 +395,7 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
             &inject::TIMING,
         )
     });
-    let mut next = if hook_first {
+    if hook_first {
         assert!(
             wait_for(Duration::from_secs(10), || dir.join("enter").exists()
                 || injected.is_finished())
@@ -400,17 +408,38 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
                 injected.await.unwrap()
             );
         }
-        let next = fx.hook(&prompt, &b).await;
+        let processed = fx.hook_probe.processed.load(Ordering::SeqCst);
+        fx.send_hook(&prompt, &b);
+        assert!(
+            wait_for(Duration::from_secs(5), || fx
+                .hook_probe
+                .processed
+                .load(Ordering::SeqCst)
+                > processed)
+            .await,
+            "B hook processed before its stable record"
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                &tmux,
+                &prompt,
+                None,
+                Some(&b),
+                chrono::Utc::now()
+            ),
+            crate::services::tui_prompt_dedupe::PromptObservation::InjectedDeferred
+        );
+        assert!(
+            fx.pending_starts().is_empty(),
+            "an idless hook cannot own B"
+        );
         assert_eq!(
             fx.codex.row().unwrap().user_msg_id,
             anchor_a,
             "B observed before A cleanup"
         );
         std::fs::write(dir.join("release"), "").unwrap();
-        Some(next)
-    } else {
-        None
-    };
+    }
     assert_eq!(
         injected.await.unwrap(),
         inject::Outcome::Injected {
@@ -418,20 +447,18 @@ async fn injected_new_turn_delivers(root: PathBuf, channel: u64, hook_first: boo
             joined: false
         }
     );
-    if next.is_none() {
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
-                .await
-                .expect("rollout publishes B")
-                .unwrap();
-            if event.tmux_session_name == tmux && event.prompt == prompt.trim() {
-                next = Some(event);
-                break;
-            }
+    let next = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
+            .await
+            .expect("rollout publishes B")
+            .unwrap();
+        if event.tmux_session_name == tmux && event.prompt == prompt.trim() {
+            break event;
         }
+    };
+    if !hook_first {
         fx.send_hook(&prompt, &b);
     }
-    let next = next.unwrap();
     assert!(!next.steer_echo, "B owns its new native turn");
     assert_eq!(next.native_turn_id.as_deref(), Some(b.as_str()));
     super::super::super::super::relay_observed_prompt(&fx.shared, next).await;
@@ -514,8 +541,7 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
             "type": "task_complete", "turn_id": a, "last_agent_message": RESPONSE})),
                     completed,
                 ) + &timestamped(
-                    &(model_opening(&b, &format!("@HEADER@\n{PROMPT2}"))
-                        + &item_completed_line_for(&b)),
+                    &(model_opening(&b, "@HEADER@") + &completed_user_line("@HEADER@", &b)),
                     completed + chrono::Duration::milliseconds(8),
                 ),
             )
@@ -593,8 +619,20 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
                 .await,
                 "B hook processed"
             );
-            let _ = wait_for(Duration::from_secs(3), || !fx.pending_starts().is_empty()).await;
-            let pending_anchor_b = fx.pending_starts().first().map(|record| record.1);
+            assert_eq!(
+                crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                    &tmux,
+                    &prompt,
+                    None,
+                    Some(&b),
+                    chrono::Utc::now()
+                ),
+                crate::services::tui_prompt_dedupe::PromptObservation::InjectedDeferred
+            );
+            assert!(
+                fx.pending_starts().is_empty(),
+                "an idless hook cannot reserve B"
+            );
             assert_eq!(
                 fx.codex.row().unwrap().user_msg_id,
                 anchor_a,
@@ -602,6 +640,25 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
             );
             std::fs::write(dir.join("release"), "").unwrap();
             let attempt_result = injected.await.unwrap();
+            assert!(
+                wait_for(Duration::from_secs(5), || !fx.pending_starts().is_empty()
+                    || fx
+                        .codex
+                        .row()
+                        .is_some_and(|row| row.user_msg_id != anchor_a))
+                .await,
+                "stable native completion reserves B"
+            );
+            let pending_anchor_b =
+                fx.pending_starts()
+                    .first()
+                    .map(|record| record.1)
+                    .or_else(|| {
+                        fx.codex
+                            .row()
+                            .filter(|row| row.user_msg_id != anchor_a)
+                            .map(|row| row.user_msg_id)
+                    });
             fx.append(&answer_for(&b, RESPONSE2));
             fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
                 .await;
@@ -612,7 +669,7 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
             assert_eq!(
                 pending_anchor_b,
                 Some(anchor_b),
-                "automatic callback reserved B before native opening"
+                "automatic callback reserved B after its stable native completion"
             );
             let mut b_observations = 0;
             while let Ok(event) = fx.observed.try_recv() {

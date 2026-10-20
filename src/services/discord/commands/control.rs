@@ -489,8 +489,8 @@ async fn clear_channel_session_state_body(
 
 /// /stop — Cancel in-progress AI request
 ///
-/// Judges the turn's host before any write, then cancels it; token.cancelled
-/// triggers turn_bridge loop exit → mailbox_finish_turn canonical cleanup
+/// Interrupts the current turn while preserving its session. Native TUI turns
+/// remain observed until termination before mailbox cancellation is published.
 #[poise::command(slash_command, rename = "stop")]
 pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
@@ -503,6 +503,8 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
         return Ok(());
     }
+
+    ctx.defer().await?;
 
     log_command_received!(ctx.channel_id().get(), user_name, "/stop");
 

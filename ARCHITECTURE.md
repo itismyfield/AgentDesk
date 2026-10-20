@@ -674,8 +674,11 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
+│   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
+│   │   │   ├── receipt_interleave_tests.rs
 │   │   │   ├── screen.rs
+│   │   │   ├── screen_identity_tests.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
 │   │   │   ├── stash_tests.rs
@@ -987,7 +990,8 @@ src/
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
-│   │   │   │   └── clear_refusal_reply_tests.rs
+│   │   │   │   ├── clear_refusal_reply_tests.rs
+│   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
 │   │   │   │   └── alert.rs
 │   │   │   ├── cancel_backstop_tests.rs
@@ -1106,6 +1110,8 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
+│   │   │   │   │   ├── catch_up_race.rs
+│   │   │   │   │   ├── catch_up_race_tests.rs
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
@@ -1562,9 +1568,12 @@ src/
 │   │   │   │   ├── skill.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_gate/
+│   │   │   │   ├── busy_inject/
+│   │   │   │   │   └── payload_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
+│   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
@@ -1573,7 +1582,11 @@ src/
 │   │   │   │   ├── stale_turn_host_tests.rs
 │   │   │   │   ├── stale_turn_witness_tests.rs
 │   │   │   │   └── thread_guard_release.rs
+│   │   │   ├── intake_queue_transaction/
+│   │   │   │   └── queue_payload.rs
 │   │   │   ├── message_handler/
+│   │   │   │   ├── attachments/
+│   │   │   │   │   └── busy_inject.rs
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
@@ -2199,6 +2212,8 @@ src/
 │   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
+│   │   │   │   ├── claude_stop_identity.rs
+│   │   │   │   ├── claude_stop_pane.rs
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
@@ -2209,6 +2224,8 @@ src/
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
 │   │   │   │   ├── judged_stop_tests.rs
+│   │   │   │   ├── native_stop.rs
+│   │   │   │   ├── native_stop_contract_tests.rs
 │   │   │   │   ├── pid_exit.rs
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   ├── process_force_kill_tests.rs
@@ -2277,6 +2294,7 @@ src/
 │   │   │   ├── terminal_outcome_delivery.rs
 │   │   │   ├── thinking.rs
 │   │   │   ├── tmux_runtime.rs
+│   │   │   ├── tmux_runtime_tests.rs
 │   │   │   ├── turn_analytics.rs
 │   │   │   ├── two_message_panel.rs
 │   │   │   ├── voice_completion.rs
@@ -2350,6 +2368,7 @@ src/
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
+│   │   │   ├── handoff_cancel.rs
 │   │   │   ├── live_cut_playback.rs
 │   │   │   ├── progress_playback.rs
 │   │   │   ├── receive_hook.rs
@@ -2447,6 +2466,7 @@ src/
 │   │   ├── live_bridge.rs
 │   │   ├── mailbox_finish.rs
 │   │   ├── mailbox_probe.rs
+│   │   ├── mailbox_stop.rs
 │   │   ├── mcp_credential_watcher.rs
 │   │   ├── meeting_artifact_store.rs
 │   │   ├── meeting_orchestrator.rs
@@ -2738,7 +2758,9 @@ src/
 │   │   ├── cancel_token_codex_owed.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── claude_interrupt_tests.rs
 │   │   ├── herdr_before_start.rs
+│   │   ├── native_stop.rs
 │   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
@@ -2903,6 +2925,11 @@ src/
 │   │   │   │   └── submit_tests.rs
 │   │   │   ├── gate.rs
 │   │   │   └── pane.rs
+│   │   ├── human_frame/
+│   │   │   ├── history/
+│   │   │   │   ├── screen.rs
+│   │   │   │   └── screen_tests.rs
+│   │   │   └── history.rs
 │   │   ├── submission_tmux/
 │   │   │   ├── guarded/
 │   │   │   │   ├── protocol_tests.rs
@@ -3237,6 +3264,8 @@ src/
 │   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
+│   ├── turn_lifecycle/
+│   │   └── stop_result.rs
 │   ├── turn_orchestrator/
 │   │   ├── clear_fence/
 │   │   │   └── clear_fence_tests.rs
@@ -3364,6 +3393,7 @@ src/
 │   ├── provider_hosting.rs
 │   ├── provider_output_guard.rs
 │   ├── provider_output_guard_tests.rs
+│   ├── provider_poll_output_file_tests.rs
 │   ├── provider_runtime.rs
 │   ├── provider_teardown.rs
 │   ├── provider_teardown_tests.rs

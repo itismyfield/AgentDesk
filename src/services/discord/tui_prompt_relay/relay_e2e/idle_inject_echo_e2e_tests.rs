@@ -136,7 +136,7 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         busy_inject::Outcome::NotSent(busy_inject::Veto::Draft)
     ));
     assert!(busy.pane.keys().is_empty());
-    let frame = busy_inject::frame(
+    let frame = crate::services::tui_input::human_frame::inject(
         request.source,
         request.author,
         request.name,

@@ -16,7 +16,7 @@ use crate::services::provider::ProviderKind;
 const TURN: &str = "turn-open";
 
 /// Scripted Codex `tmux` of 80x24, never attached: a paste draws the buffer into the composer and
-/// Enter records its header as user input of the open turn.
+/// Enter records its full input as the native response/completed pair of the open turn.
 const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -33,7 +33,26 @@ if-shell)
       awk 'NR > 1 { print "  " $0 }' "$d/buffer"
       printf '\n  tab to queue message    95%% context left\n'; } > "$d/cap.pasted" ;;
   send-keys*)
-    printf '{"type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-open","item":{"type":"UserMessage","content":[{"type":"text","text":"%s"}]}}}\n' "$(head -n 1 "$d/buffer")" >> "$d/rollout.jsonl" ;;
+    python3 - "$d" <<'PY'
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+counter = d / "receipt.count"
+number = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(str(number))
+row = f"native-user-{number}"
+(d / "receipt.id").write_text(row)
+body = (d / "buffer").read_text()
+response = {"type": "response_item", "payload": {"type": "message", "role": "user",
+    "content": [{"type": "input_text", "text": body}],
+    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-open"}}}
+completed = {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "turn-open",
+    "item": {"type": "UserMessage", "id": row,
+        "content": [{"type": "text", "text": body, "text_elements": []}]}}}
+with (d / "rollout.jsonl").open("a") as stream:
+    for record in (response, completed):
+        stream.write(json.dumps(record) + "\n")
+PY
+    ;;
   esac ;;
 esac
 exit 0
@@ -160,6 +179,10 @@ impl CodexPane {
         buffer.lines().next().unwrap_or_default().to_string()
     }
 
+    fn receipt_id(&self) -> String {
+        fs::read_to_string(self.path("receipt.id")).expect("native input record id")
+    }
+
     async fn attempt(
         &self,
         shared: &std::sync::Arc<crate::services::discord::SharedData>,
@@ -213,7 +236,7 @@ async fn codex_injection_reads_native_with_a_separate_relay_pg() {
         crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
             &session,
             &pane.header(),
-            None,
+            Some(&pane.receipt_id()),
             Some(TURN),
             chrono::Utc::now(),
         ),
@@ -278,9 +301,20 @@ async fn codex_listed_channel_uses_production_enablement_pg() {
     let native = fs::read_to_string(pane.path("rollout.jsonl")).unwrap();
     assert_eq!(
         native.matches(&pane.header()).count(),
-        1,
-        "one native nonce"
+        2,
+        "one native response/completed pair"
     );
+    let completed: Vec<serde_json::Value> = native
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| {
+            record["type"] == "event_msg"
+                && record["payload"]["type"] == "item_completed"
+                && record["payload"]["item"]["content"][0]["text"] == pane.header()
+        })
+        .collect();
+    assert_eq!(completed.len(), 1, "one canonical input receipt");
+    assert_eq!(completed[0]["payload"]["item"]["id"], pane.receipt_id());
 }
 
 /// A listed Herdr-hosted channel opens the queued head gate, yet Codex input there stays refused.
@@ -401,7 +435,7 @@ async fn an_enabled_codex_channel_steers_the_open_turn_quietly_pg() {
     let seen = observe(
         &pane.session(),
         &pane.header(),
-        None,
+        Some(&pane.receipt_id()),
         Some(TURN),
         chrono::Utc::now(),
     );

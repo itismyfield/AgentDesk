@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 126
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -49,6 +49,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
+| `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
@@ -97,6 +98,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/claude_tui/hook_server/relay_receipts.rs` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs` |  |
+| `AGENTDESK_I7193_MUTANT` | `src/services/provider/native_stop.rs` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs`, `src/services/tui_prompt_dedupe/binding_context.rs` | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs` |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
