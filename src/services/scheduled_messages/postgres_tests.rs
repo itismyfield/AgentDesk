@@ -1636,3 +1636,36 @@ async fn postgres_expiry_does_not_terminalize_a_still_live_agent_turn() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+#[tokio::test]
+async fn postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff() {
+    let (pg_db, pool) = create_test_pool("agentdesk_smsg_image_fire", "dormant image fire").await;
+    let message = insert_due_push_message(&pool).await;
+    sqlx::query("UPDATE scheduled_messages SET image_filename='image.png', image_content_type='image/png', image_data=$1, provider_targets=$2, provider_target_summary=$2 WHERE id=$3")
+        .bind(&b"image bytes"[..])
+        .bind(json!({"kakao":{"accountId":"default","friendUuids":[],"sendToSelf":true}}))
+        .bind(&message.id).execute(&pool).await.expect("direct SQL image definition");
+    let fire = claim_one(&pool, "dormant-image-worker").await;
+    assert!(fire.message.image_attachment.is_some());
+    fire_push(&pool, &fire, Utc::now()).await;
+    let discord: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let kakao: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_external_delivery_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (discord, kakao),
+        (0, 0),
+        "dormant image must make zero Discord/Kakao handoffs"
+    );
+    let status: (String, String, Option<String>) = sqlx::query_as("SELECT sm.status, d.status, d.error FROM scheduled_messages sm JOIN scheduled_message_deliveries d ON d.scheduled_message_id=sm.id WHERE sm.id=$1")
+        .bind(&message.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status.0, db::STATUS_FAILED);
+    assert_eq!(status.1, db::DELIVERY_FAILED);
+    assert_eq!(status.2.as_deref(), Some("image transport not enabled"));
+    pool.close().await;
+    pg_db.drop().await;
+}

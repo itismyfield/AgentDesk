@@ -20,6 +20,7 @@ mod evidence;
 mod external_delivery;
 pub(crate) mod provider_targets;
 mod push_handoff;
+use push_handoff::fire_push;
 mod timing;
 
 #[cfg(test)]
@@ -181,25 +182,6 @@ pub async fn fire_claimed(
         other => {
             let error = format!("unknown delivery_kind '{other}'");
             finish_terminal_failure(pool, &fire, &error).await;
-        }
-    }
-}
-
-async fn fire_push(pool: &PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
-    match push_handoff::commit(pool, fire, now).await {
-        Ok(push_handoff::PushHandoffOutcome::Committed) => {}
-        Ok(push_handoff::PushHandoffOutcome::Canceled) => tracing::info!(
-            id = fire.message.id,
-            delivery_id = fire.delivery_id,
-            "[smsg] push handoff skipped after claim cancellation"
-        ),
-        Err(push_handoff::PushHandoffError::Invalid(error)) => {
-            finish_terminal_failure(pool, fire, error).await;
-        }
-        Err(push_handoff::PushHandoffError::Transient(error)) => {
-            let error = format!("outbox enqueue failed: {error}");
-            tracing::warn!(id = fire.message.id, "[smsg] {error}");
-            interrupt_for_retry(pool, fire, &error).await;
         }
     }
 }

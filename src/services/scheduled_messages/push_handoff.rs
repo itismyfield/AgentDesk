@@ -9,9 +9,9 @@ use crate::services::message_outbox::{
     OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
 };
 
-use super::OUTBOX_SOURCE;
 use super::external_delivery::{ExternalHandoffError, enqueue_for_message_tx};
 use super::timing::compute_resume;
+use super::{OUTBOX_SOURCE, finish_terminal_failure, interrupt_for_retry};
 
 const DEFAULT_EXTERNAL_DELIVERY_WINDOW_HOURS: i64 = 24;
 
@@ -39,6 +39,29 @@ pub(super) enum PushHandoffError {
     Invalid(&'static str),
     #[error("scheduled push handoff failed: {0}")]
     Transient(#[source] anyhow::Error),
+}
+
+pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
+    if fire.message.image_attachment.is_some() {
+        finish_terminal_failure(pool, fire, "image transport not enabled").await;
+        return;
+    }
+    match commit(pool, fire, now).await {
+        Ok(PushHandoffOutcome::Committed) => {}
+        Ok(PushHandoffOutcome::Canceled) => tracing::info!(
+            id = fire.message.id,
+            delivery_id = fire.delivery_id,
+            "[smsg] push handoff skipped after claim cancellation"
+        ),
+        Err(PushHandoffError::Invalid(error)) => {
+            finish_terminal_failure(pool, fire, error).await;
+        }
+        Err(PushHandoffError::Transient(error)) => {
+            let error = format!("outbox enqueue failed: {error}");
+            tracing::warn!(id = fire.message.id, "[smsg] {error}");
+            interrupt_for_retry(pool, fire, &error).await;
+        }
+    }
 }
 
 pub(super) async fn commit(

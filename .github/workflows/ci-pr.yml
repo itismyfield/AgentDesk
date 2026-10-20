@@ -148,6 +148,7 @@ jobs:
               - 'src/server/outbox_actionable_delivery.rs'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
+              - 'src/server/routes/scheduled_messages/**'
               - 'src/server/worker_registry.rs'
               - 'src/server/mod.rs'
               - 'src/server/policy_tick_logging.rs'
