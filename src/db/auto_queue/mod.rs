@@ -4,12 +4,15 @@ pub mod entries;
 pub mod phase_gate_verdict;
 pub mod phase_gates;
 pub mod queries;
+pub(crate) mod run_admission;
 pub(crate) mod run_owner_guard;
 pub mod run_status;
 pub mod runs;
 pub mod slot_predicate;
 pub mod slots;
 
+#[cfg(test)]
+mod run_admission_pg_tests;
 #[cfg(test)]
 mod run_completion_contract_tests;
 #[cfg(test)]

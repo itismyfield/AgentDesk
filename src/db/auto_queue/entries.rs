@@ -2,6 +2,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+use super::run_admission::admit_entry_transition_on_pg_tx;
 use super::run_status::is_live_run_status;
 use super::runs::{
     acquire_run_advisory_xact_lock_on_pg_tx, acquire_run_advisory_xact_locks_on_pg_tx,
@@ -503,8 +504,15 @@ pub async fn update_entry_status_on_pg(
             .await
             .map_err(|error| format!("open postgres entry transition transaction: {error}"))?;
 
+        admit_entry_transition_on_pg_tx(
+            &mut tx,
+            &current.run_id,
+            entry_id,
+            &current.status,
+            normalized,
+        )
+        .await?;
         if normalized == ENTRY_STATUS_DISPATCHED {
-            gate_dispatched_entry_run_on_pg_tx(&mut tx, &current.run_id).await?;
             validate_new_dispatch_attachment_on_pg_tx(
                 &mut tx,
                 entry_id,
@@ -850,8 +858,9 @@ pub async fn update_entry_status_on_pg_tx(
         });
     }
 
+    admit_entry_transition_on_pg_tx(tx, &current.run_id, entry_id, &current.status, normalized)
+        .await?;
     if normalized == ENTRY_STATUS_DISPATCHED {
-        gate_dispatched_entry_run_on_pg_tx(tx, &current.run_id).await?;
         validate_new_dispatch_attachment_on_pg_tx(
             tx,
             entry_id,
@@ -1015,38 +1024,6 @@ pub async fn update_entry_status_on_pg_tx(
         to_status: normalized.to_string(),
         changed: true,
     })
-}
-
-/// Serializes a live attachment with terminal run writers, then derives the
-/// run predicate from a fresh READ COMMITTED statement under that token.
-///
-/// Call sites invoke this only for the dispatched arm, before its entry write.
-/// That arm does not call `maybe_finalize_run_if_ready_pg`; its non-blocking
-/// finalizer protocol and the participant lock-order summary are documented by
-/// that symbol in `runs`.
-async fn gate_dispatched_entry_run_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-) -> Result<(), String> {
-    acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await?;
-    let run_status = sqlx::query_scalar::<_, String>(
-        "SELECT status
-         FROM auto_queue_runs
-         WHERE id = $1",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| format!("reload auto-queue run {run_id} before entry dispatch: {error}"))?
-    .ok_or_else(|| format!("auto-queue run not found before entry dispatch: {run_id}"))?;
-
-    if !is_live_run_status(&run_status) {
-        return Err(format!(
-            "auto-queue run {run_id} is {run_status}: refusing to dispatch an entry"
-        ));
-    }
-
-    Ok(())
 }
 
 /// Acquire every run token before a caller-owned transaction writes any row.

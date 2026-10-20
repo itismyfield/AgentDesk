@@ -38,7 +38,7 @@ fn read(
     let reader = {
         let (path, token, alive) = (path.display().to_string(), token.clone(), alive.clone());
         std::thread::spawn(move || {
-            let alive = move || alive.load(Ordering::SeqCst);
+            let alive = move |_| (!alive.load(Ordering::SeqCst)).then(String::new);
             read_to_provider_terminal(&path, 0, &tx, &token, alive)
         })
     };

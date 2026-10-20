@@ -40,8 +40,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
 
 use super::SharedData;
-/// A holder's forwarded user stop, run as its own `/stop`.
-pub(crate) use super::commands::stop::run_holder_stop;
+/// A holder's forwarded user stop and a live Herdr turn's non-forced cancel, run as its `/stop`.
+pub(crate) use super::commands::stop::{run_herdr_cancel, run_holder_stop};
 
 #[cfg(test)]
 // Install a real active gateway token for forwarded-stop effect assertions.

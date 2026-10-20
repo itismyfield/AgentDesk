@@ -354,12 +354,14 @@ async fn run_entry_readiness_on_pg_tx(
 /// handoff append, activate's empty-run completion `complete_run_if_empty`,
 /// and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
 /// Owner publication joins them through `run_owner_guard`: context creation, entry-less retry,
-/// dispatch-carrying gate saves, force-pause cleanup, status-writer and review-recovery revival.
+/// every gate save, force-pause cleanup, status-writer and review-recovery revival.
 /// Retry already takes the d1 retry token first and then the run token before its
 /// failed-sync and replacement attachment. Later cards/entries/runs/slots
 /// ordering is serialized by that first run token for these participants.
 /// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold
 /// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
+/// New blockers (gate saves, reopen, append, order) re-read the run under it via `run_admission`.
+/// Gate reconciliation can still fail a stored non-blocking gate; no production writer stores one.
 ///
 /// `lock_phase_gate_state_on_pg_tx` uses PostgreSQL's two-argument advisory
 /// key space, separate from the one-argument `aq_run:<run_id>` token. A save that carries
@@ -433,8 +435,8 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
     #[cfg(test)]
     super::run_completion_pg_tests::pause_completion_at("readiness_read").await;
 
-    // Recheck blockers committed by token-free writers since the readiness reads.
-    // Only a successful status transition authorizes releasing slots and notifying.
+    // Recheck grace (same row, no token) and blockers committed outside the token since the reads;
+    // only a successful status transition authorizes releasing slots and notifying.
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'completed',
