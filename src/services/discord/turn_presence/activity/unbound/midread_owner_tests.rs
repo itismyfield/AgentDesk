@@ -640,7 +640,7 @@ impl PeriodicCompletionFence {
             ),
             "the actual finalizer must preserve the FIFO head behind the fixture barrier"
         );
-        self.transition.take();
+        drop(self.transition.take());
         eprintln!(
             "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released=1"
         );
@@ -787,8 +787,11 @@ async fn supervisor_drains_pair(
             fence.release_after_a(fixture, logs, b).await;
         }
         until(async || {
-            inflight::load_inflight_state(&fixture.provider, fixture.rig.channel.get())
-                .is_none_or(|row| row.user_msg_id == b)
+            inflight::load_inflight_state_read_only_result(
+                &fixture.provider,
+                fixture.rig.channel.get(),
+            )
+            .is_ok_and(|row| row.is_none_or(|row| row.user_msg_id == b))
         })
         .await;
         if !periodic_only {
@@ -869,9 +872,9 @@ async fn supervisor_drains_pair(
         assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
         assert_eq!(supervisor.woken_head(), Some(b));
         assert_eq!(supervisor.state()["kickoffs_total"], 2);
+        assert_eq!(supervisor.state()["generation"], baseline["generation"]);
     }
     assert!(b_after_a_kick <= RECOVERY_LIMIT);
-    assert_eq!(supervisor.state()["generation"], baseline["generation"]);
     assert!(
         kick_observed_after(
             logs,
