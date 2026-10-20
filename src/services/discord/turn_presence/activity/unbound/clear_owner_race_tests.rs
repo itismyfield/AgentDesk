@@ -71,46 +71,15 @@ impl ProviderTurn {
     async fn wait_with_limit(&mut self, fixture: &Fixture, expected: u64, limit: Duration) -> u64 {
         let entry = tokio::time::timeout(limit, &mut self.entered).await;
         if !matches!(&entry, Ok(Ok(_))) {
-            let mailbox = tokio::time::timeout(
-                Duration::from_secs(1),
-                fixture.rig.shared.mailbox(fixture.rig.channel).snapshot(),
-            )
-            .await;
-            if let Ok(state) = mailbox {
-                let ids = state
-                    .intervention_queue
-                    .iter()
-                    .map(|item| item.message_id.get())
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "A2_FIFO_TIMEOUT expected={expected} queue_ids={ids:?} disk_ids={:?} token_present={} active_user_message_id={:?} pending_user_dispatch={:?}",
-                    fixture.disk_ids(),
-                    state.cancel_token.is_some(),
-                    state.active_user_message_id.map(|id| id.get()),
-                    state.pending_user_dispatch.map(|id| id.get()),
-                );
-            } else {
-                eprintln!("A2_FIFO_TIMEOUT expected={expected} mailbox_snapshot=timeout");
-            }
-            match inflight::load_inflight_state_read_only_result(
-                &fixture.provider,
-                fixture.rig.channel.get(),
-            ) {
-                Ok(Some(row)) => eprintln!(
-                    "A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=present user_msg_id={} runtime_kind={:?} runtime_unknown={}",
-                    row.user_msg_id, row.runtime_kind, row.runtime_kind_unknown_on_disk
-                ),
-                Ok(None) => eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=absent"),
-                Err(_) => {
-                    eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=unreadable")
-                }
-            }
+            self.trace_wait_state(fixture, expected).await;
         }
         assert!(
             matches!(&entry, Ok(Ok(_))),
             "queued FIFO source {expected} must enter provider within {limit:?}: {entry:?}"
         );
-        let thread = entry.unwrap().unwrap();
+        self.verify_entry(fixture, expected, entry.unwrap().unwrap())
+    }
+    fn verify_entry(&self, fixture: &Fixture, expected: u64, thread: std::thread::ThreadId) -> u64 {
         assert_ne!(thread, std::thread::current().id());
         assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
         let row =
@@ -120,6 +89,62 @@ impl ProviderTurn {
             "the entered provider must own the FIFO source"
         );
         row.user_msg_id
+    }
+    async fn trace_wait_state(&self, fixture: &Fixture, expected: u64) {
+        let mailbox = tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture.rig.shared.mailbox(fixture.rig.channel).snapshot(),
+        )
+        .await;
+        if let Ok(state) = mailbox {
+            let ids = state
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id.get())
+                .collect::<Vec<_>>();
+            eprintln!(
+                "A2_FIFO_TIMEOUT expected={expected} queue_ids={ids:?} disk_ids={:?} token_present={} active_user_message_id={:?} pending_user_dispatch={:?}",
+                fixture.disk_ids(),
+                state.cancel_token.is_some(),
+                state.active_user_message_id.map(|id| id.get()),
+                state.pending_user_dispatch.map(|id| id.get()),
+            );
+        } else {
+            eprintln!("A2_FIFO_TIMEOUT expected={expected} mailbox_snapshot=timeout");
+        }
+        match inflight::load_inflight_state_read_only_result(
+            &fixture.provider,
+            fixture.rig.channel.get(),
+        ) {
+            Ok(Some(row)) => eprintln!(
+                "A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=present user_msg_id={} runtime_kind={:?} runtime_unknown={}",
+                row.user_msg_id, row.runtime_kind, row.runtime_kind_unknown_on_disk
+            ),
+            Ok(None) => eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=absent"),
+            Err(_) => {
+                eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=unreadable")
+            }
+        }
+    }
+    async fn diagnose_missed_entry(
+        &mut self,
+        fixture: &Fixture,
+        expected: u64,
+        anchor: tokio::time::Instant,
+        context: &str,
+    ) {
+        self.trace_wait_state(fixture, expected).await;
+        // Observe the native receiver after a missed boundary; the caller retains its failure.
+        match tokio::time::timeout(Duration::from_secs(30), &mut self.entered).await {
+            Ok(Ok(thread)) => {
+                self.verify_entry(fixture, expected, thread);
+                eprintln!(
+                    "A2_FIFO_LATE_ENTRY ms={} context={context}",
+                    anchor.elapsed().as_millis()
+                );
+            }
+            Ok(Err(_)) | Err(_) => eprintln!("A2_FIFO_NO_ENTRY context={context}"),
+        }
     }
     fn finish(self) {
         self.release.send(()).unwrap();

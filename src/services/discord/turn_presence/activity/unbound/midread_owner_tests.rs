@@ -2,13 +2,16 @@
 use super::*;
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
 
-// After observed A cleanup, allow two actual recovery wakes and two ticks of scheduling slack.
+// The third actual wake closes admission; the absolute bound also covers a claimed dispatch stall.
 const RECOVERY_WAKE_LIMIT: usize = 2;
 const RECOVERY_LIMIT: Duration = LiveSupervisor::SUPERVISOR_WAKE_EVERY
     .saturating_mul(RECOVERY_WAKE_LIMIT as u32)
     .saturating_add(LiveSupervisor::SUPERVISOR_TICK.saturating_mul(2));
+const RECOVERY_SAFETY_LIMIT: Duration =
+    RECOVERY_LIMIT.saturating_add(LiveSupervisor::SUPERVISOR_WAKE_EVERY);
+// Count ticks up to the third-wake safety boundary, including the existing two-tick scheduling slack.
 const RECOVERY_TICK_LIMIT: usize =
-    (RECOVERY_LIMIT.as_nanos() / LiveSupervisor::SUPERVISOR_TICK.as_nanos()) as usize + 1;
+    (RECOVERY_SAFETY_LIMIT.as_nanos() / LiveSupervisor::SUPERVISOR_TICK.as_nanos()) as usize + 1;
 
 struct ForeignWatcher {
     task: Option<tokio::task::JoinHandle<()>>,
@@ -541,7 +544,13 @@ impl PeriodicCompletionFence {
         );
     }
 
-    async fn release_after_a(&mut self, fixture: &Fixture, logs: &LogSink, b: u64) {
+    async fn release_after_a(
+        &mut self,
+        fixture: &Fixture,
+        logs: &LogSink,
+        b: u64,
+        keep_transition: bool,
+    ) {
         let Some(finished) = self.finished.take() else {
             return;
         };
@@ -573,9 +582,12 @@ impl PeriodicCompletionFence {
             ),
             "the actual finalizer must preserve the FIFO head behind the fixture barrier"
         );
-        drop(self.transition.take());
+        if !keep_transition {
+            drop(self.transition.take());
+        }
         eprintln!(
-            "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released=1"
+            "A2_R6_PERIODIC_FENCE a_bridge_exit=1 natural_row_none=1 b_unstarted=1 direct_preserved=1 released={}",
+            usize::from(!keep_transition),
         );
     }
 }
@@ -595,13 +607,22 @@ impl Drop for PeriodicCompletionFence {
     }
 }
 
-type LateRecoveryFence =
-    Arc<std::sync::Mutex<Option<(tokio::time::Instant, tokio::sync::OwnedMutexGuard<()>)>>>;
+type LateRecoveryFence = Arc<
+    std::sync::Mutex<
+        Option<(
+            tokio::time::Instant,
+            usize,
+            tokio::sync::OwnedMutexGuard<()>,
+        )>,
+    >,
+>;
 
 struct RecoveryDriver {
     task: Option<tokio::task::JoinHandle<()>>,
     ticks: Arc<AtomicUsize>,
     wakes: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    changed: Arc<tokio::sync::Notify>,
+    last_woken_head: Arc<std::sync::Mutex<Option<u64>>>,
     late_release: LateRecoveryFence,
 }
 
@@ -613,6 +634,10 @@ impl RecoveryDriver {
         let first_wake = supervisor.last_kick_at().unwrap();
         let wakes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = wakes.clone();
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let published = changed.clone();
+        let last_woken_head = Arc::new(std::sync::Mutex::new(None));
+        let woken = last_woken_head.clone();
         let late_release: LateRecoveryFence = Arc::new(std::sync::Mutex::new(None));
         let delayed = late_release.clone();
         let task = tokio::spawn(async move {
@@ -629,15 +654,18 @@ impl RecoveryDriver {
                 }
                 if let Some(at) = supervisor.last_kick_at().filter(|at| *at != previous) {
                     previous = at;
+                    *woken.lock().unwrap() = supervisor.woken_head();
                     let mut seen = observed.lock().unwrap();
                     seen.push(at);
                     let mut release = delayed.lock().unwrap();
-                    if release.as_ref().is_some_and(|(anchor, _)| {
-                        seen.iter().filter(|wake| **wake >= *anchor).count() > RECOVERY_WAKE_LIMIT
+                    if release.as_ref().is_some_and(|(anchor, count, _)| {
+                        seen.iter().filter(|wake| **wake >= *anchor).count() >= *count
                     }) {
+                        let count = release.as_ref().unwrap().1;
                         drop(release.take());
-                        eprintln!("A2_R8_LATE_B release_at_wake=3 native_kick=true");
+                        eprintln!("A2_R8_LATE_B release_at_wake={count} native_kick=true");
                     }
+                    published.notify_waiters();
                 }
                 trace_supervisor_tick(&supervisor, tick, first_wake);
             }
@@ -646,6 +674,8 @@ impl RecoveryDriver {
             task: Some(task),
             ticks,
             wakes,
+            changed,
+            last_woken_head,
             late_release,
         }
     }
@@ -659,16 +689,29 @@ impl RecoveryDriver {
             .count()
     }
 
-    fn delay_until_third_wake(
+    async fn boundary_after(&self, anchor: tokio::time::Instant) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.wakes_after(anchor) > RECOVERY_WAKE_LIMIT {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn delay_until_wake(
         &self,
         anchor: tokio::time::Instant,
+        count: usize,
         guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
         assert!(
             self.late_release
                 .lock()
                 .unwrap()
-                .replace((anchor, guard))
+                .replace((anchor, count, guard))
                 .is_none()
         );
     }
@@ -690,6 +733,171 @@ impl Drop for RecoveryDriver {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
+        }
+    }
+}
+
+#[derive(Default)]
+struct DispatchTimes {
+    dequeue_wake: Option<tokio::time::Instant>,
+    claimed: Option<tokio::time::Instant>,
+}
+
+struct RecoveryTiming {
+    values: Arc<std::sync::Mutex<DispatchTimes>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+fn elapsed_field(at: Option<tokio::time::Instant>, origin: tokio::time::Instant) -> String {
+    at.and_then(|at| at.checked_duration_since(origin))
+        .map_or_else(
+            || "none".to_owned(),
+            |elapsed| elapsed.as_millis().to_string(),
+        )
+}
+
+impl RecoveryTiming {
+    fn watch(fixture: &Fixture, driver: &RecoveryDriver, expected: u64) -> Self {
+        let values = Arc::new(std::sync::Mutex::new(DispatchTimes::default()));
+        let observed = values.clone();
+        let shared = fixture.rig.shared.clone();
+        let channel = fixture.rig.channel;
+        let wakes = driver.wakes.clone();
+        let woken = driver.last_woken_head.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let mailbox = shared.mailbox(channel).snapshot().await;
+                let claimed = mailbox.active_user_message_id == Some(MessageId::new(expected))
+                    && mailbox.cancel_token.is_some();
+                let pending = mailbox.pending_user_dispatch == Some(MessageId::new(expected));
+                if claimed || pending {
+                    let mut times = observed.lock().unwrap();
+                    if times.dequeue_wake.is_none() && *woken.lock().unwrap() == Some(expected) {
+                        times.dequeue_wake = wakes.lock().unwrap().last().copied();
+                    }
+                    if claimed && times.claimed.is_none() {
+                        times.claimed = Some(tokio::time::Instant::now());
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        Self { values, task }
+    }
+
+    fn fields(&self, first_wake: tokio::time::Instant, entered: tokio::time::Instant) -> String {
+        let times = self.values.lock().unwrap();
+        let latency = times
+            .dequeue_wake
+            .map(|wake| entered.saturating_duration_since(wake));
+        format!(
+            "wake_to_provider_ms={} dequeue_wake_after_a_ms={} claim_after_a_ms={}",
+            latency.map_or_else(|| "none".to_owned(), |value| value.as_millis().to_string()),
+            elapsed_field(times.dequeue_wake, first_wake),
+            elapsed_field(times.claimed, first_wake),
+        )
+    }
+}
+
+impl Drop for RecoveryTiming {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct ClaimPause {
+    task: Option<tokio::task::JoinHandle<()>>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for ClaimPause {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        self.release.notify_one();
+    }
+}
+
+async fn wait_recovery_entry(
+    second: &mut ProviderTurn,
+    fixture: &Fixture,
+    expected: u64,
+    driver: &RecoveryDriver,
+    timing: &RecoveryTiming,
+    first_wake: tokio::time::Instant,
+    anchor: tokio::time::Instant,
+) -> u64 {
+    // The 96s bound finitely ends either a stopped driver or a claimed dispatch without entry.
+    let deadline = anchor
+        + if wake_mutant("a2-claim-delay-old66") {
+            RECOVERY_LIMIT
+        } else {
+            RECOVERY_SAFETY_LIMIT
+        };
+    let result = tokio::select! {
+        biased;
+        _ = driver.boundary_after(anchor) => Err("third_actual_wake"),
+        entry = &mut second.entered => match entry {
+            Ok(thread) => Ok(thread),
+            Err(_) => Err("provider_probe_closed"),
+        },
+        _ = tokio::time::sleep_until(deadline) => Err(if wake_mutant("a2-claim-delay-old66") {
+            "old66_deadline"
+        } else {
+            "absolute_safety"
+        }),
+    };
+    match result {
+        Ok(thread) => second.verify_entry(fixture, expected, thread),
+        Err(reason) => {
+            let mailbox = fixture
+                .rig
+                .shared
+                .mailbox(fixture.rig.channel)
+                .snapshot()
+                .await;
+            let claimed = mailbox.cancel_token.is_some()
+                && mailbox.active_user_message_id == Some(MessageId::new(expected));
+            let phase = if claimed {
+                "claimed_dispatch_stalled"
+            } else {
+                "driver_or_preclaim_stalled"
+            };
+            let inflight = match inflight::load_inflight_state_read_only_result(
+                &fixture.provider,
+                fixture.rig.channel.get(),
+            ) {
+                Ok(Some(_)) => "present",
+                Ok(None) => "absent",
+                Err(_) => "unreadable",
+            };
+            let context = format!(
+                "reason={reason} phase={phase} token_present={} active_user={:?} pending_user={:?} inflight={inflight} recovery_wakes={} {}",
+                mailbox.cancel_token.is_some(),
+                mailbox.active_user_message_id.map(|id| id.get()),
+                mailbox.pending_user_dispatch.map(|id| id.get()),
+                driver.wakes_after(anchor),
+                timing.fields(first_wake, tokio::time::Instant::now()),
+            );
+            eprintln!("A2_FIFO_BOUNDARY {context}");
+            if reason == "provider_probe_closed" {
+                second.trace_wait_state(fixture, expected).await;
+                eprintln!("A2_FIFO_NO_ENTRY {context}");
+            } else {
+                second
+                    .diagnose_missed_entry(fixture, expected, anchor, &context)
+                    .await;
+            }
+            match reason {
+                "third_actual_wake" => {
+                    panic!("B must be claimed within two actual recovery wakes: {context}")
+                }
+                "old66_deadline" => {
+                    panic!("B provider entry exceeded the old66 wall-clock contract: {context}")
+                }
+                _ => panic!("B provider entry reached the absolute safety bound: {context}"),
+            }
         }
     }
 }
@@ -760,11 +968,18 @@ async fn supervisor_drains_pair(
     }
     let producers = WakeObservations::install(fixture.rig.channel, periodic_only);
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
+    let timing = RecoveryTiming::watch(fixture, &driver, b);
+    let claim_mode = periodic_only
+        && ["a2-claim-stall", "a2-claim-delay", "a2-claim-delay-old66"]
+            .iter()
+            .any(|name| wake_mutant(name));
+    let claim_hook =
+        claim_mode.then(|| install_owner_race_pause(fixture.rig.channel, "intake_after_claim"));
     if wake_mutant("a2-allow-early-b") {
         // Premature terminal completion exercises the real consumer before the fixture releases A.
         first.release.send(()).unwrap();
         if let Some(fence) = completion_fence.as_mut() {
-            fence.release_after_a(fixture, logs, b).await;
+            fence.release_after_a(fixture, logs, b, false).await;
         }
         until(async || {
             inflight::load_inflight_state_read_only_result(
@@ -813,7 +1028,11 @@ async fn supervisor_drains_pair(
     eprintln!("A2_S3_A_HELD a_entered=1 no_early_b=1");
     first.finish();
     if let Some(fence) = completion_fence.as_mut() {
-        fence.release_after_a(fixture, logs, b).await;
+        let keep_transition =
+            claim_mode || wake_mutant("a2-preclaim-stall") || wake_mutant("a2-unbounded-recovery");
+        fence
+            .release_after_a(fixture, logs, b, keep_transition)
+            .await;
     }
     until(async || {
         inflight::load_inflight_state_read_only_result(&fixture.provider, fixture.rig.channel.get())
@@ -822,14 +1041,92 @@ async fn supervisor_drains_pair(
     .await;
     let a_cleared = tokio::time::Instant::now();
     let ticks_at_cleanup = driver.ticks.load(Ordering::SeqCst);
+    let mut retained_transition = completion_fence
+        .as_mut()
+        .and_then(|fence| fence.transition.take());
+    let _preclaim_fence = if wake_mutant("a2-preclaim-stall") {
+        Some(
+            retained_transition
+                .take()
+                .expect("the periodic fixture must retain its transition fence"),
+        )
+    } else {
+        None
+    };
+    let mut claim_pause = if let Some((entered, release)) = claim_hook {
+        let guard = retained_transition
+            .take()
+            .expect("the claim fixture must retain its transition fence");
+        driver.delay_until_wake(a_cleared, 2, guard);
+        let wakes = driver.wakes.clone();
+        let shared = fixture.rig.shared.clone();
+        let channel = fixture.rig.channel;
+        let provider = fixture.provider.clone();
+        let times = timing.values.clone();
+        let resumed = release.clone();
+        let task = tokio::spawn(async move {
+            entered.notified().await;
+            let claimed_at = tokio::time::Instant::now();
+            let mailbox = shared.mailbox(channel).snapshot().await;
+            assert_eq!(mailbox.active_user_message_id, Some(MessageId::new(b)));
+            assert!(mailbox.cancel_token.is_some());
+            assert!(mailbox.pending_user_dispatch.is_none());
+            assert!(
+                inflight::load_inflight_state_read_only_result(&provider, channel.get())
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_some());
+            let observed_wakes = wakes
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .filter(|wake| *wake >= a_cleared)
+                .collect::<Vec<_>>();
+            assert_eq!(observed_wakes.len(), 2);
+            let second_wake = observed_wakes[1];
+            {
+                let mut observed = times.lock().unwrap();
+                observed.claimed = Some(claimed_at);
+                observed.dequeue_wake = Some(second_wake);
+            }
+            eprintln!(
+                "A2_R11_CLAIM_PAUSE entered=1 user={b} token_present=1 inflight_none=1 recovery_wakes=2"
+            );
+            if wake_mutant("a2-claim-stall") {
+                std::future::pending::<()>().await;
+            }
+            let needed = (a_cleared + RECOVERY_LIMIT + Duration::from_secs(1))
+                .saturating_duration_since(second_wake);
+            let pause_seconds = 8.max(needed.as_secs() + u64::from(needed.subsec_nanos() != 0));
+            let release_at = second_wake + Duration::from_secs(pause_seconds);
+            assert!(release_at > a_cleared + RECOVERY_LIMIT);
+            assert!(release_at <= a_cleared + RECOVERY_SAFETY_LIMIT - Duration::from_secs(10));
+            eprintln!(
+                "A2_R11_CLAIM_DELAY second_wake_ms={} old66_ms=66000 pause_ms={} release_ms={} safety_ms=96000 margin_ms={}",
+                second_wake.duration_since(a_cleared).as_millis(),
+                pause_seconds * 1000,
+                release_at.duration_since(a_cleared).as_millis(),
+                (a_cleared + RECOVERY_SAFETY_LIMIT)
+                    .duration_since(release_at)
+                    .as_millis(),
+            );
+            tokio::time::sleep_until(release_at).await;
+            resumed.notify_one();
+        });
+        Some(ClaimPause {
+            task: Some(task),
+            release,
+        })
+    } else {
+        None
+    };
     if wake_mutant("a2-unbounded-recovery") {
-        let guard = fixture
-            .rig
-            .shared
-            .session_transition_lock(fixture.rig.channel)
-            .lock_owned()
-            .await;
-        driver.delay_until_third_wake(a_cleared, guard);
+        let guard = retained_transition
+            .take()
+            .expect("the late-wake fixture must retain its transition fence");
+        driver.delay_until_wake(a_cleared, 3, guard);
         let thread = (&mut second.entered)
             .await
             .expect("the delayed B provider must actually enter");
@@ -844,12 +1141,30 @@ async fn supervisor_drains_pair(
         assert_eq!(row.user_msg_id, b);
         ledger.push(row.user_msg_id);
     } else {
-        let remaining =
-            (a_cleared + RECOVERY_LIMIT).saturating_duration_since(tokio::time::Instant::now());
-        ledger.push(second.wait_with_limit(fixture, b, remaining).await);
+        ledger.push(
+            wait_recovery_entry(
+                &mut second,
+                fixture,
+                b,
+                &driver,
+                &timing,
+                first_wake,
+                a_cleared,
+            )
+            .await,
+        );
+    }
+    if let Some(control) = claim_pause.as_mut() {
+        control.task.take().unwrap().await.unwrap();
     }
     let recovery_wakes = driver.wakes_after(a_cleared);
     let a_cleared_to_b = a_cleared.elapsed();
+    let entered_at = tokio::time::Instant::now();
+    let entry_ticks = driver
+        .ticks
+        .load(Ordering::SeqCst)
+        .saturating_sub(ticks_at_cleanup);
+    let dispatch_timing = timing.fields(first_wake, entered_at);
     eprintln!(
         "A2_R8_WAKE_BOUND actual_b_entered=1 recovery_wakes={recovery_wakes} limit={RECOVERY_WAKE_LIMIT} a_cleared_to_b_ms={}",
         a_cleared_to_b.as_millis()
@@ -858,7 +1173,7 @@ async fn supervisor_drains_pair(
         recovery_wakes <= RECOVERY_WAKE_LIMIT,
         "B must enter within two actual supervisor recovery wakes after observed A cleanup: {recovery_wakes}"
     );
-    assert!(a_cleared_to_b <= RECOVERY_LIMIT);
+    assert!(entry_ticks <= RECOVERY_TICK_LIMIT);
     let carriers = observed_carriers(logs, fixture.rig.channel, completion_offset);
     let direct = String::from_utf8_lossy(&logs.0.lock().unwrap()[completion_offset..])
         .contains("Processing next queued command");
@@ -902,7 +1217,7 @@ async fn supervisor_drains_pair(
     }
     if periodic_only {
         assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
-        assert_eq!(supervisor.woken_head(), Some(b));
+        assert_eq!(*driver.last_woken_head.lock().unwrap(), Some(b));
         assert_eq!(supervisor.state()["kickoffs_total"], 1 + recovery_wakes);
         assert!((1..=RECOVERY_WAKE_LIMIT).contains(&recovery_wakes));
         assert_eq!(supervisor.state()["generation"], baseline["generation"]);
@@ -923,20 +1238,15 @@ async fn supervisor_drains_pair(
         producers.requests()
     );
     producers.release();
+    assert!(driver.wakes_after(a_cleared) <= RECOVERY_WAKE_LIMIT);
     second.finish();
     fixture.assert_finished().await;
+    let final_wakes = driver.wakes_after(a_cleared);
     let recovery_ticks = driver.stop().await;
     let cleanup_ticks = recovery_ticks.saturating_sub(ticks_at_cleanup);
     let drained = began.elapsed();
     let recovery_drain = a_cleared.elapsed();
-    assert!(
-        recovery_drain <= RECOVERY_LIMIT,
-        "{label}: drain exceeded two recovery wakes and two ticks after observed A cleanup: {recovery_drain:?}"
-    );
-    assert!(
-        cleanup_ticks <= RECOVERY_TICK_LIMIT,
-        "{label}: recovery used {cleanup_ticks} real ticks after observed A cleanup"
-    );
+    assert!(final_wakes <= RECOVERY_WAKE_LIMIT);
     assert_eq!(ledger, [a, b]);
     assert_eq!(ledger.iter().filter(|id| **id == a).count(), 1);
     assert_eq!(ledger.iter().filter(|id| **id == b).count(), 1);
@@ -949,14 +1259,14 @@ async fn supervisor_drains_pair(
         supervisor.state()["kickoffs_total"],
         first_entry.as_millis(),
         drained.as_millis(),
-        RECOVERY_LIMIT.as_millis(),
+        RECOVERY_SAFETY_LIMIT.as_millis(),
         recovery_drain.as_millis(),
     );
     eprintln!(
-        "A2_S3_B_RECOVERY case={label} a_entered=1 no_early_b=1 wake_every_ms={} tick_ms={} bound_ms={} b_after_a_kick_ms={} b_entry_ms={} periodic_wake_ms={} a_cleared_to_b_ms={} recovery_wakes={recovery_wakes} recovery_wake_limit={RECOVERY_WAKE_LIMIT} superseded_holds={} recovery_superseded_holds={}",
+        "A2_S3_B_RECOVERY case={label} a_entered=1 no_early_b=1 wake_every_ms={} tick_ms={} bound_ms={} b_after_a_kick_ms={} b_entry_ms={} periodic_wake_ms={} a_cleared_to_b_ms={} recovery_wakes={recovery_wakes} recovery_wake_limit={RECOVERY_WAKE_LIMIT} superseded_holds={} recovery_superseded_holds={} wake_boundary_open=1 entry_ticks={entry_ticks} cleanup_ticks={cleanup_ticks} {dispatch_timing}",
         LiveSupervisor::SUPERVISOR_WAKE_EVERY.as_millis(),
         LiveSupervisor::SUPERVISOR_TICK.as_millis(),
-        RECOVERY_LIMIT.as_millis(),
+        RECOVERY_SAFETY_LIMIT.as_millis(),
         b_after_a_kick.as_millis(),
         b_entry.as_millis(),
         periodic_wake.as_millis(),
