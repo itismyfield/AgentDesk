@@ -187,7 +187,29 @@ impl Drop for PrivateHost {
     }
 }
 
+struct WatcherRuntime(Option<tokio::runtime::Runtime>);
+
+impl WatcherRuntime {
+    fn new() -> Self {
+        Self(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap(),
+        ))
+    }
+}
+impl Drop for WatcherRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 pub(super) struct Fixture {
+    watcher_runtime: WatcherRuntime,
     // Restore process overrides before Rig releases the shared environment lock.
     _env: Vec<crate::config::TestEnvVarGuard>,
     pub(super) rig: Rig,
@@ -210,7 +232,10 @@ impl Fixture {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        tokio::spawn(future)
+        if crate::services::claude_tui::source_verify::n2b_mutant("a2-watcher-current-thread") {
+            return tokio::spawn(future);
+        }
+        self.watcher_runtime.0.as_ref().unwrap().spawn(future)
     }
     pub(super) async fn connect_and_migrate_fixture(id: u64, provider: ProviderKind) -> Self {
         eprintln!("A2_PREP fixture_start channel={id}");
@@ -391,6 +416,7 @@ impl Fixture {
             }
         });
         Self {
+            watcher_runtime: WatcherRuntime::new(),
             rig,
             registry,
             foreign,
