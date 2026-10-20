@@ -60,7 +60,7 @@ mod command_boundary_tests {
     const DENIAL: [&str; 4] = [
         "_text: &str",
         "rate_limit_wait(shared, channel_id).await;",
-        "\"Unknown or unavailable text command. Use `!help` for supported commands.\"",
+        "&ctx.http,\n            \"Unknown or unavailable text command. Use `!help` for supported commands.\",",
         ".say(",
     ];
     const EXECUTION: [&str; 5] = [
@@ -141,5 +141,12 @@ mod command_boundary_tests {
             let coded = CONTROL.replacen(rate, &format!("{rate} let _ = \"{banned}\";"), 1);
             assert_eq!(legacy_gaps(&coded).len(), 1, "{banned}");
         }
+        let text = "\"Unknown or unavailable text command. Use `!help` for supported commands.\"";
+        let quoted = CONTROL.replacen(text, &format!("r#\"{text}\"#"), 1);
+        assert_ne!(quoted, CONTROL);
+        assert!(
+            !legacy_gaps(&quoted).is_empty(),
+            "a raw-string copy of the denial passes"
+        );
     }
 }

@@ -27,9 +27,14 @@ impl Lexed {
     }
 
     /// Offsets where `needle` appears as written: its code as code and its literals as
-    /// literals, so prose, a quoted copy or a test's own needle never counts.
+    /// literals, so prose, a quoted copy or a test's own needle never counts. A needle
+    /// with no code byte would also match inside a raw string, so it is refused.
     pub(in crate::services::discord) fn find_all(&self, needle: &str) -> Vec<usize> {
         let shape = rust_code_mask(needle).expect("needle lexes on its own");
+        assert!(
+            !shape.trim().is_empty(),
+            "needle `{needle}` has no code byte; anchor it to its call"
+        );
         self.code
             .match_indices(needle)
             .map(|(at, _)| at)
@@ -142,4 +147,18 @@ fn as_written_matching_skips_prose_and_quoted_copies() {
     assert!(body.text().ends_with("{ call(\"{\") } }"));
     let forged = forge(source, "call(\"x\")", CommentForgery::NestedBlock);
     assert_eq!(Lexed::new(&forged).count("call("), 1);
+}
+
+#[test]
+fn literal_only_needles_fail_closed() {
+    let quoted = Lexed::new("let x = r#\"\"Use `!clear` instead.\"\"#;\n");
+    let counted = std::panic::catch_unwind(|| quoted.count("\"Use `!clear` instead.\""));
+    assert!(
+        counted.is_err(),
+        "a literal-only needle counted {counted:?}"
+    );
+    assert_eq!(
+        quoted.count("msg.reply(&ctx.http, \"Use `!clear` instead.\")"),
+        0
+    );
 }

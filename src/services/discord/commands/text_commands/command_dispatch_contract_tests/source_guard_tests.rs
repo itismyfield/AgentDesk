@@ -27,7 +27,7 @@ const DISPATCH_ARMS: [&str; 2] = [
 ];
 const ALIAS_MATCH: &str = "match skill.as_str() {";
 const ALIAS_ACTIONS: [&str; 8] = [
-    "\"Use `!clear` instead.\"",
+    "msg.reply(&ctx.http, \"Use `!clear` instead.\")",
     "cancel_text_stop_token_mailbox(",
     "super::CommandRisk::Mutating,",
     "handle_text_command(ctx, msg, data, channel_id, \"!pwd\")",
@@ -169,4 +169,11 @@ fn skill_alias_guard_rejects_commented_aliases_and_actions() {
             );
         }
     }
+    let reply = "let _ = msg.reply(&ctx.http, \"Use `!clear` instead.\").await;";
+    let quoted = TEXT_COMMANDS.replacen(reply, "let _ = r#\"\"Use `!clear` instead.\"\"#;", 1);
+    assert_ne!(quoted, TEXT_COMMANDS);
+    assert!(
+        !skill_alias_gaps(&quoted, INTAKE_GATE).is_empty(),
+        "a raw-string copy of the clear reply passes"
+    );
 }
