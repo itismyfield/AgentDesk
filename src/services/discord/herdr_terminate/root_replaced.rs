@@ -41,6 +41,7 @@ impl RootReplacedCandidate {
 struct Cached {
     row: HostedObservation,
     result: Recovery,
+    candidates: Vec<RootReplacedCandidate>,
 }
 #[cfg(not(test))]
 static CACHE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<i64, Cached>>> =
@@ -71,7 +72,42 @@ fn cache<R>(use_it: impl FnOnce(&mut BTreeMap<i64, Cached>) -> R) -> R {
     }
 }
 pub(crate) fn prune(rows: &[HostedObservation]) {
-    cache(|entries| entries.retain(|_, entry| rows.contains(&entry.row)));
+    cache(|entries| {
+        entries.retain(|_, entry| {
+            entry
+                .candidates
+                .retain(|candidate| rows.iter().any(|row| candidate.matches(row)));
+            rows.contains(&entry.row) || !entry.candidates.is_empty()
+        })
+    });
+}
+pub(in crate::services::discord) fn remember_candidate(candidate: &RootReplacedCandidate) {
+    cache(|entries| {
+        let row = &candidate.0;
+        let entry = entries.entry(row.session_id()).or_insert_with(|| Cached {
+            row: row.clone(),
+            result: Recovery::Held("candidate observed".into()),
+            candidates: Vec::new(),
+        });
+        if !entry.candidates.iter().any(|known| known.matches(row)) {
+            entry.candidates.push(candidate.clone());
+        }
+    });
+}
+pub(in crate::services::discord) fn candidate_for(
+    row: &HostedObservation,
+) -> Option<RootReplacedCandidate> {
+    cache(|entries| {
+        entries
+            .get(&row.session_id())
+            .and_then(|entry| {
+                entry
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.matches(row))
+            })
+            .cloned()
+    })
 }
 fn report(row: &HostedObservation, result: Recovery) -> Recovery {
     cache(|entries| {
@@ -85,11 +121,16 @@ fn report(row: &HostedObservation, result: Recovery) -> Recovery {
                 "herdr_root_replaced_recovery"
             );
         }
+        let candidates = entries
+            .get(&row.session_id())
+            .map(|old| old.candidates.clone())
+            .unwrap_or_default();
         entries.insert(
             row.session_id(),
             Cached {
                 row: row.clone(),
                 result: result.clone(),
+                candidates,
             },
         );
     });
@@ -212,6 +253,7 @@ pub(crate) async fn recover(
     candidate: &RootReplacedCandidate,
     transition: Option<&SessionTransitionLease<'_>>,
 ) -> Recovery {
+    remember_candidate(candidate);
     recover_report(shared, pool, &candidate.0, transition).await
 }
 pub(crate) async fn recover_retired(

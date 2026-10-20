@@ -297,7 +297,9 @@ fn reconnect_pass(
             // Cleanup has its own recovery log; a terminal row is not a withheld Bound attach.
             continue;
         }
-        let result = if let Some(seen) = seen.filter(|seen| {
+        let result = if let Some(candidate) = root_replaced::candidate_for(row) {
+            fresh((Reconnect::RootReplaced, Some(candidate)))
+        } else if let Some(seen) = seen.filter(|seen| {
             seen.candidate
                 .as_ref()
                 .is_some_and(|candidate| candidate.matches(row))

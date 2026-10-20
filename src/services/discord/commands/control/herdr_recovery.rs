@@ -110,6 +110,9 @@ pub(super) async fn clear(
             }
         }
     };
+    if let Some(candidate) = candidate.as_ref() {
+        root_replaced::remember_candidate(candidate);
+    }
     let (original, excluded) = original_execution(shared, provider, channel).await;
     let reason = original.err();
     discard_waiting(shared, provider, channel, Some(&logical), &excluded, report).await;

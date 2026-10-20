@@ -12,6 +12,12 @@ fn context(case: &Case) -> QueuePersistenceContext {
 }
 
 fn clear(case: &Case) -> ClearReport {
+    let admitted =
+        crate::services::tui_prompt_dedupe::herdr_claim_admission(case.fx.logical(), true).is_ok();
+    if admitted {
+        // Model the process-wide launch listing on this test's thread-local fast-path flag.
+        crate::services::tui_prompt_dedupe::admit_herdr_execution(case.fx.logical(), &case.nonce);
+    }
     let endpoint = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
     let _registry = case.fx.rig.registry_as_on_this_thread(
         &endpoint.execution_node,
@@ -165,7 +171,15 @@ fn recover_after_clear(case: &Case, original: &HostedRecord, effects: &[Value]) 
     case.fx.rig.exists(SHELL, false);
     case.fx.rig.exists(PROVIDER, false);
     case.fx.rig.show_panes(&[PANE]);
+    assert!(
+        crate::services::tui_prompt_dedupe::herdr_execution_listed(case.fx.logical()),
+        "the process already lists the replaced execution before its background pass"
+    );
+    let passes = crate::services::discord::recovery_engine::herdr_reader::PASSES.with(|v| v.get());
     case.pass();
+    assert!(
+        crate::services::discord::recovery_engine::herdr_reader::PASSES.with(|v| v.get()) > passes
+    );
     let HostedRecord::Known(mut expected) = original.clone() else {
         panic!("Bound N1");
     };
@@ -176,8 +190,8 @@ fn recover_after_clear(case: &Case, original: &HostedRecord, effects: &[Value]) 
         "background recovery changes only N1 state after observations normalize"
     );
     assert!(
-        ATTACHES.with(|count| count.get() > 0),
-        "the real background pass observed the restored pane"
+        recovery::CAS_ATTEMPTS.with(|count| count.get() > 0),
+        "the real background pass proved and attempted the captured execution retirement"
     );
     assert_eq!(case.cleanups(), 1);
     assert!(!case.hold_path().exists());
@@ -277,10 +291,21 @@ fn rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg(
                     case.fx.rig.exists(PROVIDER, true);
                     case.fx.rig.foreground(&[PROVIDER]);
                 }
-                Change::ReadFailed => case.fx.rig.answer(
-                    "pane.process_info",
-                    json!({"type":"pane_process_info", "process_info":{"pane_id":PANE}}),
-                ),
+                Change::ReadFailed => {
+                    case.fx.rig.exists(PROVIDER, true);
+                    case.pass();
+                    assert!(ATTACHES.with(|count| count.get() > 0));
+                    assert_eq!(
+                        case.fx.record(),
+                        original,
+                        "the real pass identified RootReplaced but kept the live provider Held"
+                    );
+                    case.fx.rig.exists(PROVIDER, false);
+                    case.fx.rig.answer(
+                        "pane.process_info",
+                        json!({"type":"pane_process_info", "process_info":{"pane_id":PANE}}),
+                    );
+                }
                 _ => unreachable!(),
             }
             let report = clear(&case);
