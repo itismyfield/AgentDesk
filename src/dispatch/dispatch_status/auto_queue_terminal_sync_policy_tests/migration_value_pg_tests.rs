@@ -122,6 +122,10 @@ async fn assert_rejects(pool: &PgPool, table: &str, constraint: &str, statuses: 
     }
 }
 
+/// Agent statuses outside the 0068 CHECK; 0089 narrows that set, so it must
+/// keep rejecting all of them as well as `archived`.
+const AGENT_STATUSES_REJECTED_SINCE_0068: &[&str] = &["active", "busy", "Idle", ""];
+
 #[tokio::test(flavor = "current_thread")]
 async fn migration_status_normalization_and_constraints_match_values_pg() {
     let fixture = TestPostgresDb::create().await;
@@ -234,7 +238,7 @@ async fn migration_status_normalization_and_constraints_match_values_pg() {
         &pool,
         "agents",
         "agents_status_known_check",
-        &["active", "busy", "Idle", ""],
+        AGENT_STATUSES_REJECTED_SINCE_0068,
     )
     .await;
     assert_statuses(
@@ -296,7 +300,7 @@ async fn migration_status_normalization_and_constraints_match_values_pg() {
         &pool,
         "agents",
         "agents_status_known_check",
-        &["archived", "active"],
+        &[AGENT_STATUSES_REJECTED_SINCE_0068, &["archived"]].concat(),
     )
     .await;
 
