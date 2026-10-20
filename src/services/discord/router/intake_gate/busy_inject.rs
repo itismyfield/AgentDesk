@@ -168,7 +168,7 @@ fn readiness(live: &LiveText<'_>) -> Option<&'static str> {
             Upload::Bundle(reference) => u64::from(reference.source_count),
         })
         .sum();
-    (completed < live.message.attachments.len() as u64).then_some("uploads_not_ready")
+    (completed != live.message.attachments.len() as u64).then_some("uploads_not_ready")
 }
 
 fn body(live: &LiveText<'_>, uploads: &[String]) -> String {
@@ -223,6 +223,13 @@ async fn attempt(
     }
     let message = live.message.id;
     let guard = inject_disposition::claim_source(provider, message, Instant::now())?;
+    if crate::services::discord::mailbox_snapshot(shared, live.channel_id)
+        .await
+        .cancel_token
+        .is_none()
+    {
+        return None;
+    }
     let prepare = super::super::message_handler::prepare_busy_inject_uploads;
     let uploads = match prepare(live.channel_id, live.uploads, shared.pg_pool.as_ref()).await {
         Ok(records) => records,

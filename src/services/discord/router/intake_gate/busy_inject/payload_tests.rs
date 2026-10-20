@@ -70,6 +70,9 @@ async fn assert_injected_chunks(
     expected: &str,
 ) {
     let (_database, shared, pane) = runtime(channel).await;
+    if text.is_empty() {
+        pane.set("size", "200,24");
+    }
     let _gate = test_support::open_gate(channel);
     let message = message(channel, text, uploads.len());
     let mut live = live(&message, uploads);
@@ -79,7 +82,17 @@ async fn assert_injected_chunks(
     let rendered = render_input_chunks(&records, reply.map(str::to_string), text.to_string());
     assert_eq!(rendered.as_bytes(), expected.as_bytes());
     assert_eq!(body(&live, &records).as_bytes(), rendered.as_bytes());
-    pane.fold_paste(expected.matches('\n').count() + 1);
+    let frame = crate::services::claude_tui::busy_inject::frame(
+        "fixture",
+        "200",
+        "lane-user",
+        "abcdef12",
+        expected,
+    );
+    let breaks = frame.matches('\n').count();
+    if breaks > 0 {
+        pane.fold_paste(breaks);
+    }
     pane.set(
         "receipt",
         &json!({"type": "user", "message": {"role": "user", "content":
@@ -94,7 +107,11 @@ async fn assert_injected_chunks(
     );
     assert_eq!(pane.keys(), ["paste-buffer", "send-keys"]);
     let buffer = pane.read("buffer").expect("submitted buffer");
-    let (_, chunk) = buffer.split_once('\n').expect("outer author frame");
+    let chunk = buffer
+        .split_once(']')
+        .map(|(_, chunk)| chunk)
+        .and_then(|chunk| chunk.strip_prefix('\n').or_else(|| chunk.strip_prefix(' ')))
+        .expect("outer author frame and body separator");
     assert_eq!(chunk.as_bytes(), expected.as_bytes());
     assert_eq!(chunk.as_bytes(), rendered.as_bytes());
     let snapshot = crate::services::discord::mailbox_snapshot(&shared, live.channel_id).await;
@@ -141,6 +158,75 @@ async fn multiple_attachment_input_chunks_match_normal_turn_and_confirm_pg() {
         "[File uploaded] one.txt → /tmp/i7196-one.txt (3 bytes)\n[File uploaded] two.txt → /tmp/i7196-two.txt (7 bytes)\n\ninspect\nboth",
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn attachment_only_input_has_no_empty_trailing_chunk_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    assert_injected_chunks(7_196_111, "", &[Upload::Local(FIRST.into())], None, FIRST).await;
+}
+
+#[test]
+fn excess_upload_records_fail_closed_before_injection() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let message = message(7_196_112, "inspect", 1);
+    let uploads = [Upload::Local(FIRST.into()), Upload::Local(SECOND.into())];
+    assert_eq!(
+        readiness(&live(&message, &uploads)),
+        Some("uploads_not_ready")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_bundle_precheck_never_reads_storage_or_retains_files_pg() {
+    use crate::services::cluster::attachment_transfer::{
+        AttachmentMessageIdentity, uploads::BundleRef,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = 7_196_113;
+    let database = TestPostgresDb::create().await;
+    let migrated = database.connect_and_migrate().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(migrated.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let shared =
+        register_inject_runtime(&HealthRegistry::new(), &[channel], Some(pool.clone())).await;
+    shared.restart.reconcile_done.store(true, Relaxed);
+    let pane = InjectPane::new(channel, "all");
+    let _gate = test_support::open_gate(channel);
+    let message = message(channel, "inspect", 1);
+    let uploads = [Upload::Bundle(BundleRef {
+        bundle_id: uuid::Uuid::from_u128(7196113),
+        identity: AttachmentMessageIdentity {
+            provider: "claude".into(),
+            channel_id: channel.to_string(),
+            user_msg_id: message.id.to_string(),
+        },
+        source_count: 1,
+    })];
+    let directory =
+        crate::services::discord::settings::channel_upload_dir(message.channel_id).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    let before = std::fs::read_dir(&directory).unwrap().count();
+    // Holding the only connection makes any attempted bundle SELECT observable as a timeout.
+    let _connection = pool.acquire().await.unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        attempt(&shared, &ProviderKind::Claude, &live(&message, &uploads)),
+    )
+    .await
+    .expect("idle input must return before attempting any storage query");
+    assert!(result.is_none());
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), before);
+    assert_eq!(pane.tmux_calls(), 0);
+    assert!(
+        crate::services::discord::mailbox_snapshot(&shared, message.channel_id)
+            .await
+            .cancel_token
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

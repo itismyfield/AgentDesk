@@ -50,7 +50,9 @@ pub(in crate::services::discord::router) fn render_input_chunks(
         chunks.push(uploads.join("\n"));
     }
     chunks.extend(context);
-    chunks.push(user_input);
+    if !user_input.is_empty() {
+        chunks.push(user_input);
+    }
     chunks.join("\n\n")
 }
 
@@ -94,5 +96,23 @@ mod tests {
             prompt,
             "first\nsecond\n\ntrigger\n\nreply\n\nknowledge\n\n[User: name (ID: 42)]\none\ntwo"
         );
+    }
+
+    #[test]
+    fn normal_attachment_only_turn_keeps_its_nonempty_author_chunk() {
+        let prompt = TurnContext {
+            provider: &ProviderKind::Claude,
+            session_id: None,
+            uploads: &["file record".into()],
+            trigger: None,
+            reply: None,
+            recent: None,
+            knowledge: None,
+            author_name: "name",
+            author_id: UserId::new(42),
+            user_input: String::new(),
+        }
+        .build();
+        assert_eq!(prompt, "file record\n\n[User: name (ID: 42)]");
     }
 }
