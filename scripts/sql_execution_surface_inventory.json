@@ -32450,6 +32450,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cde14c4a1b4bec9b58a91c6d56899dcae71f82defabe8d58c7e99e339136c812"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b9a114fe93c42a6b3596c94122ae48f6ea9b4ffaebff76eeea08785f707568aa"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -34871,6 +34889,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0fd0453a7ee7028ffbb5e2ea4c7c06793692eca9a9432395cbd158f55d17530d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -36046,6 +36073,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:7880c734dc63a6edb1ff2947e399d53a307b6727b19121dc9ce6e9f8863e17e2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:37d841accaf219f60be02bd490978976dcb97391818a2ac45af3542a9666cdab"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f39afbef40f1c54ced009757b9a2c80834381915608838d65f685c3124536cd3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ea12729dcb242b8b9eed72119c4e497913b71537a9be1239d393f8d2e5c69373"
     },
     {
       "root": "src",

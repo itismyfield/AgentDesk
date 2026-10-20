@@ -173,8 +173,10 @@ pub(super) async fn handle_cancel_prompt_replace(
             None => TmuxCleanupPolicy::PreserveSession,
         };
         let stop = stop_active_turn_with_outcome(&provider, &cancel_token, cleanup_policy, &cancel_source);
-        // A turn whose host is not legacy tmux keeps its inflight row for its owner.
-        preserve_inflight_for_cleanup_retry |= !stop.await.may_clear_inflight();
+        // A turn whose host is not legacy tmux keeps its inflight row for its owner, unless its own
+        // admitted terminal already ended it.
+        let settled = inflight_state.tui_terminal_kind.is_some();
+        preserve_inflight_for_cleanup_retry |= !stop.await.may_clear_inflight() && !settled;
 
         let preserved_restart_mode = cancel_token.restart_mode();
         let terminal_response = cancelled_terminal_response(

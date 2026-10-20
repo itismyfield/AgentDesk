@@ -285,6 +285,19 @@ impl InflightTurnState {
         off_scheduler(move || row.ack_locked()).await
     }
 
+    /// The same ack for a stop shown as a reply where O owns the body: only a send that returned a
+    /// real message id is a shown notice.
+    pub(in crate::services::discord) async fn ack_before_start_reply(
+        &self,
+        sent: &Result<Option<poise::serenity_prelude::MessageId>, String>,
+    ) -> Option<InflightTurnState> {
+        if !matches!(sent, Ok(Some(_))) {
+            return None;
+        }
+        let row = self.clone();
+        off_scheduler(move || row.ack_locked()).await
+    }
+
     fn ack_locked(&self) -> Option<InflightTurnState> {
         let expected = self.herdr_before_start_stop.as_ref()?;
         let provider = self.provider_kind()?;

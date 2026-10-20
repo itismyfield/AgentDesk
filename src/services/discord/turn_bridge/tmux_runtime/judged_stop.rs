@@ -290,6 +290,40 @@ pub(in crate::services::discord) async fn begin_user_stop(
     begin_stop(shared, provider, channel, bind_unbound, Some(reason)).await
 }
 
+impl ChannelStop {
+    /// A user stop judged once: only a live Herdr turn takes its `/stop`, on the token judged
+    /// here; any other turn is left to the caller with nothing done.
+    pub(in crate::services::discord) async fn herdr_user_stop(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+    ) -> Option<CommandStop> {
+        let judgement = Self::judge(shared, provider, channel, None, false).await;
+        #[cfg(unix)]
+        if let Some(token) = herdr_turn(&judgement) {
+            #[cfg(test)]
+            if let Some(step) = AFTER_HERDR_JUDGE.with_borrow_mut(Option::take) {
+                step.await;
+            }
+            let stop = super::codex_stop_delivery::herdr_command_stop;
+            return Some(CommandStop::Herdr(
+                stop(shared, provider, channel, token, "/stop").await,
+            ));
+        }
+        let _ = judgement;
+        None
+    }
+}
+
+#[cfg(all(test, unix))]
+type JudgedStep = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step the next Herdr user stop on this thread runs between its judge and its stop.
+    pub(in crate::services::discord) static AFTER_HERDR_JUDGE: std::cell::RefCell<Option<JudgedStep>> = const { std::cell::RefCell::new(None) };
+}
+
 async fn begin_stop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

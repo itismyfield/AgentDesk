@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::claude_stop_delivery::{
     ClaudeStopDeliveryReservation, ClaudeStopTurnIdentity, ClaudeTuiInterruptPhase,
-    classify_tui_interrupt_phase,
+    classify_tui_interrupt_phase, claude_tui_stop_pane_evidence,
 };
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
@@ -787,23 +787,23 @@ fn deliver(
             {
                 return Err(Identity);
             }
-            let screen = target.capture(-160).ok_or_else(unobserved)?;
+            // One read decides: Codex's dim placeholder survives only in the styled read.
+            let screen = match provider {
+                ProviderKind::Codex => target.capture_ansi(-160),
+                _ => target.capture(-160),
+            }
+            .ok_or_else(unobserved)?;
             let running = match provider {
                 ProviderKind::Claude => {
                     use crate::services::tmux_common as screen_state;
                     let structured = crate::services::tui_turn_state::runtime_binding_turn_state(
                         provider, &current,
                     );
-                    let ready =
-                        screen_state::tmux_capture_indicates_claude_tui_ready_for_input(&screen)
-                            || screen_state::tmux_capture_indicates_claude_tui_prompt_draft(
-                                &screen,
-                            );
-                    let active =
-                        screen_state::tmux_capture_indicates_claude_tui_actively_streaming(&screen);
+                    // The tmux stop's pane evidence and phase, plus modal and draft vetoes.
+                    let (ready, active, draft) = claude_tui_stop_pane_evidence(&screen);
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
-                        && !ready
-                        && classify_tui_interrupt_phase(structured, ready, active)
+                        && !draft
+                        && classify_tui_interrupt_phase(structured, ready || draft, active)
                             == ClaudeTuiInterruptPhase::ActiveGeneration
                 }
                 ProviderKind::Codex => {

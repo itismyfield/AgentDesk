@@ -239,6 +239,101 @@ async fn a_prior_receipt_shows_one_stop_then_clears_its_row() {
     assert!(discord.calls().is_empty(), "{:?}", discord.calls());
 }
 
+/// Where O owns the body a pending receipt's stop is one reply to the turn's message, never an
+/// edit of it, and a delivered one only clears; an unreadable ownership keeps the row silent.
+#[tokio::test(flavor = "current_thread")]
+async fn an_o_owned_receipt_shows_its_stop_as_a_reply_then_clears() {
+    use crate::services::tui_o::cutover::test_override::force_channels;
+    let o_row: Edit =
+        |row| row["runtime_kind"] = serde_json::to_value(RuntimeHandoffKind::ClaudeTui).unwrap();
+    for (notice, sent) in [("pending", 1), ("delivered", 0)] {
+        let fixture = Fixture::new("o-reply", false);
+        let _o = force_channels(&[(CHANNEL, RuntimeHandoffKind::ClaudeTui)]);
+        let mut row = edited(&fixture.row, o_row);
+        if notice == "delivered" {
+            row = edited(&row, |row| {
+                row["herdr_before_start_stop"]["notice"] = "delivered".into()
+            });
+        }
+        let row = fixture.persist(&row);
+        let discord = super::o_cut_recorder::start(CHANNEL).await;
+        let outcome = fixture.settle(&discord.http, &row).await;
+        assert_eq!(outcome, BeforeStartRestartReport::Settled, "{notice}");
+        assert!(fixture.durable().is_none(), "{notice}");
+        let calls = discord.calls();
+        assert_eq!(calls.len(), sent, "{notice}: {calls:?}");
+        for call in calls {
+            assert!(call.route.starts_with("POST "), "{call:?}");
+            assert!(
+                call.route
+                    .ends_with(&format!("/channels/{CHANNEL}/messages"))
+            );
+            assert_eq!(call.content.as_deref(), Some(ADMITTED_ABORT_NOTICE));
+            assert_eq!(
+                call.reply_to.as_deref(),
+                Some("3"),
+                "a reply to the turn's message"
+            );
+        }
+    }
+    let fixture = Fixture::new("o-unreadable", false);
+    let _o = force_channels(&[(CHANNEL, RuntimeHandoffKind::CodexTui)]);
+    let row = fixture.persist(&edited(&fixture.row, o_row));
+    let before = fixture.bytes();
+    let discord = super::o_cut_recorder::start(CHANNEL).await;
+    let outcome = fixture.settle(&discord.http, &row).await;
+    assert_eq!(
+        outcome,
+        BeforeStartRestartReport::Retained("O ownership is unreadable")
+    );
+    assert_eq!(fixture.bytes(), before);
+    assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+}
+
+/// A receipt-free row of a prior process is not held, because no live turn here indexes it: the
+/// scan takes it the way production did without settlement. This process's own turn is held.
+#[tokio::test(flavor = "current_thread")]
+async fn only_a_turn_this_process_indexed_is_held_at_restart() {
+    let mut scans = Vec::new();
+    for settled in [false, true] {
+        let fixture = Fixture::new(&format!("legacy-{settled}"), true);
+        let row = edited(&fixture.row, |row| {
+            row.as_object_mut()
+                .unwrap()
+                .remove("herdr_before_start_stop");
+        });
+        let row = fixture.persist(&row);
+        let before = fixture.bytes();
+        HERDR_SETTLEMENT_OVERRIDE.set(settled);
+        let held = herdr_turn_held(&fixture.provider, &row);
+        let discord = fixture.restore().await;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        scans.push((held, fixture.bytes() == before, written(&discord)));
+    }
+    assert!(!scans[1].0, "a prior process's row is not held");
+    assert_eq!(
+        scans[0], scans[1],
+        "settlement leaves a prior process's row as it was"
+    );
+
+    let fixture = Fixture::new("live", true);
+    let token = CancelToken::new();
+    let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner("1");
+    owner.logical_key = fixture.row.tmux_session_name.clone().unwrap();
+    let _state = token.prepare_herdr_interrupt(fixture.provider.clone(), &owner);
+    let mut live = fixture.row.clone();
+    live.herdr_before_start_stop = None;
+    assert!(
+        !herdr_turn_held(&fixture.provider, &live),
+        "another nonce on the session"
+    );
+    live.turn_nonce = token.turn_nonce().map(str::to_owned);
+    assert!(
+        herdr_turn_held(&fixture.provider, &live),
+        "this process's own turn"
+    );
+}
+
 /// Restart keeps each held receipt row byte-for-byte with no Discord call, marker or not: neither
 /// the existing path (it looks the channel up) nor, by a native kind, the admitted path runs.
 #[tokio::test(flavor = "current_thread")]
@@ -269,14 +364,11 @@ async fn the_restart_scan_settles_a_marked_receipt_before_the_marker_hold() {
     assert!(fixture.durable().is_none());
 }
 
-/// O's body, a planned restart, a live actor or a missing message keep the receipt: nothing is
-/// sent, acked or cleared.
+/// A planned restart, a live actor or a missing message keep the receipt: nothing is sent, acked
+/// or cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn a_destination_restart_does_not_own_keeps_the_receipt() {
-    let cases: [(&str, Edit); 4] = [
-        ("O owns the body", |row| {
-            row["runtime_kind"] = serde_json::to_value(RuntimeHandoffKind::ClaudeTui).unwrap()
-        }),
+    let cases: [(&str, Edit); 3] = [
         ("planned restart", |row| {
             row["restart_mode"] = serde_json::to_value(InflightRestartMode::DrainRestart).unwrap()
         }),
@@ -288,12 +380,6 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
     ];
     for (case, edit) in cases {
         let fixture = Fixture::new("kept", false);
-        let _o = (case == "O owns the body").then(|| {
-            crate::services::tui_o::cutover::test_override::force_channels(&[(
-                CHANNEL,
-                RuntimeHandoffKind::ClaudeTui,
-            )])
-        });
         let row = fixture.persist(&edited(&fixture.row, edit));
         let before = fixture.bytes();
         let discord = super::o_cut_recorder::start(CHANNEL).await;

@@ -34,8 +34,8 @@ pub(crate) const PROVIDER: u32 = 20;
 /// The root shell a restarted server gives the pane in place of the launch's.
 pub(crate) const NEW_SHELL: u32 = 11;
 
-/// The process reads the gate sees; empty until a test names the running provider. Whether a pid
-/// exists is unreadable unless a test set it, and every such read is counted.
+/// The process reads the gate sees; empty until a test names the running provider. A pid a test
+/// set answers whether it exists as set, any other as the named OS does; every such read is counted.
 #[derive(Default)]
 struct LateOs {
     os: Mutex<Option<Arc<dyn ProcessOs>>>,
@@ -56,8 +56,10 @@ impl LateOs {
 impl ProcessOs for LateOs {
     fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
         self.exists_reads.fetch_add(1, Ordering::SeqCst);
-        let exists = self.exists.lock().unwrap().get(&pid).copied();
-        exists.ok_or(RestoreUnverified::ProcessUnreadable)
+        match self.exists.lock().unwrap().get(&pid).copied() {
+            Some(exists) => Ok(exists),
+            None => self.now()?.exists(pid),
+        }
     }
     fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
         self.now()?.parent(pid)
@@ -81,6 +83,28 @@ type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
 
 /// Prefixes an answer that takes its method's place once a pane write arrives.
 const AFTER_SEND: &str = "after-send:";
+
+/// A launched pane's processes that also answer whether each exists: the provider as `alive`
+/// says, every other one present.
+struct Seen(FakeOs, bool);
+
+impl ProcessOs for Seen {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        Ok(pid != PROVIDER || self.1)
+    }
+    fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
+        self.0.parent(pid)
+    }
+    fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        self.0.start(pid)
+    }
+    fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+        self.0.environ(pid)
+    }
+    fn exec_path(&self, pid: u32) -> Option<String> {
+        self.0.exec_path(pid)
+    }
+}
 
 pub(crate) struct HerdrRig {
     path: PathBuf,
@@ -265,6 +289,12 @@ impl HerdrRig {
             os
         };
         self.os.set(os);
+    }
+
+    /// The pane runs the launch at `context`, and its provider process is seen to exist or not.
+    pub(crate) fn provider_seen(&self, context: &Path, alive: bool) {
+        let os = Seen(FakeOs::launched(env_naming(context)), alive);
+        *self.os.os.lock().unwrap() = Some(Arc::new(os));
     }
 
     /// The pane's root shell was restarted after the launch recorded it; the provider is the same.
