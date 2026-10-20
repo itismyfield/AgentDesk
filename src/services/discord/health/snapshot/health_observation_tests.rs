@@ -280,20 +280,23 @@ fn health_snapshot_by_late_start_keeps_the_request_deadline() {
     main.block_on(nameless_turn(&claude, normal));
     let started = Instant::now();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
-    // Answers the first read and one more, then stalls before the reconfirm arrives.
-    let _driver = Driver::start(
-        silent_runtime,
-        Duration::from_millis(1_100),
-        |_| async move {
-            let _ = handle.try_snapshot().await;
-        },
-    );
+    // Dropped after `block_on`: the driver hands back a runtime, which cannot drop in async code.
+    let mut driver = None;
     main.block_on(async {
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let snapshot = registry.health_snapshot_by(true, deadline);
-        let snapshot = tokio::time::timeout(Duration::from_secs(6), snapshot)
-            .await
-            .expect("the health snapshot must finish");
+        let build = registry.health_snapshot_by(true, deadline);
+        let mut build = std::pin::pin!(tokio::time::timeout(Duration::from_secs(6), build));
+        // The first poll queues the first reads; the silent actor is not driven, so it cannot end.
+        assert!(futures::poll!(build.as_mut()).is_pending());
+        // Queued behind the health read, so driving stops once that read has been answered.
+        driver = Some(Driver::start(
+            silent_runtime,
+            Duration::ZERO,
+            |_| async move {
+                let _ = handle.try_snapshot().await;
+            },
+        ));
+        let snapshot = build.await.expect("the health snapshot must finish");
         let elapsed = started.elapsed();
         assert!(elapsed < BUDGET, "request took {elapsed:?}");
         let json = serde_json::to_value(snapshot).unwrap();
@@ -305,6 +308,7 @@ fn health_snapshot_by_late_start_keeps_the_request_deadline() {
         assert_eq!(entry["has_cancel_token"], true);
         assert!(mailbox(&json, "claude", normal).is_some());
     });
+    drop(driver);
 }
 
 /// First reads answer, then a paired thread's read and an unpaired-token reconfirm stall: both
