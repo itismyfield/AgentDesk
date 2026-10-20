@@ -36,9 +36,6 @@ use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, MailboxObservat
 pub(super) type Observations =
     HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>>;
 
-/// The first reads end this soon at the latest, so the reads after them keep some of the deadline.
-const FIRST_READS_CAP: Duration = Duration::from_secs(1);
-
 /// The mailbox-read deadline of a snapshot built outside `health_snapshot_by`.
 const UNBOUNDED_CALLER_BUDGET: Duration = Duration::from_millis(1_500);
 
@@ -95,13 +92,13 @@ impl HealthRegistry {
     }
 }
 
-/// Every provider's first mailbox reads, all started together.
+/// Every provider's first mailbox reads, all started together and ending by `deadline`: a slow
+/// actor may use all of it, and the later reads then end unanswered rather than past it.
 pub(super) async fn first_reads(
     providers: &[ProviderEntry],
     include_details: bool,
     deadline: Instant,
 ) -> Vec<Observations> {
-    let end = deadline.min(Instant::now() + FIRST_READS_CAP);
     join_all(providers.iter().map(|entry| {
         let shared = entry.shared.as_ref();
         // Park-tracked channels with no actor come back Missing for the park projection.
@@ -109,7 +106,9 @@ pub(super) async fn first_reads(
             .filter(|_| include_details)
             .map(|_| shared.queue_park_ledger.tracked_channels())
             .unwrap_or_default();
-        shared.mailboxes.try_snapshot_all_for_health(tracked, end)
+        shared
+            .mailboxes
+            .try_snapshot_all_for_health(tracked, deadline)
     }))
     .await
 }

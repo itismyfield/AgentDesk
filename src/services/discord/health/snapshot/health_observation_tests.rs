@@ -192,18 +192,22 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
                 mailbox(&json, provider, channel).expect("an answering actor keeps its entry");
             assert_eq!(entry["has_cancel_token"], true);
         }
-        let failures = read_failures(&json);
         for stalled in stalled {
             assert!(
                 mailbox(&json, "claude", stalled).is_none(),
                 "a stalled actor must not become an idle entry"
             );
-            assert!(
-                failures.contains(&failed("claude", stalled, "snapshot")),
-                "{failures:?}"
-            );
         }
-        assert_eq!(failures.len(), 2, "{failures:?}");
+        // The stalled first reads hold the deadline, so the answering turns' reconfirms find
+        // no time left: named as unanswered, never as a failed snapshot.
+        let mut expected: Vec<_> = stalled
+            .iter()
+            .map(|stalled| failed("claude", *stalled, "snapshot"))
+            .collect();
+        for (_, provider, channel) in answering {
+            expected.push(failed(provider, channel, "reconfirm"));
+        }
+        assert_eq!(read_failures(&json), expected);
         let claude = provider_entry(&json, "claude");
         assert_eq!(claude["runtime_state_complete"], false);
         assert_eq!(
@@ -230,7 +234,8 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
     });
 }
 
-/// An actor that answers after 600ms is a live mailbox, not an unreachable one.
+/// An actor that answers after 1.2s, inside the 1.5s deadline, is a live mailbox, not an
+/// unreachable one.
 #[test]
 fn health_snapshot_slow_actor_within_deadline_is_ok() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -240,12 +245,12 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
     let claude = main.block_on(provider(&registry, "claude"));
     let slow = channel(6_871_320_000, 1);
     parked_turn(&parked, &claude, slow);
-    let _driver = Driver::answer_from(parked, Duration::from_millis(600));
+    let _driver = Driver::answer_from(parked, Duration::from_millis(1_200));
     main.block_on(async {
         let (json, elapsed) = detail(&registry).await;
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
         assert!(
-            elapsed >= Duration::from_millis(550),
+            elapsed >= Duration::from_millis(1_150),
             "the actor was not slow: {elapsed:?}"
         );
         let entry =
@@ -257,6 +262,48 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
             provider_entry(&json, "claude")["runtime_state_complete"],
             true
         );
+    });
+}
+
+/// A build that starts 800ms after its request set the deadline still ends by that deadline: the
+/// reconfirm that never answers is cut there and the other channels keep their entries.
+#[test]
+fn health_snapshot_by_late_start_keeps_the_request_deadline() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let (silent, normal) = (channel(6_871_390_000, 1), channel(6_871_390_000, 2));
+    let silent_runtime = parked_runtime();
+    parked_turn(&silent_runtime, &claude, silent);
+    let handle = claude.mailbox_peek(silent).unwrap();
+    main.block_on(nameless_turn(&claude, normal));
+    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
+    // Answers the first read and one more, then stalls before the reconfirm arrives.
+    let _driver = Driver::start(
+        silent_runtime,
+        Duration::from_millis(1_100),
+        |_| async move {
+            let _ = handle.try_snapshot().await;
+        },
+    );
+    main.block_on(async {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let snapshot = registry.health_snapshot_by(true, deadline);
+        let snapshot = tokio::time::timeout(Duration::from_secs(6), snapshot)
+            .await
+            .expect("the health snapshot must finish");
+        let elapsed = started.elapsed();
+        assert!(elapsed < BUDGET, "request took {elapsed:?}");
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(
+            read_failures(&json),
+            vec![failed("claude", silent, "reconfirm")]
+        );
+        let entry = mailbox(&json, "claude", silent).expect("the first read answered");
+        assert_eq!(entry["has_cancel_token"], true);
+        assert!(mailbox(&json, "claude", normal).is_some());
     });
 }
 
@@ -275,19 +322,21 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
         channel(base, 3),
         channel(base, 4),
     );
-    let thread_runtime = parked_runtime();
-    parked_turn(&thread_runtime, &claude, thread);
-    let reconfirm_runtime = parked_runtime();
-    parked_turn(&reconfirm_runtime, &claude, reconfirm);
-    // Answers the pending first read and one more, then stalls before the reconfirm arrives.
-    let handle = claude.mailbox_peek(reconfirm).unwrap();
-    let _driver = Driver::start(
-        reconfirm_runtime,
-        Duration::from_millis(300),
-        |_| async move {
-            let _ = handle.try_snapshot().await;
-        },
-    );
+    // Each actor answers its pending first read and one more, then stalls before the later
+    // reads arrive; a stalled first read would leave no time for any later read.
+    let mut drivers = Vec::new();
+    for channel in [thread, reconfirm] {
+        let runtime = parked_runtime();
+        parked_turn(&runtime, &claude, channel);
+        let handle = claude.mailbox_peek(channel).unwrap();
+        drivers.push(Driver::start(
+            runtime,
+            Duration::from_millis(300),
+            |_| async move {
+                let _ = handle.try_snapshot().await;
+            },
+        ));
+    }
     main.block_on(async {
         claude.mailboxes.handle(parent);
         claude.dispatch.thread_parents.insert(parent, thread);
@@ -296,7 +345,7 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
         let failures = read_failures(&json);
         assert!(
-            failures.contains(&failed("claude", thread, "snapshot")),
+            failures.contains(&failed("claude", thread, "reconfirm")),
             "{failures:?}"
         );
         assert!(
@@ -328,8 +377,8 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
     });
 }
 
-/// Stalled or missing tracked actors keep their park sources, a replaced episode is not confirmed,
-/// and the read changes no actor, park source or file.
+/// Stalled or missing tracked actors keep their park sources, and the read changes no actor, park
+/// source or file.
 #[test]
 fn health_snapshot_timeout_preserves_park_and_episode() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -338,13 +387,8 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
     let registry = HealthRegistry::new();
     let claude = main.block_on(provider(&registry, "claude"));
     let base = 6_871_340_000;
-    let (parked_channel, missing, replaced, control, row_channel) = (
-        channel(base, 1),
-        channel(base, 2),
-        channel(base, 3),
-        channel(base, 4),
-        channel(base, 5),
-    );
+    let (parked_channel, missing, row_channel) =
+        (channel(base, 1), channel(base, 2), channel(base, 5));
     let source = base + 90;
     let parked = parked_runtime();
     let queued = parked.block_on(async {
@@ -370,39 +414,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
             .queue_park_ledger
             .register(tracked, &queued, Origin::PostCancelPreserved);
     }
-    // Aged turns behind a watcher: a confirmed unpaired token classifies as `unpaired_active_token`.
-    let replaced_runtime = parked_runtime();
-    for (runtime, channel) in [(&replaced_runtime, replaced), (&main, control)] {
-        runtime.block_on(async {
-            nameless_turn(&claude, channel).await;
-            let handle = claude.mailbox_peek(channel).unwrap();
-            handle
-                .age_active_turn_for_test(Duration::from_secs(700))
-                .await;
-        });
-        discord::register_resume_watcher_for_tests(
-            &claude,
-            channel,
-            &format!("b2-{}", channel.get()),
-        );
-    }
-    let shared = claude.clone();
-    let _replace = Driver::start(
-        replaced_runtime,
-        Duration::from_millis(300),
-        move |stopped| async move {
-            let handle = shared.mailbox_peek(replaced).unwrap();
-            handle.hard_stop().await;
-            let token = Arc::new(CancelToken::new());
-            let user_message = MessageId::new(replaced.get() + 2);
-            assert!(
-                handle
-                    .try_start_turn(token, UserId::new(8), user_message)
-                    .await
-            );
-            let _ = stopped.await;
-        },
-    );
     let row = crate::services::discord::inflight::InflightTurnState::new(
         ProviderKind::Claude,
         row_channel.get(),
@@ -450,19 +461,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
         read_failures(&json),
         vec![failed("claude", parked_channel, "snapshot")]
     );
-    let unpaired = serde_json::to_value(RelayStallState::UnpairedActiveToken).unwrap();
-    let state = |channel| mailbox(&json, "claude", channel).unwrap()["relay_stall_state"].clone();
-    assert_eq!(
-        state(control),
-        unpaired,
-        "the unchanged episode is confirmed"
-    );
-    assert_ne!(
-        state(replaced),
-        unpaired,
-        "a replaced episode must not be confirmed"
-    );
-
     assert_eq!(
         super::super::super::test_support::tree_fingerprint(&root),
         files_before
@@ -485,5 +483,67 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
         after.intervention_queue.len(),
         1,
         "health must not drain the stalled queue"
+    );
+}
+
+/// The reconfirm is a fresh read: an episode replaced after the first read is not confirmed, while
+/// an unchanged one is.
+#[test]
+fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let (replaced, control) = (channel(6_871_340_000, 3), channel(6_871_340_000, 4));
+    // Aged turns behind a watcher: a confirmed unpaired token classifies as `unpaired_active_token`.
+    let replaced_runtime = parked_runtime();
+    for (runtime, channel) in [(&replaced_runtime, replaced), (&main, control)] {
+        runtime.block_on(async {
+            nameless_turn(&claude, channel).await;
+            let handle = claude.mailbox_peek(channel).unwrap();
+            handle
+                .age_active_turn_for_test(Duration::from_secs(700))
+                .await;
+        });
+        discord::register_resume_watcher_for_tests(
+            &claude,
+            channel,
+            &format!("b2-{}", channel.get()),
+        );
+    }
+    let shared = claude.clone();
+    let _replace = Driver::start(
+        replaced_runtime,
+        Duration::from_millis(300),
+        move |stopped| async move {
+            let handle = shared.mailbox_peek(replaced).unwrap();
+            handle.hard_stop().await;
+            let token = Arc::new(CancelToken::new());
+            let user_message = MessageId::new(replaced.get() + 2);
+            assert!(
+                handle
+                    .try_start_turn(token, UserId::new(8), user_message)
+                    .await
+            );
+            let _ = stopped.await;
+        },
+    );
+    let json = main.block_on(async {
+        let (json, elapsed) = detail(&registry).await;
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        json
+    });
+    assert_eq!(read_failures(&json), Vec::new());
+    let unpaired = serde_json::to_value(RelayStallState::UnpairedActiveToken).unwrap();
+    let state = |channel| mailbox(&json, "claude", channel).unwrap()["relay_stall_state"].clone();
+    assert_eq!(
+        state(control),
+        unpaired,
+        "the unchanged episode is confirmed"
+    );
+    assert_ne!(
+        state(replaced),
+        unpaired,
+        "a replaced episode must not be confirmed"
     );
 }
