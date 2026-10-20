@@ -153,7 +153,7 @@ fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -
         && channel.provider().as_deref() == Some(input.provider.as_str())
 }
 
-fn load_agentdesk_config() -> Option<Config> {
+pub(super) fn load_agentdesk_config() -> Option<Config> {
     load_agentdesk_config_with_path().map(|(config, _)| config)
 }
 

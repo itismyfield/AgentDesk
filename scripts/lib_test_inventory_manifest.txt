@@ -6879,6 +6879,8 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_absent_hint_preserves_main_bytes
+services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_reaches_binding_and_three_tier_hint
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge

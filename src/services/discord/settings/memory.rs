@@ -153,6 +153,14 @@ pub(crate) fn resolve_agent_memory_settings(
     }
 }
 
+pub(crate) fn memory_settings_for_role(role_id: &str) -> ResolvedMemorySettings {
+    let config = super::agentdesk_config::load_agentdesk_config();
+    let agent = config
+        .as_ref()
+        .and_then(|config| config.agents.iter().find(|agent| agent.id == role_id));
+    resolve_agent_memory_settings(agent)
+}
+
 pub(crate) fn memory_settings_for_binding(
     role_binding: Option<&RoleBinding>,
 ) -> ResolvedMemorySettings {

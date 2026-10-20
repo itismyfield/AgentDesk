@@ -41,7 +41,8 @@ pub(super) use content::{
     render_peer_agent_guidance,
 };
 pub(crate) use memory::{
-    memory_settings_for_binding, resolve_agent_memory_settings, resolve_memory_settings,
+    memory_settings_for_binding, memory_settings_for_role, resolve_agent_memory_settings,
+    resolve_memory_settings,
 };
 pub(super) use read::{load_bot_settings, load_last_session_path, save_last_session_runtime};
 pub use read::{

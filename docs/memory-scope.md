@@ -32,8 +32,8 @@ channels retain their existing `agentdesk-channel-<channel_id>` identity.
 A missing, empty, or whitespace-only `memory_group` keeps the legacy cwd-based
 project/agent-private scope hint and automatic workspace mapping unchanged.
 Nonempty group values are trimmed and used as workspace names without a cwd
-prefix. A per-agent group applies across its provider channels and meeting
-participation, including meetings hosted in another agent's channel.
+prefix. A per-agent group applies across its provider channels, routine turns,
+and meeting participation, including meetings hosted in another agent's channel.
 
 Explicit automatic-path workspace overrides retain their existing priority.
 Explicit remember workspace/global parameters keep their existing meaning.
