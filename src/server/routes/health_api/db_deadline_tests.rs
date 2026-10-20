@@ -397,9 +397,8 @@ async fn health_handler_parallel_db_preserves_complete_results() {
     db.finish().await;
 }
 
-/// Each way a read can outlast the deadline (waiting for a pool slot, a stalled statement, a
-/// late read after a slow snapshot) still answers inside 2 s, says `db_slow`, and keeps every
-/// read that did finish.
+/// A pool wait, a stalled statement and a late read after a slow snapshot each still answer
+/// inside 2 s with `db_slow`, keeping every read that did finish.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn health_handler_db_deadline_covers_late_queries() {
     let _root = crate::config::TestRuntimeRootGuard::new();

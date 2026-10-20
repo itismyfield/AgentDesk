@@ -1,22 +1,10 @@
 //! DB-backed health diagnostics shared by the health API routes.
 //!
-//! Every Postgres await on the `/api/health` path, which the self-watchdog probes, runs under
-//! [`ProbedPool`](crate::services::hang_forensics::ProbedPool) so a kill line can say whether
-//! the handler was inside one. Acquires per request, one per `sqlx` executor call (count calls,
-//! not functions, and re-derive before trusting this):
-//!
-//! | await site                           | acquires | reached when                          |
-//! |--------------------------------------|----------|---------------------------------------|
-//! | `probe_server_up`                    | 1        | always                                |
-//! | `load_dispatch_outbox_stats`         | 1        | always                                |
-//! | `load_auto_queue_cleanup_backlog`    | 1        | always                                |
-//! | `load_health_kv_meta`                | 1        | always                                |
-//! | `load_active_session_audit_rows`     | 1        | detail, audit enabled                 |
-//! | `load_mailbox_session_states`        | 1        | detail with a mailbox channel         |
-//! | `is_recent_cluster_worker`           | 1        | a standby with no providers           |
-//!
-//! At most N=6 per request: a standby with no providers lists no mailboxes. The route runs them
-//! concurrently under one 1.5 s deadline, so an acquire's own 10 s wait never sets the response time.
+//! Every Postgres await here runs under [`ProbedPool`](crate::services::hang_forensics::ProbedPool),
+//! so a watchdog kill line can say whether the health handler was inside one.
+
+//! Acquires per request, one per executor call: SELECT 1, outbox, cleanup and kv_meta always, the
+//! audit on detail, then detail mailbox sessions or the standby worker lookup; N=6 at most.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
