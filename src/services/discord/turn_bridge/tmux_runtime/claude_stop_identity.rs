@@ -15,11 +15,20 @@ pub(super) struct ClaudeStopTurnIdentity {
 
 impl ClaudeStopTurnIdentity {
     pub(super) fn capture(output_path: &str) -> Option<Self> {
-        latest_claude_user_turn_identity(Path::new(output_path))
+        claude_user_turn_identity(Path::new(output_path), None)
+    }
+
+    pub(super) fn matches_start(&self, output_path: &str, offset: u64) -> bool {
+        std::fs::canonicalize(output_path)
+            .ok()
+            .zip(std::fs::canonicalize(&self.output_path).ok())
+            .is_some_and(|(row, binding)| row == binding)
+            && claude_user_turn_identity(Path::new(&self.output_path), Some(offset)).as_ref()
+                == Some(self)
     }
 
     pub(super) fn still_current(&self) -> bool {
-        latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref() == Some(self)
+        claude_user_turn_identity(Path::new(&self.output_path), None).as_ref() == Some(self)
     }
 }
 
@@ -40,7 +49,10 @@ fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (created_ns, 0)
 }
 
-fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentity> {
+fn claude_user_turn_identity(
+    path: &Path,
+    first_from: Option<u64>,
+) -> Option<ClaudeStopTurnIdentity> {
     use std::hash::{Hash, Hasher};
 
     const MAX_TAIL_BYTES: u64 = 256 * 1024;
@@ -49,12 +61,12 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
     let metadata = file.metadata().ok()?;
     let len = metadata.len();
     let file_identity = transcript_file_identity(&metadata);
-    let start = len.saturating_sub(MAX_TAIL_BYTES);
+    let start = first_from.unwrap_or_else(|| len.saturating_sub(MAX_TAIL_BYTES));
     file.seek(std::io::SeekFrom::Start(start)).ok()?;
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
     let mut offset = start;
-    if start > 0 {
+    if start > 0 && first_from.is_none() {
         offset = offset.saturating_add(reader.read_line(&mut line).ok()? as u64);
     }
 
@@ -90,5 +102,8 @@ fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentit
             user_line_hash: hasher.finish(),
             user_entry_id,
         });
+        if first_from.is_some() {
+            return latest;
+        }
     }
 }

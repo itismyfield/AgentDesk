@@ -13,6 +13,7 @@ pub(crate) struct State {
 pub(crate) struct Inner {
     attempt: Option<Arc<Attempt>>,
     completed: bool,
+    orphan: bool,
     idle: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -35,6 +36,7 @@ impl State {
             return None;
         }
         inner.idle = None;
+        inner.orphan = false;
         if let Some(attempt) = &inner.attempt {
             if attempt.key != key {
                 return None;
@@ -60,7 +62,20 @@ impl State {
         if inner.completed {
             return false;
         }
+        inner.orphan = false;
         inner.idle = Some(terminal);
+        inner.attempt = None;
+        true
+    }
+
+    /// Recovery rechecks the absence of this token's native owner at actor publication.
+    pub(crate) fn handoff_recovery(&self, witness: Arc<dyn Fn() -> bool + Send + Sync>) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if !witness() {
+            return false;
+        }
+        inner.idle = Some(witness);
+        inner.orphan = true;
         inner.attempt = None;
         true
     }
@@ -84,7 +99,7 @@ impl State {
         if inner
             .idle
             .as_ref()
-            .is_some_and(|terminal| inner.completed || !terminal())
+            .is_some_and(|terminal| (inner.completed && !inner.orphan) || !terminal())
         {
             return Err(());
         }

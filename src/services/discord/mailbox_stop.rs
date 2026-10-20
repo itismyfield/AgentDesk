@@ -25,6 +25,10 @@ async fn guarded_cancel(
         inflight::load_inflight_state_read_only(&shared.provider, channel.get())
             .and_then(|row| row.tmux_session_name)
     });
+    let native_scope = token.herdr_interrupt_state().is_none()
+        && session
+            .as_deref()
+            .is_some_and(|session| turn_bridge::native_preserve_stop(&shared.provider, session));
     if let Some(session) = session.as_deref()
         && let Some(stop) =
             NativeStop::begin(shared, &shared.provider, channel, &token, session, reason).await
@@ -32,9 +36,27 @@ async fn guarded_cancel(
         stop.notice(shared).await;
         return stop.finish().await;
     }
-    let result = handle
-        .cancel_active_turn_if_current_with_reason(token, reason.into())
-        .await;
+    let result = if native_scope {
+        use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
+        match handle
+            .cancel_active_turn_if_current_unless_herdr(token, reason.into())
+            .await
+        {
+            StopCancel::Published(token) => CancelActiveTurnResult {
+                token: Some(token),
+                already_stopping: false,
+            },
+            StopCancel::AlreadyStopping(token) => CancelActiveTurnResult {
+                token: Some(token),
+                already_stopping: true,
+            },
+            StopCancel::NotCurrent | StopCancel::Herdr(_) => turn_bridge::empty_native_stop(),
+        }
+    } else {
+        handle
+            .cancel_active_turn_if_current_with_reason(token, reason.into())
+            .await
+    };
     if result.token.is_some() {
         record_turn_stop_tombstone(channel, session.as_deref(), reason).await;
     }

@@ -369,7 +369,7 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
     });
 }
 
-fn native_idle_slash_recovery(missing: bool) {
+fn native_idle_slash_recovery(missing: bool, completed: bool) {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let _tmux = missing_tmux(&root);
@@ -406,6 +406,7 @@ fn native_idle_slash_recovery(missing: bool) {
     );
     let token = Arc::new(CancelToken::new());
     token.bind_claude_tmux_session(session);
+    if completed { token.native_stop.completed(); }
     if missing { let failed=token.native_stop.attempt("before_session_death".into(),Arc::new(||false)).unwrap();failed.complete(false); }
     assert!(
         shared
@@ -489,10 +490,15 @@ fn native_idle_slash_recovery(missing: bool) {
 
 #[test]
 fn preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg() {
-    native_idle_slash_recovery(false);
+    native_idle_slash_recovery(false, false);
 }
 
 #[test]
 fn preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg() {
-    native_idle_slash_recovery(true);
+    native_idle_slash_recovery(true, false);
+}
+
+#[test]
+fn preserve_stop_completed_native_zombie_slash_recovers_queue_pg() {
+    native_idle_slash_recovery(false, true);
 }

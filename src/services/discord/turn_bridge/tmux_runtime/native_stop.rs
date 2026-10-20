@@ -52,6 +52,45 @@ fn confirmed_missing_session(session: &str) -> bool {
     }
 }
 
+fn owns_native_turn(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    token: &CancelToken,
+    session: &str,
+) -> Option<bool> {
+    if token.tmux_session_name().as_deref() != Some(session) {
+        return Some(false);
+    }
+    let Some(binding) =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+    else {
+        return Some(false);
+    };
+    let row = match crate::services::discord::inflight::load_inflight_state_read_only_result(
+        provider,
+        channel.get(),
+    ) {
+        Ok(Some(row)) => row,
+        Ok(None) => return Some(false),
+        Err(_) => return None,
+    };
+    if token.turn_nonce().is_none()
+        || row.turn_nonce.as_deref() != token.turn_nonce()
+        || row.tmux_session_name.as_deref() != Some(session)
+    {
+        return Some(false);
+    }
+    let Some(identity) = ClaudeStopTurnIdentity::capture(&binding.output_path) else {
+        return Some(false);
+    };
+    Some(
+        row.output_path
+            .as_deref()
+            .zip(row.turn_start_offset)
+            .is_some_and(|(path, offset)| identity.matches_start(path, offset)),
+    )
+}
+
 impl NativeStop {
     pub(in crate::services::discord) async fn begin(
         shared: &SharedData,
@@ -79,8 +118,48 @@ impl NativeStop {
         if token.cancelled.load(Ordering::Acquire) {
             return None;
         }
-        if !stop.current().await || token.native_stop.is_completed() {
+        if !stop.current().await {
             stop.finished = true;
+            return Some(stop);
+        }
+        if super::claude_stop_pane::mutant("native_always_none") {
+            return None;
+        }
+        let ownership = owns_native_turn(provider, channel, token, session);
+        if !super::claude_stop_pane::mutant("protect_unowned")
+            && (ownership == Some(false)
+                || (token.native_stop.is_completed()
+                    && super::claude_stop_pane::mutant("recovery_without_owner_gate")))
+        {
+            let weak = Arc::downgrade(token);
+            let expected_binding = token.tmux_session_name();
+            let expected_source =
+                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+                    .map(|binding| binding.output_path);
+            let (provider, session) = (provider.clone(), session.to_owned());
+            let witness = Arc::new(move || {
+                weak.upgrade().is_some_and(|token| {
+                    !token.is_completion_cleanup()
+                        && token.tmux_session_name() == expected_binding
+                        && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                            &session,
+                        )
+                        .map(|binding| binding.output_path)
+                            == expected_source
+                        && (owns_native_turn(&provider, channel, &token, &session) == Some(false)
+                            || super::claude_stop_pane::mutant("recovery_without_owner_gate"))
+                })
+            });
+            if token.native_stop.handoff_recovery(witness) {
+                return None;
+            }
+        }
+        if token.native_stop.is_completed() {
+            stop.finished = true;
+            return Some(stop);
+        }
+        if ownership.is_none() {
+            stop.notify = token.native_stop.claim_notice();
             return Some(stop);
         }
         if !crate::services::discord::host_liveness::local_tmux(session, None) {

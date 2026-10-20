@@ -1713,6 +1713,7 @@ services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::phase2_exhausted_recovery_unresolved_dispatch_is_preserved_at_ttl_pg
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests::production_sweep_too_old_drops_leave_no_outbox_notice_pg
 services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg
+services::discord::commands::cancel_backstop_tests::preserve_stop_completed_native_zombie_slash_recovers_queue_pg
 services::discord::commands::cancel_backstop_tests::preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg
 services::discord::commands::cancel_backstop_tests::preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg

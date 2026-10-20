@@ -156,7 +156,7 @@ mod high_risk_recovery {
                 let session = format!("native-reader-stop-{natural_first}");
                 let (token, path) = generating_turn(&fx, &session);
                 start(&shared, channel, &token).await;
-                inflight_row(&ProviderKind::Claude, channel, &session, false);
+                native_inflight_row(channel, &token, &session);
                 let mut events = shared.turn_completion_events.subscribe();
                 let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
                 let _ = fx.take_calls();
@@ -272,13 +272,15 @@ mod high_risk_recovery {
 fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
     let fx = Fixture::new();
     run(async {
-        for (n, failure) in ["modal", "capture", "io", "unknown", "unbound"]
+        for (n, failure) in ["modal", "capture", "io", "unknown", "draft"]
             .into_iter()
             .enumerate()
         {
             fx.serve(Server::Live);
             fx.reject_escape(failure == "io");
-            let pane = if failure == "modal" {
+            let pane = if failure == "draft" {
+                "· Working… (4s · esc to interrupt)\n❯ preserve draft".to_owned()
+            } else if failure == "modal" {
                 "Allow\nDeny\nEnter to confirm\n❯".to_owned()
             } else {
                 running()
@@ -289,17 +291,18 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
             let channel = ChannelId::new(7_193_200 + n as u64);
             let (mock, ctx, server, data) = transport(&shared, channel).await;
             let session = format!("native-stop-failed-{failure}");
-            let (bound, path) = generating_turn(&fx, &session);
-            let token = if failure == "unbound" {
-                Arc::new(CancelToken::new())
-            } else {
-                bound
-            };
+            let (token, path) = generating_turn(&fx, &session);
             if failure == "unknown" {
-                std::fs::write(&path, "{\"type\":\"unknown\"}\n").unwrap();
+                append(&path, serde_json::json!({"type":"permission-mode"}));
+                assert_eq!(
+                    crate::services::claude_tui::transcript_tail::observe_transcript_turn_state(
+                        &path
+                    ),
+                    crate::services::tui_turn_state::TuiTurnState::Unknown
+                );
             }
             start(&shared, channel, &token).await;
-            inflight_row(&ProviderKind::Claude, channel, &session, false);
+            native_inflight_row(channel, &token, &session);
             let mut events = shared.turn_completion_events.subscribe();
             let (reader, shown) = bridge(&shared, channel, &token, &session, &path);
             let before = inflight::InflightTurnIdentity::from_state(
@@ -408,6 +411,7 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
             let session = format!("native-stop-coalesced-{success}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
+            native_inflight_row(channel, &token, &session);
             let (holding, held) = std::sync::mpsc::channel();
             let (release, released) = std::sync::mpsc::channel();
             let session_locked = session.clone();
@@ -463,10 +467,11 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
                 );
                 let next =
                     begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
-                let CommandStop::Native(next) = next else {
-                    panic!("refused old native proof");
-                };
-                assert_eq!(next.wire()["effect_started"], false);
+                assert!(
+                    matches!(next, CommandStop::Stop(_)),
+                    "a foreign native turn uses main recovery, not old delivery proof"
+                );
+                assert!(token.cancelled.load(Ordering::Acquire));
                 assert!(
                     !fx.take_calls()
                         .iter()
@@ -499,6 +504,7 @@ fn preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_
         fx.reject_escape(false);
         let (token, _) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
+        native_inflight_row(channel, &token, session);
         let id = channel.get().to_string();
         let home = HomeGate::new(&id, "mini");
         home.confirm(
@@ -576,7 +582,7 @@ fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
             let session = format!("native-stop-window-{change}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
-            inflight_row(&ProviderKind::Claude, channel, &session, false);
+            native_inflight_row(channel, &token, &session);
             let reader =
                 (change == "done").then(|| bridge(&shared, channel, &token, &session, &path).0);
             let (holding, held) = std::sync::mpsc::channel();
@@ -775,20 +781,31 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
     let fx = Fixture::new();
 
     run(async {
-        for (n, probe_failed) in [false, true].into_iter().enumerate() {
+        for (n, (probe_failed, row_error)) in [(false, false), (true, false), (false, true)]
+            .into_iter()
+            .enumerate()
+        {
             fx.serve(if probe_failed {
                 Server::Missing
             } else {
                 Server::Live
             });
-            fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+            if row_error {
+                fx.pane(&running());
+            } else {
+                fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+            }
             let (shared, registry) = runtime().await;
             let channel = ChannelId::new(7_193_801 + n as u64 * 3);
             let session = format!("native-unconfirmed-api-recovery-{n}");
             let (token, _) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
-            let row = inflight_row(&ProviderKind::Claude, channel, &session, false);
+            let row = native_inflight_row(channel, &token, &session);
+            if row_error {
+                std::fs::write(&row, "unreadable row").unwrap();
+            }
             let before = file_state(&row);
+            let _ = fx.take_calls();
             let target = TurnLifecycleTarget {
                 provider: Some(ProviderKind::Claude),
                 channel_id: Some(channel),
@@ -809,6 +826,12 @@ fn preserve_stop_unconfirmed_native_api_reports_delivery_state() {
             assert!(!token.cancelled.load(Ordering::Acquire));
             assert_eq!(file_state(&row), before);
             assert_eq!(tombstone(channel), None);
+            assert!(
+                !fx.take_calls()
+                    .iter()
+                    .any(|call| call.starts_with("send-keys")),
+                "unobserved ownership never authorizes an Escape"
+            );
             crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
         }
     });
@@ -824,7 +847,7 @@ fn preserve_stop_native_published_rearms_drain_after_watcher_cleanup() {
         let session = "native-published-queue-drain";
         let (token, path) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
-        inflight_row(&ProviderKind::Claude, channel, session, false);
+        native_inflight_row(channel, &token, session);
         let generation = discord::runtime_store::process_generation();
         let message = MessageId::new(channel.get() + 3);
         let pending = crate::services::turn_orchestrator::Intervention {
@@ -902,5 +925,220 @@ fn preserve_stop_native_published_rearms_drain_after_watcher_cleanup() {
         );
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
         server.abort();
+    });
+}
+
+#[test]
+fn preserve_stop_completed_owner_keeps_natural_first() {
+    let fx = Fixture::new();
+    run(async {
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_900);
+        let session = "native-completed-owned";
+        let (token, path) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        let row = native_inflight_row(channel, &token, session);
+        append(
+            &path,
+            serde_json::json!({"type":"system","subtype":"turn_duration"}),
+        );
+        token.native_stop.completed();
+        let before = file_state(&row);
+        let result = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+        assert!(
+            !token.cancelled.load(Ordering::Acquire),
+            "an owned Done waits for natural finalization"
+        );
+        let CommandStop::Native(stop) = result else {
+            panic!("completed owned turn remains native");
+        };
+        assert!(stop.finish().await.token.is_none());
+        assert!(mailbox_holds(&shared, channel, &token).await);
+        assert_eq!(file_state(&row), before);
+        assert_eq!(tombstone(channel), None);
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn preserve_stop_foreign_unbound_or_unowned_uses_main() {
+    let fx = Fixture::new();
+    fx.pane(&running());
+    run(async {
+        for entry in ["command", "mailbox"] {
+            for (n, case) in [
+                "unbound",
+                "foreign",
+                "no_owner",
+                "unknown",
+                "bindingless",
+                "foreign_nonce",
+                "legacy",
+                "no_offset",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let shared = discord::make_shared_data_for_tests();
+                let channel =
+                    ChannelId::new(7_193_910 + n as u64 + if entry == "mailbox" { 30 } else { 0 });
+                let session = format!("native-recovery-{case}");
+                let (bound, path) = generating_turn(&fx, &session);
+                let token = if case == "unbound" {
+                    Arc::new(CancelToken::new())
+                } else if case == "legacy" {
+                    let token = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+                    token.bind_claude_tmux_session(&session);
+                    token
+                } else {
+                    bound
+                };
+                start(&shared, channel, &token).await;
+                if case != "no_owner" {
+                    native_inflight_row(channel, &token, &session);
+                }
+                match case {
+                    "foreign" => {
+                        let attempt = token
+                            .native_stop
+                            .attempt("previous_native".into(), Arc::new(|| false))
+                            .unwrap();
+                        attempt.complete(true);
+                        append(
+                            &path,
+                            serde_json::json!({"type":"user","uuid":"foreign","message":{"content":"another turn"}}),
+                        );
+                    }
+                    "unknown" => {
+                        std::fs::write(&path, "{\"type\":\"unknown\"}\n").unwrap();
+                    }
+                    "bindingless" => {
+                        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+                        crate::services::tmux_common::write_tmux_runtime_kind_marker(
+                            &session,
+                            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                        )
+                        .unwrap();
+                    }
+                    "no_offset" => {
+                        let mut row = inflight::load_inflight_state_read_only(
+                            &ProviderKind::Claude,
+                            channel.get(),
+                        )
+                        .unwrap();
+                        row.turn_start_offset = None;
+                        inflight::save_inflight_state(&row).unwrap();
+                    }
+                    "foreign_nonce" => {
+                        let mut row = inflight::load_inflight_state_read_only(
+                            &ProviderKind::Claude,
+                            channel.get(),
+                        )
+                        .unwrap();
+                        row.turn_nonce = Some("foreign_nonce".into());
+                        inflight::save_inflight_state(&row).unwrap();
+                    }
+                    _ => {}
+                }
+                let _ = fx.take_calls();
+                if entry == "command" {
+                    let result =
+                        begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop")
+                            .await;
+                    assert!(
+                        matches!(result, CommandStop::Stop(_)),
+                        "main recovery required for {case}"
+                    );
+                } else {
+                    let result =
+                        discord::mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
+                            &shared,
+                            channel,
+                            MessageId::new(channel.get() + 1),
+                            "mailbox_cancel",
+                        )
+                        .await;
+                    assert!(
+                        result
+                            .token
+                            .as_ref()
+                            .is_some_and(|published| Arc::ptr_eq(published, &token)),
+                        "guarded mailbox recovery required for {case}"
+                    );
+                }
+                assert!(
+                    token.cancelled.load(Ordering::Acquire),
+                    "main publishes the stale token for {case}"
+                );
+                assert!(
+                    !fx.take_calls()
+                        .iter()
+                        .any(|call| call.starts_with("send-keys")),
+                    "judgment never reuses old proof for {case}"
+                );
+                crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+            }
+        }
+    });
+}
+
+#[test]
+fn preserve_stop_recovery_rechecks_owner_before_publish() {
+    let fx = Fixture::new();
+    run(async {
+        for (n, change) in ["owner", "binding", "source", "cleanup"]
+            .into_iter()
+            .enumerate()
+        {
+            let shared = discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7_193_930 + n as u64);
+            let session = format!("native-orphan-race-{change}");
+            let (token, path) = generating_turn(&fx, &session);
+            start(&shared, channel, &token).await;
+            assert!(
+                discord::turn_bridge::NativeStop::begin(
+                    &shared,
+                    &ProviderKind::Claude,
+                    channel,
+                    &token,
+                    &session,
+                    "!stop"
+                )
+                .await
+                .is_none()
+            );
+            match change {
+                "owner" => {
+                    native_inflight_row(channel, &token, &session);
+                }
+                "binding" => {
+                    token.bind_claude_tmux_session("native-successor-binding");
+                }
+                "source" => {
+                    let mut binding =
+                        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                            &session,
+                        )
+                        .unwrap();
+                    let next = path.with_extension("successor.jsonl");
+                    std::fs::copy(&path, &next).unwrap();
+                    binding.output_path = next.display().to_string();
+                    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                        &session, binding,
+                    );
+                }
+                "cleanup" => token.mark_completion_cleanup(),
+                _ => unreachable!(),
+            }
+            let result = shared
+                .mailbox(channel)
+                .cancel_active_turn_if_current_unless_herdr(token.clone(), "recovery_race".into())
+                .await;
+            assert!(matches!(result, crate::services::provider::cancel_token_claude_interrupt::StopCancel::NotCurrent), "changed recovery authority must be rechecked: {change}");
+            assert!(!token.cancelled.load(Ordering::Acquire));
+            assert!(mailbox_holds(&shared, channel, &token).await);
+            assert_eq!(tombstone(channel), None);
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
     });
 }

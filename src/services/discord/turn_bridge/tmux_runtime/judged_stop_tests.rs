@@ -77,6 +77,18 @@ fn inflight_row(provider: &ProviderKind, channel: ChannelId, name: &str, compat:
     path
 }
 
+fn native_inflight_row(channel: ChannelId, token: &Arc<CancelToken>, session: &str) -> PathBuf {
+    let path = inflight_row(&ProviderKind::Claude, channel, session, false);
+    let mut row =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    row.turn_nonce = token.turn_nonce().map(str::to_owned);
+    row.output_path = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+        .map(|binding| binding.output_path);
+    row.turn_start_offset = Some(0);
+    inflight::save_inflight_state(&row).unwrap();
+    path
+}
+
 /// The row's bytes and modification time, which any save changes.
 fn file_state(path: &PathBuf) -> Option<(Vec<u8>, std::time::SystemTime)> {
     let bytes = std::fs::read(path).ok()?;
@@ -861,7 +873,7 @@ fn preserve_stop_foreground_bash_keeps_live_turn_until_native_exit() {
         let session = "claude-preserve-foreground";
         let (token, _) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
-        let row = inflight_row(&ProviderKind::Claude, channel, session, false);
+        let row = native_inflight_row(channel, &token, session);
         let before = file_state(&row);
         let _reply = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
         let escapes = fx
@@ -894,7 +906,7 @@ fn preserve_stop_unconfirmed_keeps_token_and_inflight() {
         let session = "claude-preserve-unconfirmed";
         let (token, _) = generating_turn(&fx, session);
         start(&shared, channel, &token).await;
-        let row = inflight_row(&ProviderKind::Claude, channel, session, false);
+        let row = native_inflight_row(channel, &token, session);
         let before = file_state(&row);
         let _reply = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
         assert!(
