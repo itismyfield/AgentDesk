@@ -3,6 +3,8 @@
 //! A Pending pane left without evidence is only probed again, never recreated.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod retired_hold;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -177,6 +179,8 @@ pub(crate) enum HerdrLaunchError {
     Row(String),
     /// The row holds a Pending, Bound or unreadable record (`None`).
     Occupied(Option<HostedState>),
+    /// The retired predecessor's input hold is not confirmed durably absent.
+    RetiredHold(String),
     Prepare(String),
     /// Pending did not commit; nothing was created.
     Pending(String),
@@ -313,7 +317,9 @@ pub(crate) async fn launch_herdr_session(
     }
     match &observed.record {
         HostedRecord::Legacy => {}
-        HostedRecord::Known(record) if record.state == HostedState::Retired => {}
+        HostedRecord::Known(record) if record.state == HostedState::Retired => {
+            retired_hold::before_fresh(&owner, record).await?;
+        }
         HostedRecord::Known(record) => return Err(HerdrLaunchError::Occupied(Some(record.state))),
         HostedRecord::Unknown(_) => return Err(HerdrLaunchError::Occupied(None)),
     }

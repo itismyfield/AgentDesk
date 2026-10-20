@@ -839,6 +839,12 @@ NON_PG_FILTER_REPLAY=(
   services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
   services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_absent_still_requires_directory_fsync
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_dangling_directory_is_not_confirmed_absent
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_metadata_error_is_preserved_without_cleanup
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_missing_directory_is_confirmed_absent_and_bad_nonce_is_kept
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_permission_error_keeps_the_hold
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_unlinked_but_unsynced_is_retryable
   services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans
   services::message_outbox::postgres_source_contract_tests::typed_outbox_core_preserves_cancel_at_the_observation_site
   services::message_outbox::postgres_source_contract_tests::typed_outbox_outcomes_fold_to_the_legacy_option_contract
