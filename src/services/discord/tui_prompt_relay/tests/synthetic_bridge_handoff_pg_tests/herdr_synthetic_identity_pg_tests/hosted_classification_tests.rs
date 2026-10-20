@@ -6,6 +6,60 @@ use crate::db::dispatched_sessions::hosted_execution::{
 #[tokio::test(flavor = "current_thread")]
 async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_available_pg() {
     Box::pin(async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Default)]
+        struct LookupEvent {
+            expected_channel: u64,
+            event: bool,
+            provider: bool,
+            channel: bool,
+        }
+        impl tracing::field::Visit for LookupEvent {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                match field.name() {
+                    "event" => self.event = value == "synthetic_nonherdr_hosted_lookup_unknown",
+                    "provider" => self.provider = value == "claude",
+                    _ => {}
+                }
+            }
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "channel_id" {
+                    self.channel = value == self.expected_channel;
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        struct ReleaseOnLookup {
+            channel: u64,
+            held: Arc<Mutex<Option<sqlx::pool::PoolConnection<sqlx::Postgres>>>>,
+            observed: Arc<AtomicUsize>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReleaseOnLookup {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target()
+                    != "agentdesk::services::discord::tui_prompt_relay::synthetic_start::admission_fence"
+                    || *event.metadata().level() != tracing::Level::WARN
+                {
+                    return;
+                }
+                let mut fields = LookupEvent {
+                    expected_channel: self.channel,
+                    ..Default::default()
+                };
+                event.record(&mut fields);
+                if fields.event && fields.provider && fields.channel {
+                    self.observed.fetch_add(1, Ordering::SeqCst);
+                    drop(self.held.lock().unwrap().take());
+                }
+            }
+        }
+
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
         let _binding =
@@ -14,7 +68,7 @@ async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_a
         let channel = ChannelId::new(7_186_793);
         let _hosted =
             crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
-        let fixture = Box::pin(Fixture::new(root.path(), channel)).await;
+        let mut fixture = Box::pin(Fixture::new(root.path(), channel)).await;
         let mut record = fixture.pending(N1, &fixture.source, 7_186_794);
         record.hosted_source = None;
         fixture.publish_pending_lease(&record);
@@ -31,25 +85,45 @@ async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_a
             dedupe::hosted_source::herdr_evidence(channel.get(), &fixture.logical, None),
             Ok(false)
         );
-        // This isolated database loses only the hosted SELECT column; the existing actor pin
-        // must still capture and commit through its ordinary active/status columns.
-        sqlx::query("ALTER TABLE sessions RENAME COLUMN hosted_execution TO unavailable_hosted_execution")
-            .execute(&fixture.pool)
+        let fault_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .min_connections(0)
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_with((*fixture.pool.connect_options()).clone())
             .await
             .unwrap();
-        assert!(matches!(
-            load_hosted_execution_pg(&fixture.pool, HostedLookupKey::SessionKey(&fixture.key)).await,
-            HostedLookup::Unknown(why)
-                if why.contains("hosted_execution") && why.contains("does not exist")
-        ));
-        let original_pg_pin = canonical::capture_hook_session_actor_pin_pg(&fixture.pool, &fixture.key)
+        Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(fault_pool.clone());
+        let original_pg_pin = canonical::capture_hook_session_actor_pin_pg(&fault_pool, &fixture.key)
             .await
             .expect("the existing PG actor pin remains readable before the production claim");
         assert!(matches!(original_pg_pin, canonical::HookSessionActorPin::Existing { .. }));
+        let held = Arc::new(Mutex::new(Some(fault_pool.acquire().await.unwrap())));
+        assert!(matches!(fault_pool.acquire().await, Err(sqlx::Error::PoolTimedOut)));
+        assert!(matches!(
+            load_hosted_execution_pg(&fault_pool, HostedLookupKey::SessionKey(&fixture.key)).await,
+            HostedLookup::Unknown(why) if why.to_ascii_lowercase().contains("timed out")
+        ));
+        // Only the production fallback event returns the connection; its next actor query
+        // must then use the existing healthy PG pin path in this same isolated database.
+        let observed = Arc::new(AtomicUsize::new(0));
+        crate::logging::test_capture::pin_callsite_interest();
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(ReleaseOnLookup {
+                channel: channel.get(),
+                held: held.clone(),
+                observed: observed.clone(),
+            }),
+        );
+        let claimed = tokio::time::timeout(Duration::from_secs(5), fixture.claim(&record)).await;
+        drop(held.lock().unwrap().take());
+        if !matches!(claimed, Ok(true)) {
+            fault_pool.close().await;
+        }
         assert!(
-            fixture.claim(&record).await,
+            claimed.expect("the production claim returns within its bounded lookup timeout"),
             "a non-Herdr hosted SELECT outage must not deny a production claim whose PG actor pin is available"
         );
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
         let actor = crate::services::discord::mailbox_snapshot(&fixture.shared, channel).await;
         assert!(actor.cancel_token.is_some());
         assert_eq!(actor.active_user_message_id, Some(MessageId::new(record.anchor_message_id)));
@@ -61,12 +135,13 @@ async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_a
         assert!(saved.hosted_execution_nonce.is_none());
         assert_eq!(saved.turn_nonce, actor.active_turn_nonce);
         assert_eq!(
-            canonical::capture_hook_session_actor_pin_pg(&fixture.pool, &fixture.key)
+            canonical::capture_hook_session_actor_pin_pg(&fault_pool, &fixture.key)
                 .await
                 .unwrap(),
             original_pg_pin,
             "synthetic admission preserves the captured PG row until bridge handoff"
         );
+        fault_pool.close().await;
         fixture.close().await;
     })
     .await;

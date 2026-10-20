@@ -1176,11 +1176,10 @@ mod tests {
             Case, ScriptedTmux, postgres, with_second_bot,
         };
         use crate::services::discord::host_teardown_gate::test_support::Stored;
+        use crate::services::tui_prompt_dedupe as dedupe;
 
-        fn binding(
-            kind: RuntimeHandoffKind,
-        ) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        fn binding(kind: RuntimeHandoffKind) -> dedupe::TuiRuntimeBinding {
+            dedupe::TuiRuntimeBinding {
                 runtime_kind: kind,
                 output_path: "/runtime/p4c1-rehydrate.jsonl".to_string(),
                 relay_output_path: None,
@@ -1193,140 +1192,135 @@ mod tests {
 
         // A dead pane's relay mirror and restored owner are dropped only for a session the host
         // guard admits, in the unlisted sweep and the listed-pane pass of both providers.
-        #[tokio::test(flavor = "multi_thread")]
-        async fn a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg() {
+        #[test]
+        fn a_dead_pane_mirror_is_evicted_only_for_what_the_host_guard_admits_pg() {
             let _root = crate::config::TestRuntimeRootGuard::new();
-            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            let _dedupe = dedupe::TEST_LOCK
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            crate::services::tui_prompt_dedupe::reset_state_for_tests();
-            let tmux = ScriptedTmux::install();
-            let (db, pool) = postgres().await;
-            let bot_b = "p4c1-bot-b";
-            let (shared, _registry) = with_second_bot(&pool, bot_b).await;
-            let providers = [
-                (ProviderKind::Claude, RuntimeHandoffKind::ClaudeTui),
-                (ProviderKind::Codex, RuntimeHandoffKind::CodexTui),
-            ];
-            let mut sessions = Vec::new();
-            for (p, (provider, kind)) in providers.iter().enumerate() {
-                for listed in [false, true] {
-                    for (n, case) in Case::ALL.into_iter().enumerate() {
-                        let at = (p * 2 + usize::from(listed)) * 10 + n;
-                        let channel = 1_479_671_301_387_065_000 + at as u64;
-                        let name = format!("AgentDesk-{}-p4c1-evict-{at}", provider.as_str());
-                        let key =
-                            crate::services::discord::adk_session::build_namespaced_session_key(
-                                &shared.token_hash,
-                                provider,
-                                &name,
-                            );
-                        case.seed(&pool, &key, &name, channel).await;
-                        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-                            &name,
-                            binding(*kind),
-                        );
-                        crate::services::tui_prompt_dedupe::register_tmux_channel(&name, channel);
-                        let owner = ChannelId::new(channel);
-                        shared
-                            .tmux_watchers
-                            .restore_owner_channel_for_tmux_session(&name, owner);
-                        sessions.push((name, key, listed, case));
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                dedupe::reset_state_for_tests();
+                let tmux = ScriptedTmux::install();
+                let (db, pool) = postgres().await;
+                let bot_b = "p4c1-bot-b";
+                let (shared, _registry) = with_second_bot(&pool, bot_b).await;
+                let providers = [
+                    (ProviderKind::Claude, RuntimeHandoffKind::ClaudeTui),
+                    (ProviderKind::Codex, RuntimeHandoffKind::CodexTui),
+                ];
+                let mut sessions = Vec::new();
+                for (p, (provider, kind)) in providers.iter().enumerate() {
+                    for listed in [false, true] {
+                        for (n, case) in Case::ALL.into_iter().enumerate() {
+                            let at = (p * 2 + usize::from(listed)) * 10 + n;
+                            let channel = 1_479_671_301_387_065_000 + at as u64;
+                            let name = format!("AgentDesk-{}-p4c1-evict-{at}", provider.as_str());
+                            let key =
+                                crate::services::discord::adk_session::build_namespaced_session_key(
+                                    &shared.token_hash,
+                                    provider,
+                                    &name,
+                                );
+                            case.seed(&pool, &key, &name, channel).await;
+                            dedupe::register_tmux_runtime_binding(&name, binding(*kind));
+                            dedupe::register_tmux_channel(&name, channel);
+                            let owner = ChannelId::new(channel);
+                            shared
+                                .tmux_watchers
+                                .restore_owner_channel_for_tmux_session(&name, owner);
+                            sessions.push((name, key, listed, case));
+                        }
                     }
                 }
-            }
-            // A second bot's rows sit under its own hash, which only the registry names.
-            let mut second = Vec::new();
-            for (n, stored) in [Stored::Legacy, Stored::Hosted, Stored::Future]
-                .into_iter()
-                .enumerate()
-            {
-                let channel = 1_479_671_301_387_065_800 + n as u64;
-                let name = format!("AgentDesk-claude-p4c1-bot-b-{n}");
-                let claude = ProviderKind::Claude;
-                let key = crate::services::discord::adk_session::build_namespaced_session_key(
-                    bot_b, &claude, &name,
-                );
-                let mut row_owner = owner(&channel.to_string());
-                row_owner.discord_token_hash = bot_b.to_string();
-                let raw = match stored {
-                    Stored::Hosted => Some(wire(&record(&row_owner, "n1", HostedState::Bound))),
-                    Stored::Future => Some(future_schema(&row_owner)),
-                    _ => None,
+                // A second bot's rows sit under its own hash, which only the registry names.
+                let mut second = Vec::new();
+                for (n, stored) in [Stored::Legacy, Stored::Hosted, Stored::Future]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let channel = 1_479_671_301_387_065_800 + n as u64;
+                    let name = format!("AgentDesk-claude-p4c1-bot-b-{n}");
+                    let claude = ProviderKind::Claude;
+                    let key = crate::services::discord::adk_session::build_namespaced_session_key(
+                        bot_b, &claude, &name,
+                    );
+                    let mut row_owner = owner(&channel.to_string());
+                    row_owner.discord_token_hash = bot_b.to_string();
+                    let raw = match stored {
+                        Stored::Hosted => Some(wire(&record(&row_owner, "n1", HostedState::Bound))),
+                        Stored::Future => Some(future_schema(&row_owner)),
+                        _ => None,
+                    };
+                    let seed = crate::services::discord::host_key_derivation::tests::seed_row;
+                    seed(&pool, "claude", Some(bot_b), &key, channel, raw).await;
+                    let tui = binding(RuntimeHandoffKind::ClaudeTui);
+                    dedupe::register_tmux_runtime_binding(&name, tui);
+                    dedupe::register_tmux_channel(&name, channel);
+                    second.push((name, stored == Stored::Legacy));
+                }
+
+                let unread = "AgentDesk-claude-p4c1-evict-unread";
+                let key = crate::services::discord::host_teardown_gate::test_support::channel_key;
+                let legacy = Stored::Legacy;
+                let unread_channel = 1_479_671_301_387_065_900;
+                Case::Stored(legacy)
+                    .seed(&pool, &key(&shared, unread), unread, unread_channel)
+                    .await;
+                let listed: Vec<&str> = sessions
+                    .iter()
+                    .filter(|(_, _, listed, _)| *listed)
+                    .map(|(name, ..)| name.as_str())
+                    .collect();
+                let rows = |keys: Vec<String>| {
+                    let pool = pool.clone();
+                    async move {
+                        let mut rows = Vec::new();
+                        for key in keys {
+                            let key = hosted_execution::HostedLookupKey::SessionKey(&key);
+                            let row = hosted_execution::load_hosted_execution_pg(&pool, key).await;
+                            rows.push(format!("{row:?}"));
+                        }
+                        rows
+                    }
                 };
-                let seed = crate::services::discord::host_key_derivation::tests::seed_row;
-                seed(&pool, "claude", Some(bot_b), &key, channel, raw).await;
-                let tui = binding(RuntimeHandoffKind::ClaudeTui);
-                crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&name, tui);
-                crate::services::tui_prompt_dedupe::register_tmux_channel(&name, channel);
-                second.push((name, stored == Stored::Legacy));
-            }
-            let unread = "AgentDesk-claude-p4c1-evict-unread";
-            let key = crate::services::discord::host_teardown_gate::test_support::channel_key;
-            let legacy = Stored::Legacy;
-            let unread_channel = 1_479_671_301_387_065_900;
-            Case::Stored(legacy)
-                .seed(&pool, &key(&shared, unread), unread, unread_channel)
-                .await;
-            let listed: Vec<&str> = sessions
-                .iter()
-                .filter(|(_, _, listed, _)| *listed)
-                .map(|(name, ..)| name.as_str())
-                .collect();
-            let rows = |keys: Vec<String>| {
-                let pool = pool.clone();
-                async move {
-                    let mut rows = Vec::new();
-                    for key in keys {
-                        let key = hosted_execution::HostedLookupKey::SessionKey(&key);
-                        let row = hosted_execution::load_hosted_execution_pg(&pool, key).await;
-                        rows.push(format!("{row:?}"));
-                    }
-                    rows
-                }
-            };
-            let keys = || sessions.iter().map(|(_, key, ..)| key.clone()).collect();
-            let rows_before = rows(keys()).await;
-            tmux.list(&listed);
-            let pass = shared.clone();
-            tokio::task::spawn_blocking(move || {
-                rehydrate_existing_claude_tui_bindings(&pass);
-                rehydrate_existing_codex_tui_bindings(&pass);
-            })
-            .await
-            .expect("rehydrate pass");
-            assert_eq!(rows(keys()).await, rows_before, "eviction is memory only");
-            for (name, _, listed, case) in &sessions {
-                let mirrored =
-                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
-                        .is_some();
-                let owned = shared
-                    .tmux_watchers
-                    .owner_channel_for_tmux_session(name)
-                    .is_some();
-                let label = format!("{name} listed={listed} {case:?}");
-                assert_eq!(mirrored, !case.admitted(), "{label}: mirror");
-                assert_eq!(owned, !case.admitted(), "{label}: restored owner");
-            }
-
-            for (name, admitted) in &second {
-                let mirrored =
-                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
-                        .is_some();
-                assert_eq!(mirrored, !admitted, "{name}: second bot's mirror");
-            }
-
-            let claude_tui = binding(RuntimeHandoffKind::ClaudeTui);
-            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(unread, claude_tui);
-            crate::services::tui_prompt_dedupe::register_tmux_channel(unread, unread_channel);
-            pool.close().await;
-            let pass = shared.clone();
-            tokio::task::spawn_blocking(move || rehydrate_existing_claude_tui_bindings(&pass))
+                let keys = || sessions.iter().map(|(_, key, ..)| key.clone()).collect();
+                let rows_before = rows(keys()).await;
+                tmux.list(&listed);
+                let pass = shared.clone();
+                tokio::task::spawn_blocking(move || {
+                    rehydrate_existing_claude_tui_bindings(&pass);
+                    rehydrate_existing_codex_tui_bindings(&pass);
+                })
                 .await
                 .expect("rehydrate pass");
-            let kept = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(unread);
-            assert!(kept.is_some(), "a failed row read is not a legacy answer");
-            db.drop().await;
+                assert_eq!(rows(keys()).await, rows_before, "eviction is memory only");
+                for (name, _, listed, case) in &sessions {
+                    let mirrored = dedupe::runtime_binding_for_tmux_session(name).is_some();
+                    let owned = shared
+                        .tmux_watchers
+                        .owner_channel_for_tmux_session(name)
+                        .is_some();
+                    let label = format!("{name} listed={listed} {case:?}");
+                    assert_eq!(mirrored, !case.admitted(), "{label}: mirror");
+                    assert_eq!(owned, !case.admitted(), "{label}: restored owner");
+                }
+                for (name, admitted) in &second {
+                    let mirrored = dedupe::runtime_binding_for_tmux_session(name).is_some();
+                    assert_eq!(mirrored, !admitted, "{name}: second bot's mirror");
+                }
+
+                let claude_tui = binding(RuntimeHandoffKind::ClaudeTui);
+                dedupe::register_tmux_runtime_binding(unread, claude_tui);
+                dedupe::register_tmux_channel(unread, unread_channel);
+                pool.close().await;
+                let pass = shared.clone();
+                tokio::task::spawn_blocking(move || rehydrate_existing_claude_tui_bindings(&pass))
+                    .await
+                    .expect("rehydrate pass");
+                let kept = dedupe::runtime_binding_for_tmux_session(unread);
+                assert!(kept.is_some(), "a failed row read is not a legacy answer");
+                db.drop().await;
+            });
         }
     }
 }

@@ -1069,10 +1069,16 @@ targets = {
     "needs" => %w[changes lib_test_prepare],
     "if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "54c7aa6278835c21b0af00d7e37fec97340aeb37fe163ec689beb45d1eaaecd9",
+    "job_sha256" => "da7053ddb9430e59431784b5642b7112f2f0175a1836bbe6d11bb15815c83868",
     "cargo_steps" => {
       "High-risk recovery lane" => {
         "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
+      },
+      "Herdr recovery and admission regressions" => {
+        "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- services::session_host::herdr_gate::tests::root_replaced_tests:: services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests:: services::tui_prompt_dedupe::hosted_source::tests:: services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests:: --test-threads=1"],
         "timeout_minutes" => nil,
         "shell" => nil,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},

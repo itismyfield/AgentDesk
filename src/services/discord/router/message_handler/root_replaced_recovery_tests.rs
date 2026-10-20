@@ -1,5 +1,6 @@
 use super::super::Fixture;
 use super::*;
+use crate::db::dispatched_session_canonical_identity::pg_tests as canonical_fixture;
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced as recovery;
 use crate::services::discord::recovery_engine::herdr_reader::{
@@ -187,8 +188,9 @@ impl Case {
             .into_iter()
             .filter(|request| {
                 request["method"].as_str().is_some_and(|method| {
-                    method.starts_with("pane.send")
-                        || matches!(method, "pane.close" | "pane.create")
+                    (method.starts_with("pane.")
+                        && !matches!(method, "pane.get" | "pane.read" | "pane.process_info"))
+                        || method == "workspace.create"
                 })
             })
             .collect()
@@ -326,6 +328,7 @@ fn rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_p
     let after_cas = Arc::new(AtomicBool::new(false));
     let shared = case.shared.clone();
     let pool = case.fx.pool.clone();
+    let key = super::super::session_key(&case.fx.owner);
     let target = case.target();
     recovery::BEFORE_CAS.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move || {
@@ -348,13 +351,7 @@ fn rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_p
                     ATTACHES.with(|count| count.get() > 0),
                     "the real restart attach refused RootReplaced before the fenced stage"
                 );
-                let raw: Option<Value> = sqlx::query_scalar(
-                    "SELECT hosted_execution FROM sessions WHERE channel_id=$1",
-                )
-                .bind(CHANNEL.to_string())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+                let raw = canonical_fixture::raw_of(&pool, &key).await;
                 assert!(matches!(HostedRecord::decode(raw.as_ref()), HostedRecord::Known(record) if record.state == HostedState::Bound));
                 use crate::services::discord::turn_presence::activity::{Activity, activity_now};
                 let before = tokio::time::timeout(
@@ -405,16 +402,22 @@ fn rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_p
     assert_eq!(case.effects(), before, "recovery has no pane effects");
     let taken = case.fx.rt.block_on(async {
         use crate::services::discord::turn_presence::activity::{Activity, activity_now};
-        let observed = tokio::time::timeout(
-            Duration::from_secs(15),
-            activity_now(&case.shared, &provider, channel),
-        )
+        let observed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let observed = activity_now(&case.shared, &provider, channel).await;
+                if observed.reason != "catching_up" {
+                    break observed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .unwrap();
+        .expect("Retired activity did not finish catching_up within 15 seconds");
         assert_eq!(
             observed.activity,
             Activity::Idle,
-            "Retired must pass existing owner and absence checks"
+            "Retired must pass existing owner and absence checks: reason={}",
+            observed.reason
         );
         assert_eq!(observed.reason, "no_session");
         let taken = tokio::time::timeout(
@@ -554,6 +557,7 @@ fn refuses_change(change: Change, tag: &str) {
     });
     let rig = &case.fx.rig;
     let pool = case.fx.pool.clone();
+    let key = super::super::session_key(&case.fx.owner);
     let runtime = case.fx.rt.handle().clone();
     let shared = case.shared.clone();
     let logical = case.fx.logical().to_string();
@@ -571,7 +575,13 @@ fn refuses_change(change: Change, tag: &str) {
                 Change::RootAlive => rig.exists(SHELL, true),
                 Change::ProviderAlive => rig.exists(PROVIDER, true),
                 Change::NewProvider => {
-                    rig.run_provider(&rig.context("rr-new-live-provider"), true);
+                    const OTHER_NONCE: &str = "fedcba9876543210fedcba9876543210";
+                    let nonce = if changed.execution_nonce == OTHER_NONCE {
+                        NONCE
+                    } else {
+                        OTHER_NONCE
+                    };
+                    rig.run_provider(&rig.context(nonce), true);
                     rig.exists(PROVIDER, true);
                     rig.foreground(&[PROVIDER]);
                 }
@@ -585,12 +595,12 @@ fn refuses_change(change: Change, tag: &str) {
                     changed.expected.as_mut().unwrap().binding_nonce =
                         changed.execution_nonce.clone();
                     runtime.block_on(async {
-                        sqlx::query("UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2")
-                            .bind(serde_json::to_value(&changed).unwrap())
-                            .bind(CHANNEL.to_string())
-                            .execute(&pool)
-                            .await
-                            .unwrap();
+                        canonical_fixture::set_raw(
+                            &pool,
+                            &key,
+                            Some(serde_json::to_value(&changed).unwrap()),
+                        )
+                        .await;
                     });
                 }
                 Change::Active => runtime.block_on(async {
@@ -729,6 +739,7 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
             let expected_retired = retired.clone();
             let shared = case.shared.clone();
             let pool = case.fx.pool.clone();
+            let key = super::super::session_key(&case.fx.owner);
             let logical = case.fx.logical().to_string();
             let reached = Arc::new(AtomicBool::new(false));
             let after_cas = reached.clone();
@@ -745,13 +756,7 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
             recovery::AFTER_CAS.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move || {
                     Box::pin(async move {
-                        let raw: Option<Value> = sqlx::query_scalar(
-                            "SELECT hosted_execution FROM sessions WHERE channel_id=$1",
-                        )
-                        .bind(CHANNEL.to_string())
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap();
+                        let raw = canonical_fixture::raw_of(&pool, &key).await;
                         assert_eq!(
                             HostedRecord::decode(raw.as_ref()),
                             HostedRecord::Known(expected_retired),
@@ -760,14 +765,12 @@ fn rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg() {
                         after_cas.store(true, Ordering::SeqCst);
                         match change {
                             Change::Nonce => {
-                                sqlx::query(
-                                    "UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2",
+                                canonical_fixture::set_raw(
+                                    &pool,
+                                    &key,
+                                    Some(serde_json::to_value(&replacement).unwrap()),
                                 )
-                                .bind(serde_json::to_value(&replacement).unwrap())
-                                .bind(CHANNEL.to_string())
-                                .execute(&pool)
-                                .await
-                                .unwrap();
+                                .await;
                             }
                             Change::Active => {
                                 assert!(
