@@ -2123,6 +2123,7 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_post_cas_successor_or_activity_keeps_n1_hold_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_provider_alive_after_first_proof_holds_without_cleanup_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_recorded_root_alive_after_first_proof_holds_without_cleanup_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::rr_retired_cache_skips_completed_cleanup_and_unknown_or_failed_fsync_retries_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r1_a_restart_reconnects_a_matched_bound_pane_and_its_next_turn_prompts_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
