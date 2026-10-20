@@ -75,10 +75,8 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_view_fn()
     })
 }
 
-/// The worker's claim action: rehydrate the lease (in case a restart dropped the
-/// in-memory map), then run the normal [`claim::claim_tui_direct_synthetic_turn_inner`] which
-/// reads the runtime binding FRESH and seeds `turn_start_offset = relay_last_offset()`
-/// (post-drain == EOF) with `response_sent_offset = 0`.
+/// Restore the original lease locally and run the common admission path.
+/// The provider prompt is never resubmitted.
 pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
 -> super::super::super::tui_direct_pending_start::ClaimFn {
     #[cfg(test)]
@@ -153,10 +151,8 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             // detached worker task (unix), exactly like the observer's unix-only tail.
             #[cfg(unix)]
             if claim.claimed && deferred_claim_requires_bridge_tail_relayer(claim.relay_owner) {
-                // The lease the bridge tail reads must reflect the resolved owner.
-                // Admission published the validated lease before releasing its transition.
-                // Re-read that lease (or fall back to the rehydrated one) so it carries
-                // the resolved owner before handing it to the self-gating tail.
+                // Admission published the validated owner before releasing its transition.
+                // The tail reads that lease instead of the worker's unrecorded copy.
                 let mut tail_lease =
                     crate::services::tui_prompt_dedupe::external_input_relay_lease(
                         provider.as_str(),
