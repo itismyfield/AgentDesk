@@ -487,7 +487,14 @@ class SharedSkipRuleTests(unittest.TestCase):
     def test_repository_skips_match_data_resolver_pin_and_basename_rule(self):
         data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
         self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
-        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"]
+        # New pins live in `.d/` fragments; the gate reads them with the legacy set.
+        fragments = {
+            line.split("|", 1)[1].strip()
+            for path in (ROOT / "scripts/test_only_module_skip_pin.d").glob("*.txt")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("resolver |")
+        }
+        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"] | fragments
         self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
         basename = {
             path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")
