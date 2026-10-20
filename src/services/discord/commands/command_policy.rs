@@ -369,6 +369,7 @@ pub(super) const SLASH_COMMAND_RISKS: &[(&str, CommandRisk)] = {
         ("/model", Mutating),
         ("/node", Mutating),
         ("/fast", Mutating),
+        ("/tool-call", Mutating),
         ("/goals", Mutating),
         ("/effort", Mutating),
         ("/compact", Mutating),

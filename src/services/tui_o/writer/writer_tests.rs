@@ -923,12 +923,10 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
-
 #[path = "local_retry_tests.rs"]
 mod local_retry_tests;
-
-#[path = "tool_result_tests.rs"]
-mod tool_result_tests;
+#[path = "tool_card_replay_tests.rs"]
+mod tool_card_replay;
 
 #[path = "actor_tests.rs"]
 mod actor;
@@ -936,6 +934,10 @@ mod actor;
 pub(crate) mod codex_herdr_drive;
 #[path = "operator_resume_tests.rs"]
 mod operator_resume;
+#[path = "tool_result_tests.rs"]
+mod tool_result_tests;
+#[path = "turn_summary_replay_tests.rs"]
+mod turn_summary_replay;
 
 #[path = "deliver_home_tests.rs"]
 mod deliver_home;

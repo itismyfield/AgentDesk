@@ -20,6 +20,7 @@ mod destructive_cancel_gate;
 mod discord_io;
 pub(crate) mod dispatch_policy;
 pub(crate) mod e2e_control;
+mod footer_retirement;
 mod footer_view_reconciler;
 pub(crate) mod formatting;
 mod gateway;
@@ -155,6 +156,8 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     );
 }
 mod turn_completion_events;
+mod turn_end_summary;
+
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
@@ -203,12 +206,6 @@ mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
-#[allow(unused_imports)]
-pub(in crate::services::discord) use tmux_watcher_registry::{
-    TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
-    TmuxWatcherRegistryGuard, lock_tmux_watcher_registry, tmux_watcher_now_ms,
-};
-
 pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
@@ -217,6 +214,11 @@ pub(in crate::services::discord) use delivery_lease_cell::{
 pub(crate) use recovery_engine::herdr_reader::local_reconnect_health as herdr_reconnect_health;
 #[allow(unused_imports)]
 pub(in crate::services) use relay_coord::TmuxRelayCoord;
+#[allow(unused_imports)]
+pub(in crate::services::discord) use tmux_watcher_registry::{
+    TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
+    TmuxWatcherRegistryGuard, lock_tmux_watcher_registry, tmux_watcher_now_ms,
+};
 pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
@@ -268,8 +270,6 @@ pub(in crate::services) use shared_state::DispatchRoutingState;
 // #3038 S3: same scope rationale as S2 — the cluster-E members were
 // `pub(super)` on `SharedData` (visible up to `crate::services`).
 pub(in crate::services) use shared_state::RestartLifecycle;
-pub(crate) use turn_bridge::TmuxCleanupPolicy;
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -277,11 +277,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+pub(crate) use turn_bridge::TmuxCleanupPolicy;
 
 use tokio::sync::Mutex;
-
-use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
@@ -302,6 +300,7 @@ use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};
 pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
+use poise::serenity_prelude as serenity;
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
@@ -317,6 +316,7 @@ use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use role_map_enrichment::enrich_role_map_with_channel_ids;
 use router::handle_event;
+use serenity::{ChannelId, MessageId, UserId};
 #[cfg(test)]
 use session_idle_cleanup::mark_session_disconnected_for_idle_cleanup;
 use session_idle_cleanup::maybe_cleanup_sessions;

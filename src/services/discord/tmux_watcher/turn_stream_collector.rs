@@ -176,10 +176,10 @@ async fn collect_turn_stream_body(
         utf8_decoder.clear_pending();
         return CollectOutcome::ContinueWatcherLoop;
     };
-    let completion_actor = if let Some(turn) = continuation.as_ref() {
-        turn.completion_actor.clone()
+    let (completion_actor, summary_actor) = if let Some(turn) = continuation.as_ref() {
+        (turn.completion_actor.clone(), turn.summary_actor.clone())
     } else {
-        cancel_handoff::completion::capture_actor(
+        cancel_handoff::completion::capture_actors(
             &shared,
             channel_id,
             startup_inflight_snapshot.as_ref(),
@@ -813,6 +813,7 @@ async fn collect_turn_stream_body(
         single_message_panel_footer_mode,
         startup_inflight_snapshot,
         completion_actor,
+        summary_actor,
         this_turn_status_panel_generation,
         turn_is_external_input_for_session,
         turn_identity_for_panel,

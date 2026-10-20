@@ -170,7 +170,7 @@ async fn discord(State(recorder): State<Recorder>, request: Request<Body>) -> Re
         && (path.ends_with("/messages") || path.starts_with("/api/v10/webhooks/"))
     {
         let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if body["content"] == "..." {
+        if matches!(body["content"].as_str(), Some("..." | "⠋ 계속 처리 중")) {
             return (
                 StatusCode::FORBIDDEN,
                 axum::Json(json!({"message": "fixture refuses provider start", "code": 50001})),

@@ -668,10 +668,11 @@ pub(super) fn cancelled_terminal_response(
     } else if remaining_response.trim().is_empty() {
         "[Stopped]".to_string()
     } else {
-        format!(
-            "{}\n\n[Stopped]",
-            banner.format_discord_body(remaining_response)
-        )
+        banner.format_discord_body(remaining_response)
     };
     banner.prefix(response_sent_offset == 0, response)
 }
+
+#[cfg(test)]
+#[path = "cancelled_body_retirement_tests.rs"]
+mod cancelled_body_retirement_tests;

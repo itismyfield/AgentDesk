@@ -74,7 +74,7 @@ pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
 mod anchor_completion;
 mod bridge_completion;
-mod bridge_gateway;
+pub(in crate::services::discord) mod bridge_gateway;
 use self::anchor_completion::{
     DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
 };

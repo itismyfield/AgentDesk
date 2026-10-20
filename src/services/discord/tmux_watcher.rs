@@ -511,6 +511,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             single_message_panel_footer_mode,
             startup_inflight_snapshot,
             completion_actor,
+            summary_actor,
             this_turn_status_panel_generation,
             turn_is_external_input_for_session,
             turn_identity_for_panel,
@@ -759,6 +760,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             inflight_missing_before_relay,
             inflight_silent_turn,
         } = terminal_preflight_prepared;
+        let summary_was_cancelled = recent_stop_for_output.is_some();
         let current_response = full_response.get(response_sent_offset..).unwrap_or("");
         let terminal_preflight_suppression_outcome = {
             let terminal_preflight_context = TerminalPreflightContext {
@@ -1543,7 +1545,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             watcher_tui_gate_outcome,
             terminal_delivery_committed,
         );
-
         // #4106: whether the pre-panel early release below actually released THIS
         // turn's mailbox slot. When it did, the late
         // `finish_restored_watcher_active_turn` for the same pinned id is a
@@ -1553,7 +1554,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut pre_panel_release_drove_finalize = false;
         let mut terminal_projection_settled_key = None;
         let mut completion_chrome_timed_out = false;
-
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
             // #2849: watcher-completed turns never traverse the bridge
             // StatusUpdate path, so the completed panel can lack the Context
@@ -1677,31 +1677,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             // turn's own panel, if any, is created via the streaming sources and is
             // unaffected (in-range => gate false => completion fires as today).
             if !completion_chrome_timed_out && !inflight_before_relay_is_stale_newer_turn {
-                // #3969 root invariant: read the CHOKEPOINT-FRESH inflight (this
-                // `inflight_before_relay` is re-loaded after the synthetic row exists,
-                // unlike the stale `:1017` flag) and suppress the #3089 footer for any
-                // non-Managed (TUI-mirror) turn — closing the /loop self-paced leak.
+                // Use the captured inflight row to suppress mirror footer writes.
                 let turn_is_non_managed_tui_mirror =
                     watcher_inflight_is_non_managed_tui_mirror_for_session(
                         inflight_before_relay.as_ref(),
                         &tmux_session_name,
                     );
-                // #3805 P2 (PR-C): skip the status-panel completion edit when a
-                // NEWER panel epoch has superseded this stale completion for the
-                // SAME owned panel (parity with the sink completion guard). Inert
-                // on the default-OFF path (generation stays 0) and at PR-C (no
-                // mid-turn re-anchor bumps the epoch); the re-anchor stage (PR-D)
-                // makes it live.
+                // Preserve the pinned panel generation while completing this turn.
                 let two_message_status_panel_generation_superseded =
                     watcher_two_message_status_completion_superseded(
                         this_turn_status_panel_generation,
                         status_panel_msg_id,
                         inflight_before_relay.as_ref(),
                     );
-                // #4106: release the exact pinned active slot before the awaited
-                // status-panel edit. If a same-channel follow-up claims the mailbox
-                // while Discord is round-tripping the edit, the late finalizer below
-                // will identity-miss and must be an idempotent no-op decrement.
+                // Release only the pinned slot before an awaited completion projection.
                 if !lifecycle_stage_paused {
                     let pre_panel_inflight_state_for_finalize =
                         crate::services::discord::inflight::load_inflight_state(
@@ -1758,6 +1747,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         turn_is_external_input_for_session,
                         turn_is_non_managed_tui_mirror,
                         two_message_status_panel_generation_superseded,
+                        crate::services::discord::turn_end_summary::LiveSummary::watcher(
+                            &shared,
+                            terminal_projection_settled_key,
+                            inflight_before_relay.as_ref(),
+                            summary_was_cancelled,
+                            tool_state.summary_outcome.outcome(),
+                        ),
+                        summary_actor.as_ref(),
                     ),
                 )
                 .await

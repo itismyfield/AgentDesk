@@ -181,6 +181,7 @@ pub mod turn_cancel_queue_guard;
 pub(crate) mod turn_host;
 pub mod turn_lifecycle;
 pub mod turn_orchestrator;
+pub(crate) mod turn_summary_line;
 pub(crate) mod voice_conductor;
 
 // Compatibility alias only: code referencing `services::remote::*` still

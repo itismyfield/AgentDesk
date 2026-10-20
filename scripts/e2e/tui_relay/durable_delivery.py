@@ -74,7 +74,8 @@ def _invalid_query() -> dict[str, Any]:
         "status": "failed",
         "reason": (
             "invalid query identity: provider must be a nonempty string and "
-            "channel_id/message_id must be nonzero ASCII decimal strings"
+            "channel_id/message_id must be nonzero ASCII decimal strings; "
+            "expected_kind must be body, tool or tool_result"
         ),
     }
 
@@ -145,7 +146,7 @@ def _o_owns(o_store_root: Path, channel_id: int) -> bool:
 
 
 def _scan_o_ledger(o_store_root: Path, *, provider: str, channel_id: int,
-                   message_id: int) -> dict[str, Any]:
+                   message_id: int, expected_kind: str) -> dict[str, Any]:
     ledger = o_store_root / str(channel_id) / "ledger.jsonl"
     try:
         lines = ledger.read_text(encoding="utf-8").splitlines()
@@ -183,6 +184,9 @@ def _scan_o_ledger(o_store_root: Path, *, provider: str, channel_id: int,
         and unit.get("provider") == provider
     ):
         return {"status": "failed", "reason": "O posted record lacks a prepared unit for this channel"}
+    if unit.get("kind") != expected_kind:
+        return {"status": "failed", "reason": "O prepared unit kind differs from expected kind",
+                "expected_kind": expected_kind, "unit_kind": unit.get("kind")}
     return {
         "status": "evaluated",
         "reason": "O ledger posted record observed",
@@ -194,14 +198,17 @@ def _scan_o_ledger(o_store_root: Path, *, provider: str, channel_id: int,
 
 
 def _scan(runtime_root: Path, *, provider: str, channel_id: int,
-          message_id: int) -> dict[str, Any]:
+          message_id: int, expected_kind: str) -> dict[str, Any]:
     # The O store sits beside `runtime/` under the AgentDesk root.
     o_store_root = runtime_root.parent / "o_store"
     if _o_owns(o_store_root, channel_id):
         result = _scan_o_ledger(o_store_root, provider=provider, channel_id=channel_id,
-                                message_id=message_id)
+                                message_id=message_id, expected_kind=expected_kind)
         result["output_owner"] = "o"
         return result
+    if expected_kind != "body":
+        return {"status": "failed", "reason": "Legacy receipts cannot prove a tool piece kind",
+                "output_owner": "legacy"}
     result = _scan_records(runtime_root, provider=provider, channel_id=channel_id,
                            message_id=message_id)
     result["output_owner"] = "legacy"
@@ -209,15 +216,18 @@ def _scan(runtime_root: Path, *, provider: str, channel_id: int,
 
 
 def scan_records(runtime_root: Path, *, provider: str, channel_id: str,
-                 message_id: str) -> dict[str, Any]:
+                 message_id: str, expected_kind: str = "body") -> dict[str, Any]:
     channel, message = _expected_id(channel_id), _expected_id(message_id)
-    if not _identity_string(provider) or channel is None or message is None:
+    if (not _identity_string(provider) or channel is None or message is None
+            or expected_kind not in ("body", "tool", "tool_result")):
         return _invalid_query()
-    return _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
+    return _scan(runtime_root, provider=provider, channel_id=channel, message_id=message,
+                 expected_kind=expected_kind)
 
 
 def poll_records(
     runtime_root: Path, *, provider: str, channel_id: str, message_id: str,
+    expected_kind: str = "body",
     timeout_s: float = 15.0,
     interval_s: float = 0.25,
     monotonic: Callable[[], float] = time.monotonic,
@@ -226,13 +236,16 @@ def poll_records(
     started = monotonic()
     deadline = started + max(timeout_s, 0.0)
     channel, message = _expected_id(channel_id), _expected_id(message_id)
-    if not _identity_string(provider) or channel is None or message is None:
+    if (not _identity_string(provider) or channel is None or message is None
+            or expected_kind not in ("body", "tool", "tool_result")):
         result = _invalid_query()
         result["elapsed_s"] = round(monotonic() - started, 3)
         return result
-    result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
+    result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message,
+                   expected_kind=expected_kind)
     while result["status"] != "evaluated" and monotonic() < deadline:
         sleep(min(interval_s, max(0.0, deadline - monotonic())))
-        result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message)
+        result = _scan(runtime_root, provider=provider, channel_id=channel, message_id=message,
+                       expected_kind=expected_kind)
     result["elapsed_s"] = round(monotonic() - started, 3)
     return result

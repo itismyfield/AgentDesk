@@ -4229,7 +4229,7 @@ fn s5833_s1t3_moved_builder_is_behaviour_identical() {
     );
     assert_eq!(state.user_msg_id, 101);
     assert_eq!(state.current_msg_id, 202);
-    assert_eq!(state.current_msg_len, "...".len());
+    assert_eq!(state.current_msg_len, "⠋ 계속 처리 중".len());
     assert_eq!(state.user_text, "typed in TUI");
     assert_eq!(state.session_id, None);
     assert_eq!(

@@ -373,11 +373,11 @@ mod placeholder_suppression_tests {
     }
 
     fn footer_only_placeholder() -> String {
-        build_streaming_placeholder_text("", &footer_status_block())
+        footer_status_block()
     }
 
     fn body_with_footer(body: &str) -> String {
-        build_streaming_placeholder_text(body, &footer_status_block())
+        format!("{body}\n\n{}", footer_status_block())
     }
 
     fn completion_footer_block() -> String {

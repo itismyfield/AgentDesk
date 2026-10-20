@@ -1,8 +1,11 @@
 //! Verified owed delivery through the real writer and actor: exact permits, FIFO holds, kept
 //! debt and per-source GC protection, with the readiness gate opened only by the test.
-
-use std::sync::atomic::Ordering;
-
+#[path = "tool_card_provenance_tests.rs"]
+mod tool_card_provenance;
+#[path = "tool_card_codex_tests.rs"]
+mod tool_cards;
+#[path = "turn_summary_codex_verified_tests.rs"]
+mod turn_summaries;
 use super::*;
 use crate::services::provider::CancelToken;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
@@ -11,10 +14,9 @@ use crate::services::tui_o::writer::owed::{PROBES, Reevaluation, deliver_owed};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::{
     self, forget_channel_for_tests, issue_for_tests, set_ready_for_tests,
 };
-
+use std::sync::atomic::Ordering;
 /// Opens the readiness gate for one channel on this thread and forgets its records on drop.
 struct Gate(u64);
-
 impl Gate {
     fn open(channel: u64, ready: bool) -> Self {
         set_ready_for_tests(channel, ready);
@@ -424,7 +426,11 @@ async fn the_actor_posts_permitted_episodes_holds_unknown_ones_and_waits_behind_
         resumed,
     ));
     tokio::time::sleep(POLL_INTERVAL * 4).await;
-    assert_eq!(port.posts(), ["one"], "unattributed work stops the pass");
+    assert_eq!(
+        port.posts(),
+        ["one", "-# ✅ 완료"],
+        "unattributed work stops the pass"
+    );
     let span = episode_span(channel, &a, 9, loose);
     opened(&store).persist_codex_span(span.clone()).unwrap();
     let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
@@ -432,7 +438,10 @@ async fn the_actor_posts_permitted_episodes_holds_unknown_ones_and_waits_behind_
     )));
     issue_for_tests(span.execution.clone(), span.episode.clone(), &token).unwrap();
     tokio::time::sleep(POLL_INTERVAL * 4).await;
-    assert_eq!(port.posts(), ["one", "loose", "two"]);
+    assert_eq!(
+        port.posts(),
+        ["one", "-# ✅ 완료", "loose", "two", "-# ✅ 완료"]
+    );
     stop.send(true).unwrap();
     assert_eq!(task.await.unwrap(), None);
 }
@@ -519,7 +528,7 @@ async fn gc_keeps_owed_and_associated_sources_and_nothing_while_a_unit_is_unseal
     tokio::time::sleep(POLL_INTERVAL * 2).await;
     append(&a.path, &[event("task_started", "n2")]);
     tokio::time::sleep(POLL_INTERVAL * 3).await;
-    assert_eq!(port.posts(), ["one"]);
+    assert_eq!(port.posts(), ["one", "-# ✅ 완료"]);
     assert_eq!(
         opened(&store).retained_segments(&a),
         1,

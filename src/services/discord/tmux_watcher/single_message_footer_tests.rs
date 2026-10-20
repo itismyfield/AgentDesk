@@ -86,6 +86,8 @@ async fn watcher_single_message_completion_footer_producer_threads_sniffed_backg
             false,
             false,
             false,
+            None,
+            None,
         )
         .await;
 
@@ -165,6 +167,8 @@ async fn o_delegated_single_message_footer_completion_sends_no_body() {
             false,
             false,
             false,
+            None,
+            None,
         )
         .await;
         let shows_body = recorder.contents().iter().any(|c| c.contains(BODY));
@@ -220,6 +224,8 @@ async fn only_a_footer_that_rewrites_a_body_ends_a_pending_adoption() {
                 false,
                 mirror,
                 false,
+                None,
+                None,
             )
             .await;
             recorder.contents()

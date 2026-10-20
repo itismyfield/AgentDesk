@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "a6102cb72d3f641ee4b6fca546f804884dc47e89",
+  "measured_at_sha": "e03a80f478c89a39064a91fbd4060af6e6e1b17e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -34133,6 +34133,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:00527fb3b8c699c53b36aaf86ffae87d454f4c07322bb2ba8412b83d6f8629f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:30a4f2511b9a784a4f296f46b9c563b620249e6eef8cccacc3d183ad59202ebb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/task_notification_delivery/store.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -34326,7 +34344,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:569fd83cfc6e7b59eebe186f0eee61a28150b775eee6b9ef89f1d262711ecd32"
+      "fingerprint": "sha256:3b6b34d37ac3ff4c8b0c91a1b797f0bcfd78b7a93a9749c8ac7d0610336542e0"
     },
     {
       "root": "src",
@@ -34335,7 +34353,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:b4ed21313844449fb5ce0e1de44761e322d642fed3ee49755a0d64209752331a"
+      "fingerprint": "sha256:d444ee750397363bc49cb60110e8ec1460a74d694dc090f84b2979dca9b1d3a0"
     },
     {
       "root": "src",
@@ -34525,6 +34543,24 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:9f148d4d2dda9d03df7b68dd677e2d6a250637d5c1cd021a74d4d1d2d28e7645"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/retired_metadata.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:44fd99aad01fdd649c28a4ea91f72f763a13f0fcc15577e72c6024b431a875fb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/retired_metadata.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6e4dbfa63bc112bf2ae75edf49fb22a2c76513a6456147a5d8b5e7da54bf5453"
     },
     {
       "root": "src",

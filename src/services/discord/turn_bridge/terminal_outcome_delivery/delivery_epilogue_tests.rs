@@ -1425,11 +1425,7 @@ async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
         let published = driver.published_bodies.lock().unwrap();
         assert_eq!(published.len(), writes, "{name}: {published:?}");
         if writes == 1 {
-            assert!(published[0].contains(&body), "{name}: body preserved");
-            assert!(
-                published[0].contains("[Stopped]"),
-                "{name}: cancel lifecycle preserved"
-            );
+            assert_eq!(published[0], body, "{name}: cancelled body has no footer");
         }
         if held {
             assert!(

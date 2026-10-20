@@ -473,7 +473,13 @@ PY
         }).await.expect("the actual cold launch did not publish its fresh nonce")
     }
 
-    fn publish_context(&self, context: BindingContext) -> BindingContext {
+    async fn publish_context(
+        &self,
+        context: BindingContext,
+        api: &crate::services::discord::admin_host_guard::tests::Recorder,
+        split_tick: bool,
+        observed: &mut Vec<String>,
+    ) -> BindingContext {
         let path = context
             .provider_root
             .as_ref()
@@ -517,9 +523,38 @@ PY
             "the actual verified consumer must admit its new proof"
         );
         let mut output = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        for row in [
+        writeln!(
+            output,
+            "{}",
             json!({"type":"response_item","payload":{"type":"message","role":"assistant",
-                "content":[{"type":"output_text","text":"clear relaunch completed"}]}}),
+            "content":[{"type":"output_text","text":"clear relaunch completed"}]}})
+        )
+        .unwrap();
+        output.flush().unwrap();
+        if split_tick {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    observed.extend(api.take());
+                    let seen = observed.iter().any(|call| {
+                        let Some(body) = call.strip_prefix(&format!(
+                            "PATCH /api/v10/channels/{CANARY_CHANNEL}/messages/900001 "
+                        )) else {
+                            return false;
+                        };
+                        serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                            == "clear relaunch completed"
+                    });
+                    if seen {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("split tick must observe the exact body PATCH before Done");
+            eprintln!("E51_SPLIT_TICK exact body PATCH observed before Done");
+        }
+        for row in [
             json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"new-clear-turn",
                 "last_agent_message":"clear relaunch completed"}}),
             json!({"type":"event_msg","payload":{"type":"composer_ready","turn_id":"new-clear-turn"}}),
@@ -629,6 +664,19 @@ async fn clear_and_first_input(
     if !crate::services::discord::admin_host_guard::tests::api_child(qualified) {
         return;
     }
+    for split_tick in [true, false] {
+        eprintln!("E51_TICK_VARIANT split_tick={split_tick}");
+        clear_and_first_input_at_tick(external_inventory, without_core, process_mode, split_tick)
+            .await;
+    }
+}
+
+async fn clear_and_first_input_at_tick(
+    external_inventory: bool,
+    without_core: bool,
+    process_mode: CodexSourceMode,
+    split_tick: bool,
+) {
     let mut fixture = CanaryFixture::new_in(process_mode).await;
     assert!(
         !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
@@ -778,6 +826,7 @@ async fn clear_and_first_input(
         preserve_on_cancel: false,
     };
     let mut failure_guard = None;
+    let mut before_done = Vec::new();
     let (result, events) = crate::services::observability::events::test_capture::capture_async(
         tokio::time::timeout(Duration::from_secs(30), async {
             let intake =
@@ -793,7 +842,12 @@ async fn clear_and_first_input(
                 let token = guard.token.clone();
                 failure_guard = Some(guard);
                 let new = fixture.wait_new_context().await;
-                (fixture.publish_context(new), token)
+                (
+                    fixture
+                        .publish_context(new, &api, split_tick, &mut before_done)
+                        .await,
+                    token,
+                )
             };
             tokio::pin!(intake, hook);
             tokio::select! {
@@ -896,8 +950,8 @@ async fn clear_and_first_input(
     );
     assert!(after.pending_user_dispatch.is_none());
     assert!(after.intervention_queue.is_empty());
-    let sent = api.take();
-    assert_one_completed_response(&sent);
+    before_done.extend(api.take());
+    assert_one_completed_response(&before_done);
     failure_guard
         .expect("the actual turn had a cancellation owner")
         .finish();
@@ -926,10 +980,12 @@ fn assert_no_retirement_warning(report: &ClearReport) {
 }
 
 pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String]) {
-    let mut finals = 0;
+    const RESPONSE: &str = "clear relaunch completed";
+    let mut body_calls = Vec::new();
+    let mut summaries = Vec::new();
     let mut posts = 0;
     let mut messages = std::collections::BTreeSet::new();
-    for call in sent {
+    for (index, call) in sent.iter().enumerate() {
         let mut parts = call.splitn(3, ' ');
         let method = parts.next().unwrap_or_default();
         let path = parts.next().unwrap_or_default();
@@ -939,29 +995,56 @@ pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String
         {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-            continue;
-        };
-        let Some(content) = value["content"].as_str() else {
-            continue;
-        };
-        if !content.contains("clear relaunch completed") {
+        let value: serde_json::Value = serde_json::from_str(body).expect("message payload");
+        let content = value["content"].as_str().expect("message content");
+        if content.starts_with("-# ") {
+            assert!(
+                method == "POST" && content.starts_with("-# ✅ "),
+                "completion summary: {sent:?}"
+            );
+            summaries.push(index);
             continue;
         }
-        finals += usize::from(content == "clear relaunch completed");
-        if method == "POST" {
+        let target = if method == "POST" {
             posts += 1;
-            // The isolated Recorder returns this message ID for successful creates.
-            messages.insert(format!("{path}/900001"));
+            format!("{path}/900001")
         } else {
-            messages.insert(path.to_owned());
-        }
+            path.to_owned()
+        };
+        messages.insert(target.clone());
+        body_calls.push((index, method, target, content.to_owned()));
     }
-    assert_eq!(finals, 1, "one final completed body: {sent:?}");
     assert_eq!(
         messages.len(),
         1,
         "one response message including progress edits: {sent:?}"
     );
     assert!(posts <= 1, "a repeated POST is another response: {sent:?}");
+    let last = body_calls.last().expect("completed body call");
+    assert_eq!(
+        last.3, RESPONSE,
+        "last body call settles the response: {sent:?}"
+    );
+    let finals = body_calls.iter().filter(|call| call.3 == RESPONSE).count();
+    assert!(
+        (1..=2).contains(&finals),
+        "one settle and at most one identical streaming edit: {sent:?}"
+    );
+    for call in &body_calls[..body_calls.len() - 1] {
+        if call.3 == RESPONSE {
+            assert!(
+                call.1 == "PATCH" && call.2 == last.2,
+                "earlier exact body only edits the same target: {sent:?}"
+            );
+        }
+    }
+    assert_eq!(summaries.len(), 1, "one completed turn summary: {sent:?}");
+    assert!(
+        summaries[0] > last.0,
+        "summary follows the last body call: {sent:?}"
+    );
+    eprintln!(
+        "E51_SETTLED finals={finals} summaries=1 last_body={} summary={}",
+        last.0, summaries[0]
+    );
 }

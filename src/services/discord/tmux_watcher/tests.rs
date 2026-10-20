@@ -3479,7 +3479,7 @@ fn status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_me
         &ProviderKind::Codex,
     );
 
-    assert_eq!(rendered, "PIPE-E2E-CODEX OK\n\n⠙ 계속 처리 중");
+    assert_eq!(rendered, "PIPE-E2E-CODEX OK");
 }
 
 #[test]
@@ -3491,7 +3491,7 @@ fn legacy_watcher_streaming_edit_keeps_processing_footer() {
         &ProviderKind::Codex,
     );
 
-    assert_eq!(rendered, "Partial answer\n\n⠙ 계속 처리 중");
+    assert_eq!(rendered, "Partial answer");
 }
 
 #[test]
