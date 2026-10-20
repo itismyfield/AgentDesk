@@ -978,6 +978,9 @@ mod herdr_synthetic_identity_pg_tests {
     const N1: &str = "synthetic-execution-n1";
     const N2: &str = "synthetic-execution-n2";
 
+    mod final_recheck_tests;
+    mod hosted_classification_tests;
+
     struct Fixture {
         db: TestPostgresDb,
         pool: sqlx::PgPool,

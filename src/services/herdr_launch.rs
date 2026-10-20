@@ -3,7 +3,6 @@
 //! A Pending pane left without evidence is only probed again, never recreated.
 #![cfg_attr(not(test), allow(dead_code))]
 
-#[cfg(unix)]
 pub(crate) mod retired_hold;
 
 use std::path::{Path, PathBuf};
@@ -625,4 +624,4 @@ fn record_herdr_host_marker(logical_key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 #[path = "herdr_launch_tests.rs"]
-mod tests;
+pub(crate) mod tests;

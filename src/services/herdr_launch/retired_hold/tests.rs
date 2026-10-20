@@ -74,14 +74,7 @@ fn retired_hold_absent_still_requires_directory_fsync() {
     );
     assert_eq!(fault.calls(), 1);
     fault.fail(false);
-    if cfg!(windows) {
-        assert!(matches!(
-            release("absent-n1"),
-            RetiredHoldOutcome::NotDurable(_)
-        ));
-    } else {
-        assert_eq!(release("absent-n1"), RetiredHoldOutcome::Durable);
-    }
+    assert_eq!(release("absent-n1"), RetiredHoldOutcome::Durable);
     assert_eq!(fault.calls(), 2);
 }
 
@@ -102,14 +95,7 @@ fn retired_hold_unlinked_but_unsynced_is_retryable() {
     assert!(!path.exists());
     assert_eq!(fault.calls(), 1);
     fault.fail(false);
-    if cfg!(windows) {
-        assert!(matches!(
-            release("unlinked-n1"),
-            RetiredHoldOutcome::NotDurable(_)
-        ));
-    } else {
-        assert_eq!(release("unlinked-n1"), RetiredHoldOutcome::Durable);
-    }
+    assert_eq!(release("unlinked-n1"), RetiredHoldOutcome::Durable);
     assert_eq!(
         fault.calls(),
         2,

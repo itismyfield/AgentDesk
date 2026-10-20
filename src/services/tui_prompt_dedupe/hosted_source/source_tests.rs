@@ -336,6 +336,99 @@ fn a_resume_scanner_requires_its_captured_context_and_the_native_record_time() {
 }
 
 #[test]
+fn a_context_scanner_reports_untimed_records_once_without_assigning_an_execution() {
+    const CHILD: &str = "ADK_TEST_UNTIMED_SOURCE_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::tui_prompt_dedupe::hosted_source::tests::a_context_scanner_reports_untimed_records_once_without_assigning_an_execution",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "the isolated untimed source contract failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let fx = Fixture::new();
+    let source = fx.source(N2, "untimed-native-source");
+    let context = fx.context(N2, "untimed-native-source");
+    let expected = capture_in_context("claude", LOGICAL, CHANNEL, &source.path, None, &context)
+        .expect("the original context and durable N2 source are valid before the untimed scan");
+    assert_eq!(
+        capture_scanned(
+            "claude",
+            LOGICAL,
+            CHANNEL,
+            &source.path,
+            Some(&context),
+            Some(context.created_at),
+        ),
+        Some(expected.clone())
+    );
+    let log_path = fx.root.path().join("untimed-source.log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(std::fs::File::create(&log_path).unwrap())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..3 {
+            assert!(
+                capture_scanned(
+                    "claude",
+                    LOGICAL,
+                    CHANNEL,
+                    &source.path,
+                    Some(&context),
+                    None,
+                )
+                .is_none(),
+                "missing native time cannot assign the current execution to this record"
+            );
+        }
+        assert!(
+            capture_scanned(
+                "claude",
+                LOGICAL,
+                CHANNEL,
+                &source.path,
+                Some(&context),
+                Some(context.created_at - chrono::TimeDelta::seconds(1)),
+            )
+            .is_none()
+        );
+    });
+    let logs = std::fs::read_to_string(log_path).unwrap();
+    assert_eq!(
+        logs.matches("hosted_source_scanned_record_untimed").count(),
+        1,
+        "repeated untimed scanner polls emit one diagnostic per process"
+    );
+    for field in [
+        "claude",
+        &CHANNEL.to_string(),
+        N2,
+        "untimed-native-source.jsonl",
+    ] {
+        assert!(logs.contains(field), "the untimed diagnostic lost {field}");
+    }
+    assert_eq!(
+        capture_scanned("claude", LOGICAL, CHANNEL, &source.path, None, None),
+        Some(expected)
+    );
+}
+
+#[test]
 fn a_resume_scanner_rejects_pretime_records_when_only_the_current_execution_is_logged() {
     let fx = Fixture::new();
     let source = fx.source(N2, "native-resumed-only");

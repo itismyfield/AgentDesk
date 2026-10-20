@@ -1126,6 +1126,8 @@ src/
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
+│   │   ├── herdr_terminate/
+│   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
 │   │   ├── idle_recap/
@@ -1607,6 +1609,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
@@ -1999,6 +2002,10 @@ src/
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   ├── boundary_tests.rs
 │   │   │   │   │   └── runtime_switch_tests.rs
+│   │   │   │   ├── synthetic_bridge_handoff_pg_tests/
+│   │   │   │   │   └── herdr_synthetic_identity_pg_tests/
+│   │   │   │   │       ├── final_recheck_tests.rs
+│   │   │   │   │       └── hosted_classification_tests.rs
 │   │   │   │   ├── absent_tmux_host_tests.rs
 │   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
@@ -2566,6 +2573,8 @@ src/
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
 │   │   └── retired_hold.rs
+│   ├── herdr_launch_tests/
+│   │   └── retired_hold_tests.rs
 │   ├── imsg_reply/
 │   │   ├── contract.rs
 │   │   ├── episode.rs
@@ -2787,7 +2796,9 @@ src/
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
-│   │   │   └── legacy_return_tests.rs
+│   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── root_replaced.rs
+│   │   │   └── root_replaced_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_clear_adapter.rs
 │   │   ├── herdr_clear_adapter_tests.rs

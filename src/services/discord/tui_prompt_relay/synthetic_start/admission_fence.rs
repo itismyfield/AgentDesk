@@ -108,6 +108,16 @@ impl<'a> AdmissionFence<'a> {
             let exact = load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await;
             match exact {
                 HostedLookup::Missing => return Ok(None),
+                HostedLookup::Unknown(error) => {
+                    tracing::warn!(
+                        event = "synthetic_nonherdr_hosted_lookup_unknown",
+                        provider = self.provider.as_str(),
+                        channel_id = self.channel.get(),
+                        %error,
+                        "a non-Herdr claim's exact hosted lookup is unavailable"
+                    );
+                    return Ok(None);
+                }
                 HostedLookup::Found(observed) => {
                     if !tui_prompt_dedupe::hosted_source::herdr_evidence(
                         self.channel.get(),

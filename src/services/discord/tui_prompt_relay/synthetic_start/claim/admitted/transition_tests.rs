@@ -18,6 +18,96 @@ struct Fixture {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn a_non_herdr_fence_survives_an_unknown_exact_lookup_without_bypassing_the_actor_pin() {
+    use super::super::super::admission_fence::AdmissionFence;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+    };
+    use dedupe::hosted_source::tests::Fixture as SourceFixture;
+
+    let source_fixture = SourceFixture::new();
+    let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://test:test@127.0.0.1:1/not_connected")
+        .unwrap();
+    pool.close().await;
+    let mut fixture = Fixture::new(source_fixture.root.path(), 7_186_781);
+    fixture.lease.session_key = Some("closed-pool-exact-session".into());
+    Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(pool.clone());
+    crate::services::tmux_common::host_marker::record_tmux_host_marker(&fixture.logical);
+    assert_eq!(
+        dedupe::hosted_source::herdr_evidence(fixture.channel.get(), &fixture.logical, None),
+        Ok(false)
+    );
+    assert!(matches!(
+        load_hosted_execution_pg(
+            &pool,
+            HostedLookupKey::SessionKey(fixture.lease.session_key.as_deref().unwrap()),
+        )
+        .await,
+        HostedLookup::Unknown(why) if why.to_ascii_lowercase().contains("closed")
+    ));
+    let log_path = source_fixture.root.path().join("nonherdr-unknown.log");
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(std::fs::File::create(&log_path).unwrap())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _logs = tracing::subscriber::set_default(subscriber);
+    let fence = AdmissionFence::capture(
+        &fixture.shared,
+        &fixture.provider,
+        fixture.channel,
+        &fixture.logical,
+        &fixture.lease,
+        None,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the non-Herdr production fence refused its lookup outage: {error}")
+    });
+    assert!(fence.hosted_identity().is_none());
+    fence.revalidate().await.unwrap();
+    drop(fence);
+    assert!(matches!(
+        bridge_handoff::capture_session_pin(&fixture.shared, fixture.lease.session_key.as_deref())
+            .await,
+        Err(why) if why.to_ascii_lowercase().contains("closed")
+    ));
+    let claim = claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)).await;
+    assert!(
+        !claim.claimed,
+        "a hosted lookup fallback must not bypass the existing unavailable PG actor pin"
+    );
+    fixture.assert_quiet().await;
+    assert!(
+        std::fs::read_to_string(log_path)
+            .unwrap()
+            .contains("synthetic_nonherdr_hosted_lookup_unknown")
+    );
+
+    let strict_channel = 7_186_782;
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("closed-pool-herdr-node"),
+        &[(strict_channel, "closed-pool-herdr-node")],
+    );
+    let mut strict = Fixture::new(source_fixture.root.path(), strict_channel);
+    strict.lease.session_key = fixture.lease.session_key.clone();
+    Arc::get_mut(&mut strict.shared).unwrap().pg_pool = Some(pool);
+    assert!(crate::config::session_hosts::herdr_endpoint(strict_channel).is_some());
+    assert!(
+        !claim_tui_direct_synthetic_turn_prepared(strict.prepared(None))
+            .await
+            .claimed,
+        "an unavailable exact lookup must still refuse an affirmative Herdr input"
+    );
+    strict.assert_quiet().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn a_nonce_pinned_tmux_input_keeps_the_non_herdr_production_claim_available() {
     use dedupe::hosted_source::tests::{CHANNEL, Fixture as SourceFixture, LOGICAL, N1};
     let source_fixture = SourceFixture::new();

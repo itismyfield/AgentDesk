@@ -1,4 +1,6 @@
 //! Explicit termination of one Herdr execution, by the operator route or a user clear.
+pub(crate) mod root_replaced;
+
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};

@@ -2459,3 +2459,6 @@ pub(crate) mod p11 {
         std::mem::forget(herdr_registry::force_for_test(HerdrRegistry::build(&none)));
     }
 }
+
+#[path = "herdr_gate/root_replaced_tests.rs"]
+mod root_replaced_tests;

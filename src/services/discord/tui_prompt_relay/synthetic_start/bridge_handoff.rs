@@ -251,6 +251,8 @@ pub(super) async fn refresh_existing(
     row.turn_nonce = actor.and_then(|actor| actor.turn_nonce().map(str::to_owned));
     row.set_relay_owner_kind(owner_kind);
     row.restamp_external_turn_lease(lease);
+    #[cfg(test)]
+    pause_for_test(&PREPARE_PAUSE, ChannelId::new(row.channel_id)).await;
     if let Err(error) = fence.revalidate().await {
         tracing::warn!(%error, "synthetic execution changed before row refresh");
         if freshly_admitted {
@@ -885,6 +887,8 @@ async fn capture_dormant(
         (actor, true)
     };
     let pg_pin = original_session_pin(locked.state(), Some(&actor)).unwrap_or(captured_pg_pin);
+    #[cfg(test)]
+    pause_for_test(&PREPARE_PAUSE, channel).await;
     if fence.revalidate().await.is_err() || !record(locked.state(), Some(&actor), pg_pin) {
         if freshly_admitted {
             release_unrecorded_actor(shared, locked.state(), Some(&actor), true).await;

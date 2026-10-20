@@ -8,7 +8,7 @@ use super::binding_context::{
     self, BindingContext, CapturedContext, HookBindingEnvelope, SpawnNonceMarker,
 };
 use super::binding_events::{self, BindingTarget, SourceId};
-use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
+use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 use crate::services::session_host::HostKind;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
@@ -53,7 +53,7 @@ pub(crate) fn herdr_evidence(
         crate::config::session_hosts::herdr_endpoint(channel).is_some()
             || super::herdr_execution_listed(logical)
             || marker == HostKindMarker::Known(HostKind::Herdr)
-            || matches!(record, Some(HostedRecord::Known(_))),
+            || matches!(record, Some(HostedRecord::Known(row)) if row.state != HostedState::Retired),
     )
 }
 
@@ -138,7 +138,21 @@ pub(crate) fn capture_scanned(
     };
     context_current(provider, logical, channel, context).then_some(())?;
     let pin = capture_in_context(provider, logical, channel, path, None, context)?;
-    if !record_created_at.is_some_and(|created| created >= context.created_at) {
+    let Some(created) = record_created_at else {
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                event = "hosted_source_scanned_record_untimed",
+                provider,
+                channel_id = channel,
+                path = %path.display(),
+                execution_nonce = %context.execution_nonce,
+                "a scanned source record has no native creation time"
+            );
+        }
+        return None;
+    };
+    if created < context.created_at {
         return None;
     }
     Some(pin)
