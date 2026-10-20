@@ -159,7 +159,9 @@ mod turn_end_summary;
 
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
-pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
+pub(crate) use tmux::stamp_spawn_markers;
+#[cfg(all(test, unix))]
+pub(crate) use tmux::write_spawn_nonce;
 mod tmux_error_detect;
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 mod live_bridge;
@@ -296,8 +298,10 @@ pub(in crate::services) use compact_turn_authority::{
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
 use inflight::InflightTurnState;
 #[cfg(test)]
+pub(crate) use inflight::lock_inflight_state_path;
+#[cfg(test)]
 use inflight::save_inflight_state;
-pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
+pub(crate) use inflight::{clear_inflight_state, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
 use poise::serenity_prelude as serenity;
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
@@ -342,12 +346,14 @@ pub(crate) use prompt_builder::{DispatchProfile, PromptProfiles};
 pub(crate) use runtime_bootstrap::RunBotContext;
 pub(crate) use runtime_bootstrap::run_bot;
 
+#[cfg(test)]
+use crate::services::turn_orchestrator::QueuePersistenceContext;
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
     FinishTurnResult, HydratePendingQueueResult, PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER,
-    QueueExitEvent, QueueExitKind, QueuePersistenceContext, RecoveryKickoffResult,
-    VALVE_CLEARED_DISPATCH_MARKER_GRACE, load_channel_pending_dispatch_marker,
-    load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
+    QueueExitEvent, QueueExitKind, RecoveryKickoffResult, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
+    load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
+    warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -372,9 +378,9 @@ pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 
-pub(in crate::services::discord) use synthetic_headless_message_id::{
-    SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR, is_synthetic_headless_message_id_raw,
-};
+#[cfg(test)]
+pub(in crate::services::discord) use synthetic_headless_message_id::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR;
+pub(in crate::services::discord) use synthetic_headless_message_id::is_synthetic_headless_message_id_raw;
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
