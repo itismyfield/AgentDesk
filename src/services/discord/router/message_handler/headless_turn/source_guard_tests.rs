@@ -1,6 +1,5 @@
-//! Classification 2 for the headless-turn source guards: as-written, comment-free
-//! matching inside `start_reserved_headless_turn_admitted`, so prose and this file's
-//! needles never count. A lexical tripwire; counts are not paired with awaits.
+//! Classification 2: as-written, comment-free matching inside the headless entry, so prose
+//! and these needles never count. A lexical tripwire; counts are not paired with awaits.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;

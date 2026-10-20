@@ -327,9 +327,8 @@ mod tests {
         text.split_whitespace().collect()
     }
 
-    /// Classification 2: create → admit → teardown verdict → provider → bridge, matched as
-    /// written on whitespace- and comment-free text; the create count spans the file (the
-    /// production create plus the builder test's persist). A lexical tripwire.
+    /// Classification 2: create → admit → verdict → provider → bridge, as written without
+    /// whitespace or comments; the count spans the production create and the builder test.
     fn row_admission_gaps(source: &str) -> Vec<String> {
         use crate::services::discord::router::source_guard_support::Lexed;
         let src = Lexed::new(source).compact();

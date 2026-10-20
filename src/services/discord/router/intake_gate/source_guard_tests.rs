@@ -1,6 +1,5 @@
-//! Classification 2 for the intake-gate source-order guards: comment-free, as-written
-//! matching scoped to `handle_event`, the command block or the production text before
-//! the unit tests. A lexical tripwire; it does not prove the ordered calls run.
+//! Classification 2: comment-free, as-written matching in `handle_event`, the command
+//! block or production text before the tests. A lexical tripwire, not a run proof.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;

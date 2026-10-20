@@ -1,6 +1,5 @@
-//! Classification 2 for the central-admission source guards: bans read comment-free
-//! text, counts and order read as-written code. A lexical tripwire per file; it does
-//! not resolve aliases or macros, or prove the counted calls are reachable.
+//! Classification 2: bans read comment-free text, counts and order read as-written code.
+//! A lexical tripwire per file; no alias or macro resolution, no reachability.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;

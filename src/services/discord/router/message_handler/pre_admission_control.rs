@@ -484,9 +484,8 @@ pub(super) mod pre_admission_control_tests {
     const UPLOAD_GUARD: &str = "if has_preloaded_uploads {";
     const CLASSIFY: &str = "match classify_codex_input(user_text)";
 
-    /// Classification 2: as-written, comment-free matching inside the intake handler.
-    /// Ordinary input takes early, the gate runs, and only then the deferred take; a
-    /// lexical tripwire that does not pair takes with awaits.
+    /// Classification 2, as written in the intake handler without comments: early take,
+    /// gate, then the deferred take. A lexical tripwire; takes are not paired with awaits.
     fn deferred_take_gaps(source: &str) -> Vec<String> {
         let Some(src) = Lexed::new(source).block(HANDLER) else {
             return vec![format!("missing {HANDLER}")];

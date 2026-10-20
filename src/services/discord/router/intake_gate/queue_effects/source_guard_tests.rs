@@ -1,6 +1,5 @@
-//! Classification 2 for the placeholder-reuse seam order: as-written, comment-free
-//! matching inside `reuse_any_queued_placeholder_for_channel`. A lexical auxiliary; the
-//! PATCH/rollback behavior stays covered by the rekey window tests.
+//! Classification 2: as-written, comment-free order inside the placeholder reuse caller.
+//! A lexical auxiliary; PATCH/rollback behavior stays with the rekey window tests.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;

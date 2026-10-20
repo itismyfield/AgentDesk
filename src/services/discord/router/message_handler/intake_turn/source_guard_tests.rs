@@ -1,6 +1,5 @@
-//! Classification 2 for the intake-turn source guards: as-written, comment-free matching
-//! scoped to `handle_text_message` or the named helper, so prose and this file's own
-//! needles never count. A lexical tripwire; counts are not paired with awaits.
+//! Classification 2: as-written, comment-free matching in `handle_text_message` or the named
+//! helper, so prose and these needles never count. Lexical; counts are not await pairs.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;

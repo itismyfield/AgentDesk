@@ -1,6 +1,5 @@
-//! Classification 2 for the text-command dispatcher guards: matching is comment-free and
-//! as written, scoped to the dispatcher and alias blocks. A lexical tripwire; it does
-//! not prove reachability, alias resolution or that a count pairs with an await.
+//! Classification 2: comment-free, as-written matching scoped to the dispatcher and alias
+//! blocks. A lexical tripwire; it proves no reachability or alias resolution.
 
 use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::test_support::CommentForgery;
