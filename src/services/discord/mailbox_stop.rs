@@ -50,7 +50,12 @@ async fn guarded_cancel(
                 token: Some(token),
                 already_stopping: true,
             },
-            StopCancel::NotCurrent | StopCancel::Herdr(_) => turn_bridge::empty_native_stop(),
+            StopCancel::Herdr(token) => {
+                handle
+                    .cancel_active_turn_if_current_with_reason(token, reason.into())
+                    .await
+            }
+            StopCancel::NotCurrent => turn_bridge::empty_native_stop(),
         }
     } else {
         handle
