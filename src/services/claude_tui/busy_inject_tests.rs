@@ -211,6 +211,32 @@ impl Fake {
             .collect()
     }
 
+    /// Resolve late evidence using the identity and exact bytes actually pasted.
+    fn pasted_attempt_submission(&self) -> Option<bool> {
+        let loads = self.calls("load-buffer");
+        assert_eq!(loads.len(), 1, "one pasted attempt owns the late receipt");
+        let mut args = loads[0].split_whitespace();
+        args.find(|arg| *arg == "-b").unwrap();
+        let id = args
+            .next()
+            .unwrap()
+            .strip_prefix("agentdesk-busy-inject-")
+            .unwrap();
+        let pasted = fs::read_to_string(self.dir.path().join("buffer")).unwrap();
+        let registered = crate::services::tui_input::human_frame::history::registered;
+        assert!(
+            registered(id, &self.transcript, &pasted),
+            "late receipt must retain its pasted attempt ID and exact frame hash"
+        );
+        assert!(!registered("foreign-attempt", &self.transcript, &pasted));
+        assert!(!registered(
+            id,
+            &self.transcript,
+            &format!("{pasted}\nforeign")
+        ));
+        transcript_submission(&self.transcript, 0, id, Some(&pasted))
+    }
+
     /// Keys the server applied while a client was attached.
     fn keys_while_attached(&self) -> usize {
         fs::read_to_string(self.dir.path().join("keys_while_attached"))
@@ -232,6 +258,7 @@ impl Fake {
 
 #[test]
 fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
@@ -285,6 +312,7 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
 
 #[test]
 fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let expected = v1_text();
     for body in [
         expected.clone(),
@@ -322,6 +350,7 @@ fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
 
 #[test]
 fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let expected = v1_text();
     let text_block = serde_json::json!({"type": "text", "text": expected});
     let mut cases = vec![
@@ -374,6 +403,7 @@ fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
 
 #[test]
 fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let expected = v1_text();
     let fake = Fake::new();
     let path = &fake.transcript;
@@ -423,6 +453,7 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
 
 #[test]
 fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let framed = crate::services::tui_input::human_frame::inject(
         "iMessage", "200", "a]b\nc", NONCE, "/clear",
     );
@@ -434,6 +465,7 @@ fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
 /// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
 #[test]
 fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
     let framed = crate::services::tui_input::human_frame::inject(
@@ -459,6 +491,7 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
 
 #[test]
 fn every_pre_paste_veto_leaves_the_pane_untouched() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     type Setup = fn(&Fake);
     let cases: [(&str, Setup, Veto); 10] = [
         (
@@ -541,6 +574,7 @@ fn every_pre_paste_veto_leaves_the_pane_untouched() {
 
 #[test]
 fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.caps(&[busy_empty()]);
     let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
@@ -576,6 +610,7 @@ fn a_held_composer_lock_is_tried_three_times_without_any_tmux_call() {
 
 #[test]
 fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     // A person's stash beside an empty composer needs no C-s; Claude hands it back on the submit.
     let stashed = format!("{:>58}", "› stashed");
     for status in ["", stashed.as_str()] {
@@ -618,6 +653,7 @@ fn paste_block(inner: &str) -> String {
 
 #[test]
 fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let payload = multiline_payload();
     let expected = frame("iMessage", "200", "ann", NONCE, &payload);
     assert!(expected.encode_utf16().count() > 800);
@@ -656,6 +692,7 @@ fn multiline_folded_paste_confirms_the_exact_wrapped_or_bare_transcript() {
 
 #[test]
 fn multiline_folded_paste_keeps_foreign_input_contaminated() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let payload = multiline_payload();
     let expected = frame("iMessage", "200", "ann", NONCE, &payload);
     let folded = format!("[Pasted text #1 +{} lines]", expected.matches('\n').count());
@@ -685,7 +722,7 @@ fn multiline_folded_paste_keeps_foreign_input_contaminated() {
             assert_eq!(
                 fake.run_text(&payload, &MULTILINE_TIMING),
                 Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit),
-                "{body}"
+                "submitted body: {body:?}"
             );
             assert_eq!(
                 fake.keys(),
@@ -699,6 +736,7 @@ fn multiline_folded_paste_keeps_foreign_input_contaminated() {
 /// After the paste nothing is NotSent; every path ends with at most one Enter and no deletion.
 #[test]
 fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let prefix = |n: usize| text().chars().take(n).collect::<String>();
     // (name, captures, transcript accepts on Enter, outcome, (pastes, Enter keys, other keys))
     type Case<'a> = (&'a str, Vec<String>, bool, Outcome, (usize, usize, usize));
@@ -766,14 +804,14 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_submission(&fake.transcript, 0, NONCE, Some(&text())) == Some(true)
+            fake.pasted_attempt_submission() == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
             (1, 1, 0),
             true
         ),
-        "late transcript"
+        "late transcript belongs to the pasted attempt and frame hash"
     );
     // Production window: 3s window < record at 3.2s <= reply at 3.3s < 5s tmux call budget.
     // The Enter takes effect at once; the window must not start from the late reply.
@@ -791,14 +829,14 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
         (
             outcome,
             fake.keys(),
-            transcript_submission(&fake.transcript, 0, NONCE, Some(&text())) == Some(true)
+            fake.pasted_attempt_submission() == Some(true)
         ),
         (
             Outcome::Unconfirmed(Unconfirmed::NotObserved),
             (1, 1, 0),
             true
         ),
-        "slow Enter reply"
+        "slow Enter reply retains the pasted attempt receipt"
     );
     for (name, subcommand, outcome) in [
         ("paste fails", "paste-buffer", Unconfirmed::PasteFailed),
@@ -814,6 +852,7 @@ fn schedules_after_the_paste_never_fall_back_to_not_sent_or_delete() {
 /// A person's keys mixed into the composer stop the Enter; nothing is ever deleted.
 #[test]
 fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let owned = || vec![busy_empty(), screen(&text(), "")];
     // (name, captures, attach seen by checks, attach when the server applies each key, ...)
     type Case<'a> = (
@@ -895,6 +934,7 @@ fn human_typing_or_attaching_around_the_paste_sends_no_enter_and_no_delete() {
 
 #[test]
 fn identical_plain_frames_need_their_own_fresh_enqueue_and_not_a_late_command_or_user() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native.jsonl");
     fs::write(&path, "").unwrap();
