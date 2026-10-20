@@ -180,6 +180,7 @@ async fn run_skill_slash_command(
             if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
                 return Ok(());
             }
+            ctx.defer().await?;
             let permit = crate::services::cluster::channel_home::admit_command(
                 &ctx.channel_id().get().to_string(),
                 ctx.data().provider.as_str(),
