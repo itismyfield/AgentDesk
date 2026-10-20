@@ -30,6 +30,7 @@ pub(in crate::services::discord::tui_prompt_relay) fn defer_synthetic_turn_start
         captured_source,
         native_turn_id: prompt.native_turn_id.clone(),
         hosted_source: lease.hosted_source.clone(),
+        hosted_source_checked: true,
     };
     if let Err(error) = super::super::super::tui_direct_pending_start::persist(&record) {
         tracing::warn!(
@@ -95,6 +96,9 @@ pub(in crate::services::discord::tui_prompt_relay) fn pending_start_claim_fn()
             // the provider prompt — only the relay lease is restored.
             let mut lease = ExternalInputRelayLease::unassigned(Some(record.channel_id));
             lease.hosted_source = record.hosted_source.clone().or_else(|| {
+                // Only older records may recover a missing pin from their original captured source.
+                // A modern failed observation stays unowned across deferred retries.
+                (!record.hosted_source_checked).then_some(())?;
                 crate::services::tui_prompt_dedupe::hosted_source::restore(
                     provider.as_str(),
                     &record.tmux_session_name,

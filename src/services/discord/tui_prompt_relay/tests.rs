@@ -241,6 +241,7 @@ fn abort_cleanup_records_marker_and_keeps_hourglass() {
     let shared = super::super::make_shared_data_for_tests();
     let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
         hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id: 4242,
         tmux_session_name: "tmux-4242".to_string(),

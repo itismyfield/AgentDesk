@@ -394,6 +394,170 @@ async fn hook_observer_carries_the_original_hosted_source_through_pending_json_r
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn modern_unattributed_hook_pending_cannot_adopt_a_source_discovered_after_inline_refusal_pg()
+{
+    use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
+
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let _binding =
+        crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(root.path());
+    let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let channel = ChannelId::new(7_186_652);
+    let anchor = MessageId::new(7_186_653);
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+    let fixture = Fixture::new(root.path(), channel).await;
+    let (hooks, hook_rx) = tokio::sync::broadcast::channel(4);
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let expected_logical = fixture.logical.clone();
+    super::super::hook_observer::spawn_tui_prompt_relay_observer(
+        "claude".into(),
+        hook_rx,
+        move |prompt| {
+            let observed_tx = observed_tx.clone();
+            let expected_logical = expected_logical.clone();
+            Box::pin(async move {
+                if prompt.tmux_session_name == expected_logical {
+                    observed_tx.send(prompt).expect("live observation receiver");
+                }
+            })
+        },
+    );
+    hooks
+        .send(HookEvent {
+            provider: "claude".into(),
+            session_id: fixture.logical.clone(),
+            kind: HookEventKind::UserPromptSubmit,
+            received_at: chrono::Utc::now(),
+            payload: serde_json::json!({
+                "prompt": "input observed before the native source could be proved",
+                "prompt_id": "unattributed-before-new-execution"
+            }),
+            fanout: None,
+            original_context: None,
+        })
+        .expect("the production hook observer is subscribed");
+    let observed = tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
+        .await
+        .expect("the actual hook producer published the unattributed original input")
+        .expect("observed original input");
+    assert!(observed.hosted_source.is_none());
+    let lease = record_observed_external_turn_lease(&fixture.shared, &observed, channel);
+    assert!(lease.hosted_source.is_none());
+    assert!(lease.turn_id.is_some());
+
+    fixture.replace_execution(HostedState::Bound, N2).await;
+    let path = root
+        .path()
+        .join("new-execution-after-unattributed-hook.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for("native-n2", &path).unwrap();
+    fixture.publish_source(&source, N2, 2);
+    let (_, watcher) = fixture
+        .shared
+        .tmux_watchers
+        .remove(&channel)
+        .expect("the fixture's watcher metadata exists before inline fallback");
+    let (inline, captured_source) =
+        synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            channel,
+            &fixture.logical,
+            (&observed.prompt, anchor),
+            &lease,
+            (None, observed.native_turn_id.as_deref()),
+        )
+        .await;
+    assert!(
+        !inline.claimed,
+        "the inline fence refused the unproved original input"
+    );
+    assert_eq!(inline.relay_owner, ExternalInputRelayOwner::BridgeAdapter);
+    assert_eq!(
+        captured_source.as_ref().map(|(path, _)| path.as_str()),
+        source.path.to_str(),
+        "inline fallback observed N2 only after the original hook had no source pin"
+    );
+    fixture.assert_quiet().await;
+    let worker_lock = pending::channel_lock("claude", channel.get())
+        .lock_owned()
+        .await;
+    synthetic_start::defer_synthetic_turn_start(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        channel,
+        &observed,
+        anchor,
+        &lease,
+        captured_source.clone(),
+    );
+    let deferred = pending::load_all()
+        .into_iter()
+        .find(|record| record.channel_id == channel.get())
+        .expect("the real defer constructor persisted the original input");
+    assert_eq!(deferred.captured_source, captured_source);
+    assert_eq!(deferred.lease_turn_id, lease.turn_id);
+    assert!(serde_json::to_value(&deferred).unwrap()["hosted_source"].is_null());
+    fixture.shared.tmux_watchers.insert(channel, watcher);
+    drop(worker_lock);
+
+    let (saved, retained) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let saved =
+                inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
+            let retained = pending::load_all()
+                .into_iter()
+                .find(|record| record.channel_id == channel.get());
+            if saved.is_some()
+                || retained
+                    .as_ref()
+                    .is_some_and(|record| record.attempt_count >= 1)
+            {
+                break (saved, retained);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the actual deferred worker either claimed or completed a refused claim attempt");
+    assert!(
+        saved.is_none(),
+        "the modern unattributed hook was restamped from N2's later captured path and saved"
+    );
+    fixture.assert_quiet().await;
+    let retained = retained.expect("the unresolved original input remains pending");
+    assert!(retained.attempt_count >= 1);
+    assert!(serde_json::to_value(&retained).unwrap()["hosted_source"].is_null());
+    assert_eq!(retained.lease_turn_id, lease.turn_id);
+
+    let worker_lock = tokio::time::timeout(
+        Duration::from_secs(5),
+        pending::channel_lock("claude", channel.get()).lock_owned(),
+    )
+    .await
+    .expect("the refused old worker exhausted its bounded retry budget");
+    fixture.assert_quiet().await;
+    let current = fixture.pending(N2, &source, 7_186_654);
+    fixture.publish_pending_lease(&current);
+    assert!(
+        fixture.claim(&current).await,
+        "a separately proved N2 input remains claimable while the unknown original stays pending"
+    );
+    let saved =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(saved.hosted_execution_nonce.as_deref(), Some(N2));
+    assert_eq!(saved.user_msg_id, current.anchor_message_id);
+    assert!(pending::load_all().iter().any(|record| {
+        record.channel_id == channel.get() && record.anchor_message_id == anchor.get()
+    }));
+    drop(hooks);
+    fixture.close().await;
+    drop(worker_lock);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn admitted_herdr_pending_worker_waits_for_recovery_transition_then_claims_pg() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());

@@ -27,6 +27,7 @@ async fn retire_during_admission_refuses_row_save_and_releases_mailbox() {
     let anchor = 6_287_105u64;
     let record = tui_direct_pending_start::TuiDirectPendingStart {
         hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id: channel.get(),
         tmux_session_name: tmux.to_string(),

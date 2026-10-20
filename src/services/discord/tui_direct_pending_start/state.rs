@@ -60,12 +60,8 @@ pub(in crate::services::discord) enum PendingStartState {
     Waiting,
 }
 
-/// Durable record describing a TUI-direct synthetic turn-start that must be
-/// claimed only AFTER the prior turn on the same channel finalizes.
-///
-/// All fields are primitives so the JSON survives a dcserver version swap; the
-/// lease is rehydrated from these fields on restart
-/// (`record_external_input_turn_lease`), never from a serialized lease struct.
+/// Durable ownership and source values for a deferred synthetic claim.
+/// Restart restores the relay lease without resubmitting the provider prompt.
 #[cfg_attr(test, derive(Default))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct TuiDirectPendingStart {
@@ -98,6 +94,8 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
     pub native_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosted_source: Option<crate::services::tui_prompt_dedupe::hosted_source::HostedSourcePin>,
+    #[serde(default)]
+    pub hosted_source_checked: bool,
 }
 
 impl TuiDirectPendingStart {

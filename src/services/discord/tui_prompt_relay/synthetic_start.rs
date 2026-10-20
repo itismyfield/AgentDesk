@@ -423,7 +423,7 @@ mod tests {
             state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: 0,
             captured_source: None,
-            native_turn_id: None,
+            ..Default::default()
         };
         assert!(pending_start_claim_fn()(shared, &record).await);
         let stale_token = crate::services::discord::mailbox_snapshot(shared, channel_id)

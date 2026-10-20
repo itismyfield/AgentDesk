@@ -42,6 +42,7 @@ fn an_output_source_survives_lease_and_pending_restore_without_restamping() {
         captured_source: Some((source.path.display().to_string(), 0)),
         native_turn_id: None,
         hosted_source: lease.hosted_source,
+        hosted_source_checked: false,
     };
     pending::persist(&record).unwrap();
     let restored = pending::load_all()
