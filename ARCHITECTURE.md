@@ -1323,6 +1323,8 @@ src/
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── unanswered_tests.rs
 │   │   │   └── queued_card_gate.rs
@@ -1841,6 +1843,7 @@ src/
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   ├── retired_transport_tests.rs
+│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs

@@ -5533,6 +5533,10 @@ services::discord::placeholder_controller::edit_retry_tests::retry_recovers_from
 services::discord::placeholder_controller::edit_retry_tests::retry_surfaces_permanent_errors_without_extra_attempts
 services::discord::placeholder_controller::live_events_tests::ensure_active_with_live_events_appends_block_and_throttles_changes
 services::discord::placeholder_controller::live_events_tests::render_cache_invalidation_forces_identical_live_rerender
+services::discord::placeholder_controller::queued_card_gate::tests::source_guard_tests::exit_body_warning_guard_rejects_commented_fields_and_counts_coded_warnings
+services::discord::placeholder_controller::queued_card_gate::tests::source_guard_tests::gated_region_bounds_follow_code_not_comments_or_log_text
+services::discord::placeholder_controller::queued_card_gate::tests::source_guard_tests::gated_region_guards_count_coded_raw_calls_but_not_comments
+services::discord::placeholder_controller::queued_card_gate::tests::source_guard_tests::gated_region_guards_reject_commented_heads_and_gate_calls
 services::discord::placeholder_controller::queued_card_gate::tests::t1_exit_body_failure_table_parks_only_on_double_failure
 services::discord::placeholder_controller::queued_card_gate::tests::t1_t1b_t2_t5_t8_queue_exit_verdicts_over_the_whole_queue
 services::discord::placeholder_controller::queued_card_gate::tests::t2_parked_row_is_deleted_by_the_next_pending_drain
@@ -8345,6 +8349,8 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_tool_only_raw_post_is_minimal_before_the_body_patch
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::retired_tick_with_legacy_ownership_preserves_long_body_and_row
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::source_guard_tests::tick_wiring_guard_rejects_commented_and_reordered_steps
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::source_guard_tests::tick_wiring_guard_requires_the_calls_inside_their_legacy_blocks
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_progress_no_false_authority
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload
@@ -9107,6 +9113,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_restored_shell_retire_then_next_input_launches_a_new_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
+services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::boot_relay_guard_rejects_commented_steps_and_counts_coded_spawns
 services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::bootstrap_keeps_confirmation_before_the_existing_relay
 services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::codex_reconciles_a_late_marker_while_legacy_recovery_is_busy
 services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::late_claude_source_posts_with_body_disabled_while_legacy_still_relays
