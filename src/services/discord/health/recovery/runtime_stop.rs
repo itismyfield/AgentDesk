@@ -66,7 +66,7 @@ pub(super) async fn stop_judged_channel_runtime(
     stop: discord::turn_bridge::ChannelJudgement,
     reason: &str,
     cleanup_policy: discord::TmuxCleanupPolicy,
-    approved: Option<Option<&str>>,
+    _approved: Option<Option<&str>>,
 ) -> RuntimeTurnStopResult {
     // A turn that could not be read is kept as a refused host's is.
     let Ok(stop) = stop else {
@@ -79,12 +79,37 @@ pub(super) async fn stop_judged_channel_runtime(
         && discord::inflight::inflight_state_file_exists(&provider, channel_id.get());
     let mut skipped_idle_provider_interrupt = false;
     let mut judged_termination = false;
+    let mut native_published = false;
 
     if let Some(stop) = stop.as_ref() {
         // A refused host, or a turn that moved on since the verdict, is left unchanged.
-        let result = match stop.refused() {
-            false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
-            true => None,
+        let native = if !cleanup_requested {
+            stop.native(reason).await
+        } else {
+            None
+        };
+        let result = if let Some(native) = native {
+            native.notice(&shared).await;
+            let result = native.finish().await;
+            if result.token.is_none() {
+                let snapshot = shared.mailbox(channel_id).snapshot().await;
+                return RuntimeTurnStopResult::native_preserved(
+                    if snapshot.cancel_token.is_none() {
+                        "native-stop-completed"
+                    } else {
+                        native.lifecycle_path()
+                    },
+                    snapshot.intervention_queue.len(),
+                    snapshot.cancel_token.is_none(),
+                );
+            }
+            native_published = true;
+            Some(result)
+        } else {
+            match stop.refused() {
+                false => Some(stop.cancel().await).filter(|result| result.token.is_some()),
+                true => None,
+            }
         };
         let Some(result) = result else {
             return host_guard_preserved(&shared, channel_id).await;
@@ -96,7 +121,11 @@ pub(super) async fn stop_judged_channel_runtime(
             legacy_name,
             cleanup_policy,
         );
-        let outcome = if skip_provider_interrupt {
+        let outcome = if native_published {
+            let mut outcome = stop.unstopped();
+            outcome.termination_recorded = true;
+            outcome
+        } else if skip_provider_interrupt {
             tracing::info!(
                 target: "agentdesk::services::discord::health::recovery",
                 provider = provider.as_str(),
@@ -157,7 +186,7 @@ pub(super) async fn stop_judged_channel_runtime(
         Ok(finish) => finish,
         Err(kept) => return kept,
     };
-    let mut termination_recorded = false;
+    let mut termination_recorded = native_published && judged_termination;
     // The finish removes only the judged token.
     if let (Some(_), Some(stop)) = (finish.removed_token.as_ref(), stop.as_ref()) {
         let skip_provider_interrupt = skipped_idle_provider_interrupt
@@ -176,7 +205,7 @@ pub(super) async fn stop_judged_channel_runtime(
                 "runtime fallback skipped provider interrupt for idle Claude TUI turn"
             );
             skipped_idle_provider_interrupt = true;
-        } else {
+        } else if !native_published {
             termination_recorded = stop.stop(cleanup_policy, reason).await.termination_recorded;
         }
     }

@@ -9,99 +9,11 @@ use super::process_table::{pane_foreground_is_provider_wrapper, write_line_to_wr
 use super::tmux_runtime_paths;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_turn_state::TuiTurnState;
-use std::io::{BufRead, Seek};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct ClaudeStopTurnIdentity {
-    output_path: String,
-    file_identity: (u64, u64),
-    user_line_start: u64,
-    user_line_end: u64,
-    user_line_hash: u64,
-    user_entry_id: Option<String>,
-}
-
-impl ClaudeStopTurnIdentity {
-    pub(super) fn capture(output_path: &str) -> Option<Self> {
-        latest_claude_user_turn_identity(Path::new(output_path))
-    }
-
-    pub(super) fn still_current(&self) -> bool {
-        latest_claude_user_turn_identity(Path::new(&self.output_path)).as_ref() == Some(self)
-    }
-}
-
-#[cfg(unix)]
-fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn transcript_file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    let created_ns = metadata
-        .created()
-        .ok()
-        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
-    (created_ns, 0)
-}
-
-fn latest_claude_user_turn_identity(path: &Path) -> Option<ClaudeStopTurnIdentity> {
-    use std::hash::{Hash, Hasher};
-
-    const MAX_TAIL_BYTES: u64 = 256 * 1024;
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    let len = metadata.len();
-    let file_identity = transcript_file_identity(&metadata);
-    let start = len.saturating_sub(MAX_TAIL_BYTES);
-    file.seek(std::io::SeekFrom::Start(start)).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    let mut offset = start;
-    if start > 0 {
-        offset = offset.saturating_add(reader.read_line(&mut line).ok()? as u64);
-    }
-
-    let mut latest = None;
-    loop {
-        line.clear();
-        let line_start = offset;
-        let bytes_read = reader.read_line(&mut line).ok()?;
-        if bytes_read == 0 {
-            return latest;
-        }
-        offset = offset.saturating_add(bytes_read as u64);
-        if !line.ends_with('\n') {
-            return latest;
-        }
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        let Some((_prompt, user_entry_id)) =
-            crate::services::tui_prompt_dedupe::extract_claude_transcript_user_prompt_with_entry_id(
-                &json,
-            )
-        else {
-            continue;
-        };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        line.as_bytes().hash(&mut hasher);
-        latest = Some(ClaudeStopTurnIdentity {
-            output_path: path.display().to_string(),
-            file_identity,
-            user_line_start: line_start,
-            user_line_end: offset,
-            user_line_hash: hasher.finish(),
-            user_entry_id,
-        });
-    }
-}
+pub(super) use super::claude_stop_identity::ClaudeStopTurnIdentity;
 
 fn transcript_identity_allows_delivery(identity: Option<&ClaudeStopTurnIdentity>) -> bool {
     identity.is_none_or(ClaudeStopTurnIdentity::still_current)
@@ -188,11 +100,13 @@ fn deliver_claimed_claude_stop_under_lock_order<R>(
     session_name: &str,
     delivery: ClaudeTurnInterruptDelivery,
     transcript_identity: Option<&ClaudeStopTurnIdentity>,
+    recheck: impl FnOnce() -> Result<(), String>,
     write: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
     match delivery {
         ClaudeTurnInterruptDelivery::TuiEscape => {
             deliver_tui_escape_under_composer_lock(session_name, || {
+                recheck()?;
                 deliver_claimed_claude_stop(token, session_name, transcript_identity, write)
             })
         }
@@ -278,16 +192,12 @@ pub(super) fn classify_tui_interrupt_phase(
 
 /// Pane evidence at a Claude TUI stop: `(prompt painted, interruptible turn, editable draft)`.
 pub(super) fn claude_tui_stop_pane_evidence(pane: &str) -> (bool, bool, bool) {
-    use crate::services::tmux_common as screen;
-    // Claude keeps its empty composer painted through generation and foreground tools, so spinner
-    // chrome counts as active only above an exactly empty composer, never over composer text.
-    let active = screen::tmux_capture_indicates_claude_tui_actively_streaming(pane)
-        || (screen::tmux_capture_indicates_claude_tui_structured_spinner(pane)
-            && screen::tmux_capture_indicates_claude_tui_exact_empty_composer(pane));
+    let (ready, active, draft) = super::claude_stop_pane::legacy_evidence(pane);
     (
-        screen::tmux_capture_indicates_claude_tui_ready_for_input(pane),
-        active,
-        screen::tmux_capture_indicates_claude_tui_prompt_draft(pane),
+        ready,
+        !super::claude_stop_pane::veto(pane)
+            && (active || super::claude_stop_pane::foreground_tool_running(pane)),
+        draft,
     )
 }
 
@@ -320,14 +230,23 @@ pub(super) fn decide_claimed_claude_stop_delivery(
 /// Delivery uses Escape for the interactive TUI or a stream-json interrupt
 /// control request for the wrapper FIFO. A token-local CAS reserves one attempt
 /// and commits only after successful provider I/O; skipped or failed attempts
-/// roll back. Interactive Escape additionally requires structured streaming
-/// state and positive active-pane evidence.
+/// roll back. Escape requires streaming and current active-pane evidence,
+/// rechecked under the composer lock before writing.
 pub(super) async fn interrupt_claude_turn_session_preserving(
     token: &Arc<CancelToken>,
     tmux_session: Option<String>,
     reason: &str,
 ) -> ProviderTurnInterruptOutcome {
-    interrupt_claude_session(Some(token), tmux_session, reason, None).await
+    interrupt_claude_session(Some(token), tmux_session, reason, None, None).await
+}
+
+pub(super) async fn interrupt_claude_native_turn(
+    token: &Arc<CancelToken>,
+    session: String,
+    reason: &str,
+    identity: ClaudeStopTurnIdentity,
+) -> ProviderTurnInterruptOutcome {
+    interrupt_claude_session(Some(token), Some(session), reason, None, Some(identity)).await
 }
 
 pub(super) async fn interrupt_claude_session(
@@ -335,6 +254,7 @@ pub(super) async fn interrupt_claude_session(
     tmux_session: Option<String>,
     reason: &str,
     observed_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    expected_identity: Option<ClaudeStopTurnIdentity>,
 ) -> ProviderTurnInterruptOutcome {
     // #3169: an anonymous internal PreserveSession teardown
     // (`turn_bridge_cancelled`, no user `cancel_source`) must NOT cancel the
@@ -385,6 +305,7 @@ pub(super) async fn interrupt_claude_session(
         None => None,
     };
 
+    let protected_delivery = expected_identity.is_some() || token.is_none();
     let session_for_probe = session_name.clone();
     let token_for_probe = token.cloned();
     let probe_result = tokio::task::spawn_blocking(move || {
@@ -437,9 +358,14 @@ pub(super) async fn interrupt_claude_session(
         } else {
             None
         };
-        let (pane_ready, pane_active, pane_has_draft) = pane
-            .as_deref()
-            .map_or((false, false, false), claude_tui_stop_pane_evidence);
+        let (pane_ready, pane_active, pane_has_draft) =
+            pane.as_deref().map_or((false, false, false), |pane| {
+                if protected_delivery {
+                    claude_tui_stop_pane_evidence(pane)
+                } else {
+                    super::claude_stop_pane::legacy_evidence(pane)
+                }
+            });
         let phase = match delivery {
             ClaudeTurnInterruptDelivery::TuiEscape => classify_tui_interrupt_phase(
                 structured_state,
@@ -497,14 +423,28 @@ pub(super) async fn interrupt_claude_session(
         }
     };
 
+    if expected_identity
+        .as_ref()
+        .is_some_and(|expected| turn_identity.as_ref() != Some(expected))
+    {
+        return ProviderTurnInterruptOutcome {
+            tmux_session,
+            ..super::stop_host::not_sent()
+        };
+    }
+
     // An open transcript turn stands in for streaming only while the pane shows no prompt or draft.
     let pane_idle = pane_ready || pane_has_draft;
-    let phase =
-        if token.is_none() && !pane_idle && observed_open.as_ref().is_some_and(|open| open()) {
-            ClaudeTuiInterruptPhase::ActiveGeneration
-        } else {
-            phase
-        };
+    let phase = if token.is_none()
+        && structured_state.is_none()
+        && pane_active
+        && !pane_idle
+        && observed_open.as_ref().is_some_and(|open| open())
+    {
+        ClaudeTuiInterruptPhase::ActiveGeneration
+    } else {
+        phase
+    };
     let decision = decide_claimed_claude_stop_delivery(delivery, phase);
     tracing::info!(
         "claude turn interrupt decision: provider=claude session={} generation={} reason={} mechanism={:?} runtime_kind={} structured_state={} pane_ready={} pane_active={} pane_has_draft={} phase={} decision={}",
@@ -541,6 +481,37 @@ pub(super) async fn interrupt_claude_session(
     let token_for_task = token.cloned();
     let request_id = format!("agentdesk-interrupt-{}", uuid::Uuid::new_v4());
     let delivery_result = tokio::task::spawn_blocking(move || {
+        let recheck = || {
+            if !protected_delivery || delivery != ClaudeTurnInterruptDelivery::TuiEscape {
+                return Ok(());
+            }
+            let pane = crate::services::platform::tmux::capture_pane(&session_for_task, -160)
+                .ok_or("Claude stop pane unavailable before Escape")?;
+            let (ready, active, draft) = claude_tui_stop_pane_evidence(&pane);
+            let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                &session_for_task,
+            );
+            let structured = binding.as_ref().and_then(|binding| {
+                crate::services::tui_turn_state::runtime_binding_turn_state(
+                    &ProviderKind::Claude,
+                    binding,
+                )
+            });
+            let observed = token_for_task.is_none()
+                && structured.is_none()
+                && active
+                && !ready
+                && observed_open.as_ref().is_some_and(|open| open());
+            if super::claude_stop_pane::veto(&pane)
+                || draft
+                || (!observed
+                    && classify_tui_interrupt_phase(structured, ready, active)
+                        != ClaudeTuiInterruptPhase::ActiveGeneration)
+            {
+                return Err("Claude stop pane no longer permits Escape".into());
+            }
+            Ok(())
+        };
         let write = || match delivery {
             ClaudeTurnInterruptDelivery::TuiEscape => {
                 match crate::services::platform::tmux::send_keys(&session_for_task, &["Escape"]) {
@@ -566,10 +537,12 @@ pub(super) async fn interrupt_claude_session(
                 &session_for_task,
                 delivery,
                 turn_identity.as_ref(),
+                recheck,
                 write,
             ),
             None => {
                 let deliver = || {
+                    recheck()?;
                     if !observed_open.as_ref().is_some_and(|open| open()) {
                         return Err("session stop no longer observes its bound open turn".into());
                     }
@@ -694,6 +667,7 @@ pub(super) mod herdr {
                 session,
                 escape,
                 identity.as_ref(),
+                || Ok(()),
                 write,
             )
         })
@@ -1243,6 +1217,7 @@ mod tests {
                 &stop_session,
                 ClaudeTurnInterruptDelivery::TuiEscape,
                 None,
+                || Ok(()),
                 || Ok::<(), String>(()),
             );
             delivery_done_tx.send(result).expect("signal delivery done");

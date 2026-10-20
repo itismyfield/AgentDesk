@@ -1,3 +1,4 @@
+mod native_stop;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -30,7 +31,7 @@ async fn cancel_text_stop_token_mailbox(
 /// call so the three cancel surfaces (`!stop`, `!cc stop`, and the
 /// REST cancel endpoint) all share the same post-cancel drain
 /// semantics.
-fn schedule_text_stop_pending_queue_drain(
+pub(super) fn schedule_text_stop_pending_queue_drain(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
     channel_id: serenity::ChannelId,
@@ -347,64 +348,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         TextCommandId::Stop => {
-            let permit = crate::services::cluster::channel_home::admit_command(
-                &channel_id.get().to_string(),
-                data.provider.as_str(),
-            )?;
-            return crate::services::cluster::channel_home::command_scope(permit, async {
-            let stop_lookup =
-                cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id, "!stop")
-                    .await;
-            match stop_lookup {
-                CommandStop::Session(stop) => {
-                    stop.interrupt("!stop").await;
-                }
-                CommandStop::Stop(stop) => {
-                    // #1218: send abort key first, then SIGKILL — see
-                    // `stop_active_turn` doc comment.
-                    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-                    let termination_recorded =
-                        stop.stop(policy, "!stop").await.termination_recorded;
-                    crate::services::turn_cancel_finalizer::finalize_turn_cancel(
-                        crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
-                            data.provider.clone(),
-                            channel_id,
-                            "!stop",
-                            termination_recorded,
-                        ),
-                    );
-                    // #1672: belt-and-suspenders drain trigger so the
-                    // !stop surface matches the cancel-API contract.
-                    // The turn_bridge cancellation tail also schedules
-                    // a drain when `has_pending` is true, but we
-                    // re-arm here so a watcher-finalized turn (where
-                    // the bridge skips its own finalize) still drains.
-                    schedule_text_stop_pending_queue_drain(
-                        &data.shared,
-                        &data.provider,
-                        channel_id,
-                        "!stop",
-                    );
-                }
-                CommandStop::AlreadyStopping => {
-                    let _ = msg.reply(&ctx.http, super::ALREADY_STOPPING_RESPONSE).await;
-                }
-                CommandStop::HostRefused => {
-                    let _ = msg
-                        .reply(&ctx.http, super::HOST_REFUSED_STOP_RESPONSE)
-                        .await;
-                }
-                CommandStop::NoActiveTurn => {
-                    let _ = msg.reply(&ctx.http, super::NO_ACTIVE_TURN_RESPONSE).await;
-                }
-                // The turn stays with its provider: no cancel finalize and no queue drain.
-                #[cfg(unix)]
-                CommandStop::Herdr(stop) => {
-                    let _ = msg.reply(&ctx.http, stop.reply()).await;
-                }
-            }
-            Ok(true)
-            }).await;
+            return native_stop::handle(ctx, msg, data, channel_id).await;
         }
 
         TextCommandId::Clear => {
@@ -1140,6 +1084,16 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     )
                     .await;
                     match stop_lookup {
+                        CommandStop::Native(stop) => {
+                            if stop.should_reply() { let _ = msg.reply(&ctx.http, stop.text()).await; }
+                            if stop.finish().await.token.is_some() {
+                                super::stop::after_native_publish(&data.shared, &data.provider, channel_id, Some(stop_reason)).await;
+                            }
+                        }
+                        CommandStop::Observed(sent) => {
+                            let _ = msg.reply(&ctx.http, super::super::turn_bridge::NativeStop::observed_text(sent)).await;
+                        }
+
                         CommandStop::Session(stop) => {
                             stop.interrupt(&stop_reason).await;
                             let _ = msg.reply(&ctx.http, super::STOPPING_RESPONSE).await;

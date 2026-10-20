@@ -97,6 +97,15 @@ pub async fn stop_agent_turn(
         .await;
         // A turn the host guard kept is running on: its session is not marked disconnected.
         if lifecycle.host_guard_kept() {
+            let reason = lifecycle.refusal_reason();
+            if reason.starts_with("native_stop_") {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": reason, "stop_disposition": reason, "session_key": session_key,
+                    })),
+                );
+            }
             let (error, unsupported) = ("session host is not legacy tmux", "session_host_not_tmux");
             let body =
                 json!({"error": error, "unsupported": unsupported, "session_key": session_key});

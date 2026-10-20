@@ -504,6 +504,7 @@ jobs:
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
