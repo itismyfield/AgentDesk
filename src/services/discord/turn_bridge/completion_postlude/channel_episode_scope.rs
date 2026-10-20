@@ -470,6 +470,7 @@ mod tests {
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+                "services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs",
             ],
             "every bridge entry file must declare its mailbox token-registration contract"
         );

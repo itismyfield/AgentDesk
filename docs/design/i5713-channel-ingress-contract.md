@@ -161,6 +161,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/stop.rs` | admission | `home_fence::admit` :122 |
 | `src/services/discord/commands/tool_call.rs` | admission | `home_fence::admit` :162. on/off 저장과 공개 응답 완료까지 command permit을 보유한다(:80–87) |
 | `src/services/discord/commands/text_commands.rs` | admission | `current_command` :37, `admit_command` :389·:1300 |
+| `src/services/discord/commands/text_commands/native_stop.rs` | admission | `admit_command` :10, `command_scope` :14; !stop preflight·ACK·종료 확인이 같은 permit 안에서 실행된다 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
