@@ -45,6 +45,24 @@ pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> boo
         if last_nonce != Some(nonce.as_str()))
 }
 
+/// Selection restoration observes its exact marker while the existing source authority is held.
+pub(crate) fn with_current_scope_nonce<T>(
+    channel: u64,
+    inspect: impl FnOnce(Option<&str>) -> T,
+) -> T {
+    let Some(tmux) = input_target(channel) else {
+        return inspect(None);
+    };
+    tc::with_tmux_source_authority(&tmux, |_| {
+        let SpawnNonceMarker::Known(nonce) = absent_open::read_nonce(&tmux) else {
+            return inspect(None);
+        };
+        let scoped = binding_context::execution_context("codex", &nonce)
+            .is_ok_and(|context| absent_open::scoped_context(&context, &tmux));
+        inspect(scoped.then_some(nonce.as_str()))
+    })
+}
+
 pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     let tmux = input_target(channel)?;
     let observation = crate::services::discord::codex_absence::readiness(channel, &tmux)?;

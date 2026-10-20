@@ -78,3 +78,130 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
         assert_eq!(tree(&root.path().join(STORE_DIR_NAME)), before);
     }
 }
+
+/// A preexisting operator job isolates the quiescence gate; Codex mailbox admission stays closed.
+pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
+    writer: ChannelWriter<P, L, A>,
+    bindings: Arc<B>,
+    tmux: &str,
+    initial_nonce: &str,
+    next_root: impl FnOnce() -> String,
+    held: impl Fn(),
+) -> String
+where
+    P: DiscordPort,
+    L: DeliveryLease,
+    A: AlarmSink,
+    B: BindingEvents,
+{
+    let channel = writer.channel();
+    let suspension = writer.suspension.clone();
+    let (_stop, stopped) = watch::channel(false);
+    let mut actor = Actor {
+        writer,
+        deriver: UnitDeriver::new(channel, ShadowProvider::Codex),
+        owed: VecDeque::new(),
+        verified: None,
+        sources: Sources::new(channel, ShadowProvider::Codex, bindings.clone())
+            .with_suspension(suspension),
+        bindings,
+        transitions: Transitions::new(None, stopped.clone()),
+        notice: None,
+        waiting: Waiting::default(),
+        clock: (Instant::now(), chrono::Utc::now()),
+        scope_hold: None,
+    };
+    assert!(
+        actor.rescope(),
+        "the first exact root must install its selection"
+    );
+    actor
+        .sources
+        .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
+        .unwrap();
+    for _ in 0..6 {
+        actor.read_sources();
+        actor.deliver_owed().await;
+        actor.collect_settled();
+        tokio::task::yield_now().await;
+    }
+    assert!(actor.owed.is_empty());
+    assert!(!actor.deriver.has_unsealed());
+    assert!(actor.sources.quiescent_for_rescope());
+    let context = Context {
+        tmux: tmux.into(),
+        nonce: initial_nonce.into(),
+        home_epoch: None,
+        lock: Arc::default(),
+        permit: None,
+    };
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let (_, common) = actor
+        .build_snapshot(&context, &gate, &BTreeMap::new())
+        .unwrap();
+    let (reply, completed) = oneshot::channel();
+    actor.transitions.job = Some(Job {
+        request: Request {
+            channel,
+            cutoff: actor.writer.store().binding_checkpoint().unwrap().unwrap(),
+            job_id: "fresh-root-waiting".into(),
+            operator: "fixture".into(),
+            at: chrono::Utc::now(),
+            reason: "finish an existing transition before selecting a new root".into(),
+            termination: None,
+        },
+        apply: false,
+        scope: None,
+        stopping: stopped,
+        context,
+        reply,
+        gate,
+        wall: Arc::new(std::time::SystemTime::now),
+        common,
+        first: Vec::new(),
+        probes: BTreeMap::new(),
+        queue: VecDeque::new(),
+        stage: Stage::First,
+        worker: None,
+        deadline: now() + DEADLINE,
+        hashed: 0,
+        outcomes: BTreeMap::new(),
+    });
+    let nonce = next_root();
+    for _ in 0..3 {
+        assert!(actor.transitions.has_job());
+        assert!(
+            !actor.rescope(),
+            "a live transition job must hold the new root"
+        );
+        assert_eq!(actor.scope_hold, Some("new_root_waiting"));
+        actor.observe_waiting(false);
+        held();
+    }
+    let mut job = actor.transitions.job.take().unwrap();
+    assert!(actor.step(&mut job, &watch::channel(None).0));
+    actor.finish(job);
+    assert!(completed.await.unwrap().refused.is_none());
+    assert!(!actor.transitions.has_job());
+    assert!(
+        actor.rescope(),
+        "finishing the job must permit the exact new root"
+    );
+    assert_eq!(actor.scope_hold, None);
+    actor.observe_waiting(false);
+    actor
+        .sources
+        .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
+        .unwrap();
+    for _ in 0..6 {
+        actor.read_sources();
+        actor.deliver_owed().await;
+        actor.collect_settled();
+        actor.observe_waiting(true);
+        tokio::task::yield_now().await;
+    }
+    assert!(actor.owed.is_empty());
+    assert!(!actor.writer.is_stopped());
+    nonce
+}

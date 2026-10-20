@@ -577,7 +577,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
 #[cfg(all(test, unix))]
 #[path = "scoped_transition_tests.rs"]
-mod scoped_tests;
+pub(super) mod scoped_tests;
 
 #[cfg(test)]
 pub(crate) mod test_hooks {

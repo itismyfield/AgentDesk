@@ -236,6 +236,7 @@ src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/delegated_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_scope_restart_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_joint_owner_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_repeated_absence_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_restart_phase_tests.rs
@@ -631,6 +632,7 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase
 services::discord::runtime_bootstrap::orphan_recovery::tests
@@ -2207,6 +2209,13 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign::actual_gateway_mixed_foreign_owners_deliver_fresh_fifo_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::different_nonce_cannot_restore_the_installed_suspension_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::fresh_relaunch_restart_settles_prepared_once_without_duplicate_post_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::fresh_relaunch_restart_with_not_found_local_retry_registers_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::malformed_installed_suspension_holds_before_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::ordinary_canary_restart_after_fresh_relaunch_with_operator_approval_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::partial_installed_suspension_holds_before_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::unsupported_installed_suspension_version_holds_before_live_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_settles_prepared_once_without_duplicate_post_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_not_found_local_retry_registers_live_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_operator_approval_hosts_and_sends_once_pg

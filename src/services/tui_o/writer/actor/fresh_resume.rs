@@ -62,6 +62,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .cursors()
             .map(|cursor| cursor.source.clone())
             .collect();
+        let mut persisted = Ok(());
         let result = crate::services::tui_prompt_dedupe::clear_relaunch::with_fresh_scope(
             channel,
             nonce.as_deref(),
@@ -69,12 +70,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             quiescent,
             |nonce, denied| {
                 let changed = !denied.is_empty();
-                selection.extend(nonce, denied);
-                if changed {
+                persisted = selection.install(self.writer.store(), nonce, denied);
+                if changed && persisted.is_ok() {
                     self.sources.reset_for_rescope();
                 }
             },
         );
+        if let Err(error) = persisted {
+            self.writer.stop(WriterAlarm::Halted {
+                detail: format!("fresh selection write: {error:?}"),
+            });
+            return false;
+        }
         match result {
             Ok(changed) => {
                 self.scope_hold = None;
@@ -102,8 +109,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                             .ledger()
                             .unresolved()
                             .map(|(serial, _)| serial);
+                        let incident = format!("new_root_waiting:{}", uuid::Uuid::new_v4());
+                        #[cfg(test)]
+                        let remember = !crate::services::claude_tui::source_verify::n2b_mutant(
+                            "b1b-root-incident",
+                        );
+                        #[cfg(not(test))]
+                        let remember = true;
+                        if remember {
+                            self.waiting.incident = Some(incident.clone());
+                        }
                         self.writer.alarm(WriterAlarm::WaitingTooLong {
-                            incident: format!("new_root_waiting:{}", uuid::Uuid::new_v4()),
+                            incident,
                             ready: self.owed.len(),
                             prepared,
                         });

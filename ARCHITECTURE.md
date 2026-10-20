@@ -1657,6 +1657,8 @@ src/
 │   │   │   ├── o_writer_host/
 │   │   │   │   └── fence_tests/
 │   │   │   │       ├── b1b_fresh_launch_tests/
+│   │   │   │       │   ├── ordinary_restart_tests/
+│   │   │   │       │   │   └── fresh_scope_restart_tests.rs
 │   │   │   │       │   ├── delegated_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs

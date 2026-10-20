@@ -7,6 +7,8 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, LocalRetryMark, PieceOu
 
 const PAYLOAD: &str = "ordinary verified canary saved piece";
 
+mod fresh_scope_restart_tests;
+
 #[derive(Clone, Copy)]
 enum Pending {
     Approval,
@@ -45,7 +47,15 @@ async fn ordinary_canary_restart_with_not_found_local_retry_registers_live_pg() 
 }
 
 async fn ordinary_restart(pending: Pending) {
-    let fixture =
+    restart_case(pending, false, None).await;
+}
+
+async fn restart_case(
+    pending: Pending,
+    fresh: bool,
+    fault: Option<fresh_scope_restart_tests::Fault>,
+) {
+    let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
     let pool: &sqlx::PgPool = fixture.shared.pg_pool.as_ref().unwrap();
@@ -99,39 +109,52 @@ async fn ordinary_restart(pending: Pending) {
             })
         })
         .unwrap();
-    let key = UnitKey {
-        channel_id: CANARY_CHANNEL,
-        provider: ShadowProvider::Codex,
-        native_key: "operator-restored-unit".into(),
-        kind: UnitKind::Body,
-    };
-    let prepared = |serial, local_retry| LedgerEntry::Prepared {
-        serial,
-        unit_key: key.clone(),
-        piece_index: 0,
-        payload: PAYLOAD.into(),
-        anchor_id: 0,
-        epoch: 1,
-        local_retry,
-    };
     let mut channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
     let proof = dedupe::binding_events::codex::read_ownership(&fixture.context)
         .unwrap()
         .verified
         .unwrap();
     channel.set_binding_checkpoint(proof.seq).unwrap();
+    drop(channel);
+    let output = Discord::start().await;
+    let preserved = if fresh {
+        Some(fresh_scope_restart_tests::install(&mut fixture, &store, &era, &output).await)
+    } else {
+        None
+    };
+    let key = UnitKey {
+        channel_id: CANARY_CHANNEL,
+        provider: ShadowProvider::Codex,
+        native_key: "operator-restored-unit".into(),
+        kind: UnitKind::Body,
+    };
+    let mut channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+    let anchor_id = channel.ledger().anchor();
+    let prepared = |serial, local_retry| LedgerEntry::Prepared {
+        serial,
+        unit_key: key.clone(),
+        piece_index: 0,
+        payload: PAYLOAD.into(),
+        anchor_id,
+        epoch: 1,
+        local_retry,
+    };
+    let blocked_serial = channel.ledger().next_serial();
+    let sent_serial = blocked_serial + 1;
     channel
         .append_ledger(prepared(
-            0,
+            blocked_serial,
             matches!(pending, Pending::LocalRetry).then_some(LocalRetryMark::Budget),
         ))
         .unwrap();
     channel
         .append_ledger(if matches!(pending, Pending::LocalRetry) {
-            LedgerEntry::NotFound { serial: 0 }
+            LedgerEntry::NotFound {
+                serial: blocked_serial,
+            }
         } else {
             LedgerEntry::Rejected {
-                serial: 0,
+                serial: blocked_serial,
                 status: 403,
             }
         })
@@ -139,25 +162,38 @@ async fn ordinary_restart(pending: Pending) {
     drop(channel);
     if !matches!(pending, Pending::LocalRetry) {
         store
-            .record_operator_resume(CANARY_CHANNEL, 0, "operator", "ordinary managed restart")
+            .record_operator_resume(
+                CANARY_CHANNEL,
+                blocked_serial,
+                "operator",
+                "ordinary managed restart",
+            )
             .unwrap();
     }
-    let output = Discord::start().await;
+    let prior_posts = output.texts();
     if matches!(pending, Pending::Prepared) {
         let mut channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
-        channel.append_ledger(prepared(1, None)).unwrap();
-        assert_eq!(channel.ledger().unresolved().unwrap().0, 1);
+        channel.append_ledger(prepared(sent_serial, None)).unwrap();
+        assert_eq!(channel.ledger().unresolved().unwrap().0, sent_serial);
         assert_eq!(
-            channel.ledger().approval(0).unwrap().consumed_serial,
-            Some(1)
+            channel
+                .ledger()
+                .approval(blocked_serial)
+                .unwrap()
+                .consumed_serial,
+            Some(sent_serial)
         );
+        let existing_id = (900_001 + output.messages.lock().unwrap().len() as u64).to_string();
         output.messages.lock().unwrap().push(json!({
-            "id":"900001", "channel_id":CANARY_CHANNEL.to_string(), "content":PAYLOAD,
+            "id": existing_id, "channel_id":CANARY_CHANNEL.to_string(), "content":PAYLOAD,
             "author":{"id":"1","username":"o-bot","discriminator":"0001","avatar":null,"bot":true},
             "timestamp":"2026-10-20T00:00:00+00:00", "edited_timestamp":null,
             "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
             "attachments":[],"embeds":[],"pinned":false,"type":0
         }));
+    }
+    if let Some(fault) = fault {
+        fresh_scope_restart_tests::corrupt(&fixture, fault);
     }
     let prepared = parts(
         &fixture.shared,
@@ -175,6 +211,31 @@ async fn ordinary_restart(pending: Pending) {
     );
     assert_eq!(hosts.len(), 1);
     let result = std::panic::AssertUnwindSafe(async {
+        if fault.is_some() {
+            for _ in 0..100 {
+                assert!(
+                    readiness.submission(CANARY_CHANNEL).is_none(),
+                    "invalid persisted scope must never publish a live actor"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!readiness.accepts(CANARY_CHANNEL));
+            assert!(
+                matches!(
+                    cutover::intake_route::for_input_placement("codex", CANARY_CHANNEL).await,
+                    cutover::intake_route::IntakeRoute::Hold(_)
+                ),
+                "invalid persisted scope cannot admit fresh input"
+            );
+            assert_eq!(
+                output.texts(),
+                prior_posts,
+                "invalid persisted scope cannot POST saved delivery work"
+            );
+            let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+            assert!(channel.ledger().piece(sent_serial).is_none());
+            return;
+        }
         for _ in 0..1000 {
             if readiness.submission(CANARY_CHANNEL).is_some() {
                 break;
@@ -185,6 +246,9 @@ async fn ordinary_restart(pending: Pending) {
             readiness.submission(CANARY_CHANNEL).is_some(),
             "ordinary verified canary restart must install Live despite saved delivery work"
         );
+        if fresh {
+            fresh_scope_restart_tests::assert_selection(&fixture);
+        }
         eventually(
             || readiness.accepts(CANARY_CHANNEL),
             "ordinary verified source restoration",
@@ -201,17 +265,17 @@ async fn ordinary_restart(pending: Pending) {
                 crate::services::tui_o::writer::local_retry::pending(channel.ledger()).is_some()
             );
             assert!(
-                output.texts().is_empty(),
+                output.texts() == prior_posts,
                 "pending budget waits for its original due time"
             );
-            assert_eq!(channel.ledger().next_serial(), 1);
+            assert_eq!(channel.ledger().next_serial(), sent_serial);
         } else {
             eventually(
                 || {
                     let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
                     channel
                         .ledger()
-                        .piece(1)
+                        .piece(sent_serial)
                         .is_some_and(|piece| matches!(piece.outcome, Some(PieceOutcome::Posted(_))))
                 },
                 "saved approved or uncertain piece settlement",
@@ -219,14 +283,20 @@ async fn ordinary_restart(pending: Pending) {
             .await;
             let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
             assert_eq!(
-                channel.ledger().approval(0).unwrap().consumed_serial,
-                Some(1)
+                channel
+                    .ledger()
+                    .approval(blocked_serial)
+                    .unwrap()
+                    .consumed_serial,
+                Some(sent_serial)
             );
             assert!(channel.ledger().unresolved().is_none());
-            assert_eq!(channel.ledger().next_serial(), 2);
+            assert_eq!(channel.ledger().next_serial(), sent_serial + 1);
+            let mut expected = prior_posts.clone();
+            expected.push(PAYLOAD.to_owned());
             assert_eq!(
                 output.texts(),
-                [PAYLOAD],
+                expected,
                 "saved piece appears once across the restart"
             );
             assert_eq!(
@@ -239,6 +309,9 @@ async fn ordinary_restart(pending: Pending) {
     .catch_unwind()
     .await;
     hosts.pop().unwrap().stop_and_join().await.unwrap();
+    if let Some(preserved) = preserved {
+        preserved.assert_preserved(&store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap());
+    }
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }

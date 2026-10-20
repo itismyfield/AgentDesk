@@ -20,6 +20,61 @@ use crate::services::tui_o::writer::binding::{
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
+pub(crate) const FRESH_SELECTION_FILE: &str = "fresh_selection";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FreshSelection {
+    schema: u32,
+    channel: u64,
+    pub(crate) nonce: String,
+    pub(crate) keys: Vec<String>,
+}
+
+impl ChannelStore {
+    pub(crate) fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
+        let read: Option<FreshSelection> =
+            durable::read_json(&self.dir.join(FRESH_SELECTION_FILE))?;
+        if let Some(record) = &read {
+            let valid = record.schema == 1
+                && record.channel == self.init.channel
+                && !record.nonce.trim().is_empty()
+                && record.keys.iter().all(|key| {
+                    key.len() == 32
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                && record.keys.windows(2).all(|keys| keys[0] < keys[1]);
+            if !valid {
+                return Err(damage("fresh selection identity or keys are invalid"));
+            }
+        }
+        Ok(read)
+    }
+
+    pub(crate) fn write_fresh_selection(
+        &mut self,
+        nonce: String,
+        mut keys: Vec<String>,
+    ) -> Result<(), StoreError> {
+        keys.sort();
+        keys.dedup();
+        let record = FreshSelection {
+            schema: 1,
+            channel: self.init.channel,
+            nonce,
+            keys,
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        self.mutate(|store| {
+            Ok(durable::replace(
+                &store.dir.join(FRESH_SELECTION_FILE),
+                &bytes,
+            )?)
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

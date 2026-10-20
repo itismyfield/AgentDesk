@@ -36,11 +36,24 @@ pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
     ) {
         return None;
     }
+    let selection = super::super::suspension::Suspension::default();
+    let restored = match selection.restore_current(store) {
+        Ok(restored) => restored,
+        Err(_) => return Some("store_selection_unready"),
+    };
     let ordinary = super::super::deliver::source_delivery_allowed(
         store.init().channel,
         store
             .cursors()
-            .filter(|cursor| !cursor.retired)
+            .filter(|cursor| {
+                let suspended = selection.contains(&cursor.source);
+                #[cfg(test)]
+                let suspended = suspended
+                    && !crate::services::claude_tui::source_verify::n2b_mutant(
+                        "b1b-boot-scope-subtract",
+                    );
+                !cursor.retired && !suspended
+            })
             .map(|cursor| cursor.source.clone()),
     );
     #[cfg(test)]
@@ -48,6 +61,9 @@ pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
         ordinary && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-boot-ordinary");
     if ordinary {
         return None;
+    }
+    if restored {
+        return Some("store_selection_conflict");
     }
     if store.cursors().next().is_some() && !matches!(store.binding_checkpoint(), Ok(Some(_))) {
         return Some("store_metadata_unready");

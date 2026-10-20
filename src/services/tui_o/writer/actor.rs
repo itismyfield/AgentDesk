@@ -278,11 +278,25 @@ where
             utc.unwrap_or_else(chrono::Utc::now),
         ),
     };
+    let selection = actor.writer.suspension.clone();
+    let restore = provider == ShadowProvider::Codex;
+    #[cfg(test)]
+    let restore =
+        restore && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-selection-restore");
+    if restore && let Err(error) = selection.restore_current(actor.writer.store()) {
+        actor.writer.stop(WriterAlarm::Halted {
+            detail: format!("fresh selection restore: {error:?}"),
+        });
+        return actor.writer.stop_cause().cloned();
+    }
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
         if actor.rescope() {
             sources_resumed = false;
             resumed.send_replace(false);
+        }
+        if actor.writer.is_stopped() {
+            break;
         }
         if !sources_resumed && actor.sources_allowed() {
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
@@ -442,7 +456,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn observe_waiting(&mut self, restored: bool) {
-        if self.writer.is_stopped() || self.scope_hold == Some("new_root_waiting") {
+        let scope_waiting = self.scope_hold == Some("new_root_waiting");
+        #[cfg(test)]
+        let scope_waiting = scope_waiting
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-scope-hold");
+        if self.writer.is_stopped() || scope_waiting {
             return;
         }
         let now = tokio::time::Instant::now();
@@ -694,6 +712,8 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use transition::scoped_tests::exercise_scope_waiting_job_for_tests;
 #[cfg(test)]
 pub(crate) use transition::test_hooks as transition_hooks;
 #[cfg(test)]

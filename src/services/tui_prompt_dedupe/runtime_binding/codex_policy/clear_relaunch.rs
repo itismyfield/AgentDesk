@@ -15,7 +15,8 @@ mod fresh_admission;
 pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
 pub(crate) use fresh_admission::{
     fresh_scope_eligible, fresh_scope_pending, input_hold_reason_for_channel,
-    input_reason_for_channel, successor_unproved_for_channel, with_fresh_scope,
+    input_reason_for_channel, successor_unproved_for_channel, with_current_scope_nonce,
+    with_fresh_scope,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

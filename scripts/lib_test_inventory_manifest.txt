@@ -7343,6 +7343,13 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign::actual_gateway_mixed_foreign_owners_deliver_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::native_output::native_terminal_fixture_has_a_postable_stable_unit_and_idle_boundary
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::different_nonce_cannot_restore_the_installed_suspension_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::fresh_relaunch_restart_settles_prepared_once_without_duplicate_post_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::fresh_relaunch_restart_with_not_found_local_retry_registers_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::malformed_installed_suspension_holds_before_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::ordinary_canary_restart_after_fresh_relaunch_with_operator_approval_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::partial_installed_suspension_holds_before_live_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::fresh_scope_restart_tests::unsupported_installed_suspension_version_holds_before_live_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_settles_prepared_once_without_duplicate_post_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_not_found_local_retry_registers_live_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_operator_approval_hosts_and_sends_once_pg
@@ -12957,10 +12964,13 @@ services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::cu
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::physical_alias_is_rejected_before_any_retained_native_read
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::shadow_legacy_other_channel_and_herdr_do_not_gain_scope_admission
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::startup_pending_resolved_anchor_survives_later_same_nonce_warm_proof
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::new_root_waiting_alarm_clears_once_after_transition_job_finishes
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::obligations::durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_and_unretired_denied_sources_stay_untouched_while_fresh_work_posts
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_source_with_an_actual_owed_piece_cannot_enter_suspension
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::same_actor_scopes_two_fresh_incarnations_without_clear_or_restart
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::selection_rename_sync_failure_restores_whole_record_before_fresh_post
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::selection_write_failure_halts_before_publishing_scope_or_ready
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::unsealed_current_native_unit_holds_in_place_rescope_without_dropping_work
 services::tui_o::writer::tests::actor::canary_policy::operator_resume::local_retry_managed_verified_host_drains_budget_before_following_exact_work
 services::tui_o::writer::tests::actor::canary_policy::operator_resume::local_retry_retired_source_stays_held_when_only_the_new_source_is_allowed
