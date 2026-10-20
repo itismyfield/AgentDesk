@@ -1142,16 +1142,7 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         );
         assert!(fx.take_calls().is_empty());
     });
-    let source = include_str!("../../commands/control.rs");
-    let body = source
-        .split("async fn cmd_stop")
-        .nth(1)
-        .unwrap()
-        .split("pub(super) fn parse_queued_message_id")
-        .next()
-        .unwrap();
-    assert_eq!(body.matches("run_slash_stop(").count(), 1);
-    assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
+    source_guard_tests::act7_slash_stop_enters_through_run_slash_stop();
 }
 
 /// A cold stop alone is no proof and holds; after the executor's no-attempt exit the exit seal
@@ -1323,6 +1314,9 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
             .contains("요청은 유지")
     );
 }
+
+#[path = "codex_stop_source_guard_tests.rs"]
+mod source_guard_tests;
 
 #[path = "codex_stop_delivery_home_stop_tests.rs"]
 mod home_stop;
