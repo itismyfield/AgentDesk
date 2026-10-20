@@ -1754,82 +1754,16 @@ mod reply_context_tests {
 /// pass that same value into both request and submission envelopes.
 #[cfg(test)]
 mod live_intake_preserve_wiring_tests {
+    use super::source_guard_tests::{INTAKE_GATE, admission_guard_gaps, preservation_gaps};
+
     #[test]
     fn live_human_preservation_precedes_stale_dispatch_suppression() {
-        let module_src = include_str!("intake_gate.rs");
-        let computation = "let preserve_on_cancel =\n                !new_message.author.bot && !author_excluded_from_cancel_preservation;";
-        let computation_pos = module_src
-            .find(computation)
-            .expect("live preservation is computed once from author identity");
-        let guard_pos = module_src[computation_pos..]
-            .find("if !preserve_on_cancel")
-            .map(|offset| computation_pos + offset)
-            .expect("stale dispatch suppression is gated by preservation");
-        let stale_lookup_pos = module_src[guard_pos..]
-            .find("stale_dispatch_turn_for_text(")
-            .map(|offset| guard_pos + offset)
-            .expect("stale dispatch lookup remains present for automation");
-        let raw_submission_pos = module_src[stale_lookup_pos..]
-            .find("origin: super::IntakeOrigin::RawAttachment,")
-            .map(|offset| stale_lookup_pos + offset)
-            .expect("raw-attachment IntakeSubmission construction exists");
-        let live_submission_pos = module_src[raw_submission_pos..]
-            .find("origin: super::IntakeOrigin::LiveMessage,")
-            .map(|offset| raw_submission_pos + offset)
-            .expect("live-message IntakeSubmission construction exists");
-        let raw_request_window = &module_src[stale_lookup_pos..raw_submission_pos];
-        let raw_submission_window = &module_src[raw_submission_pos..live_submission_pos];
-        let live_request_window = &module_src[raw_submission_pos..live_submission_pos];
-        let production_end = module_src[live_submission_pos..]
-            .find("#[cfg(test)]\nmod reply_context_tests")
-            .map(|offset| live_submission_pos + offset)
-            .expect("production intake gate ends before reply-context tests");
-        let live_submission_window = &module_src[live_submission_pos..production_end];
-
-        assert!(computation_pos < guard_pos && guard_pos < stale_lookup_pos);
-        assert!(
-            raw_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
-            "raw attachment IntakeRequest must reuse the precomputed preservation value"
-        );
-        assert!(
-            raw_submission_window.contains(
-                "origin: super::IntakeOrigin::RawAttachment,\n                    preserve_on_cancel,"
-            ),
-            "raw attachment IntakeSubmission must reuse the precomputed preservation value"
-        );
-        assert!(
-            live_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
-            "live IntakeRequest must reuse the precomputed preservation value"
-        );
-        assert!(
-            live_submission_window.contains(
-                "origin: super::IntakeOrigin::LiveMessage,\n                    preserve_on_cancel,"
-            ),
-            "live IntakeSubmission must reuse the precomputed preservation value"
-        );
+        assert_eq!(preservation_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 
     #[test]
     fn one_admission_guard_precedes_all_soft_intervention_entrypoints() {
-        let module_src = include_str!("intake_gate.rs");
-        let production_end = module_src
-            .find("#[cfg(test)]\nmod reply_context_tests")
-            .expect("production intake gate ends before unit tests");
-        let production = &module_src[..production_end];
-        let guard = "if is_allowed_bot_sender\n                && !should_admit_turn_message(";
-        let guard_pos = production
-            .find(guard)
-            .expect("all intake queue branches share the outer admission guard");
-        let first_queue_entry = production
-            .find("SoftInterventionSpec {")
-            .expect("intake gate has a soft intervention queue entrypoint");
-
-        assert!(guard_pos < first_queue_entry);
-        assert_eq!(
-            production.matches("is_allowed_turn_sender(").count(),
-            0,
-            "queue branches must not make sender decisions independently"
-        );
+        assert_eq!(admission_guard_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }
 
@@ -1837,43 +1771,10 @@ mod live_intake_preserve_wiring_tests {
 mod command_recognition_tests {
     #[test]
     fn command_outcomes_end_before_restore_and_preserve_upload_conditions() {
-        let production = include_str!("intake_gate.rs")
-            .split_once("#[cfg(test)]\nmod reply_context_tests")
-            .unwrap()
-            .0;
-        let command = production
-            .split_once("let cmd_text = strip_leading_bot_mention(text);")
-            .unwrap()
-            .1
-            .split_once("// Auto-restore session")
-            .unwrap()
-            .0;
-        let anchors = [
-            "if cmd_text.starts_with('!')",
-            "let handled = super::message_handler::handle_text_command(",
-            "&mut attachment_local_permit,",
-            ".await?;",
-            "if handled {",
-            "if (!is_skill_command || attachment_local_permit.is_some())",
-            "&& !upload_records_appended_to_session",
-        ];
-        let mut remaining = command;
-        for anchor in anchors {
-            remaining = remaining.split_once(anchor).expect(anchor).1;
-        }
-        assert!(
-            remaining
-                .trim_end()
-                .ends_with("}\n                return Ok(());\n            }")
-        );
-        let legacy = production
-            .split_once("// Legacy command boundary:")
-            .unwrap()
-            .1
-            .split_once("// Regular text")
-            .unwrap()
-            .0;
-        assert!(legacy.contains("super::message_handler::handle_shell_command_raw("));
-        assert!(legacy.trim_end().ends_with("return Ok(());\n            }"));
+        use super::source_guard_tests::{INTAKE_GATE, command_boundary_gaps};
+        assert_eq!(command_boundary_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }
+
+#[cfg(test)]
+mod source_guard_tests;

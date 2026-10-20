@@ -1519,14 +1519,10 @@ mod rekey_window_tests {
     }
     #[test]
     fn reuse_caller_keeps_lock_snapshot_seam_order() {
-        // Lexical auxiliary; PATCH/rollback remains production-source reviewed.
-        let source = include_str!("queue_effects.rs");
-        let source = &source[source
-            .find("async fn reuse_any_queued_placeholder_for_channel(")
-            .unwrap()..];
-        let lock = source.find("lock_owned().await").unwrap();
-        let snapshot = source.find("mailbox_snapshot(").unwrap();
-        let seam = source.find("rekey_channel_card_locked(").unwrap();
-        assert!(lock < snapshot && snapshot < seam);
+        use super::source_guard_tests::{QUEUE_EFFECTS, reuse_seam_gaps};
+        assert_eq!(reuse_seam_gaps(QUEUE_EFFECTS), Vec::<String>::new());
     }
 }
+
+#[cfg(test)]
+mod source_guard_tests;

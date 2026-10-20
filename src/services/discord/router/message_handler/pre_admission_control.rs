@@ -465,53 +465,156 @@ pub(super) mod pre_admission_control_tests {
         }
     }
 
-    fn offset(source: &str, token: &str) -> usize {
-        source
-            .find(token)
-            .unwrap_or_else(|| panic!("missing token: {token}"))
+    use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
+    use crate::test_support::CommentForgery;
+
+    const INTAKE_TURN: &str = include_str!("intake_turn.rs");
+    const PRE_ADMISSION: &str = include_str!("pre_admission_control.rs");
+    const HANDLER: &str = "pub(super) async fn handle_text_message(";
+    const EARLY: &str = "if !pre_admission_control::may_complete_locally(user_text) {";
+    const TAKE: &str = "take_channel_input_state(";
+    const TAKE_ORIGINAL: &str = "take_channel_input_state(shared, original_channel_id)";
+    const GATE: &str = "pre_admission_control::resolve(";
+    const RECORD_CLEARED: &str = "session_was_cleared = Some(cleared);";
+    const DEFERRED_BRANCH: &str = "if let Some(cleared) = session_was_cleared";
+    const FLAG: &str = "(http, shared, &provider, !pending_uploads.is_empty())";
+    const SPLICE: &str = "splice(0..0, taken_uploads)";
+    const SESSION_DRAIN: &str = "mem::take(&mut s.pending_uploads";
+    const LIFECYCLE: &str = "return PreAdmissionRoute::GoalLifecycle(";
+    const UPLOAD_GUARD: &str = "if has_preloaded_uploads {";
+    const CLASSIFY: &str = "match classify_codex_input(user_text)";
+
+    /// Classification 2: as-written, comment-free matching inside the intake handler.
+    /// Ordinary input takes early, the gate runs, and only then the deferred take; a
+    /// lexical tripwire that does not pair takes with awaits.
+    fn deferred_take_gaps(source: &str) -> Vec<String> {
+        let Some(src) = Lexed::new(source).block(HANDLER) else {
+            return vec![format!("missing {HANDLER}")];
+        };
+        let at = |token| src.find(token);
+        let ordered = match (at(EARLY), at(TAKE), at(GATE), at(DEFERRED_BRANCH), at(FLAG)) {
+            (Some(early), Some(take), Some(gate), Some(branch), Some(flag)) => {
+                let deferred = src.find_all(TAKE).last().copied().unwrap_or(0);
+                early < take
+                    && take < gate
+                    && gate < branch
+                    && gate < deferred
+                    && flag < deferred
+                    && src.slice(early..gate).contains(RECORD_CLEARED)
+            }
+            _ => false,
+        };
+        let mut gaps = Vec::new();
+        if !ordered {
+            gaps.push("early take → gate → deferred take order broken".to_string());
+        }
+        for (token, expected) in [(TAKE_ORIGINAL, 2), (FLAG, 1), (SPLICE, 2)] {
+            if src.count(token) != expected {
+                gaps.push(format!("{token} must appear {expected} time(s)"));
+            }
+        }
+        if src.text().contains(SESSION_DRAIN) {
+            gaps.push("intake must not drain session uploads directly".to_string());
+        }
+        gaps
+    }
+
+    /// Production text before the unit tests: the upload guard sits between the goal
+    /// lifecycle return and the control registry, and nothing writes session uploads.
+    fn upload_guard_gaps(source: &str) -> Vec<String> {
+        let lexed = Lexed::new(source);
+        let Some(end) = lexed.find("#[cfg(test)]") else {
+            return vec!["missing the unit-test boundary".to_string()];
+        };
+        let src = lexed.slice(0..end);
+        let mut gaps = Vec::new();
+        match (
+            src.find(LIFECYCLE),
+            src.find(UPLOAD_GUARD),
+            src.find(CLASSIFY),
+        ) {
+            (Some(lifecycle), Some(guard), Some(classify))
+                if lifecycle < guard && guard < classify => {}
+            found => gaps.push(format!(
+                "lifecycle → upload guard → classify broken: {found:?}"
+            )),
+        }
+        if src.count(UPLOAD_GUARD) != 1 {
+            gaps.push("the upload guard must appear once".to_string());
+        }
+        for tail in [".push(", ".extend(", ".splice(", " ="] {
+            if src.text().contains(&format!(".pending_uploads{tail}")) {
+                gaps.push(format!("session uploads written via {tail}"));
+            }
+        }
+        gaps
     }
 
     /// Ordinary input takes early; only locally completable input defers state.
     /// Both sites use the original channel and preserve prepend order.
     #[test]
     fn intake_turn_keeps_the_gate_above_the_deferred_take() {
-        let src = include_str!("intake_turn.rs");
-        let flag = "(http, shared, &provider, !pending_uploads.is_empty())";
-        let take = "take_channel_input_state(";
-        let early = offset(
-            src,
-            "if !pre_admission_control::may_complete_locally(user_text) {",
-        );
-        let gate = offset(src, "pre_admission_control::resolve(");
-        let deferred = src.rfind(take).unwrap();
-        assert!(early < offset(src, take) && offset(src, take) < gate);
-        assert!(src[early..gate].contains("session_was_cleared = Some(cleared);"));
-        assert!(gate < offset(src, "if let Some(cleared) = session_was_cleared"));
-        assert!(gate < deferred && offset(src, flag) < deferred);
-        assert_eq!(
-            src.matches("take_channel_input_state(shared, original_channel_id)")
-                .count(),
-            2
-        );
-        assert_eq!(src.matches(flag).count(), 1);
-        assert_eq!(src.matches("mem::take(&mut s.pending_uploads").count(), 0);
-        assert_eq!(src.matches("splice(0..0, taken_uploads)").count(), 2);
+        assert_eq!(deferred_take_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 
     /// (f3) S3-20e/20f: the guard stays between the lifecycle branch and the
     /// control registry, and this module never writes session uploads back (O4).
     #[test]
     fn guard_position_and_one_way_upload_ownership_are_pinned() {
-        let src = include_str!("pre_admission_control.rs");
-        let guard = format!("{}{}", "if has_preloaded_", "uploads {");
-        let lifecycle = format!("{}{}", "return PreAdmissionRoute::", "GoalLifecycle(");
-        let classify = format!("{}{}", "match classify_", "codex_input(user_text)");
-        assert!(offset(src, &lifecycle) < offset(src, &guard));
-        assert!(offset(src, &guard) < offset(src, &classify));
-        assert_eq!(src.matches(&guard).count(), 1);
-        for tail in [".push(", ".extend(", ".splice(", " ="] {
-            let write = format!("{}{}", ".pending_uploads", tail);
-            assert_eq!(src.matches(&write).count(), 0, "{write}");
+        assert_eq!(upload_guard_gaps(PRE_ADMISSION), Vec::<String>::new());
+    }
+
+    #[test]
+    fn upload_ownership_guards_reject_commented_reordered_and_coded_writes() {
+        let intake = [
+            HANDLER,
+            EARLY,
+            TAKE,
+            GATE,
+            RECORD_CLEARED,
+            DEFERRED_BRANCH,
+            FLAG,
+            SPLICE,
+        ];
+        let cases: [(fn(&str) -> Vec<String>, &str, &[&str]); 2] = [
+            (deferred_take_gaps, INTAKE_TURN, &intake),
+            (
+                upload_guard_gaps,
+                PRE_ADMISSION,
+                &[LIFECYCLE, UPLOAD_GUARD, CLASSIFY],
+            ),
+        ];
+        for (judge, source, needles) in cases {
+            for needle in needles {
+                for forgery in CommentForgery::ALL {
+                    let forged = forge(source, needle, forgery);
+                    assert!(forged.contains(needle));
+                    assert!(!judge(&forged).is_empty(), "{forgery:?} `{needle}` passes");
+                }
+            }
+        }
+        let gate_first = swap(INTAKE_TURN, TAKE_ORIGINAL, GATE);
+        assert!(!deferred_take_gaps(&gate_first).is_empty());
+        let classify_first = swap(PRE_ADMISSION, UPLOAD_GUARD, CLASSIFY);
+        assert!(!upload_guard_gaps(&classify_first).is_empty());
+        for (judge, source, anchor, write) in [
+            (
+                deferred_take_gaps as fn(&str) -> Vec<String>,
+                INTAKE_TURN,
+                EARLY,
+                "std::mem::take(&mut s.pending_uploads);",
+            ),
+            (
+                upload_guard_gaps,
+                PRE_ADMISSION,
+                UPLOAD_GUARD,
+                "s.pending_uploads.push(upload);",
+            ),
+        ] {
+            let prose = source.replacen(anchor, &format!("/* {write} */ {anchor} // {write}"), 1);
+            assert_eq!(judge(&prose), Vec::<String>::new());
+            let coded = source.replacen(anchor, &format!("{write}\n{anchor}"), 1);
+            assert_eq!(judge(&coded).len(), 1, "{write}");
         }
     }
 }
