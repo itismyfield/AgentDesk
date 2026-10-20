@@ -55,6 +55,7 @@ pub(super) async fn clear(
     )
     .await;
     let row = match lookup {
+        HostedLookup::Missing => return false,
         HostedLookup::Found(row) if matches!(&row.record, HostedRecord::Known(_)) => row,
         _ if !endpoint => return false,
         other => {
@@ -73,6 +74,9 @@ pub(super) async fn clear(
     let HostedRecord::Known(record) = &row.record else {
         unreachable!()
     };
+    if record.state == HostedState::Pending {
+        return false;
+    }
     let logical = record.owner.logical_key.clone();
     let candidate = if record.state == HostedState::Retired {
         None

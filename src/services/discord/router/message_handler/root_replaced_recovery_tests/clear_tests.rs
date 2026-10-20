@@ -241,6 +241,18 @@ fn rr_public_clear_with_termination_disabled_retires_and_reports_empty_queue_pg(
         effects,
         "public recovery clear has no pane mutation"
     );
+    let repeated = clear(&case);
+    assert!(
+        !repeated.reply().contains("정리하지 못했어요"),
+        "{}",
+        repeated.reply()
+    );
+    assert_eq!(case.fx.row(), Some(HostedState::Retired));
+    assert_eq!(
+        case.effects(),
+        effects,
+        "a repeated Retired clear has no managed fallback"
+    );
 }
 
 #[test]

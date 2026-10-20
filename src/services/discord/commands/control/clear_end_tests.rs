@@ -343,8 +343,7 @@ fn a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg() {
 
 const HERDR_RETIRED_CHANNEL: u64 = 1_479_671_305_341_200_002;
 
-// A Herdr channel whose execution already retired still ends the managed tmux and process it
-// left behind, and closes no pane.
+// A Retired execution cannot authorize managed fallback; an unmatched owner stays Held.
 #[test]
 fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
     use crate::services::session_host::herdr_termination_rig as herdr;
@@ -381,9 +380,18 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
 
         let reply = clear(&shared, &provider, channel).await;
 
-        assert_eq!(reply, cleared(0));
+        assert!(reply.contains("대기 메시지 0건을 비웠어요."), "{reply}");
+        assert!(
+            reply.contains("이전 Herdr 실행은 정리하지 못했어요."),
+            "{reply}"
+        );
+        assert!(reply.contains("local owner or endpoint differs"), "{reply}");
         assert!(rig.writes().is_empty(), "no pane is closed");
-        assert!(managed.ended(), "the managed tmux and process end");
+        assert!(!managed.ended(), "a Retired row grants no managed fallback");
+        assert_eq!(
+            herdr::row(&pool, &key).await,
+            Some((herdr::HostedState::Retired, herdr::EXECUTION.to_string()))
+        );
         pool.close().await;
         db.drop().await;
     });
