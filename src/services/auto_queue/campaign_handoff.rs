@@ -482,9 +482,8 @@ mod minute_tick_wiring_tests {
     const FIRE: &str = "fire_tick_hook_by_name_with_pg(";
     const ON_TICK: &str = "\"OnTick1min\"";
 
-    /// Classification 2: the 1min tier is the real `count % 2` block of the policy tick
-    /// (not a section comment); the handoff precedes the fire call whose own argument is
-    /// exactly `"OnTick1min"`, so a quoted copy inside another argument does not count.
+    /// Classification 2: in the policy tick's real `count % 2` block, the handoff precedes
+    /// the fire call whose own argument is exactly `"OnTick1min"` (a quoted copy is not).
     fn handoff_order_gaps(server: &str) -> Vec<String> {
         let text = strip_rust_comments(server).expect("server source lexes");
         let mask = rust_code_mask(server).expect("server source lexes");

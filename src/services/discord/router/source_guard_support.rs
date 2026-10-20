@@ -26,9 +26,8 @@ impl Lexed {
         &self.code
     }
 
-    /// Offsets where `needle` appears as written: its code as code and its literals as
-    /// literals, so prose, a quoted copy or a test's own needle never counts. A needle
-    /// with no code byte would also match inside a raw string, so it is refused.
+    /// Offsets where `needle` appears as written (code as code, literals as literals); a
+    /// needle with no code byte would also match inside a raw string, so it is refused.
     pub(in crate::services::discord) fn find_all(&self, needle: &str) -> Vec<usize> {
         let shape = rust_code_mask(needle).expect("needle lexes on its own");
         assert!(
