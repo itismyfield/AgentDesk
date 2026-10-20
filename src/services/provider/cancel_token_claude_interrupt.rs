@@ -885,10 +885,10 @@ mod tests {
         let writes = AtomicUsize::new(0);
         let guard = stale.lock_current_claude_interrupt_session(session);
         if let Some(guard) = guard {
-            let outcome = guard.commit_success((|| {
+            let outcome = guard.commit_success({
                 writes.fetch_add(1, Ordering::Relaxed);
                 Ok::<(), ()>(())
-            })());
+            });
             assert_eq!(outcome, Ok(()));
         }
 
