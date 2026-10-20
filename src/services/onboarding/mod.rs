@@ -2881,6 +2881,8 @@ async fn complete_with_options(
 }
 
 #[cfg(test)]
-mod canonical_status_tests;
+mod canonical_status_tests {
+    mod migration_value_pg_tests;
+}
 
 // Provider check + AI prompt generation handlers moved to `provider` submodule.

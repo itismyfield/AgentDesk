@@ -1,5 +1,7 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::onboarding::{
+    ChannelResolutionKind, CompleteBody, ResolvedChannelMapping, persist_onboarding_pg,
+};
 
 /// Runs the onboarding agent write on a fully migrated schema, so the status
 /// under test is the value the write path binds, checked by the live CHECK.

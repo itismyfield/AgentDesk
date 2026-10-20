@@ -1,9 +1,9 @@
 //! Seeds rows at the schema just before each status migration, applies only
 //! that migration, then compares the stored values and CHECK outcomes.
 
-use super::VALID_DISPATCH_STATUSES;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::postgres;
+use crate::dispatch::dispatch_status::VALID_DISPATCH_STATUSES;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 use std::borrow::Cow;
