@@ -353,6 +353,7 @@ jobs:
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_metadata_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_owner_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs'

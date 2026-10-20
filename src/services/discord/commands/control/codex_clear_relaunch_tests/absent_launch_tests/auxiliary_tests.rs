@@ -454,6 +454,9 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
         ],
     )
     .await;
+    let old_state = foreign_no_core
+        .is_some_and(|no_core| no_core)
+        .then(|| joint_owner_tests::OldSourceSnapshot::seed(&fixture));
     let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
         &fixture.old_source.path,
     );
@@ -717,6 +720,9 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
     )
     .unwrap();
     assert!(disk.is_empty());
+    if let Some(old_state) = old_state {
+        old_state.assert_preserved();
+    }
     assert_eq!(
         old_io.stats(),
         Default::default(),

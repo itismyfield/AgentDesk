@@ -3695,6 +3695,10 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_on_without_session_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_after_boot_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_in_memory_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_conflicting_metadata_identity_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_metadata_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_registered_owner_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_routine_receipt_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_registered_owner_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_routine_receipt_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::no_core_registered_and_routine_foreign_owners_drain_restored_fifo_pg
@@ -10616,6 +10620,10 @@ services::discord::turn_presence::activity::tests::presence_requires_live_host_w
 services::discord::turn_presence::activity::tests::s1_actual_tail_initial_resume_and_poll_have_bounded_hash_free_reads
 services::discord::turn_presence::activity::tests::s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
+services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_rejects_scope_and_existing_name_conflicts_before_supplementing
+services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_snapshot_pins_context_nonce_even_when_the_candidate_name_does_not_change
+services::discord::turn_presence::activity::unbound::binding_metadata::tests::metadata_supplements_only_a_name_without_installing_current_or_source
+services::discord::turn_presence::activity::unbound::binding_metadata::tests::strict_metadata_refuses_duplicate_gap_foreign_and_unreadable_records
 services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_local_foreign_owner_conflicts_with_another_foreign_claim
 services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_receipt_distinct_keys_and_invalid_history_cannot_fill_foreign_owner
 services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_watcher_agreement_preserves_local_and_self_claims

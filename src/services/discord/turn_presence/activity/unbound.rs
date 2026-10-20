@@ -535,6 +535,7 @@ mod dormancy_tests;
 #[path = "unbound/unit_tests.rs"]
 mod tests;
 
+mod binding_metadata;
 mod cross_runtime_owners;
 pub(super) mod herdr_bound;
 pub(super) mod hold_leaf;

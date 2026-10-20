@@ -949,6 +949,7 @@ src/
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
+│   │   │   │   │   │   │   ├── joint_metadata_tests.rs
 │   │   │   │   │   │   │   ├── joint_owner_tests.rs
 │   │   │   │   │   │   │   └── policy_tests.rs
 │   │   │   │   │   │   ├── auxiliary_tests.rs
@@ -2270,6 +2271,8 @@ src/
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
+│   │   │   │   │   ├── binding_metadata.rs
+│   │   │   │   │   ├── binding_metadata_tests.rs
 │   │   │   │   │   ├── canonical_target.rs
 │   │   │   │   │   ├── clear_owner_race_tests.rs
 │   │   │   │   │   ├── collection_publication_tests.rs

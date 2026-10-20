@@ -5,6 +5,10 @@ use super::*;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::CanaryFixture;
 use crate::services::discord::health::HealthRegistry;
 
+#[path = "joint_metadata_tests.rs"]
+mod metadata_tests;
+pub(super) use metadata_tests::OldSourceSnapshot;
+
 const REGISTRY_NAME: &str = "AgentDesk-codex-bundle-registered-foreign";
 const ROUTINE_NAME: &str = "AgentDesk-claude-routine-bundle-foreign";
 const FOREIGN_CHANNEL: u64 = CANARY_CHANNEL + 9_900;
@@ -15,10 +19,18 @@ pub(in crate::services::discord) struct OwnerScope {
 }
 
 #[derive(Clone, Copy)]
+enum Metadata {
+    Exact,
+    Missing,
+    Conflict,
+}
+
+#[derive(Clone, Copy)]
 struct Evidence {
     registry: bool,
     routine: bool,
     no_core: bool,
+    metadata: Metadata,
 }
 
 pub(in crate::services::discord) async fn install_positive(
@@ -31,6 +43,7 @@ pub(in crate::services::discord) async fn install_positive(
             registry: true,
             routine: true,
             no_core,
+            metadata: Metadata::Exact,
         },
     )
     .await
@@ -120,14 +133,18 @@ async fn install(fixture: &mut CanaryFixture, evidence: Evidence) -> OwnerScope 
         );
     }
     if evidence.no_core {
-        make_binding_only(fixture).await;
+        make_binding_only(
+            fixture,
+            evidence.registry && evidence.routine && matches!(evidence.metadata, Metadata::Exact),
+        )
+        .await;
     }
     OwnerScope {
         _registry: registry,
     }
 }
 
-async fn make_binding_only(fixture: &CanaryFixture) {
+async fn make_binding_only(fixture: &CanaryFixture, assert_absent: bool) {
     let channel = serenity::ChannelId::new(CANARY_CHANNEL);
     fixture.shared.core.lock().await.sessions.remove(&channel);
     let mut config = (*crate::config_live_reload::current().unwrap()).clone();
@@ -242,6 +259,9 @@ async fn make_binding_only(fixture: &CanaryFixture) {
         event.seq == prior.seq && matches!(&event.record, BindingRecord::Rejected { .. })
     }));
     eprintln!("BUNDLE_NO_CORE_BINDING raw_exact_n2=1 source_permission=0 filtered_rejected=1");
+    if !assert_absent {
+        return;
+    }
     let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
     let unbound =
         activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
@@ -334,6 +354,7 @@ async fn missing_registered_owner_preserves_restored_fifo_pg() {
             registry: false,
             routine: true,
             no_core: false,
+            metadata: Metadata::Exact,
         })
         .await;
     }
@@ -349,6 +370,7 @@ async fn missing_routine_receipt_preserves_restored_fifo_pg() {
             registry: true,
             routine: false,
             no_core: false,
+            metadata: Metadata::Exact,
         })
         .await;
     }
@@ -365,7 +387,25 @@ async fn missing_proof_holds(evidence: Evidence) {
     ));
     let _cli = fixture.cold_cli();
     target_missing(&fixture, true);
+    let _metadata_input = matches!(evidence.metadata, Metadata::Missing).then(|| {
+        fixture.scoped_test_env(
+            "AGENTDESK_N2B_TEST_MUTATION",
+            "joint-metadata-missing".as_ref(),
+        )
+    });
+    let old_state = evidence.no_core.then(|| OldSourceSnapshot::seed(&fixture));
     let _owners = install(&mut fixture, evidence).await;
+    if matches!(evidence.metadata, Metadata::Conflict) {
+        let mut bytes = Vec::new();
+        for line in fs::read_to_string(fixture.history()).unwrap().lines() {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["execution_nonce"].as_str() == Some(fixture.context.execution_nonce.as_str()) {
+                event["execution_nonce"] = json!("1123456789abcdef0123456789abcdef");
+            }
+            writeln!(&mut bytes, "{event}").unwrap();
+        }
+        fs::write(fixture.history(), bytes).unwrap();
+    }
     let channel = serenity::ChannelId::new(CANARY_CHANNEL);
     fixture.shared.core.lock().await.sessions.remove(&channel);
     let identities = restore_instructions(
@@ -383,19 +423,23 @@ async fn missing_proof_holds(evidence: Evidence) {
     let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
         &fixture.old_source.path,
     );
-    assert_eq!(
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel,)
-            .await
-            .unwrap(),
-        "Hold(\"owner_unresolved\")"
-    );
+    let verdict =
+        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
+            .await;
+    match evidence.metadata {
+        Metadata::Exact => assert_eq!(verdict.unwrap(), "Hold(\"owner_unresolved\")"),
+        Metadata::Missing => assert_eq!(verdict.unwrap(), "Hold(\"current_unresolved\")"),
+        Metadata::Conflict => assert!(verdict.is_err(), "{verdict:?}"),
+    }
     let absence_observation =
         crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
             .expect("the queue guard fixture must have a read-only absent inflight observation");
-    assert!(
-        dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &absence_observation).is_some(),
-        "the queue guard fixture must have exact absence launch evidence"
-    );
+    if !matches!(evidence.metadata, Metadata::Conflict) {
+        assert!(
+            dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &absence_observation).is_some(),
+            "the queue guard fixture must have exact absence launch evidence"
+        );
+    }
     assert!(
         !dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
         "absence alone must not satisfy the explicit-clear queue exception"
@@ -403,7 +447,14 @@ async fn missing_proof_holds(evidence: Evidence) {
     let public_activity =
         activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
     assert_eq!(public_activity.activity, activity::Activity::Unknown);
-    assert_eq!(public_activity.reason, "session_identity_unresolved");
+    assert_eq!(
+        public_activity.reason,
+        if matches!(evidence.metadata, Metadata::Conflict) {
+            "session_probe_failed"
+        } else {
+            "session_identity_unresolved"
+        }
+    );
     fixture.fake.take_calls();
     let taken = crate::services::discord::queue_dispatch::mailbox_take_next_automatic_intervention(
         &fixture.shared,
@@ -427,6 +478,9 @@ async fn missing_proof_holds(evidence: Evidence) {
     assert!(after.cancel_token.is_none() && after.pending_user_dispatch.is_none());
     assert_eq!(fs::read(fixture.history()).unwrap(), history_before);
     assert!(!fixture.root.path().join("fresh-context").exists());
+    if let Some(old_state) = old_state {
+        old_state.assert_preserved();
+    }
     assert_eq!(old_io.stats(), Default::default());
     assert!(fixture.fake.take_calls().iter().all(|call| {
         ["new-session", "kill-session", "send-keys", "paste-buffer"]

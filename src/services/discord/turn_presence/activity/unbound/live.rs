@@ -185,6 +185,7 @@ fn registrations(config: &Config) -> Result<Vec<RegisteredChannelBinding>, Strin
 struct Files {
     fallback: Vec<RegisteredChannelBinding>,
     bindings: Vec<BindingEvent>,
+    metadata: binding_metadata::Snapshot,
     candidates: Result<Candidates, String>,
     row: Result<Option<InflightTurnState>, String>,
     row_identity: String,
@@ -208,8 +209,14 @@ impl Files {
                 _ => ShadowProvider::Codex,
             };
             let log = ChannelBindingLog::new(channel, shadow);
-            let candidates = observe_candidates(channel, provider, core, &fallback, &log);
             let bindings = log.binding_events_since(channel, 0)?;
+            let metadata = binding_metadata::collect(channel, provider, &bindings)?;
+            let candidates = observe_candidates(channel, provider, core, &fallback, &log).and_then(
+                |mut candidates| {
+                    metadata.supplement(&mut candidates)?;
+                    Ok(candidates)
+                },
+            );
             let row = inflight::load_inflight_state_read_only_result(provider, channel);
             let row_identity = serde_json::to_string(&row).map_err(|e| e.to_string())?;
             let traces = candidates
@@ -230,6 +237,7 @@ impl Files {
             Ok(Self {
                 fallback,
                 bindings,
+                metadata,
                 candidates,
                 row,
                 row_identity,
@@ -243,6 +251,7 @@ impl Files {
     fn same(&self, other: &Self) -> bool {
         self.fallback == other.fallback
             && self.bindings == other.bindings
+            && self.metadata == other.metadata
             && self.candidates == other.candidates
             && self.row_identity == other.row_identity
             && self.seq == other.seq

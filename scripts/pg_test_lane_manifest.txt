@@ -143,6 +143,7 @@ src/services/discord/commands/control/clear_persist_failure_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_metadata_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_owner_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs
@@ -532,6 +533,7 @@ services::discord::commands::control::codex_clear_relaunch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests
@@ -1728,6 +1730,10 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_on_without_session_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_after_boot_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_in_memory_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_conflicting_metadata_identity_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_metadata_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_registered_owner_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::metadata_tests::no_core_missing_routine_receipt_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_registered_owner_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_routine_receipt_preserves_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::no_core_registered_and_routine_foreign_owners_drain_restored_fifo_pg

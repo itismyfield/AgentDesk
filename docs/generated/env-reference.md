@@ -109,7 +109,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_MEMENTO_HOOK` | `src/cli/utils.rs` | #2655: marker key that identifies AgentDesk-managed hook entries in a Claude Code `settings.json`. |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs` |  |
-| `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs` | Test-only switch naming the one rule a mutation run disables. |
+| `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs`, `src/services/discord/turn_presence/activity/unbound/binding_metadata.rs`, `src/services/tui_o/writer/binding.rs` | Test-only switch naming the one rule a mutation run disables. |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs`, `src/engine/mod.rs` |  |
