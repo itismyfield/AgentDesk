@@ -87,6 +87,8 @@ impl Pane {
             crate::services::claude_tui::transcript_tail::claude_transcript_path(&cwd, &a, None)
                 .unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Mirror the host evidence published by the production tmux launch.
+        tc::host_marker::record_tmux_host_marker(&tmux);
         let context = BindingContext {
             schema: 1,
             provider: "claude".into(),
