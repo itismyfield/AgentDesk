@@ -71,24 +71,59 @@ pub(in crate::services::discord) struct TurnBridgeContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::services::discord::router::source_guard_support::{Lexed, forge};
+    use crate::test_support::CommentForgery;
+
+    const INTAKE: &str = include_str!("../router/message_handler/intake_turn.rs");
+    const WAIT: &str = "if let Some(rx) = completion_rx {";
+    const EXECUTED: &str = "Ok(IntakeExecution::Executed)";
+    const WAITER: &str = "if let Some(rx) = completion_rx {\n    rx.await\n        .map_err(|_| \"queued turn completion wait failed\".to_string())?;\n}";
+
+    /// Classification 2: from the first coded wait to the executed return, the code is exactly
+    /// the waiter that drops the typed payload, ignoring comments and whitespace outside literals.
+    fn completion_waiter_gaps(intake: &str) -> Vec<String> {
+        let lexed = Lexed::new(intake);
+        let waiter = lexed.find(WAIT).and_then(|at| {
+            let end = lexed.find_after(at, EXECUTED)?;
+            Some(lexed.slice(at..end).compact())
+        });
+        match waiter {
+            Some(found) if found.text() == Lexed::new(WAITER).compact().text() => Vec::new(),
+            found => vec![format!(
+                "the completion waiter is not exactly the recv-error map: {found:?}"
+            )],
+        }
+    }
+
     #[test]
     fn intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error() {
-        let source = include_str!("../router/message_handler/intake_turn.rs");
-        let start = source
-            .find("if let Some(rx) = completion_rx {")
-            .expect("intake completion wait remains present");
-        let waiter = source[start..]
-            .split_once("Ok(IntakeExecution::Executed)")
-            .expect("intake still returns the executed disposition")
-            .0;
-        assert_eq!(
-            waiter.trim().lines().map(str::trim).collect::<Vec<_>>(),
-            [
-                "if let Some(rx) = completion_rx {",
-                "rx.await",
-                ".map_err(|_| \"queued turn completion wait failed\".to_string())?;",
-                "}",
-            ]
+        assert_eq!(completion_waiter_gaps(INTAKE), Vec::<String>::new());
+    }
+
+    #[test]
+    fn completion_waiter_guard_follows_code_not_comments_or_quoted_copies() {
+        for needle in [WAIT, "rx.await", ".to_string())?;", EXECUTED] {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(INTAKE, needle, forgery);
+                assert!(
+                    !completion_waiter_gaps(&forged).is_empty(),
+                    "{forgery:?} `{needle}`"
+                );
+            }
+        }
+        let noted = INTAKE.replacen("rx.await", "rx.await // payload dropped", 1);
+        assert_ne!(noted, INTAKE);
+        assert_eq!(completion_waiter_gaps(&noted), Vec::<String>::new());
+        // A quoted copy of the waiter ahead of a real waiter that keeps the payload is no proof.
+        let at = INTAKE.find(WAIT).expect("intake completion wait");
+        let decoy = format!("let _decoy = r#\"{WAITER}\n{EXECUTED}\"#;\n");
+        let kept = INTAKE.replacen(
+            ".map_err(|_| \"queued",
+            ".map(|payload| payload).map_err(|_| \"queued",
+            1,
         );
+        assert_ne!(kept, INTAKE);
+        let decoyed = [&kept[..at], decoy.as_str(), &kept[at..]].concat();
+        assert!(!completion_waiter_gaps(&decoyed).is_empty());
     }
 }

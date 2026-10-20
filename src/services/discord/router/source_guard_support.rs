@@ -7,9 +7,8 @@ use crate::test_support::{
     CommentForgery, braced_item_span, rust_code_mask, rust_spans, strip_rust_comments,
 };
 
-/// One source with comments blanked (`code`) and literals blanked too (`mask`); both
-/// keep the source's byte offsets, so a position found in one indexes the other.
-/// `literals` holds each literal token's range in those offsets.
+/// One source with comments blanked (`code`), literals blanked too (`mask`) and literal
+/// token ranges (`literals`), all in the source's byte offsets.
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct Lexed {
     code: String,
@@ -122,6 +121,36 @@ impl Lexed {
             code: utf8(code),
             mask: utf8(mask),
         }
+    }
+
+    /// The (optionally labeled) block after the `=>` of the first arm whose pattern starts
+    /// with as-written `head`; `None` for an expression arm or once the enclosing block closes.
+    pub(in crate::services::discord) fn arm(&self, head: &str) -> Option<Self> {
+        let at = self.find(head)?;
+        let mask = self.mask.as_bytes();
+        let mut depth = 0usize;
+        for index in at..mask.len() {
+            match mask[index] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
+                b'=' if depth == 0 && mask.get(index + 1) == Some(&b'>') => {
+                    let skip = |from: usize| {
+                        from + self.mask[from..].len() - self.mask[from..].trim_start().len()
+                    };
+                    let mut body = skip(index + 2);
+                    if mask.get(body) == Some(&b'\'') {
+                        body = skip(body + self.mask[body..].find(':')? + 1);
+                    }
+                    if mask.get(body) != Some(&b'{') {
+                        return None;
+                    }
+                    let span = braced_item_span(&self.mask[body..], "{")?;
+                    return Some(self.slice(body + span.start..body + span.end));
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// From the first as-written `head` through the `}` closing the block it opens;
@@ -239,4 +268,17 @@ fn compact_keeps_literal_bytes_and_drops_only_outside_whitespace() {
         compacted.count("\"clear_inflight_state_for_reconcile\","),
         1
     );
+}
+
+#[test]
+fn arm_bodies_skip_pattern_braces_and_refuse_expression_arms() {
+    let lexed = Lexed::new(
+        "match m { A { x } => { call(x) } B(y) => y, C => { other(\"}\") } D => 'l: { d() } }",
+    );
+    let body = |head: &str| lexed.arm(head).map(|arm| arm.text().to_string());
+    assert_eq!(body("A {").as_deref(), Some("{ call(x) }"));
+    assert_eq!(body("B("), None);
+    assert_eq!(body("C =>").as_deref(), Some("{ other(\"}\") }"));
+    assert_eq!(body("D =>").as_deref(), Some("{ d() }"));
+    assert!(Lexed::new("{ f() } g => { h() }").arm("f(").is_none());
 }

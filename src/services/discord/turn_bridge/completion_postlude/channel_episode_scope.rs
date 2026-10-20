@@ -474,97 +474,192 @@ mod tests {
             "every bridge entry file must declare its mailbox token-registration contract"
         );
 
-        let live_original = include_str!("../../live_bridge/guard_tests.rs");
-        assert_eq!(live_original.matches(&spawn).count(), 2);
-        for call in [
-            "spawn_turn_bridge(shared.clone(), token.clone(), rx, context);",
-            "spawn_turn_bridge(shared, token, rx, context);",
-        ] {
-            assert_eq!(live_original.matches(call).count(), 1);
-        }
-        let intake = include_str!("../../router/message_handler/intake_turn.rs");
-        let headless = include_str!("../../router/message_handler/headless_turn.rs");
-        let recovery = include_str!("../../recovery_engine/restore_inflight.rs");
-        let tui_direct = include_str!("../../tui_prompt_relay/claude_idle_bridge.rs");
-        assert_eq!(intake.matches(&spawn).count(), 2);
-        assert_eq!(headless.matches(&spawn).count(), 1);
-        assert_eq!(recovery.matches(&spawn).count(), 1);
-        assert_eq!(tui_direct.matches(&spawn).count(), 0);
-        // T6 unrecorded dead-code sweep slice 1: 2 -> 1. The unwired legacy
-        // `relay_tui_idle_response_through_bridge` (zero production and zero
-        // test callers) was deleted; `stream_tui_idle_response_through_bridge`
-        // is now the only TUI-direct bridge entry, and it still pins the
-        // captured synthetic mailbox actor.
-        assert_eq!(tui_direct.matches(&pinned).count(), 1);
-        assert!(
-            intake
-                .split_whitespace()
-                .collect::<String>()
-                .contains("cancel_token.clone(),request_owner")
-        );
-        // The headless start bridges the token its shared claim helper registered with the mailbox.
-        let headless_claim = include_str!("../../router/turn_start.rs");
-        assert!(headless.contains(
-            "let (session_transition_guard, cancel_token) =\n        claim(shared, channel_id, request_owner, &reservation, identity).await?;"
-        ));
-        assert!(
-            headless_claim.contains(
-                "let (token, message) = (cancel_token.clone(), reservation.user_msg_id);"
-            )
-        );
-        assert!(headless_claim.contains("Ok((transition, cancel_token))"));
-        let process_fixture: String =
-            include_str!("../../router/message_handler/headless_turn/process_mailbox/tests.rs")
-                .split_whitespace()
-                .collect();
-        assert!(process_fixture.contains("lettoken=Arc::new(CancelToken::new());"));
-        assert!(process_fixture.contains("letmailbox=shared.mailbox(channel);"));
-        assert!(process_fixture.contains(concat!(
-            "mailbox.try_start_turn(token.clone(),",
-            "UserId::new(7),MessageId::new(user_message_id))"
-        )));
-        assert!(
-            process_fixture
-                .contains("letlease=capture((&shared,channel),&token,Some(&process_metadata()))")
-        );
-        assert!(process_fixture.contains("Self{shared,channel,token,mailbox,}"));
-        let process_bridge = include_str!(
+        assert_eq!(entry_contract_gaps(ENTRY_INPUTS), Vec::<String>::new());
+    }
+
+    /// The include inputs of the bridge entry contract, kept together so a forgery varies one.
+    #[derive(Clone, Copy)]
+    struct EntryInputs<'a> {
+        live: &'a str,
+        intake: &'a str,
+        headless: &'a str,
+        recovery: &'a str,
+        tui_direct: &'a str,
+        claim: &'a str,
+        process_fixture: &'a str,
+        process_bridge: &'a str,
+    }
+
+    const ENTRY_INPUTS: EntryInputs<'static> = EntryInputs {
+        live: include_str!("../../live_bridge/guard_tests.rs"),
+        intake: include_str!("../../router/message_handler/intake_turn.rs"),
+        headless: include_str!("../../router/message_handler/headless_turn.rs"),
+        recovery: include_str!("../../recovery_engine/restore_inflight.rs"),
+        tui_direct: include_str!("../../tui_prompt_relay/claude_idle_bridge.rs"),
+        claim: include_str!("../../router/turn_start.rs"),
+        process_fixture: include_str!(
+            "../../router/message_handler/headless_turn/process_mailbox/tests.rs"
+        ),
+        process_bridge: include_str!(
             "../../router/message_handler/headless_turn/process_mailbox/bridge_tests.rs"
+        ),
+    };
+
+    /// Classification 2, per input, comments and whitespace ignored: entry counts, token/actor/pin
+    /// hand-offs and the fixture's real claim identity. A lexical tripwire: no alias or macro.
+    fn entry_contract_gaps(inputs: EntryInputs<'_>) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let spawn = ["spawn_turn_", "bridge("].concat();
+        let pinned = ["spawn_turn_", "bridge_with_pin("].concat();
+        let mut gaps = Vec::new();
+        let mut want = |source: &str, needle: &str, wanted: Option<usize>| {
+            let tight = Lexed::new(needle).compact().text().to_string();
+            let found = Lexed::new(source).compact().count(&tight);
+            if wanted.map_or(found == 0, |wanted| found != wanted) {
+                gaps.push(format!("`{needle}` appears {found} times; want {wanted:?}"));
+            }
+        };
+        let EntryInputs {
+            live,
+            intake,
+            headless,
+            recovery,
+            tui_direct,
+            claim,
+            process_fixture,
+            process_bridge,
+        } = inputs;
+        want(live, &spawn, Some(2));
+        want(
+            live,
+            "spawn_turn_bridge(shared.clone(), token.clone(), rx, context);",
+            Some(1),
         );
-        assert_eq!(process_bridge.matches(&spawn).count(), 1);
-        let process_bridge: String = process_bridge.split_whitespace().collect();
-        assert!(
-            process_bridge
-                .contains("Fixture::with_user_message(ProviderKind::Codex,USER_MESSAGE).await;")
+        want(
+            live,
+            "spawn_turn_bridge(shared, token, rx, context);",
+            Some(1),
         );
-        assert!(process_bridge.contains(concat!(
-            "spawn_turn_bridge(fixture.shared.clone(),",
-            "fixture.token.clone(),rx,context);"
-        )));
-        let recovery_tokens: String = recovery.split_whitespace().collect();
-        assert_eq!(
-            recovery_tokens.matches("mailbox_recovery_kickoff(").count(),
-            1
+        want(intake, &spawn, Some(2));
+        want(headless, &spawn, Some(1));
+        want(recovery, &spawn, Some(1));
+        want(tui_direct, &spawn, Some(0));
+        want(tui_direct, &pinned, Some(1));
+        want(intake, "cancel_token.clone(), request_owner", None);
+        // The headless start bridges the token its shared claim helper registered with the mailbox.
+        want(
+            headless,
+            "let (session_transition_guard, cancel_token) = claim(shared, channel_id, request_owner, &reservation, identity).await?;",
+            None,
         );
-        assert!(recovery_tokens.contains(concat!(
-            "mailbox_recovery_kickoff(",
-            "shared,channel_id,cancel_token.clone(),",
-            "kickoff_identity.request_owner,kickoff_identity.user_message_id,)",
-        )));
-        assert_eq!(
-            tui_direct
-                .matches(concat!(
-                    "spawn_turn_bridge_with_pin(\n",
-                    "        shared.clone(),\n",
-                    "        claim.actor.clone(),\n",
-                    "        rx,\n",
-                    "        bridge,\n",
-                    "        pin,\n",
-                    "    );"
-                ))
-                .count(),
-            1,
-            "the surviving TUI-direct entry preserves the captured synthetic mailbox actor"
+        want(
+            claim,
+            "let (token, message) = (cancel_token.clone(), reservation.user_msg_id);",
+            None,
         );
+        want(claim, "Ok((transition, cancel_token))", None);
+        for fixture in [
+            "let token = Arc::new(CancelToken::new());",
+            "let mailbox = shared.mailbox(channel);",
+            "mailbox.try_start_turn(token.clone(), UserId::new(7), MessageId::new(user_message_id))",
+            "let lease = capture((&shared, channel), &token, Some(&process_metadata()))",
+            "Self { shared, channel, token, mailbox, }",
+        ] {
+            want(process_fixture, fixture, None);
+        }
+        want(process_bridge, &spawn, Some(1));
+        want(
+            process_bridge,
+            "Fixture::with_user_message(ProviderKind::Codex, USER_MESSAGE).await;",
+            None,
+        );
+        want(
+            process_bridge,
+            "spawn_turn_bridge(fixture.shared.clone(), fixture.token.clone(), rx, context);",
+            None,
+        );
+        want(recovery, "mailbox_recovery_kickoff(", Some(1));
+        want(
+            recovery,
+            "mailbox_recovery_kickoff(shared, channel_id, cancel_token.clone(), kickoff_identity.request_owner, kickoff_identity.user_message_id,)",
+            None,
+        );
+        // The surviving TUI-direct entry preserves the captured synthetic mailbox actor.
+        want(
+            tui_direct,
+            "spawn_turn_bridge_with_pin(shared.clone(), claim.actor.clone(), rx, bridge, pin,);",
+            Some(1),
+        );
+        gaps
+    }
+
+    #[test]
+    fn bridge_entry_contract_rejects_commented_hand_offs_and_counts_coded_entries() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        type Pick = for<'a> fn(&'a mut EntryInputs<'static>) -> &'a mut &'static str;
+        let spawn = ["spawn_turn_", "bridge("].concat();
+        let cases: [(Pick, &str); 15] = [
+            (
+                |i| &mut i.live,
+                "spawn_turn_bridge(shared, token, rx, context);",
+            ),
+            (|i| &mut i.live, &spawn),
+            (|i| &mut i.intake, &spawn),
+            (|i| &mut i.intake, "cancel_token.clone(),"),
+            (|i| &mut i.headless, &spawn),
+            (
+                |i| &mut i.headless,
+                "claim(shared, channel_id, request_owner, &reservation, identity)",
+            ),
+            (|i| &mut i.recovery, "mailbox_recovery_kickoff("),
+            (|i| &mut i.recovery, "kickoff_identity.request_owner,"),
+            (|i| &mut i.tui_direct, "claim.actor.clone(),"),
+            (
+                |i| &mut i.claim,
+                "let (token, message) = (cancel_token.clone(), reservation.user_msg_id);",
+            ),
+            (|i| &mut i.claim, "Ok((transition, cancel_token))"),
+            (
+                |i| &mut i.process_fixture,
+                "let token = Arc::new(CancelToken::new());",
+            ),
+            (|i| &mut i.process_fixture, "let lease = capture("),
+            (|i| &mut i.process_bridge, &spawn),
+            (
+                |i| &mut i.process_bridge,
+                "Fixture::with_user_message(ProviderKind::Codex, USER_MESSAGE)",
+            ),
+        ];
+        for (pick, needle) in cases {
+            for forgery in CommentForgery::ALL {
+                let mut inputs = ENTRY_INPUTS;
+                let forged = forge(*pick(&mut inputs), needle, forgery);
+                *pick(&mut inputs) = forged.leak();
+                assert!(
+                    !entry_contract_gaps(inputs).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        let anchor = "let (session_transition_guard, cancel_token) =";
+        let at = ENTRY_INPUTS.headless.find(anchor).expect("headless claim");
+        for (extra, gaps) in [
+            ("// spawn_turn_bridge(a, b, c, d);", 0),
+            ("spawn_turn_bridge(a, b, c, d);", 1),
+        ] {
+            let headless = [
+                &ENTRY_INPUTS.headless[..at],
+                extra,
+                "\n    ",
+                &ENTRY_INPUTS.headless[at..],
+            ]
+            .concat();
+            let inputs = EntryInputs {
+                headless: headless.leak(),
+                ..ENTRY_INPUTS
+            };
+            assert_eq!(entry_contract_gaps(inputs).len(), gaps, "{extra}");
+        }
     }
 }
