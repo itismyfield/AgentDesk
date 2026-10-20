@@ -187,6 +187,8 @@ pub(super) async fn queued_attempt(
                     detail: "queued_settle_unknown",
                 };
             }
+            // Pane and actor settlement are complete; reaction I/O must not hold the next input.
+            drop(target);
             if matches!(attempt, InjectAttempt::Injected { .. }) {
                 super::catch_up_race::confirmed(
                     &shared,

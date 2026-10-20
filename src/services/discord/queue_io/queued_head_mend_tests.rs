@@ -251,6 +251,10 @@ async fn s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg() {
         ["paste-buffer", "send-keys"],
         "H was typed once in all"
     );
+    until("the recorded reconciliation attempt is reported", || {
+        fixture.reconciled_rows() == 1
+    })
+    .await;
     fixture.slow_check().await;
     until("B follows", || fixture.terminal() == [h.get(), b.get()]).await;
     assert_eq!(fixture.pane.keys().len(), 4);

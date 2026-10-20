@@ -413,6 +413,10 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     until("H is settled", || fixture.terminal() == [h.get()]).await;
     assert_eq!(fixture.receipts(), ["H raced by two workers"]);
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    until("H's owner finished reporting", || {
+        fixture.rows().iter().any(|row| row.outcome == "injected")
+    })
+    .await;
 
     // B's own enqueue only typed H; nothing new arrives, and the backstop left armed reaches B.
     let b = fixture.queue().await[0].message_id;

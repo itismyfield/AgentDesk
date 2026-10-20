@@ -81,6 +81,7 @@ pub(super) async fn mend(
         tracing::warn!(channel_id, primary, %error, "queued head proof was not applied");
         return None;
     }
+    drop(_transition);
     super::catch_up_race::confirmed(shared, &request.provider, channel, &sources).await;
     tracing::info!(
         channel_id = channel.get(),
