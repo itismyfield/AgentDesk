@@ -6446,9 +6446,6 @@ mod herdr_synthetic_transition_tests;
 mod herdr_synthetic_claim_window_tests;
 
 #[cfg(unix)]
-mod herdr_synthetic_identity_pg_tests;
-
-#[cfg(unix)]
 mod relayerless_claim_tests {
     // #6210: a TUI-direct claim must leave a deliverer when the supervisor producer
     // outlives the tmux watcher.

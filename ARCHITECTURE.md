@@ -2005,7 +2005,6 @@ src/
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── herdr_synthetic_claim_window_tests.rs
-│   │   │   │   ├── herdr_synthetic_identity_pg_tests.rs
 │   │   │   │   ├── herdr_synthetic_transition_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
 │   │   │   │   ├── pending_start_worker_claim_tests.rs
