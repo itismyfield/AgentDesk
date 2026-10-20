@@ -287,8 +287,8 @@ impl HerdrTarget {
         Ok(TerminationFence(permit, was_closing))
     }
 
-    pub(crate) fn revalidate_termination_reads(&self) -> Result<(), HerdrGateRefusal> {
-        self.0.restore_witness(Mutation::Terminate).map(|_| ())
+    pub(crate) fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
+        self.0.restore_witness(Mutation::Terminate)
     }
 
     pub(crate) fn provider_absent(&self) -> Result<bool, String> {

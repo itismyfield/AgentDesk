@@ -21,8 +21,7 @@ impl HerdrTarget {
             return Err("stored launch evidence differs".into());
         }
         let witness = self
-            .0
-            .restore_witness(Mutation::Terminate)
+            .revalidate_termination_reads()
             .map_err(|why| format!("restore: {why:?}"))?;
         if previous.is_some_and(|old| old.record != *record || old.witness != witness) {
             return Err("execution or server changed between proofs".into());

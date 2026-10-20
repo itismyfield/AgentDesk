@@ -392,7 +392,7 @@ pub(crate) async fn terminate_explicit_herdr(
     }
     let read_target = target.clone();
     match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         other => {
             fence.reopen();
             return TerminationResult::Refused(format!("termination provenance: {other:?}"));

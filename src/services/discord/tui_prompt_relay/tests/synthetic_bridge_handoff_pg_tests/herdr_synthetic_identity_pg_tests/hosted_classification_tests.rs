@@ -3,6 +3,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
 };
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_available_pg() {
     Box::pin(async {
@@ -147,6 +148,7 @@ async fn a_tmux_claim_survives_a_hosted_select_error_while_the_actor_pin_stays_a
     .await;
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_retired_hosted_row_allows_tmux_claim_without_weakening_unknown_or_bound_rows_pg() {
     Box::pin(async {
