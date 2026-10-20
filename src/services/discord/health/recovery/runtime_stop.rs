@@ -186,7 +186,7 @@ pub(super) async fn stop_judged_channel_runtime(
         Ok(finish) => finish,
         Err(kept) => return kept,
     };
-    let mut termination_recorded = judged_termination;
+    let mut termination_recorded = native_published && judged_termination;
     // The finish removes only the judged token.
     if let (Some(_), Some(stop)) = (finish.removed_token.as_ref(), stop.as_ref()) {
         let skip_provider_interrupt = skipped_idle_provider_interrupt
