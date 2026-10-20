@@ -470,6 +470,84 @@ mod tests {
     }
 
     #[test]
+    fn parent_sync_observes_published_append_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("codex/5166.json");
+        let mut syncs = 0;
+        append_at_with_sync(
+            &path,
+            7_001,
+            Some("episode"),
+            1_000,
+            |published| {
+                syncs += 1;
+                assert_eq!(published, path);
+                assert_eq!(
+                    read_ledger_at(published)
+                        .expect("rename must precede parent sync")
+                        .entries,
+                    vec![episode(7_001, "episode", 1_000)]
+                );
+                Ok(())
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(syncs, 1, "successful publication must sync its parent once");
+    }
+
+    #[test]
+    fn parent_sync_is_skipped_when_rename_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        append_at(&path, 7_000, None, 900).unwrap();
+        let before = fs::read(&path).unwrap();
+        let fault = runtime_store::rename_fault::Armed::new(&path);
+        let mut syncs = 0;
+        let result = append_at_with_sync(
+            &path,
+            7_001,
+            None,
+            1_000,
+            |_| {
+                syncs += 1;
+                Ok(())
+            },
+            true,
+        );
+        assert!(
+            result.is_err(),
+            "rename failure must remain a write failure"
+        );
+        assert_eq!(syncs, 0, "failed publication must never sync its parent");
+        assert_eq!(fault.evidence().0, 1, "one real rename was attempted");
+        assert_eq!(fault.evidence().1.len(), 1, "the OS refused the rename");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn parent_sync_failure_keeps_the_published_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        let result = append_at_with_sync(
+            &path,
+            7_001,
+            None,
+            1_000,
+            |_| Err(std::io::Error::other("injected parent sync failure")),
+            true,
+        );
+        assert!(
+            result.is_err(),
+            "parent sync failure must be reported separately"
+        );
+        assert_eq!(
+            read_ledger_at(&path).unwrap().entries,
+            vec![entry(7_001, 1_000)]
+        );
+    }
+
+    #[test]
     fn append_then_read_roundtrips_the_user_msg_id() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("codex").join("4564.json");
