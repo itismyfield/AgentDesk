@@ -201,9 +201,8 @@ enum Successor {
     RowSaved,
 }
 
-/// Runs episode A's fresh turn to its failure and its bridge to its exit. `successor`, when
-/// given, replaces A in the mailbox after the provider returned and before the bridge settles,
-/// and at `RowSaved` also saves its own row.
+/// Runs episode A's fresh turn to its failure and its bridge to its exit; a `successor` takes
+/// the channel after the provider returned and before the bridge settles.
 async fn run_case(
     channel_raw: u64,
     successor: Option<(Arc<CancelToken>, Successor)>,
