@@ -36,6 +36,7 @@ mod environment_tests {
             return;
         }
 
+        let _runtime = crate::config::TestRuntimeRootGuard::new();
         USE_PRODUCTION_CHANNELS.set(true);
         for channel in [Some(6245), Some(6246), None] {
             let tui = Tui::new("human draft A");
@@ -388,6 +389,7 @@ fn framed() -> String {
 
 #[test]
 fn a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for draft in ["human draft A", "first line\n\n  indented third"] {
         let tui = Tui::new(draft);
         let got = tui.run();
@@ -407,6 +409,7 @@ fn a_draft_is_stashed_then_the_input_entered_once_and_the_draft_handed_back() {
 
 #[test]
 fn an_allowlisted_attached_pane_stashes_submits_once_and_restores_the_exact_draft() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for draft in ["human draft A", "first line\n\n  indented third"] {
         let tui = Tui::new(draft);
         tui.put("attached", "4");
@@ -424,6 +427,7 @@ fn an_allowlisted_attached_pane_stashes_submits_once_and_restores_the_exact_draf
 
 #[test]
 fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("");
     tui.put("attached", "4");
     let session = tui.session();
@@ -450,6 +454,7 @@ fn only_an_allowlisted_empty_attached_pane_takes_the_direct_paste() {
 
 #[test]
 fn same_generation_contamination_after_ownership_never_confirms_a_nonce_only_match() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("attached", "4");
     // The person types, then returns the caret to the observed location: body evidence must
@@ -472,6 +477,7 @@ fn same_generation_contamination_after_ownership_never_confirms_a_nonce_only_mat
 
 #[test]
 fn an_image_added_before_enter_is_contaminated_even_with_matching_text_and_generation() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("attached", "4");
     tui.put(
@@ -502,6 +508,7 @@ fn an_image_added_before_enter_is_contaminated_even_with_matching_text_and_gener
 
 #[test]
 fn a_same_generation_cursor_change_after_ownership_withholds_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("attached", "4");
     tui.person_after_capture(3, "type_text X");
@@ -527,6 +534,7 @@ fn a_same_generation_cursor_change_after_ownership_withholds_enter() {
 
 #[test]
 fn an_attached_direct_paste_beside_new_human_keys_is_unconfirmed_and_held() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("");
     tui.put("attached", "4");
     tui.person_after_capture(1, "type_text 'person typed '");
@@ -559,6 +567,7 @@ fn an_attached_direct_paste_beside_new_human_keys_is_unconfirmed_and_held() {
 
 #[test]
 fn an_attached_direct_paste_resize_is_not_misclassified_as_an_attach_change() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("");
     tui.put("attached", "4");
     tui.person_after_capture(1, "echo 161 > \"$d/width\"");
@@ -576,6 +585,7 @@ fn an_attached_direct_paste_resize_is_not_misclassified_as_an_attach_change() {
 
 #[test]
 fn an_attached_generation_change_stops_the_next_stash_key() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for (capture, action, draft, applied) in [
         (1, "echo 5 > \"$d/attached\"", DraftState::Unchanged, vec![]),
         (1, "echo 101 > \"$d/last\"", DraftState::Unchanged, vec![]),
@@ -607,6 +617,7 @@ fn an_attached_generation_change_stops_the_next_stash_key() {
 
 #[test]
 fn an_attached_generation_change_after_ownership_withholds_enter_and_never_retries() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for action in ["echo 5 > \"$d/attached\"", "echo 101 > \"$d/last\""] {
         let tui = Tui::new("human draft A");
         tui.put("attached", "4");
@@ -631,6 +642,7 @@ fn an_attached_generation_change_after_ownership_withholds_enter_and_never_retri
 
 #[test]
 fn a_stash_marker_and_empty_composer_are_required_before_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for action in [
         "type_text 'human typed'",
         "echo unknown-stash > \"$d/status\"",
@@ -655,6 +667,7 @@ fn a_stash_marker_and_empty_composer_are_required_before_paste() {
 
 #[test]
 fn generation_changes_stop_evidence_reads_after_stash_or_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for after in ["C-s", "paste"] {
         let tui = Tui::new("human draft A");
         tui.put("attached", "4");
@@ -678,6 +691,7 @@ fn generation_changes_stop_evidence_reads_after_stash_or_paste() {
 
 #[test]
 fn human_text_mixed_after_an_attached_paste_is_unconfirmed_without_enter_or_retry() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("attached", "4");
     tui.put("human.after-paste", "type_text ' person typed'");
@@ -706,6 +720,7 @@ fn human_text_mixed_after_an_attached_paste_is_unconfirmed_without_enter_or_retr
 
 #[test]
 fn allowing_attached_clients_keeps_the_same_second_attach_floor_veto() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("attached", "4");
     // Future by a minute: a slow test cannot accidentally age this ambiguous attach out.
@@ -722,6 +737,7 @@ fn allowing_attached_clients_keeps_the_same_second_attach_floor_veto() {
 /// A person who attaches after the pre-capture, stashes A, types B and leaves keeps both.
 #[test]
 fn a_person_attaching_after_the_pre_capture_keeps_both_drafts() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.person_after_capture(1, "attach 200; cs; type_text 'human draft B'; detach");
     assert_eq!(
@@ -762,6 +778,7 @@ fn a_person_attaching_after_the_pre_capture_keeps_both_drafts() {
 /// Delivery and draft are judged apart; nothing is resent and a pane in doubt is held.
 #[test]
 fn delivery_and_draft_outcomes_stay_apart_and_an_unrecovered_pane_is_held() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     // Enter applied but its reply lost: no retry, and the restore is still watched.
     let tui = Tui::new("human draft A");
     tui.put("lost.Enter", "");
@@ -845,6 +862,7 @@ fn delivery_and_draft_outcomes_stay_apart_and_an_unrecovered_pane_is_held() {
 /// The lock spans C-s to the recovery decision, so a second input never starts a second stash.
 #[test]
 fn a_second_input_waits_out_the_whole_stash_transaction() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     tui.put("barrier", "");
@@ -878,6 +896,7 @@ fn a_second_input_waits_out_the_whole_stash_transaction() {
 /// Only a frame Claude shows unfolded and unwrapped may displace a draft.
 #[test]
 fn a_frame_that_would_fold_or_wrap_leaves_the_draft_alone() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     type Setup = fn(&Tui);
     let cases: [(&str, &str, Setup); 3] = [
         ("three more lines", "one\ntwo\nthree", |_| {}),
@@ -910,6 +929,7 @@ fn a_frame_that_would_fold_or_wrap_leaves_the_draft_alone() {
 
 #[test]
 fn a_draft_beside_an_occupied_or_unreadable_stash_is_left_alone() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     type Setup = fn(&Tui);
     let cases: [(&str, &str, Setup); 4] = [
         ("stash occupied", "draft B", |tui| {

@@ -422,6 +422,7 @@ impl Fake {
 /// turn the rollout names decides whether it joined the target turn.
 #[test]
 fn one_enter_and_the_rollout_names_the_turn_it_joined() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.accept_into(T);
     let ledger = FakeLedger::default();
@@ -446,6 +447,7 @@ fn one_enter_and_the_rollout_names_the_turn_it_joined() {
 /// unconfirmed. An Enter whose call fails after it applied is never sent again.
 #[test]
 fn only_the_rollout_confirms_and_enter_is_never_repeated() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi", "busy_empty.ansi"]);
     let ledger = FakeLedger::default();
@@ -464,6 +466,7 @@ fn only_the_rollout_confirms_and_enter_is_never_repeated() {
 /// ledger never hears of them.
 #[test]
 fn draft_queue_and_hidden_composer_are_refused_before_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let cases = [
         ("busy_draft.ansi", Veto::Draft),
         ("busy_queued.ansi", Veto::QueueShown),
@@ -485,6 +488,7 @@ fn draft_queue_and_hidden_composer_are_refused_before_the_paste() {
 /// or is not the caller's target refuses the paste.
 #[test]
 fn the_turn_is_rechecked_before_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let cases = [
         (records("model_turn.jsonl", 20), Veto::NotBusy),
         (records("shell_turn.jsonl", 2), Veto::NotSteerable),
@@ -509,6 +513,7 @@ fn the_turn_is_rechecked_before_the_paste() {
 /// A paste that may fold or outgrow the screen, or a pane whose size is unknown, is refused.
 #[test]
 fn unpredictable_renders_are_refused() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let render = Outcome::NotSent(Veto::UnpredictableRender);
     let fake = Fake::new();
     let rows: Vec<String> = (0..14).map(|row| format!("row {row}")).collect();
@@ -533,6 +538,7 @@ fn unpredictable_renders_are_refused() {
 /// out withdraws, while a paste of unknown effect leaves the record for a late observation.
 #[test]
 fn the_ledger_brackets_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     let full = FakeLedger {
         refuse: true,
@@ -562,6 +568,7 @@ fn the_ledger_brackets_the_paste() {
 /// keeps the Enter back.
 #[test]
 fn attach_and_foreign_composer_text_withhold_the_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.answers("attach", &["1,,80,24"]);
     assert_eq!(
@@ -596,6 +603,7 @@ fn with_image(capture: &str) -> String {
 /// any write, and an image that appears after the paste keeps the Enter back.
 #[test]
 fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let shown = screen::read(&with_image(&fixture("busy_empty.ansi")));
     assert_eq!(
         (shown.composer, shown.attachments),
@@ -625,6 +633,7 @@ fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
 /// write: a blank or blank-looking line, or more rows than the reader scans in a tall pane.
 #[test]
 fn bodies_the_reader_cannot_prove_are_refused_before_any_write() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tall: Vec<String> = (0..40).map(|row| format!("row {row}")).collect();
     let bodies = [
         "first\n\nsecond".to_string(),
@@ -681,6 +690,7 @@ fn unproven_roots_and_reviews_never_read_as_steerable() {
 
 #[test]
 fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native.jsonl");
     fs::write(&path, "").unwrap();

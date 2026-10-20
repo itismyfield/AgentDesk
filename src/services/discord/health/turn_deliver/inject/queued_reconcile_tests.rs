@@ -573,6 +573,7 @@ fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_so
 
 #[test]
 fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     for wrapped in [false, true] {
         let transcript = Transcript::new(&[]);
         let offset = std::fs::metadata(&transcript.path).unwrap().len();
@@ -620,6 +621,7 @@ fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
 
 #[test]
 fn identical_plain_history_cannot_use_an_earlier_attempts_delayed_removal_chain() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let transcript = Transcript::new(&[]);
     let offset = std::fs::metadata(&transcript.path).unwrap().len();
     let frame = human_frame::idle("ann", "200", "status?");

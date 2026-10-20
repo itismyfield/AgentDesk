@@ -209,6 +209,7 @@ fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
 /// shows the stash gone and the composer empty.
 #[test]
 fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     let got = tui.run();
@@ -275,6 +276,7 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
 /// `/tui/send` sends nothing to a pane in recovery, read or not, and submits once after it.
 #[test]
 fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     // The Enter is withheld: B, the external input, waits in the composer over A in the stash.
     tui.person_after_capture(3, "attach 300; detach");
@@ -308,6 +310,7 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
 
 #[test]
 fn uncertain_attached_direct_input_holds_every_later_automatic_writer() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("");
     tui.put("attached", "4");
     tui.person_after_capture(1, "type_text 'person typed '");
@@ -337,6 +340,7 @@ fn uncertain_attached_direct_input_holds_every_later_automatic_writer() {
 /// or that cannot be read, sends nothing; an empty composer takes it once.
 #[test]
 fn the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("head", IDLE_HEAD);
     let (status, body) = relay(&tui, "C", false);
@@ -362,6 +366,7 @@ fn the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft() {
 /// any write, a busy input stashes it again, and once the person sends it the follow-up goes in.
 #[test]
 fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     let restored = report(Outcome::Injected, DraftState::RestoredObserved);
     assert_eq!(tui.run(), restored);
@@ -397,6 +402,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 /// A draft the person brought back from the stash by hand is protected the same way.
 #[test]
 fn a_draft_brought_back_by_hand_is_never_sent_with_the_next_follow_up() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     assert_eq!(tui.run(), report(Outcome::Injected, DraftState::Unknown));
@@ -416,6 +422,7 @@ fn a_draft_brought_back_by_hand_is_never_sent_with_the_next_follow_up() {
 /// still shows that dialog.
 #[test]
 fn a_startup_dialog_is_dismissed_only_where_no_draft_is_protected() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dismiss = |session: &str, captures: &[&str]| {
         let token = Arc::new(CancelToken::new());
         let guard = spy(captures, Some(("capture", 6, token.clone())));
@@ -442,6 +449,7 @@ fn a_startup_dialog_is_dismissed_only_where_no_draft_is_protected() {
 /// owner says; the switch never lifts a protection.
 #[test]
 fn only_an_allowlisted_channel_takes_the_stash_path() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let (e2e, other) = (1_509_350_490_461_180_105, 7);
     let tui = Tui::new("human draft A");
     let queued = report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged);
@@ -483,6 +491,7 @@ fn only_an_allowlisted_channel_takes_the_stash_path() {
 
 #[test]
 fn configured_stash_channels_are_scoped_and_use_the_resolved_input_channel() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let (channel, other) = (18_003_000_001, 18_003_000_002);
     let first = StashChannelGuard::new(channel);
     let second = StashChannelGuard::new(other);
