@@ -32,12 +32,13 @@ pub(super) fn handoff_options_gaps(source: &str) -> Vec<String> {
 #[test]
 fn handoff_options_guard_rejects_commented_entries_and_constructor_calls() {
     let mask = rust_code_mask(ROLLOUT_TAIL).expect("rollout tail source lexes");
-    for (index, entry) in ENTRIES.into_iter().enumerate() {
+    for entry in ENTRIES {
         for forgery in CommentForgery::ALL {
             let forged = comment_out_code(ROLLOUT_TAIL, entry, forgery);
+            let gaps = handoff_options_gaps(&forged);
             assert!(
-                handoff_options_gaps(&forged)[0].starts_with(entry),
-                "{forgery:?} {entry}"
+                gaps.first().is_some_and(|gap| gap.starts_with(entry)),
+                "{forgery:?} commented {entry} still passes"
             );
             // Only this entry's constructor calls become comments.
             let span = braced_item_span(&mask, entry).expect("entry item");
@@ -51,7 +52,7 @@ fn handoff_options_guard_rejects_commented_entries_and_constructor_calls() {
             assert!(forged.contains(SHARED));
             let gaps = handoff_options_gaps(&forged);
             assert_eq!(gaps.len(), 1, "{forgery:?} {entry} {gaps:?}");
-            assert!(gaps[0].starts_with(ENTRIES[index]));
+            assert!(gaps[0].starts_with(entry));
         }
     }
 }
