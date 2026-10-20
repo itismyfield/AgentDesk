@@ -125,7 +125,6 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 }
 
 /// Codex entry for a live hook naming the native turn the input opens or steers.
-#[cfg(test)]
 pub(crate) fn observe_codex_prompt_in_turn_at(
     tmux_session_name: &str,
     prompt: &str,
