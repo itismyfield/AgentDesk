@@ -410,6 +410,7 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── host_guard_tests.rs
+│   │   │   ├── presence_unknown_tests.rs
 │   │   │   ├── public_projection.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
@@ -1095,12 +1096,15 @@ src/
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── o_transition.rs
+│   │   │   ├── presence_unknown.rs
+│   │   │   ├── presence_unknown_tests.rs
 │   │   │   ├── probe_runtime.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
+│   │   │   ├── registry_tests.rs
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
@@ -2242,6 +2246,7 @@ src/
 │   │   │   │   │   ├── stale_binding_tests.rs
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   └── unit_tests.rs
+│   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
 │   │   │   │   ├── tail_tests.rs
@@ -2250,11 +2255,17 @@ src/
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
+│   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
-│   │   │   └── supervisor_tests.rs
+│   │   │   ├── supervisor_notice_tests.rs
+│   │   │   ├── supervisor_reader_notice_tests.rs
+│   │   │   ├── supervisor_tests.rs
+│   │   │   ├── unknown_notice.rs
+│   │   │   ├── unknown_notice_store.rs
+│   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
