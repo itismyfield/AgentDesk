@@ -200,3 +200,45 @@ fn after() {}
     assert!(braced_item_span(&mask("fn x() {}"), "fn y()").is_none());
     assert!(braced_item_span(&mask("fn x(); fn z() {}"), "fn x()").is_none());
 }
+
+#[test]
+fn rust_whitespace_ends_a_word_before_raw_string_prefixes() {
+    for space in ['\u{85}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}'] {
+        for prefix in ["r", "br", "cr"] {
+            let source =
+                format!("let x ={space}{prefix}#\"a\" decoy_call() /* in */ \"b\"#; after();");
+            let stripped = strip(&source);
+            assert!(
+                stripped.contains("decoy_call() /* in */"),
+                "{space:?}{prefix}: {stripped:?}"
+            );
+            let masked = mask(&source);
+            assert!(
+                !masked.contains("decoy_call") && masked.contains("after();"),
+                "{space:?}{prefix}: {masked:?}"
+            );
+        }
+    }
+    assert!(mask("let 이름 = r\"x\";").contains("let 이름 ="));
+}
+
+#[test]
+fn literal_suffix_is_not_the_next_raw_string_prefix() {
+    for first in [r#""prefix""#, r#"b"p""#, "'c'", r##"r#"p"#"##] {
+        for prefix in ["r", "br", "cr"] {
+            let source =
+                format!(r#"discard!({first}{prefix}"a\" /* PGHOST */ fake_call() \"b"); real();"#);
+            let stripped = strip(&source);
+            assert!(
+                stripped.contains("/* PGHOST */"),
+                "{first}{prefix}: {stripped:?}"
+            );
+            let masked = mask(&source);
+            assert!(
+                !masked.contains("PGHOST") && !masked.contains("fake_call"),
+                "{first}{prefix}: {masked:?}"
+            );
+            assert!(masked.contains("real();"), "{first}{prefix}: {masked:?}");
+        }
+    }
+}

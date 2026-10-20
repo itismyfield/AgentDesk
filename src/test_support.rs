@@ -101,26 +101,29 @@ fn blank(source: &str, literals: bool) -> Result<String, UnterminatedSource> {
         let (end, comment) = match bytes[index] {
             b'/' if bytes.get(index + 1) == Some(&b'/') => (line_comment_end(bytes, index), true),
             b'/' if bytes.get(index + 1) == Some(&b'*') => (block_comment_end(bytes, index)?, true),
-            b'"' => (quoted_end(bytes, index, index + 1)?, false),
+            b'"' => (
+                suffix_end(bytes, quoted_end(bytes, index, index + 1)?),
+                false,
+            ),
             b'\'' => match char_literal_end(bytes, index)? {
-                Some(end) => (end, false),
+                Some(end) => (suffix_end(bytes, end), false),
                 None => {
                     index += 1;
                     continue;
                 }
             },
-            byte if is_word(byte) => {
+            _ if word_char_len(bytes, index).is_some() => {
                 let word_end = word_end(bytes, index);
                 match prefixed_literal_end(bytes, index, word_end)? {
-                    Some(end) => (end, false),
+                    Some(end) => (suffix_end(bytes, end), false),
                     None => {
                         index = word_end;
                         continue;
                     }
                 }
             }
-            _ => {
-                index += 1;
+            lead => {
+                index += utf8_len(lead);
                 continue;
             }
         };
@@ -140,17 +143,40 @@ fn unterminated<T>(kind: &'static str, offset: usize) -> Result<T, UnterminatedS
     Err(UnterminatedSource { kind, offset })
 }
 
-/// Identifier, keyword or number bytes; non-ASCII is treated as identifier text.
-fn is_word(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+/// Byte length of the identifier, keyword or number char at `index`. Non-ASCII
+/// counts as identifier text except Rust's Pattern_White_Space characters.
+fn word_char_len(bytes: &[u8], index: usize) -> Option<usize> {
+    let lead = *bytes.get(index)?;
+    if lead.is_ascii() {
+        return (lead.is_ascii_alphanumeric() || lead == b'_').then_some(1);
+    }
+    let len = utf8_len(lead);
+    let ch = std::str::from_utf8(bytes.get(index..index + len)?)
+        .ok()?
+        .chars()
+        .next()?;
+    let space = matches!(
+        ch,
+        '\u{85}' | '\u{200e}' | '\u{200f}' | '\u{2028}' | '\u{2029}'
+    );
+    (!space).then_some(len)
 }
 
 fn word_end(bytes: &[u8], start: usize) -> usize {
-    start
-        + bytes[start..]
-            .iter()
-            .position(|byte| !is_word(*byte))
-            .unwrap_or(bytes.len() - start)
+    let mut index = start;
+    while let Some(len) = word_char_len(bytes, index) {
+        index += len;
+    }
+    index
+}
+
+/// A literal's suffix (the `r` in `"a"r"b"`) belongs to the literal, so it never
+/// opens the next raw string; a digit cannot start a suffix.
+fn suffix_end(bytes: &[u8], end: usize) -> usize {
+    match bytes.get(end) {
+        Some(byte) if byte.is_ascii_digit() => end,
+        _ => word_end(bytes, end),
+    }
 }
 
 fn line_comment_end(bytes: &[u8], start: usize) -> usize {
@@ -205,7 +231,10 @@ fn char_literal_end(bytes: &[u8], quote: usize) -> Result<Option<usize>, Untermi
         },
         Some(first) => {
             let close = body + utf8_len(*first);
-            if bytes.get(close) != Some(&b'\'') && is_word(*first) && !first.is_ascii_digit() {
+            if bytes.get(close) != Some(&b'\'')
+                && word_char_len(bytes, body).is_some()
+                && !first.is_ascii_digit()
+            {
                 return Ok(None);
             }
             close
@@ -247,7 +276,7 @@ fn prefixed_literal_end(
                 .count();
             let open = word_end + hashes;
             if bytes.get(open) != Some(&b'"') {
-                if word == b"r" && hashes == 1 && bytes.get(open).is_some_and(|b| is_word(*b)) {
+                if word == b"r" && hashes == 1 && word_char_len(bytes, open).is_some() {
                     return Ok(None);
                 }
                 return unterminated("raw string literal", start);
