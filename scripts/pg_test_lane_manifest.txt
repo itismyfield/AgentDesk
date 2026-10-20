@@ -751,6 +751,7 @@ cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoc
 cli::dcserver_pg_bootstrap::tests::startup_initialization_reports_a_database_ahead_of_the_binary_pg
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
 cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
+cli::doctor::orchestrator::observation_tests::doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair
 cli::herdr::tests::a_hold_a_retire_left_is_shown_and_removed_by_the_next_retire_pg
 cli::herdr::tests::a_lone_recorded_root_shell_retires_its_execution_pg
 cli::herdr::tests::a_retire_whose_cas_fails_keeps_the_hold_pg

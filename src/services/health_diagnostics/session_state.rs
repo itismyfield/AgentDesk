@@ -38,8 +38,11 @@ pub(super) fn mailbox_channels(json: &serde_json::Value) -> Vec<u64> {
         .collect()
 }
 
+/// Writes each row's session fields or its `session_lookup_error`; `cause` names why a failed
+/// lookup failed when the caller knows it.
 pub(super) async fn enrich_with<F: Future<Output = Result<Option<ChannelSessionState>, String>>>(
     json: &mut serde_json::Value,
+    cause: Option<&'static str>,
     mut lookup: impl FnMut(u64) -> F,
 ) {
     let Some(mailboxes) = json
@@ -59,11 +62,17 @@ pub(super) async fn enrich_with<F: Future<Output = Result<Option<ChannelSessionS
         // Keep legacy fields compatible; this additive field distinguishes failed measurement.
         mailbox["session_lookup_error"] = match &result {
             Ok(_) => serde_json::Value::Null,
-            Err(error) => serde_json::json!({
-                "safety_gate": "measurement_unavailable",
-                "fix_safety": crate::cli::doctor::contract::FixSafety::NotFixable,
-                "message": error,
-            }),
+            Err(error) => {
+                let mut unavailable = serde_json::json!({
+                    "safety_gate": "measurement_unavailable",
+                    "fix_safety": crate::cli::doctor::contract::FixSafety::NotFixable,
+                    "message": error,
+                });
+                if let Some(cause) = cause {
+                    unavailable["cause"] = serde_json::json!(cause);
+                }
+                unavailable
+            }
         };
         if let Ok(Some(session)) = result {
             let active_dispatch_present = session
@@ -138,7 +147,7 @@ mod tests {
             let mut wire =
                 json!({"mailboxes": [{"channel_id": 77, "active_dispatch_present": false}]});
             let mut calls = 0;
-            enrich_with(&mut wire, |channel| {
+            enrich_with(&mut wire, None, |channel| {
                 assert_eq!(channel, 77);
                 calls += 1;
                 std::future::ready(lookup.clone())
