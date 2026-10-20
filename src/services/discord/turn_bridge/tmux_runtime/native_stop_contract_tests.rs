@@ -78,6 +78,7 @@ fn bridge(
 
 async fn transport(
     shared: &Arc<SharedData>,
+    channel: ChannelId,
 ) -> (
     discord_mock::DiscordMockState,
     serenity::Context,
@@ -85,6 +86,7 @@ async fn transport(
     Data,
 ) {
     let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(channel.get());
     mock.park_first_placeholder.store(false, Ordering::SeqCst);
     let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
     let ctx = discord_mock::serenity_context(proxy, gateway).await;
@@ -112,7 +114,7 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
     message.author.id = UserId::new(7);
     message.content = "!stop".into();
     assert!(
-        discord::commands::handle_text_command_with_uploads(
+        Box::pin(discord::commands::handle_text_command_with_uploads(
             ctx,
             &message,
             data,
@@ -120,7 +122,7 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
             "!stop",
             &[],
             &mut None,
-        )
+        ))
         .await
         .unwrap()
     );
@@ -146,8 +148,8 @@ fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
         );
         for natural_first in [false, true] {
             let shared = discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-            let channel = ChannelId::new(discord_mock::CHANNEL_ID);
-            let (mock, ctx, server, data) = transport(&shared).await;
+            let channel = ChannelId::new(7_193_101 + u64::from(natural_first));
+            let (mock, ctx, server, data) = transport(&shared, channel).await;
             let session = format!("native-reader-stop-{natural_first}");
             let (token, path) = generating_turn(&fx, &session);
             start(&shared, channel, &token).await;
@@ -261,7 +263,10 @@ fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
 fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
     let fx = Fixture::new();
     run(async {
-        for failure in ["modal", "capture", "io", "unknown"] {
+        for (n, failure) in ["modal", "capture", "io", "unknown"]
+            .into_iter()
+            .enumerate()
+        {
             fx.serve(Server::Live);
             fx.reject_escape(failure == "io");
             let pane = if failure == "modal" {
@@ -274,8 +279,8 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                 fx.serve(Server::NoSocket);
             }
             let shared = discord::make_shared_data_for_tests();
-            let channel = ChannelId::new(discord_mock::CHANNEL_ID);
-            let (mock, ctx, server, data) = transport(&shared).await;
+            let channel = ChannelId::new(7_193_200 + n as u64);
+            let (mock, ctx, server, data) = transport(&shared, channel).await;
             let session = format!("native-stop-failed-{failure}");
             let (token, path) = generating_turn(&fx, &session);
             if failure == "unknown" {
