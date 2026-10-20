@@ -282,6 +282,131 @@ fn wake_mutant(name: &str) -> bool {
     crate::services::claude_tui::source_verify::n2b_mutant(name)
 }
 
+fn classify_enabled() -> bool {
+    std::env::var_os("ADK_A2_CLASSIFY").is_some()
+}
+
+fn classify_row(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> serde_json::Value {
+    let row = match inflight::load_inflight_state_read_only_result(provider, channel.get()) {
+        Ok(None) => serde_json::json!({"state": "absent"}),
+        Err(_) => serde_json::json!({"state": "unreadable"}),
+        Ok(Some(row)) => serde_json::json!({
+            "state": "present", "user": row.user_msg_id, "nonce": row.turn_nonce,
+            "born_generation": row.born_generation, "save_generation": row.save_generation, "restart_generation": row.restart_generation,
+            "tmux": row.tmux_session_name,
+            "panel_generation": row.status_panel_generation, "started_at": row.started_at,
+            "turn_start_offset": row.turn_start_offset, "runtime_kind": row.runtime_kind,
+            "restart_mode": row.restart_mode.is_some(), "rebind_origin": row.rebind_origin,
+            "terminal_committed": row.terminal_delivery_committed,
+            "response_sent_offset": row.response_sent_offset, "response_bytes": row.full_response.len(),
+        }),
+    };
+    serde_json::json!({"row": row, "process_generation": shared.restart.current_generation,
+        "provider_probe_armed": INPUT_EFFECT_PROBE.lock().unwrap().is_some()})
+}
+
+struct PhaseDiagnostic {
+    task: tokio::task::JoinHandle<()>,
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel: ChannelId,
+    phase: &'static str,
+    logs: LogSink,
+}
+
+impl PhaseDiagnostic {
+    fn install(fixture: &Fixture, periodic_only: bool, logs: &LogSink) -> Option<Self> {
+        if !classify_enabled() {
+            return None;
+        }
+        let shared = fixture.rig.shared.clone();
+        let provider = fixture.provider.clone();
+        let channel = fixture.rig.channel;
+        let phase = if periodic_only { "periodic" } else { "race" };
+        let (observed, kind) = (shared.clone(), provider.clone());
+        let task = tokio::spawn(async move {
+            let mut previous = serde_json::Value::Null;
+            loop {
+                let mailbox = observed.mailbox(channel).snapshot().await;
+                let sample = serde_json::json!({
+                    "durable": classify_row(&observed, &kind, channel),
+                    "active_user": mailbox.active_user_message_id.map(|id| id.get()),
+                    "pending_user": mailbox.pending_user_dispatch.map(|id| id.get()),
+                    "cancel_token": mailbox.cancel_token.is_some(),
+                    "queue": mailbox.intervention_queue.iter().map(|item| item.message_id.get()).collect::<Vec<_>>(),
+                });
+                if sample != previous {
+                    eprintln!("A2_R6_ROW phase={phase} sample={sample}");
+                    previous = sample;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        Some(Self {
+            task,
+            shared,
+            provider,
+            channel,
+            phase,
+            logs: logs.clone(),
+        })
+    }
+}
+
+impl Drop for PhaseDiagnostic {
+    fn drop(&mut self) {
+        self.task.abort();
+        eprintln!(
+            "A2_R6_FINAL phase={} sample={}",
+            self.phase,
+            classify_row(&self.shared, &self.provider, self.channel)
+        );
+        for event in crate::services::observability::events::recent(10_000) {
+            if event.channel_id != Some(self.channel.get())
+                || !matches!(
+                    event.event_type.as_str(),
+                    "inflight_lifecycle" | "turn_started" | "turn_finished" | "agent_quality_event"
+                )
+            {
+                continue;
+            }
+            let p = &event.payload;
+            let inner = &p["payload"]["details"];
+            let safe = serde_json::json!({"type": event.event_type, "timestamp_ms": event.timestamp_ms,
+                "turn_id": p["turn_id"].as_str().or(p["payload"]["turn_id"].as_str()), "kind": p["kind"], "status": p["status"],
+                "quality_type": p["quality_event_type"],
+                "extra": {"user": p["extra"]["user_msg_id"], "outcome": p["extra"]["guarded_save_outcome"],
+                    "retry": p["extra"]["preserve_inflight_for_cleanup_retry"]},
+                "quality": {"outcome": inner["outcome"], "committed": inner["terminal_delivery_committed"],
+                    "retry": inner["preserved_for_retry"], "cancelled": inner["cancelled"],
+                    "watcher": inner["watcher_relay"], "standby": inner["standby_relay"]}});
+            eprintln!("A2_R6_EVENT phase={} event={safe}", self.phase);
+        }
+        let bytes = self
+            .logs
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let markers = [
+            "Processing next queued command",
+            "preserving inflight row in channel",
+            "turn bridge epilogue inflight guarded-clear hit IoError",
+            "QUEUE-GUARD:",
+            "[turn_presence] unbound hold leaf",
+            "queue-eligible completion event received; kicking idle queue channel",
+        ];
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if let Some(at) = markers.iter().find_map(|m| line.rfind(m)) {
+                eprintln!("A2_R6_TRACE phase={} {}", self.phase, &line[at..]);
+            }
+        }
+    }
+}
+
 struct WakeProducerState {
     serial: tokio::sync::Mutex<()>,
     producer: std::sync::Mutex<Option<&'static str>>,
@@ -328,6 +453,12 @@ impl WakeProducers {
                         let mut released = state.completion_release.subscribe();
                         if !*released.borrow_and_update() {
                             state.completion_blocked.fetch_add(1, Ordering::SeqCst);
+                            if classify_enabled() {
+                                eprintln!(
+                                    "A2_R6_BARRIER reason={reason} stage=blocked sample={}",
+                                    classify_row(&runtime, &provider, channel)
+                                );
+                            }
                         }
                         loop {
                             let open = *released.borrow_and_update();
@@ -335,6 +466,12 @@ impl WakeProducers {
                                 break;
                             }
                         }
+                    }
+                    if classify_enabled() {
+                        eprintln!(
+                            "A2_R6_ATTEMPT reason={reason} stage=before_actual sample={}",
+                            classify_row(&runtime, &provider, channel)
+                        );
                     }
                     // A blocked completion never owns this mutex; a real NoStart permits fallback.
                     let _serial = state.serial.lock().await;
@@ -364,6 +501,12 @@ impl WakeProducers {
                             &deps, &provider, channel,
                         ),
                     ).await;
+                    if classify_enabled() {
+                        eprintln!(
+                            "A2_R6_ATTEMPT reason={reason} stage=after_actual started={}",
+                            outcome.started
+                        );
+                    }
                     state
                         .attempts
                         .lock()
@@ -489,6 +632,7 @@ async fn supervisor_drains_pair(
         periodic_only,
     } = case;
     let _failure_logs = FailureLogs(logs.clone());
+    let _diagnostic = PhaseDiagnostic::install(fixture, periodic_only, logs);
     let baseline = supervisor.state();
     assert_eq!(baseline["activity"], "idle");
     assert_eq!(baseline["generation"], 1);
@@ -503,6 +647,12 @@ async fn supervisor_drains_pair(
     trace_supervisor_tick(supervisor, 1, first_wake);
     let driver = RecoveryDriver::start(supervisor.clone());
     let mut ledger = vec![first.wait(fixture, a).await];
+    if classify_enabled() {
+        eprintln!(
+            "A2_R6_A_HELD periodic_only={periodic_only} sample={}",
+            classify_row(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
+        );
+    }
     assert!(
         recovery_kick_observed(logs, fixture.rig.channel),
         "the real LiveEffects recovery kick origin was not observed"
@@ -575,6 +725,13 @@ async fn supervisor_drains_pair(
     first.finish();
     producers.wait_for_start(first_wake + RECOVERY_LIMIT).await;
     let producer = producers.producer();
+    if classify_enabled() {
+        eprintln!(
+            "A2_R6_WAIT_RETURN periodic_only={periodic_only} producer={producer:?} completion_blocked={} sample={}",
+            producers.completion_blocked(),
+            classify_row(&fixture.rig.shared, &fixture.provider, fixture.rig.channel)
+        );
+    }
     assert!(
         producer.is_some(),
         "a real queue producer must start FIFO B within the recovery bound; attempts={:?} periodic_only={periodic_only} state={:?}",
