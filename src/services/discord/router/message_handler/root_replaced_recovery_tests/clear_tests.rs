@@ -304,6 +304,16 @@ fn rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg(
             let original = case.fx.record();
             let effects = case.effects();
             let (queued, observed) = waiting(&case);
+            if matches!(change, Change::NewProvider | Change::ReadFailed) {
+                case.fx.rig.exists(PROVIDER, true);
+                case.pass();
+                assert!(ATTACHES.with(|count| count.get() > 0));
+                assert_eq!(
+                    case.fx.record(),
+                    original,
+                    "the real pass identified RootReplaced but kept the live provider Held"
+                );
+            }
             match change {
                 Change::ProviderAlive => case.fx.rig.exists(PROVIDER, true),
                 Change::NewProvider => {
@@ -313,14 +323,6 @@ fn rr_public_clear_unproven_provider_or_read_failure_keeps_n1_and_discards_q_pg(
                     case.fx.rig.foreground(&[PROVIDER]);
                 }
                 Change::ReadFailed => {
-                    case.fx.rig.exists(PROVIDER, true);
-                    case.pass();
-                    assert!(ATTACHES.with(|count| count.get() > 0));
-                    assert_eq!(
-                        case.fx.record(),
-                        original,
-                        "the real pass identified RootReplaced but kept the live provider Held"
-                    );
                     case.fx.rig.exists(PROVIDER, false);
                     case.fx.rig.answer(
                         "pane.process_info",
