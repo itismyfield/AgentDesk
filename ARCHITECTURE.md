@@ -36,6 +36,8 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── dispatch_outbox.rs
+│   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
 │   │   │   ├── observation_checks.rs
@@ -99,6 +101,7 @@ src/
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
+│   ├── agent_memory.rs
 │   ├── cluster_role.rs
 │   ├── disk_write.rs
 │   ├── late_live_reload_tests.rs
@@ -211,8 +214,12 @@ src/
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
 │   │   ├── api_json.rs
+│   │   ├── attachments.rs
+│   │   ├── attachments_pg_tests.rs
 │   │   ├── discord_mentions.rs
 │   │   ├── external_delivery.rs
+│   │   ├── image_lifecycle.rs
+│   │   ├── image_lifecycle_tests.rs
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
@@ -361,6 +368,9 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── outbox_worker/
+│   │   ├── attachment_pg_tests.rs
+│   │   └── claim.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -413,8 +423,12 @@ src/
 │   │   │   ├── reviews.rs
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
+│   │   │   ├── db_collection.rs
+│   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
+│   │   │   ├── kv_gate_tests.rs
 │   │   │   ├── public_projection.rs
+│   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
 │   │   │   ├── session_repair.rs
 │   │   │   ├── tui_output_readiness_tests.rs
@@ -430,8 +444,11 @@ src/
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
+│   │   │   ├── create.rs
 │   │   │   ├── delivery_render.rs
 │   │   │   ├── discord_mentions.rs
+│   │   │   ├── image_activation_tests.rs
+│   │   │   ├── image_input.rs
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
@@ -1051,6 +1068,7 @@ src/
 │   │   │   │   │   │   └── tests/
 │   │   │   │   │   │       └── mod.rs
 │   │   │   │   │   ├── tests/
+│   │   │   │   │   │   ├── health_response.rs
 │   │   │   │   │   │   └── mod.rs
 │   │   │   │   │   ├── driver.rs
 │   │   │   │   │   └── policy.rs
@@ -1078,6 +1096,9 @@ src/
 │   │   │   │   ├── refusal_dispatch_tests.rs
 │   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
+│   │   │   │   ├── health_observation.rs
+│   │   │   │   ├── health_observation_pg_tests.rs
+│   │   │   │   ├── health_observation_tests.rs
 │   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
@@ -1269,9 +1290,13 @@ src/
 │   │   │   │   ├── rollout.rs
 │   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
+│   │   │   │   ├── compatibility_tests.rs
 │   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
-│   │   │   │   └── production_nonce_tests.rs
+│   │   │   │   ├── image_delivery.rs
+│   │   │   │   ├── image_delivery_tests.rs
+│   │   │   │   ├── production_nonce_tests.rs
+│   │   │   │   └── resolved.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
@@ -1354,6 +1379,7 @@ src/
 │   │   │   ├── layer_rendering.rs
 │   │   │   ├── manifest.rs
 │   │   │   ├── memory_guidance.rs
+│   │   │   ├── memory_scope_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
@@ -2362,6 +2388,7 @@ src/
 │   │   ├── admin_host_guard_verified_reset_tests.rs
 │   │   ├── agent_handoff.rs
 │   │   ├── agentdesk_config.rs
+│   │   ├── agentdesk_memory_tests.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
@@ -2568,6 +2595,10 @@ src/
 │   │   └── tests/
 │   │       └── mod.rs
 │   ├── health_diagnostics/
+│   │   ├── pg_wire_proxy_tests.rs
+│   │   ├── request_batch.rs
+│   │   ├── request_batch_pg_tests.rs
+│   │   ├── request_batch_tests.rs
 │   │   └── session_state.rs
 │   ├── herdr_launch/
 │   │   ├── retired_hold/
@@ -2587,6 +2618,8 @@ src/
 │   │   └── transport_tests.rs
 │   ├── maintenance/
 │   │   ├── jobs/
+│   │   │   ├── db_retention/
+│   │   │   │   └── image_retention.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -2606,6 +2639,8 @@ src/
 │   │   ├── memento.rs
 │   │   ├── memento_anchor.rs
 │   │   ├── memento_endpoint.rs
+│   │   ├── memento_scope.rs
+│   │   ├── memento_scope_tests.rs
 │   │   ├── memento_throttle.rs
 │   │   ├── memento_transport.rs
 │   │   ├── memento_writer_guard.rs
@@ -2613,7 +2648,9 @@ src/
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
-│   │   └── identity.rs
+│   │   ├── attachments.rs
+│   │   ├── identity.rs
+│   │   └── identity_tests.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs

@@ -108,7 +108,7 @@ pub(super) fn routine_metadata_role_binding(
         reasoning_effort: None,
         peer_agents_enabled: true,
         quality_feedback_injection_enabled: true,
-        memory: settings::resolve_memory_settings(None, None),
+        memory: settings::memory_settings_for_role(agent_id),
     })
 }
 
@@ -131,6 +131,76 @@ where
         clear().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod memory_scope_tests {
+    use super::*;
+    use crate::services::discord::prompt_builder::{DispatchProfile, build_system_prompt};
+    use crate::services::discord::settings::MemoryBackendKind;
+
+    fn routine_binding_and_hint(group: Option<&str>) -> (settings::RoleBinding, String) {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_agentdesk_root_for_test(root.path());
+        let mut config = crate::config::Config::default();
+        let mut agent: crate::config::AgentDef = serde_yaml::from_str(
+            "id: ch-td\nname: Test\nchannels:\n  claude:\n    id: '4242'\n    workspace: /fixture/ch-td\n",
+        )
+        .unwrap();
+        agent.memory_group = group.map(str::to_owned);
+        config.agents.push(agent);
+        let path = crate::runtime_layout::config_file_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+        let metadata = serde_json::json!({"routine_id": "routine-1", "agent_id": " ch-td "});
+        let mut binding =
+            routine_metadata_role_binding(Some(&metadata), &ProviderKind::Claude).unwrap();
+        binding.memory.backend = MemoryBackendKind::Memento;
+        let prompt = build_system_prompt(
+            "ctx",
+            &[],
+            "/fixture/ch-td",
+            ChannelId::new(4242),
+            "tok",
+            Some(&binding),
+            false,
+            DispatchProfile::Full,
+            None,
+            None,
+            None,
+            None,
+            Some(&binding.memory),
+            true,
+            false,
+        );
+        let hint = prompt
+            .lines()
+            .find(|line| line.starts_with("- scope hints:"))
+            .unwrap()
+            .to_owned();
+        (binding, hint)
+    }
+
+    #[test]
+    fn routine_memory_group_reaches_binding_and_three_tier_hint() {
+        let (binding, hint) = routine_binding_and_hint(Some("cookingheart"));
+        assert_eq!(binding.memory.memory_group.as_deref(), Some("cookingheart"));
+        assert_eq!(
+            hint,
+            "- scope hints: read=`workspace=cookingheart, agentId=ch-td`; default write (private)=`workspace=cookingheart, agentId=ch-td`; group shared=`workspace=cookingheart, agentId=default`; global=`agentId=default` (omit workspace)."
+        );
+        assert!(!hint.contains("agent-private="));
+    }
+
+    #[test]
+    fn routine_memory_group_absent_hint_preserves_main_bytes() {
+        let (binding, hint) = routine_binding_and_hint(None);
+        assert_eq!(binding.memory.memory_group, None);
+        assert_eq!(
+            hint,
+            "- scope hints: project=`workspace=ch-td, agentId=default`; agent-private=`workspace=agentdesk-ch-td, agentId=ch-td`."
+        );
+    }
 }
 
 #[cfg(test)]

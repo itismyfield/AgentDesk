@@ -343,3 +343,15 @@ gets a new row.
   long-form rationale behind the 7/30/90-day horizons.
 - [`docs/reports/cost-efficiency-908.md`](reports/cost-efficiency-908.md) —
   parallel cost-observability report template that this one mirrors.
+
+
+### Scheduled image payloads
+
+The database retention pass clears the filename/MIME/bytea triplet of terminal
+one-shot scheduled definitions after seven days (strict `updated_at < cutoff`).
+Recurring definitions and active definitions preserve their payloads. This removes
+payloads without removing definitions or delivery history; dry-run only counts.
+Outbox bytes are cleared by the existing lease-owned sent UPDATE immediately on
+success, leaving the permanent dedupe sentinel intact. Failed outbox images retain
+bytes for redrive until the existing seven-day whole-row GC. Do not null failed
+attachment triplets: that would turn a later redrive into a text-only delivery.

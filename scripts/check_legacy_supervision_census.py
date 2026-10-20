@@ -31,7 +31,7 @@ PROTECTED = {
         'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1ae7b07a407e0e867fa3bc3e2c28e51b2541ed818a3c75974784d4da577cbbac'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'f51ee799255b84bf55b1d715bc1fe898507c5aab6808bee975e047608d3203f5'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 # The deleted RETIRED gate (#6325 23C): any production return of its owner or readers fails.
 RETIRED_GATE = re.compile(r"\b(?:legacy_supervision|legacy_retired|retired_in|RetiredForTest)\b")

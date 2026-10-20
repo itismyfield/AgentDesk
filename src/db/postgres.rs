@@ -15,7 +15,7 @@ mod advisory_lock;
 pub use advisory_lock::AdvisoryLockLease;
 mod shared_config;
 pub(crate) use shared_config::shared_config_sync_enabled;
-pub use shared_config::{startup_reseed, startup_reseed_with_warmup_pool};
+pub use shared_config::startup_reseed_with_warmup_pool;
 
 static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations/postgres");
 const LEGACY_AGENT_PREFIX: &str = "openclaw-";
@@ -1679,9 +1679,9 @@ mod tests {
         connect_test_pool, connect_test_pool_and_migrate, connect_test_pool_and_migrate_config,
         connect_test_pool_with_max_connections, connect_test_pool_with_max_connections_and_migrate,
         create_test_database, database_enabled, database_summary, health_check, require_pg_guard,
-        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings, shared_config_sync_enabled,
-        should_yield_for_counters, startup_pool_settings, startup_reseed,
-        sync_agents_from_config_pg, with_startup_advisory_lock,
+        run_test_postgres_sqlx_op_with_timeout, runtime_pool_settings,
+        shared_config::startup_reseed, shared_config_sync_enabled, should_yield_for_counters,
+        startup_pool_settings, sync_agents_from_config_pg, with_startup_advisory_lock,
     };
     use sqlx::postgres::PgConnectOptions;
     use sqlx::{Executor as _, PgPool, Row};
@@ -2084,7 +2084,6 @@ mod tests {
         .await
         .map(|_| ())
     }
-
     fn postgres_test_config(test_db: &TestDatabase) -> crate::config::Config {
         let mut config = crate::config::Config::default();
         config.database.enabled = true;
@@ -2111,6 +2110,7 @@ mod tests {
             department: Some("platform".to_string()),
             avatar_emoji: Some(":gear:".to_string()),
             preferred_intake_node_labels: None,
+            memory_group: None,
         }];
         config
     }
@@ -3110,7 +3110,6 @@ mod tests {
             .expect("close postgres pool");
         test_db.drop().await;
     }
-
     #[tokio::test]
     async fn postgres_startup_reseed_migrates_legacy_openclaw_agent_ids() {
         let test_db = TestDatabase::create().await;
@@ -3131,6 +3130,7 @@ mod tests {
             department: Some("engineering".to_string()),
             avatar_emoji: Some("🛠️".to_string()),
             preferred_intake_node_labels: None,
+            memory_group: None,
         }];
 
         let pool =
@@ -3222,13 +3222,11 @@ mod tests {
                 .await
                 .expect("load session agent");
         assert_eq!(session_agent.as_deref(), Some("maker"));
-
         close_test_pool(pool, "db::postgres legacy reseed test pool")
             .await
             .expect("close postgres pool");
         test_db.drop().await;
     }
-
     #[tokio::test]
     async fn postgres_startup_reseed_preserves_configured_legacy_openclaw_agent_id() {
         let test_db = TestDatabase::create().await;
@@ -3250,6 +3248,7 @@ mod tests {
                 department: Some("engineering".to_string()),
                 avatar_emoji: None,
                 preferred_intake_node_labels: None,
+                memory_group: None,
             },
             crate::config::AgentDef {
                 id: "openclaw-maker".to_string(),
@@ -3267,6 +3266,7 @@ mod tests {
                 department: Some("legacy".to_string()),
                 avatar_emoji: None,
                 preferred_intake_node_labels: None,
+                memory_group: None,
             },
         ];
 

@@ -16,6 +16,8 @@ NON_PG_SKIP_ARGS=(
   --skip pg_
   --skip postgres
   --skip cli::channel_home::tests
+  --skip cli::doctor::orchestrator::dispatch_outbox::tests
+  --skip cli::doctor::orchestrator::observation_tests
   --skip cli::herdr::tests
   --skip db::auto_queue::entries::dispatch_failure::tests
   --skip db::auto_queue::entries::tests
@@ -37,6 +39,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
   --skip db::replay_disposition::write_tests
+  --skip db::scheduled_messages::image_lifecycle::tests
   --skip dispatch::dispatch_status::terminal_timestamp_tests
   --skip engine::ops::auto_queue_ops::tests
   --skip engine::ops::config_ops::tests
@@ -53,11 +56,14 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::campaigns::tests
   --skip server::routes::dispatched_sessions::tests
   --skip server::routes::escalation::manual_decision_gate_tests
+  --skip server::routes::health_api::db_deadline_tests
   --skip server::routes::health_api::host_guard_tests
+  --skip server::routes::health_api::response::kv_gate_tests
   --skip server::routes::herdr_legacy_tests
   --skip server::routes::memory_api::request_body_tests
   --skip server::routes::message_outbox::tests
   --skip server::routes::pipeline::stage_save_tests
+  --skip server::routes::scheduled_messages::image_input::tests
   --skip server::routes::session_evidence::tests
   --skip server::task_dispatch_claims::replay_tests
   --skip services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -105,6 +111,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
+  --skip services::discord::health::recovery::self_watchdog::tests::health_response
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject::herdr::tests
@@ -263,6 +270,11 @@ NON_PG_FILTER_REPLAY=(
   cli::dcserver_pg_bootstrap::tests::pool_timeout_diagnostic_includes_timestamp_source_and_attempt
   cli::dcserver_pg_bootstrap::tests::schema_ahead_needs_every_unknown_version_past_the_latest
   cli::dcserver_pg_bootstrap::tests::slow_startup_timeout_exhausts_retries_and_reports_the_exit_line
+  cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
+  cli::doctor::orchestrator::observation_tests::observations_preserve_unmeasured_diagnostics
+  cli::doctor::orchestrator::observation_tests::reason_aggregation_and_human_checks_preserve_safety_restrictions
+  cli::doctor::orchestrator::observation_tests::repair_responses_preserve_measured_safety_and_gates
+  cli::doctor::orchestrator::observation_tests::repair_responses_preserve_unmeasured_results
   cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
   cli::herdr::terminate_tests::act_cli_terminate_never_opens_postgres
   db::auto_queue::entries::tests::pinned_dispatch_identity_is_declared_before_the_stale_retry_loop
@@ -326,6 +338,8 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_layer_zero_cap_disables_truncation_for_visibility
   db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
+  db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
+  db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
   db::session_transcripts::native_clear_pg_tests::record_and_classification_agree_on_every_row_shape
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
@@ -376,6 +390,8 @@ NON_PG_FILTER_REPLAY=(
   server::routes::message_outbox::tests::monitor_alert_routing_separates_actionable_and_informational_kinds
   server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
   server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
+  server::routes::scheduled_messages::image_input::tests::image_context_rejects_mixed_targets_and_rendered_utf16_overflow
+  server::routes::scheduled_messages::image_input::tests::image_upload_validates_filename_mime_magic_and_base64
   server::routes::scheduled_messages::postgres_tests::scheduled_message_bot_defaults_to_non_triggering_notify
   server::routes::scheduled_messages::postgres_tests::scheduled_push_rejects_agent_only_fields_but_allows_explicit_clears
   services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error

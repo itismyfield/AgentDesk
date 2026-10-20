@@ -51,11 +51,9 @@ impl RoutineAgentExecutor {
             None => None,
         };
 
-        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) = if let Some(
-            dm_user_id_num,
-        ) = dm_user_id_num
-        {
-            let (dm_channel_id, reservation) = reserve_headless_agent_turn_in_dm(
+        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) =
+            if let Some(dm_user_id_num) = dm_user_id_num {
+                let (dm_channel_id, reservation) = reserve_headless_agent_turn_in_dm(
                     registry,
                     channel_id,
                     dm_user_id_num,
@@ -63,49 +61,47 @@ impl RoutineAgentExecutor {
                 )
                 .await
                 .map_err(|error| {
-                    anyhow!(
-                        "reserve routine agent DM turn for {agent_id} and user {dm_user_id_num}: {error}"
-                    )
+                    start_deferral::dm_reservation_error(agent_id, dm_user_id_num, error)
                 })?;
-            (dm_channel_id, None, "dm".to_string(), reservation)
-        } else {
-            let routine_channel = self
-                .resolve_or_create_routine_thread(
-                    store,
-                    registry,
-                    claimed,
-                    agent_id,
-                    provider.as_str(),
-                    channel_id,
+                (dm_channel_id, None, "dm".to_string(), reservation)
+            } else {
+                let routine_channel = self
+                    .resolve_or_create_routine_thread(
+                        store,
+                        registry,
+                        claimed,
+                        agent_id,
+                        provider.as_str(),
+                        channel_id,
+                    )
+                    .await;
+                let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
+                    Ok(target) => (
+                        target.channel_id,
+                        target.discord_thread_id,
+                        target.delivery_bot,
+                    ),
+                    Err(error) => {
+                        let warning = error.to_string();
+                        let _ = store
+                            .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
+                            .await;
+                        tracing::warn!(
+                            routine_id = claimed.routine_id,
+                            run_id = claimed.run_id,
+                            error = %warning,
+                            "routine thread setup failed; falling back to agent primary channel"
+                        );
+                        (channel_id, None, UtilityBotRole::Notify.alias().to_string())
+                    }
+                };
+                (
+                    turn_channel_id,
+                    discord_thread_id,
+                    delivery_bot,
+                    reserve_headless_agent_turn(turn_channel_id),
                 )
-                .await;
-            let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
-                Ok(target) => (
-                    target.channel_id,
-                    target.discord_thread_id,
-                    target.delivery_bot,
-                ),
-                Err(error) => {
-                    let warning = error.to_string();
-                    let _ = store
-                        .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
-                        .await;
-                    tracing::warn!(
-                        routine_id = claimed.routine_id,
-                        run_id = claimed.run_id,
-                        error = %warning,
-                        "routine thread setup failed; falling back to agent primary channel"
-                    );
-                    (channel_id, None, UtilityBotRole::Notify.alias().to_string())
-                }
             };
-            (
-                turn_channel_id,
-                discord_thread_id,
-                delivery_bot,
-                reserve_headless_agent_turn(turn_channel_id),
-            )
-        };
         let turn_id = reservation.turn_id().to_string();
 
         let mut result_json = json!({
