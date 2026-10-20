@@ -654,6 +654,13 @@ fn synthetic_bridge_handoff_fixture(
                 std::fs::OpenOptions::new().append(true).open(&output).unwrap().write_all(format!("{terminal}\n").as_bytes()).unwrap();
                 let (tx, rx) = mpsc::channel();
                 let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                let resume_from = {
+                    let bodies = gateway.bodies.lock().unwrap();
+                    let sites = gateway.sites.lock().unwrap();
+                    assert_eq!(bodies.len(), sites.len(), "paired pre-resume history: {sites:?} {bodies:?}");
+                    assert!(bodies.iter().all(|sent| !sent.starts_with("-# ") && !sent.contains("DEFERRED_READER_FAILURE")), "reader failure cannot post a terminal summary or error: {sites:?} {bodies:?}");
+                    bodies.len()
+                };
                 let reader = spawn_handoff_reader(&output, retained.last_offset, tmux, tx, end_tx);
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
                     &shared, provider.clone(), channel,
@@ -664,12 +671,26 @@ fn synthetic_bridge_handoff_fixture(
                     (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
-                let bodies = gateway.bodies.lock().unwrap();
-                // Legacy streaming status quotes the last response line; count
-                // the completed publication, whose footer has been removed.
-                let terminal_body = bodies.last().expect("resumed terminal publication");
-                assert!(terminal_body.contains(body.trim()), "terminal must retain the complete saved Unicode body: {terminal_body:?}");
-                assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again; observed bodies={bodies:#?}");
+                let bodies = gateway.bodies.lock().unwrap().clone();
+                let sites = gateway.sites.lock().unwrap().clone();
+                assert_eq!(bodies.len(), sites.len(), "paired resumed history: {sites:?} {bodies:?}");
+                let resumed_sites = &sites[resume_from..];
+                let resumed_bodies = &bodies[resume_from..];
+                assert!(resumed_sites.len() >= 2, "terminal body and summary must both publish: {sites:?} {bodies:?}");
+                let terminal_index = resumed_sites.len() - 2;
+                // Streaming edits may precede the terminal; only the final replace settles it.
+                assert!(resumed_sites[..terminal_index].iter().all(|site| *site == "edit_message"), "no extra terminal replace or POST: {sites:?} {bodies:?}");
+                assert_eq!(&resumed_sites[terminal_index..], ["replace_message_with_outcome", "send_message"], "terminal body precedes one summary: {sites:?} {bodies:?}");
+                for streamed in &resumed_bodies[..terminal_index] {
+                    assert_eq!(streamed, &body, "resumed streaming preserves the saved body: {sites:?} {bodies:?}");
+                }
+                let terminal_body = &resumed_bodies[terminal_index];
+                assert_eq!(terminal_body, &body, "terminal must retain the exact saved Unicode body: {sites:?} {bodies:?}");
+                assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again: {sites:?} {bodies:?}");
+                let summary = &resumed_bodies[terminal_index + 1];
+                let summary_shape = regex::Regex::new(r"\A-# ✅ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)\z").unwrap();
+                assert!(summary_shape.is_match(summary), "one completed summary after the terminal body: {sites:?} {bodies:?}");
+                assert!(bodies.iter().all(|sent| !sent.contains("DEFERRED_READER_FAILURE")), "reader error is never published: {sites:?} {bodies:?}");
             } else {
                 delivered.expect("actual idle adapter terminal publication completes");
             }
