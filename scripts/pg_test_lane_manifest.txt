@@ -45,6 +45,8 @@ src/db/replay_disposition_tests.rs
 src/db/replay_disposition_tests/compatibility_tests.rs
 src/db/replay_disposition_tests/concurrency_tests.rs
 src/db/replay_disposition_tests/consumer_tests.rs
+src/db/scheduled_messages/attachments_pg_tests.rs
+src/db/scheduled_messages/image_lifecycle_tests.rs
 src/db/scheduled_messages/postgres_tests.rs
 src/db/session_observability/background_ordering_pg_tests.rs
 src/db/session_transcripts.rs
@@ -65,6 +67,7 @@ src/reconcile.rs
 src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
+src/server/outbox_worker/attachment_pg_tests.rs
 src/server/resource_locks.rs
 src/server/routes/agents_host_guard_tests.rs
 src/server/routes/agents_turn_deliver/pg_tests.rs
@@ -80,6 +83,7 @@ src/server/routes/memory_api.rs
 src/server/routes/message_outbox.rs
 src/server/routes/pipeline_stage_save_tests.rs
 src/server/routes/queue_api.rs
+src/server/routes/scheduled_messages/image_activation_tests.rs
 src/server/routes/scheduled_messages/postgres_tests.rs
 src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
@@ -426,6 +430,8 @@ db::replay_disposition::tests::compatibility_tests
 db::replay_disposition::tests::concurrency_tests
 db::replay_disposition::tests::consumer_tests
 db::replay_disposition::write_tests
+db::scheduled_messages::attachments_pg_tests
+db::scheduled_messages::image_lifecycle::tests
 db::scheduled_messages::postgres_tests
 db::session_observability::tests_pg
 db::session_transcripts::clear_fence_pg_tests
@@ -446,6 +452,7 @@ reconcile::dispatch_delivery_reconcile_tests
 server::issue_specs::issue_specs_pg_tests
 server::message_outbox_retry_tests
 server::multinode_regression::multinode_regression_pg_tests
+server::outbox_worker::attachment_pg_tests
 server::resource_locks::resource_locks_pg_tests
 server::routes::agents::host_guard_tests
 server::routes::agents_turn_deliver::pg_tests
@@ -464,6 +471,7 @@ server::routes::memory_api::request_body_tests
 server::routes::message_outbox::tests
 server::routes::pipeline::stage_save_tests
 server::routes::queue_api::cancel_queue_preserve_pg_tests
+server::routes::scheduled_messages::image_input::tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
@@ -1173,6 +1181,17 @@ db::replay_disposition::write_tests::database_refuses_inexact_attempt_transition
 db::replay_disposition::write_tests::exact_attempt_migration_preserves_0136_rows_and_reapplies_pg
 db::replay_disposition::write_tests::exact_retry_moves_session_off_stale_resume_once_pg
 db::replay_disposition::write_tests::live_evidence_requires_a_complete_observation_and_one_provider_terminal_pg
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_detail_loads_exact_bytes
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_legacy_text_rows_keep_api_shape
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_limits_cover_sql_insert_patch_and_copy
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_list_redacts_payload_and_renders_metadata
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_partial_triplets_are_rejected
+db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_storage_insert_patch_preserve_and_clear
+db::scheduled_messages::attachments_pg_tests::postgres_image_decoder_rejects_corrupt_metadata_projection
+db::scheduled_messages::attachments_pg_tests::postgres_image_list_cannot_enter_attachment_handoff
+db::scheduled_messages::image_lifecycle::tests::postgres_image_retention_job_wiring_pg
+db::scheduled_messages::image_lifecycle::tests::postgres_image_rollout_includes_offline_members_and_outbox_consumers
+db::scheduled_messages::image_lifecycle::tests::postgres_terminal_image_retention_reclaims_one_shots_and_preserves_recurring
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
 db::scheduled_messages::postgres_tests::postgres_agent_turn_start_waits_for_parent_lock_and_observes_cancel
@@ -1291,6 +1310,14 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_
 server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node
 server::multinode_regression::multinode_regression_pg_tests::multinode_single_leader_lock_allows_one_holder
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
+server::outbox_worker::attachment_pg_tests::image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg
+server::outbox_worker::attachment_pg_tests::image_claim_batch_budget_and_old_consumer_barrier_pg
+server::outbox_worker::attachment_pg_tests::image_outbox_paths_preserve_retry_restart_and_dedupe_pg
+server::outbox_worker::attachment_pg_tests::image_preflight_400_fails_first_attempt_pg
+server::outbox_worker::attachment_pg_tests::image_prod_options_and_sent_cleanup_preserve_sentinel_pg
+server::outbox_worker::attachment_pg_tests::legacy_enqueue_wrappers_keep_null_attachment_bytes_pg
+server::outbox_worker::attachment_pg_tests::outbox_image_constraints_reject_partial_and_oversized_rows_pg
+server::outbox_worker::attachment_pg_tests::partial_outbox_image_never_invokes_text_delivery_pg
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg
@@ -1394,6 +1421,8 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
+server::routes::scheduled_messages::image_input::tests::postgres_image_api_create_patch_rollout_and_redaction
+server::routes::scheduled_messages::image_input::tests::postgres_image_route_body_limit_and_eight_mib_boundary
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_rejects_invalid_agent_primary_channel
@@ -2680,8 +2709,11 @@ services::scheduled_messages::postgres_tests::postgres_agent_trigger_now_retry_p
 services::scheduled_messages::postgres_tests::postgres_bound_cc_target_uses_claude_and_cc_owner_channel
 services::scheduled_messages::postgres_tests::postgres_cancel_before_push_handoff_enqueues_nothing
 services::scheduled_messages::postgres_tests::postgres_definitive_agent_failure_atomically_enqueues_one_fallback
+services::scheduled_messages::postgres_tests::postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff
 services::scheduled_messages::postgres_tests::postgres_expired_running_agent_never_enqueues_raw_fallback
 services::scheduled_messages::postgres_tests::postgres_expiry_does_not_terminalize_a_still_live_agent_turn
+services::scheduled_messages::postgres_tests::postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes
+services::scheduled_messages::postgres_tests::postgres_image_rollout_query_error_interrupts_and_rearms_parent
 services::scheduled_messages::postgres_tests::postgres_launch_compat_migration_backfills_legacy_turn_as_ambiguous
 services::scheduled_messages::postgres_tests::postgres_missing_runtime_waits_without_consuming_agent_retry
 services::scheduled_messages::postgres_tests::postgres_provider_error_transcripts_fail_without_false_delivery
