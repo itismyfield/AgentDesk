@@ -822,9 +822,9 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
 
     const SHARED_STATE: &str = include_str!("shared_state.rs");
     const PAIRED_ADAPTERS: [&str; 3] = [
-        "fn legacy_deferred_rollback(&self) {",
-        "fn legacy_lease_lost(&self) {",
-        "fn legacy_sigterm(&self) {",
+        "legacy_deferred_rollback",
+        "legacy_lease_lost",
+        "legacy_sigterm",
     ];
     const SHUTDOWN: &str = "self.shutting_down.store";
     const PENDING: &str = "self.restart_pending.store";
@@ -836,14 +836,14 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
         let lexed = Lexed::new(source);
         PAIRED_ADAPTERS
             .into_iter()
-            .filter(|adapter| {
-                let body = lexed.block(adapter);
+            .filter(|name| {
+                let body = lexed.block(&format!("fn {name}(&self) {{"));
                 let order = body
                     .as_ref()
                     .map(|body| (body.find(SHUTDOWN), body.find(PENDING)));
                 !matches!(order, Some((Some(shutdown), Some(pending))) if shutdown < pending)
             })
-            .map(|adapter| format!("{adapter} must store shutdown before pending"))
+            .map(|name| format!("{name} must store shutdown before pending"))
             .collect()
     }
 
@@ -851,7 +851,8 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
     fn shutdown_first_guard_rejects_commented_and_reordered_stores() {
         use crate::services::discord::router::source_guard_support::{forge, swap};
         use crate::test_support::CommentForgery;
-        for needle in PAIRED_ADAPTERS.into_iter().chain([SHUTDOWN, PENDING]) {
+        let heads = PAIRED_ADAPTERS.map(|name| format!("fn {name}(&self) {{"));
+        for needle in heads.iter().map(String::as_str).chain([SHUTDOWN, PENDING]) {
             for forgery in CommentForgery::ALL {
                 let forged = forge(SHARED_STATE, needle, forgery);
                 assert!(
@@ -860,8 +861,8 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
                 );
             }
         }
-        for adapter in PAIRED_ADAPTERS {
-            let at = SHARED_STATE.find(adapter).expect("adapter");
+        for adapter in &heads {
+            let at = SHARED_STATE.find(adapter.as_str()).expect("adapter");
             let swapped = format!(
                 "{}{}",
                 &SHARED_STATE[..at],
