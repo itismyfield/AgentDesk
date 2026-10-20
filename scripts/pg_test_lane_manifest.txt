@@ -143,6 +143,7 @@ src/services/discord/commands/control/clear_persist_failure_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs
+src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_owner_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/late_tests.rs
@@ -235,6 +236,7 @@ src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/delegated_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs
+src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_joint_owner_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_repeated_absence_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_restart_phase_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs
@@ -528,6 +530,7 @@ services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::codex_clear_relaunch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests
@@ -626,6 +629,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::repeated_absence
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::restart_phase
@@ -1722,6 +1726,10 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_on_without_session_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_after_boot_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_in_memory_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_registered_owner_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::missing_routine_receipt_preserves_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::no_core_registered_and_routine_foreign_owners_drain_restored_fifo_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::joint_owner_tests::registered_and_routine_foreign_owners_drain_restored_fifo_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::ordinary_launch_policy_remains_outside_the_absence_exception_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::post_tail_error_preserves_the_new_live_incarnation_pg
@@ -2198,6 +2206,7 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_restart_before_proof_preserves_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign::actual_gateway_mixed_foreign_owners_deliver_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_settles_prepared_once_without_duplicate_post_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_not_found_local_retry_registers_live_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::ordinary_canary_restart_with_operator_approval_hosts_and_sends_once_pg

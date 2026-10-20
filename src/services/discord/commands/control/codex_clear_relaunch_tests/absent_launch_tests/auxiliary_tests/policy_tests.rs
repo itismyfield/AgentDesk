@@ -45,6 +45,21 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
             .unwrap(),
         "Hold(\"owner_unresolved\")"
     );
+    let absence_observation =
+        crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
+            .expect("the queue guard fixture must have a read-only absent inflight observation");
+    assert!(
+        dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &absence_observation).is_some(),
+        "the queue guard fixture must have exact absence launch evidence"
+    );
+    assert!(
+        !dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
+        "absence alone must not satisfy the explicit-clear queue exception"
+    );
+    let public_activity =
+        activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    assert_eq!(public_activity.activity, activity::Activity::Unknown);
+    assert_eq!(public_activity.reason, "session_identity_unresolved");
     fixture.fake.take_calls();
     let taken = crate::services::discord::queue_dispatch::mailbox_take_next_automatic_intervention(
         &fixture.shared,

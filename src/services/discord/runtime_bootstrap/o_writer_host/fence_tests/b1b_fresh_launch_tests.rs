@@ -29,6 +29,8 @@ const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
 mod delegated_tests;
+#[path = "b1b_joint_owner_tests.rs"]
+mod joint_foreign;
 #[path = "b1b_terminal_tests.rs"]
 mod native_output;
 mod ordinary_restart_tests;
@@ -40,6 +42,7 @@ mod restart_phase;
 #[derive(Clone, Copy)]
 enum BeforeInput {
     Absent,
+    ForeignInventory,
     Restart,
     ExplicitClear,
     RepeatAbsent,
@@ -254,6 +257,11 @@ async fn scenario(retained: bool, before: BeforeInput) {
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
     let api = b1::recorder(&mut fixture).await;
+    let _foreign_owners = if matches!(before, BeforeInput::ForeignInventory) {
+        Some(joint_foreign::install(&mut fixture).await)
+    } else {
+        None
+    };
     let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
         "http://127.0.0.1:{}",
         api.port
@@ -383,6 +391,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
         .await;
         match before {
             BeforeInput::Absent
+            | BeforeInput::ForeignInventory
             | BeforeInput::RepeatAbsent
             | BeforeInput::InPlaceAbsent
             | BeforeInput::RestartAfterContext

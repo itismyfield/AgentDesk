@@ -949,6 +949,7 @@ src/
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
+│   │   │   │   │   │   │   ├── joint_owner_tests.rs
 │   │   │   │   │   │   │   └── policy_tests.rs
 │   │   │   │   │   │   ├── auxiliary_tests.rs
 │   │   │   │   │   │   ├── custody_tests.rs
@@ -1659,6 +1660,7 @@ src/
 │   │   │   │       │   ├── delegated_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs
+│   │   │   │       ├── b1b_joint_owner_tests.rs
 │   │   │   │       ├── b1b_repeated_absence_tests.rs
 │   │   │   │       ├── b1b_restart_phase_tests.rs
 │   │   │   │       └── b1b_terminal_tests.rs

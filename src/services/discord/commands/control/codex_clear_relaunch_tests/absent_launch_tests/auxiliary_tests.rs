@@ -5,6 +5,7 @@ use super::*;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use std::sync::Mutex;
 
+pub(in crate::services::discord) mod joint_owner_tests;
 mod policy_tests;
 
 pub(in crate::services::discord) const Q1: &str = "B1 restored FIFO first instruction";
@@ -406,6 +407,10 @@ pub(in crate::services::discord) fn warm_probe(
 }
 
 async fn full_fifo(recover: Option<bool>) {
+    full_fifo_with_owners(recover, None).await;
+}
+
+async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bool>) {
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
@@ -431,6 +436,10 @@ async fn full_fifo(recover: Option<bool>) {
     } else {
         target_missing(&fixture, true);
     }
+    let _foreign_owners = match foreign_no_core {
+        Some(no_core) => Some(joint_owner_tests::install_positive(&mut fixture, no_core).await),
+        None => None,
+    };
     let identities = restore_instructions(
         &mut fixture,
         vec![
@@ -443,7 +452,21 @@ async fn full_fifo(recover: Option<bool>) {
         &fixture.old_source.path,
     );
     fixture.fake.take_calls();
-    assert!(kickoff(&fixture, &api).await);
+    let started = kickoff(&fixture, &api).await;
+    if foreign_no_core.is_some() && !started {
+        assert_eq!(queue_identities(&fixture).await, identities);
+        assert_eq!(old_io.stats(), Default::default());
+        assert!(fixture.fake.take_calls().iter().all(|call| {
+            ["new-session", "kill-session", "send-keys", "paste-buffer"]
+                .iter()
+                .all(|effect| !call.starts_with(effect))
+        }));
+        eprintln!("BUNDLE_OWNER_DRAIN started=0 dequeue=0 provider_effects=0 fifo_preserved=1");
+    }
+    assert!(
+        started,
+        "exact foreign ownership must admit the restored FIFO head"
+    );
     let first = fixture.turn_failure_guard().await;
     let n2 = wait_context_after(&fixture, &fixture.context.execution_nonce).await;
     let n2_path = n2
@@ -525,6 +548,9 @@ async fn full_fifo(recover: Option<bool>) {
     .await
     .expect("real Q1 completion must publish its native selector before warm Q2");
     first.finish();
+    if foreign_no_core.is_some() {
+        joint_owner_tests::assert_bridge_once(&api, "Q1 cold").await;
+    }
     let before_attach = activity::activity_now(
         &fixture.shared,
         &ProviderKind::Codex,
@@ -644,6 +670,9 @@ async fn full_fifo(recover: Option<bool>) {
     wait_completion(&second.token).await;
     wait_idle(&fixture).await;
     second.finish();
+    if foreign_no_core.is_some() {
+        joint_owner_tests::assert_bridge_once(&api, "Q2 warm").await;
+    }
     assert!(queue_identities(&fixture).await.is_empty());
     let calls = fixture.fake.take_calls();
     assert_eq!(
