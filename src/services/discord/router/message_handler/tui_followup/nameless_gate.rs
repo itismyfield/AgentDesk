@@ -26,11 +26,7 @@ pub(super) async fn nameless_promote_blocked(
     let held = nameless(shared, provider, channel_id.get()).await;
     #[cfg(unix)]
     if held && crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-        let reading = crate::services::discord::turn_presence::activity::reading_now(
-            shared, provider, channel_id,
-        )
-        .await;
-        if reading.local_legacy_absence_for_start(None).await {
+        if Box::pin(local_legacy_start_ready(shared, provider, channel_id, None)).await {
             return false;
         }
     }
@@ -135,13 +131,13 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {
         #[cfg(unix)]
         if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-            let reading = crate::services::discord::turn_presence::activity::reading_now(
-                shared, provider, channel_id,
-            )
-            .await;
-            if reading
-                .local_legacy_absence_for_start(Some(&tmux_session_name))
-                .await
+            if Box::pin(local_legacy_start_ready(
+                shared,
+                provider,
+                channel_id,
+                Some(&tmux_session_name),
+            ))
+            .await
             {
                 return false;
             }
@@ -182,4 +178,19 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         );
     }
     blocked
+}
+
+#[cfg(unix)]
+// The caller boxes this witness so nested queue admission keeps its observation state off-stack.
+async fn local_legacy_start_ready(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    name: Option<&str>,
+) -> bool {
+    let reading = crate::services::discord::turn_presence::activity::reading_now(
+        shared, provider, channel_id,
+    )
+    .await;
+    reading.local_legacy_absence_for_start(name).await
 }

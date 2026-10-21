@@ -314,7 +314,7 @@ struct Snapshot {
     files: Files,
     exact: HostedLookup,
     canonical: HostedLookup,
-    legacy_absence: Option<Result<legacy_divergence::Proof, String>>,
+    legacy_absence: Option<Result<Box<legacy_divergence::Proof>, String>>,
     canonical_target: Option<Result<canonical_target::CanonicalTarget, String>>,
     owners: BTreeMap<String, Option<u64>>,
     ownership: Option<ownership::OwnerInputs>,
@@ -405,7 +405,7 @@ impl Snapshot {
                 if exact != canonical && local_registration(&config, channel.get(), provider) =>
             {
                 Some(
-                    legacy_divergence::collect(
+                    Box::pin(legacy_divergence::collect(
                         pool,
                         provider,
                         &shared.token_hash,
@@ -413,8 +413,9 @@ impl Snapshot {
                         name,
                         &exact,
                         &canonical,
-                    )
-                    .await,
+                    ))
+                    .await
+                    .map(Box::new),
                 )
             }
             _ => None,
