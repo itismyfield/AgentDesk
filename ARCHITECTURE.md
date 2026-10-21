@@ -152,10 +152,12 @@ src/
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
+│   │   │   ├── http_force.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   └── legacy_return_tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
+│   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── rebind_override.rs
@@ -1205,6 +1207,10 @@ src/
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
+│   │   │   ├── http_force.rs
+│   │   │   ├── http_force_e08_tests.rs
+│   │   │   ├── http_force_tests.rs
+│   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
@@ -2584,6 +2590,7 @@ src/
 │   │   ├── herdr_terminate.rs
 │   │   ├── herdr_terminate_exit_tests.rs
 │   │   ├── herdr_terminate_route_tests.rs
+│   │   ├── herdr_terminate_tests.rs
 │   │   ├── host_defer_gate.rs
 │   │   ├── host_defer_gate_tests.rs
 │   │   ├── host_key_derivation.rs
@@ -2734,7 +2741,11 @@ src/
 │   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
+│   │   ├── herdr_kill/
+│   │   │   └── effects.rs
 │   │   ├── canonical_identity.rs
+│   │   ├── force_kill.rs
+│   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs
@@ -2928,7 +2939,9 @@ src/
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
 │   ├── queue/
-│   │   └── herdr_stop.rs
+│   │   ├── cancel_effects.rs
+│   │   ├── herdr_stop.rs
+│   │   └── http_force.rs
 │   ├── qwen/
 │   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
@@ -2991,6 +3004,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── tests/
 │   │   │   └── source_guard_tests.rs
+│   │   ├── cancel_lookup.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs

@@ -389,9 +389,11 @@ jobs:
               - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
-              - 'src/services/discord/herdr_terminate.rs'
+              - 'src/services/discord/herdr_terminate/http_force_e08_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_tests.rs'
               - 'src/services/discord/herdr_terminate_exit_tests.rs'
               - 'src/services/discord/herdr_terminate_route_tests.rs'
+              - 'src/services/discord/herdr_terminate_tests.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
@@ -873,6 +875,9 @@ jobs:
               - 'src/services/codex/**'
               - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
+              # queue/ and the cancel lookup wire the forced Herdr cancel behind cfg(unix).
+              - 'src/services/queue/**'
+              - 'src/services/session_forwarding/cancel_lookup.rs'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
