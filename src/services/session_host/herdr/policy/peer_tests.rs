@@ -136,7 +136,8 @@ fn policy_peer_refuses_nondefault_xdg_even_with_default_override() {
 #[test]
 fn policy_peer_checks_version_protocol_start_and_current_witness() {
     let fixture = Fixture::new();
-    let edits: [(fn(&mut PeerObservation), Unverified); 8] = [
+    type Edit = fn(&mut PeerObservation);
+    let edits: [(Edit, Unverified); 8] = [
         (|peer| peer.protocol = 23, Unverified::Unsupported),
         (
             |peer| peer.hello.version = "0.9.4".into(),
