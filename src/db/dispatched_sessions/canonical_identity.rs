@@ -173,6 +173,9 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
+    if identity.is_none() {
+        return upsert_legacy_hook_session_pg(pool, params).await;
+    }
     upsert_hook_session_pg(pool, params, identity, None, None)
         .await
         .map(|(outcome, _)| outcome)
@@ -304,7 +307,9 @@ pub(crate) async fn upsert_legacy_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
-    upsert_hook_session_with_identity_pg(pool, params, None).await
+    upsert_hook_session_pg(pool, params, None, None, None)
+        .await
+        .map(|(outcome, _)| outcome)
 }
 
 /// Resolve a runtime locator in compatibility order: exact current key, exact
@@ -903,7 +908,7 @@ fn database_error(error: impl std::fmt::Display) -> HookSessionUpsertError {
 
 #[cfg(test)]
 #[path = "canonical_identity_pg_tests.rs"]
-mod pg_tests;
+pub(crate) mod pg_tests;
 
 #[cfg(test)]
 mod tests {

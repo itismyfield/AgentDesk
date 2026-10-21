@@ -878,6 +878,12 @@ NON_PG_FILTER_REPLAY=(
   services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
   services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_absent_still_requires_directory_fsync
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_dangling_directory_is_not_confirmed_absent
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_metadata_error_is_preserved_without_cleanup
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_missing_directory_is_confirmed_absent_and_bad_nonce_is_kept
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_permission_error_keeps_the_hold
+  services::herdr_launch::tests::retired_durability_tests::retired_hold_unlinked_but_unsynced_is_retryable
   services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans
   services::message_outbox::postgres_source_contract_tests::typed_outbox_core_preserves_cancel_at_the_observation_site
   services::message_outbox::postgres_source_contract_tests::typed_outbox_outcomes_fold_to_the_legacy_option_contract
@@ -951,6 +957,15 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
   services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_every_nonabsent_original_provider
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_every_nonabsent_original_root
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_mutated_stored_launch_evidence
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_new_provider_and_unverified_pane
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_rejects_changed_snapshot_process_and_final_witness
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_requires_a_replaced_lone_shell
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_requires_two_exact_absence_reads_for_shell_and_missing_pane
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_requires_verified_restore_off_before_pane_reads
+  services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_second_proof_requires_the_first_execution_and_server
   services::session_host::herdr_gate::tests::stopped_admission_refuses_input_but_lets_a_cancel_key_through
   services::session_host::herdr_gate::tests::the_boot_registry_holds_only_this_nodes_endpoints
   services::session_resume::tests::completed_critical_section_cancels_its_watchdog

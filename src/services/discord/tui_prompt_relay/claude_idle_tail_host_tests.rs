@@ -3,6 +3,7 @@ use crate::services::provider_teardown::tests::test_support::FakeTmux;
 
 fn lease(channel_id: ChannelId, tmux: &str) -> ExternalInputRelayLease {
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some(format!("external:claude:{}:p5c:1", channel_id.get())),
         session_key: Some(format!("host:{tmux}")),

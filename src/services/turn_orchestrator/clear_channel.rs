@@ -6,14 +6,34 @@ use std::path::Path;
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::pending_queue_persistence::{
-    load_channel_pending_dispatch_marker_checked, pending_queue_file_path,
-    remove_channel_pending_dispatch_marker,
+    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
+    pending_queue_file_path, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, ClearChannelResult, QueueExitEvent, QueueExitKind,
     QueuePersistenceContext, clear_pending_user_dispatch, queued_head, release_active_turn_anchor,
 };
 use crate::services::discord::runtime_store::{AtomicWriteContext, critical_atomic_write};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ActivePolicy {
+    Release,
+    Preserve,
+}
+
+pub(super) fn dispatch(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: QueuePersistenceContext,
+    active: ActivePolicy,
+    reply: super::closed_verdict::VerdictReply<ClearChannelResult>,
+) {
+    let result = clear_channel_state(state, channel_id, persistence, active);
+    if active == ActivePolicy::Release {
+        super::mark_turn_finished_signal_done(channel_id);
+    }
+    let _ = reply.send(result);
+}
 
 /// What a clear could not write: each write runs again once after a failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -57,6 +77,7 @@ pub(super) fn clear_channel_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: QueuePersistenceContext,
+    active: ActivePolicy,
 ) -> ClearChannelResult {
     state.last_persistence = Some(persistence.clone());
     let namespace = super::remint_fence::namespace(&persistence);
@@ -66,26 +87,77 @@ pub(super) fn clear_channel_state(
         .transpose();
     let marker_unreadable = read.is_err();
     let marker = read.ok().flatten().flatten();
+    let disk = if active == ActivePolicy::Preserve && disk_trusted {
+        load_channel_pending_queue_checked(
+            &persistence.provider,
+            &persistence.token_hash,
+            channel_id,
+        )
+        .map(|(items, _)| items)
+    } else {
+        Ok(Vec::new())
+    };
+    let queue_unreadable = disk.is_err();
     // Read before the release, which forgets the running turn's absorbed sources.
-    let not_waiting: Vec<MessageId> = (state.active_user_message_id.into_iter())
+    let protected: Vec<MessageId> = state
+        .active_user_message_id
+        .into_iter()
         .chain(state.active_absorbed_source_ids.iter().copied())
-        .chain(state.pending_user_dispatch)
-        .chain(state.pending_user_dispatch_source_ids.iter().copied())
         .collect();
-    let mut discarded_message_ids: Vec<MessageId> =
-        state.active_user_message_id.into_iter().collect();
-    let removed_token = release_active_turn_anchor(state, channel_id, Some(&persistence.provider));
+    let mut not_waiting = protected.clone();
+    let mut discarded_message_ids = Vec::new();
+    let removed_token = if active == ActivePolicy::Release {
+        not_waiting.extend(state.pending_user_dispatch);
+        not_waiting.extend(state.pending_user_dispatch_source_ids.iter().copied());
+        discarded_message_ids.extend(state.active_user_message_id);
+        release_active_turn_anchor(state, channel_id, Some(&persistence.provider))
+    } else {
+        None
+    };
     // Liveness-blind: an orphaned reservation is discarded all the same.
     discarded_message_ids.extend(state.pending_user_dispatch);
     discarded_message_ids.extend(state.pending_user_dispatch_source_ids.iter().copied());
-    let queue_exit_events: Vec<QueueExitEvent> = (marker.into_iter())
+    let mut waiting: Vec<_> = marker
+        .into_iter()
         .chain(state.intervention_queue.drain(..))
+        .chain(disk.unwrap_or_default())
+        .collect();
+    if active == ActivePolicy::Preserve {
+        let seen = std::cell::RefCell::new(
+            protected
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+        super::active_source_dedup::purge_sources_from_queue(&mut waiting, |_, id| {
+            !seen.borrow_mut().insert(id)
+        });
+    }
+    let queue_exit_events: Vec<QueueExitEvent> = waiting
+        .into_iter()
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
         .collect();
     for event in &queue_exit_events {
         let item = &event.intervention;
         discarded_message_ids.push(item.message_id);
         discarded_message_ids.extend(item.source_message_ids.iter().copied());
+    }
+    let (injected, unknown_reservation) = if active == ActivePolicy::Preserve {
+        super::injected_inputs::discard_waiting_reservation(state, &protected)
+    } else {
+        (None, false)
+    };
+    discarded_message_ids.extend(injected);
+    let waiting: Vec<_> = discarded_message_ids
+        .iter()
+        .copied()
+        .filter(|id| !protected.contains(id))
+        .collect();
+    if active == ActivePolicy::Preserve {
+        state.remint_fence.note_discarded(&waiting);
+    }
+    if active == ActivePolicy::Preserve {
+        discarded_message_ids = waiting;
     }
     clear_pending_user_dispatch(state);
     state.recently_valve_cleared_dispatch = None;
@@ -94,7 +166,7 @@ pub(super) fn clear_channel_state(
     state.remint_fence.begin_clear();
     let mut persistence = write_cleared_files(state, channel_id, &persistence, disk_trusted);
     persistence.not_waiting = not_waiting;
-    persistence.count_unknown = marker_unreadable;
+    persistence.count_unknown = marker_unreadable || queue_unreadable || unknown_reservation;
     ClearChannelResult {
         removed_token,
         queue_exit_events,

@@ -1117,6 +1117,8 @@ async fn observation_keeps_abandoned_synthetic_presence_and_bytes() {
     ))
     .await;
     let record = discord::tui_direct_pending_start::TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".into(),
         channel_id: channel.get(),
         tmux_session_name: "cancel-park-abandoned".into(),

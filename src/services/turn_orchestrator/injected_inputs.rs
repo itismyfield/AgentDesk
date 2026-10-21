@@ -15,8 +15,8 @@ const HANDBACK_DELAYS: [Duration; 4] = [
 ];
 
 /// The owner's share; a reservation whose lease only the actor holds counts as gone.
-#[derive(Debug)]
-pub(crate) struct InjectionLease;
+#[derive(Debug, Default)]
+pub(crate) struct InjectionLease(std::sync::atomic::AtomicBool);
 
 /// A live reservation. Not `Clone`: settling or abandoning consumes it.
 #[derive(Debug)]
@@ -33,7 +33,7 @@ pub(crate) enum ReserveOutcome {
     Reserved(InjectionTicket),
     /// The message is already queued, reserved for dispatch, or held by the active turn.
     Owned,
-    /// The message was already injected.
+    /// The message was already injected or explicitly discarded.
     Consumed,
     HolderChanged,
     Backlog,
@@ -173,6 +173,9 @@ pub(super) fn reserve(
     persistence: &QueuePersistenceContext,
 ) -> ReserveOutcome {
     if let Some(message) = message_id {
+        if state.remint_fence.refuses_discarded(&[message]) {
+            return ReserveOutcome::Consumed;
+        }
         let now = std::time::Instant::now();
         if disposition::terminal(Some(&persistence.provider), message, now).is_some() {
             return ReserveOutcome::Consumed;
@@ -230,7 +233,7 @@ pub(super) fn reserve(
             None => ReserveOutcome::Unavailable,
         };
     }
-    let lease = Arc::new(InjectionLease);
+    let lease = Arc::new(InjectionLease::default());
     state.injection_reserved = Some((message_id, lease.clone()));
     if let Some(message) = message_id {
         // A catch-up enqueue classified before this reservation is refused by its claim CAS.
@@ -335,6 +338,26 @@ fn release(state: &mut ChannelMailboxState, ticket: &InjectionTicket) {
     }
 }
 
+pub(super) fn discard_waiting_reservation(
+    state: &mut ChannelMailboxState,
+    protected: &[MessageId],
+) -> (Option<MessageId>, bool) {
+    if state
+        .injection_reserved
+        .as_ref()
+        .is_some_and(|(id, _)| id.is_some_and(|id| protected.contains(&id)))
+    {
+        return (None, false);
+    }
+    match state.injection_reserved.take() {
+        Some((id, lease)) => {
+            lease.0.store(true, Ordering::Release);
+            (id, id.is_none())
+        }
+        None => (None, false),
+    }
+}
+
 /// The reservation ends only with a written handback; a write that did not land keeps it.
 pub(super) fn settle(
     state: &mut ChannelMailboxState,
@@ -354,6 +377,15 @@ pub(super) fn settle(
             return SettleOutcome::Committed { queue_exit_events };
         }
     };
+    if ticket.lease.0.load(Ordering::Acquire) || super::clear_fence::refuses(state, &intervention) {
+        release(state, &ticket);
+        return SettleOutcome::Committed {
+            queue_exit_events: vec![QueueExitEvent::new(
+                *intervention,
+                QueueExitKind::Superseded,
+            )],
+        };
+    }
     if let Some(error) = absorb_disk_queue_error(state, channel_id, persistence) {
         return SettleOutcome::NotCommitted { ticket, error };
     }

@@ -556,6 +556,7 @@ pub(super) struct Observation<'a> {
     pub(super) may_park: bool,
     pub(super) effect: PromptObservationEffect,
     pub(super) observed_at: DateTime<Utc>,
+    pub(super) hosted_source: Option<&'a hosted_source::HostedSourcePin>,
 }
 
 pub(super) enum Decision {
@@ -608,6 +609,7 @@ pub(super) fn decide_observation(
                 entry_id,
                 native_turn,
                 observation.observed_at,
+                observation.hosted_source,
             )
         {
             return Decision::Parked;

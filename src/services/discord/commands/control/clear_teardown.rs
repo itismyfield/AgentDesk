@@ -6,9 +6,10 @@ use poise::serenity_prelude as serenity;
 use tokio::sync::OwnedMutexGuard;
 
 use super::super::super::SharedData;
+use super::super::super::turn_bridge::stop_active_turn_with_outcome;
 use super::{ClearReport, ManagedSessionClearBehavior, managed_session_clear_behavior};
 use crate::db::session_transcripts;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
 
 #[cfg(unix)]
 mod clear_end_record;
@@ -172,4 +173,19 @@ async fn end_herdr(
         report.end_unconfirmed = true;
     }
     true
+}
+
+/// Uses the canonical stop ordering; a host refusal leaves the released turn unconfirmed.
+pub(super) async fn stop_released_turn(
+    provider: &ProviderKind,
+    token: Option<Arc<CancelToken>>,
+    clear_source: &str,
+) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    let policy = super::super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+    let stop = stop_active_turn_with_outcome(provider, &token, policy, clear_source).await;
+    // Only a legacy settlement says the stop reached the turn's host.
+    stop.may_clear_inflight()
 }

@@ -341,6 +341,7 @@ fn session_relay_trace_context_uses_external_input_lease_without_inflight() {
         ProviderKind::Codex.as_str(),
         tmux,
         crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+            hosted_source: None,
             channel_id: Some(4242),
             turn_id: Some("external:codex:4242:trace:1".to_string()),
             session_key: Some("host:AgentDesk-codex-external-trace".to_string()),
@@ -378,6 +379,7 @@ fn terminal_delivery_route_skips_bridge_owned_external_lease_without_inflight() 
         .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-codex-bridge-owned-direct";
     let lease = crate::services::tui_prompt_dedupe::ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(4243),
         turn_id: Some("external:codex:4243:trace:1".to_string()),
         session_key: Some("host:AgentDesk-codex-bridge-owned-direct".to_string()),
@@ -1000,12 +1002,7 @@ fn idle_jsonl_should_not_skip_none_tmux_inflight_wildcard() {
     inflight.tmux_session_name = None;
     let mut last_inflight_seen_at = HashMap::new();
     last_inflight_seen_at.insert(matched.expected_session_name.clone(), Instant::now());
-    let mut offset = 128;
-    let wake_payload = concat!(
-        "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"wake-none\"}\n",
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer\"}]}}\n"
-    );
-    let end = offset + wake_payload.len() as u64;
+    let offset = 128;
 
     assert!(idle_jsonl::idle_jsonl_inflight_mismatches_session(
         &inflight,
@@ -1136,8 +1133,8 @@ async fn inflightless_ranged_frame_acquires_sink_lease_before_terminal_delivery_
     );
 }
 
-#[tokio::test]
-async fn watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277() {
+#[test]
+fn watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277() {
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -1145,83 +1142,87 @@ async fn watcher_preemption_blocks_task_context_route_promotion_before_card_post
         .unwrap_or_else(|poison| poison.into_inner());
     crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
-    let channel_id = 4_277_006;
-    let channel = ChannelId::new(channel_id);
-    let binding = matched(&channel_id.to_string());
-    let registry = Arc::new(HealthRegistry::new());
-    let shared = super::super::make_shared_data_for_tests();
-    shared
-        .http
-        .cached_bot_token
-        .set("test-token".to_string())
-        .expect("test token set once");
-    registry
-        .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
-        .await;
+    #[tokio::main(flavor = "current_thread")]
+    async fn run() {
+        let channel_id = 4_277_006;
+        let channel = ChannelId::new(channel_id);
+        let binding = matched(&channel_id.to_string());
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        shared
+            .http
+            .cached_bot_token
+            .set("test-token".to_string())
+            .expect("test token set once");
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+            .await;
 
-    let mut rebind = inflight_for(
-        &binding.expected_session_name,
-        RelayOwnerKind::Watcher,
-        true,
-    );
-    rebind.channel_id = channel_id;
-    rebind.user_msg_id = 0;
-    rebind.current_msg_id = 9_001;
-    rebind.started_at = "2026-07-24T01:00:00Z".to_string();
-    rebind.turn_start_offset = Some(640);
-    super::super::inflight::save_inflight_state(&rebind).expect("persist rebind inflight");
-
-    let range_start = 640;
-    let range_end = 1_024;
-    let watcher_key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
-        channel,
-        shared.restart.current_generation,
-        Some(&rebind),
-        &binding.expected_session_name,
-        range_end,
-        range_start,
-    );
-    assert!(shared.delivery_lease(channel).try_acquire(
-        watcher_key,
-        super::super::LeaseHolder::Watcher { instance_id: 91 },
-        range_start,
-        range_end,
-        super::super::lease_now_ms().saturating_add(10_000),
-    ));
-    let sink = SessionBoundDiscordRelaySink::new(registry);
-    let payload = concat!(
-        "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-route-mutation-4277\",\"tool_use_id\":\"toolu-bg-route-mutation-4277\",\"status\":\"completed\",\"summary\":\"background work\",\"task_notification_kind\":\"background\"}\n",
-        "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"task answer\"}]}}\n",
-        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"task answer\"}\n"
-    );
-    let terminal = terminal_frame_offset(
-        &binding,
-        payload,
-        1,
-        range_end,
-        0,
-        &rebind.started_at,
-        Some(range_start),
-    );
-
-    let outcome = sink
-        .deliver(&terminal)
-        .await
-        .expect("lost lease is a known not-delivered outcome");
-
-    assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
-    assert_eq!(sink.delivered_total.load(Ordering::Acquire), 0);
-    assert!(
-        crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
-            ProviderKind::Claude.as_str(),
+        let mut rebind = inflight_for(
             &binding.expected_session_name,
-            channel_id,
-        )
-        .is_none(),
-        "task-card ensure must not run after the outer lease loses"
-    );
-    super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
-    crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            RelayOwnerKind::Watcher,
+            true,
+        );
+        rebind.channel_id = channel_id;
+        rebind.user_msg_id = 0;
+        rebind.current_msg_id = 9_001;
+        rebind.started_at = "2026-07-24T01:00:00Z".to_string();
+        rebind.turn_start_offset = Some(640);
+        super::super::inflight::save_inflight_state(&rebind).expect("persist rebind inflight");
+
+        let range_start = 640;
+        let range_end = 1_024;
+        let watcher_key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
+            channel,
+            shared.restart.current_generation,
+            Some(&rebind),
+            &binding.expected_session_name,
+            range_end,
+            range_start,
+        );
+        assert!(shared.delivery_lease(channel).try_acquire(
+            watcher_key,
+            super::super::LeaseHolder::Watcher { instance_id: 91 },
+            range_start,
+            range_end,
+            super::super::lease_now_ms().saturating_add(10_000),
+        ));
+        let sink = SessionBoundDiscordRelaySink::new(registry);
+        let payload = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-route-mutation-4277\",\"tool_use_id\":\"toolu-bg-route-mutation-4277\",\"status\":\"completed\",\"summary\":\"background work\",\"task_notification_kind\":\"background\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"task answer\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"task answer\"}\n"
+        );
+        let terminal = terminal_frame_offset(
+            &binding,
+            payload,
+            1,
+            range_end,
+            0,
+            &rebind.started_at,
+            Some(range_start),
+        );
+
+        let outcome = sink
+            .deliver(&terminal)
+            .await
+            .expect("lost lease is a known not-delivered outcome");
+
+        assert_eq!(outcome, RelaySinkOutcome::TerminalNotDelivered);
+        assert_eq!(sink.delivered_total.load(Ordering::Acquire), 0);
+        assert!(
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+                ProviderKind::Claude.as_str(),
+                &binding.expected_session_name,
+                channel_id,
+            )
+            .is_none(),
+            "task-card ensure must not run after the outer lease loses"
+        );
+        super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+    run();
 }
 
 #[tokio::test]
@@ -1818,7 +1819,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "answer",
@@ -1856,7 +1857,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
     // REFUSES → NotDelivered AND the committed offset does NOT advance.
     // A mutation that hard-codes advance=`true` would advance here and Deliver.
     let shared2 = super::super::make_shared_data_for_tests();
-    let sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+    let _sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
     let mismatched = inflight_with_identity_offset(
         channel.get(),
         session,
@@ -1887,7 +1888,7 @@ fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
             short_controller::SinkShortReplaceCtx {
                 shared: &shared2,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "answer",
@@ -1930,7 +1931,7 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
         .build()
         .unwrap();
     let provider = ProviderKind::Claude;
-    let channel = ChannelId::new(8_041_491_1);
+    let channel = ChannelId::new(80_414_911);
     let session = "AgentDesk-claude-sink-short-4911";
     let generation_path = crate::services::tmux_common::session_temp_path(session, "generation");
     std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
@@ -2024,7 +2025,7 @@ fn sink_short_controller_post_reset_is_landed_stale_without_replacement_poison_4
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: "old body",
@@ -2223,10 +2224,10 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         .build()
         .unwrap();
     let provider = ProviderKind::Claude;
-    let channel = ChannelId::new(8_041_4081);
+    let channel = ChannelId::new(80_414_081);
     let session = "AgentDesk-claude-session-sink-raw-4081";
     let raw_body = "# heading\nbody line\n".to_string();
-    let user_msg_id = 8_041_4080;
+    let user_msg_id = 80_414_080;
     let relay_text = formatting::format_for_discord_with_provider(&raw_body, &provider);
     assert_ne!(
         raw_body, relay_text,
@@ -2305,7 +2306,7 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
             short_controller::SinkShortReplaceCtx {
                 shared: &shared,
                 provider: &provider,
-                channel: channel,
+                channel,
                 channel_id: channel.get(),
                 msg_id: MessageId::new(99),
                 relay_text: &relay_text,
@@ -3332,6 +3333,7 @@ fn external_input_delivery(session_name: &str, channel_id: u64) -> SessionRelayD
 
 fn session_bound_lease(channel_id: u64, session: &str, turn_seq: u64) -> ExternalInputRelayLease {
     ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id),
         turn_id: Some(format!("external:claude:{channel_id}:{session}:{turn_seq}")),
         session_key: Some(format!("host:{session}")),

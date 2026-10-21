@@ -40,7 +40,12 @@ pub(super) fn set_pending_user_dispatch(
     message_id: MessageId,
     source_message_ids: &[MessageId],
 ) -> Arc<DispatchLease> {
-    let lease = Arc::new(DispatchLease);
+    let sources = source_message_ids
+        .iter()
+        .copied()
+        .chain([message_id])
+        .collect();
+    let lease = DispatchLease::new(state.remint_fence.clone(), sources);
     state.pending_user_dispatch = Some(message_id);
     // #5191: carry the merged head's absorbed ids through the dequeue→claim
     // window. `queued_message_ids()` unions primary + sources while the entry
@@ -307,10 +312,13 @@ pub(super) fn hydrate_pending_queue_into_state(
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
     // Items read from a file a clear could not rewrite were discarded by that clear.
-    let disk_items = match queue_trusted(state, &persistence) {
+    let mut disk_items = match queue_trusted(state, &persistence) {
         true => disk_items,
         false => Vec::new(),
     };
+    purge_sources_from_queue(&mut disk_items, |_, id| {
+        state.remint_fence.refuses_discarded(&[id])
+    });
     let previous_queue = state.intervention_queue.clone();
     let mut existing_ids: HashSet<MessageId> = state
         .intervention_queue
@@ -375,7 +383,7 @@ pub(super) fn merge_pending_dispatch_marker_into_state(
     operation: &'static str,
 ) -> HydratePendingQueueResult {
     state.last_persistence = Some(persistence.clone());
-    if !marker_trusted(state, &persistence) {
+    if !marker_trusted(state, &persistence) || super::clear_fence::refuses(state, &marker) {
         return HydratePendingQueueResult {
             absorbed: 0,
             queue_len_after: state.intervention_queue.len(),
@@ -625,6 +633,9 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     let Some((mut marker, marker_override)) = marker.flatten() else {
         return None;
     };
+    if super::clear_fence::refuses(state, &marker) {
+        return None;
+    }
     let marker_id = marker.message_id;
     let marker_ids = intervention_dedup_ids(&marker);
     let stale_duplicate = marker_ids.iter().all(|id| {

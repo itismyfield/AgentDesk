@@ -30,6 +30,7 @@ fn n1a_confirmed_direct_prompt_posts_only_its_notice() {
             None,
         );
         let prompt = ObservedTuiPrompt {
+            hosted_source: None,
             provider: PROVIDER_KEY.into(),
             tmux_session_name: tmux.into(),
             prompt: "N1a direct prompt remains visible".into(),
@@ -273,6 +274,7 @@ fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
             super::super::relay_observed_prompt(
                 &h.shared,
                 ObservedTuiPrompt {
+                    hosted_source: None,
                     provider: PROVIDER_KEY.into(),
                     tmux_session_name: tmux.into(),
                     prompt: text.into(),

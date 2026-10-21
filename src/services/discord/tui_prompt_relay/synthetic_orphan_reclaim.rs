@@ -201,6 +201,8 @@ mod tests {
 
     fn pending_record(channel_id: u64, tmux: &str) -> TuiDirectPendingStart {
         TuiDirectPendingStart {
+            hosted_source: None,
+            hosted_source_checked: false,
             provider: "claude".to_string(),
             channel_id,
             tmux_session_name: tmux.to_string(),

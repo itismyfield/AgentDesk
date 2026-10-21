@@ -1,4 +1,6 @@
 use super::*;
+mod admitted;
+use admitted::claim_tui_direct_synthetic_turn_prepared;
 
 #[cfg(test)]
 #[path = "intake_placeholder_retirement_tests.rs"]
@@ -15,6 +17,7 @@ pub(super) struct SyntheticClaimIdentity<'a> {
     pub(super) lease: &'a ExternalInputRelayLease,
     pub(super) register_deferred_start: bool,
     pub(super) native_turn: Option<&'a str>,
+    pub(super) transition: Option<&'a tokio::sync::OwnedMutexGuard<()>>,
 }
 
 pub(super) struct SyntheticClaimPreparation<'a> {
@@ -25,6 +28,7 @@ pub(super) struct SyntheticClaimPreparation<'a> {
     pub(super) relay_owner_kind: RelayOwnerKind,
 }
 
+#[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_synthetic_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -39,11 +43,9 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         provider,
         channel_id,
         tmux_session_name,
-        prompt_text,
-        anchor_message_id,
+        (prompt_text, anchor_message_id),
         lease,
-        None,
-        None,
+        (None, None),
     )
     .await
     .0
@@ -56,12 +58,12 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    prompt_text: &str,
-    anchor_message_id: MessageId,
+    prompt: (&str, MessageId),
     lease: &ExternalInputRelayLease,
-    captured_source: Option<&(String, u64)>,
-    native_turn: Option<&str>,
+    source: (Option<&(String, u64)>, Option<&str>),
 ) -> (TuiDirectSyntheticTurnClaim, Option<(String, u64)>) {
+    let (prompt_text, anchor_message_id) = prompt;
+    let (captured_source, native_turn) = source;
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         return (
             TuiDirectSyntheticTurnClaim::new(lease.relay_owner, false, 0),
@@ -183,6 +185,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
             lease,
             register_deferred_start: DEFERRED,
             native_turn,
+            transition: None,
         },
         output_path,
         start_offset,
@@ -351,11 +354,9 @@ mod n1a_tests {
                         &provider,
                         channel,
                         "n1a-isolated-claim",
-                        "human prompt",
-                        MessageId::new(7),
+                        ("human prompt", MessageId::new(7)),
                         &lease,
-                        None,
-                        None,
+                        (None, None),
                     )
                     .await;
                     assert!(
@@ -379,11 +380,9 @@ mod n1a_tests {
                         &provider,
                         channel,
                         "n1a-isolated-claim",
-                        "human prompt",
-                        MessageId::new(7),
+                        ("human prompt", MessageId::new(7)),
                         &lease,
-                        None,
-                        None,
+                        (None, None),
                     )
                     .await;
                     assert!(claim.claimed, "Legacy claim remains available");

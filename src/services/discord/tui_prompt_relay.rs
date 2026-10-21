@@ -654,7 +654,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // neutral note cannot claim the mailbox if this seam is called accidentally.
         deferred_synthetic_start = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
             shared,
-            &prompt.provider,
             channel_id,
             &prompt,
             anchor_message_id,

@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+mod clear_waiting;
+pub(in crate::services::discord) use clear_waiting::discard_legacy_waiting;
+pub(super) use clear_waiting::take_retired;
+
 use super::super::{SharedData, inflight, runtime_store, tui_direct_abort_marker, turn_finalizer};
 
 /// Conservative poll interval for the wait predicate.
@@ -60,12 +64,9 @@ pub(in crate::services::discord) enum PendingStartState {
     Waiting,
 }
 
-/// Durable record describing a TUI-direct synthetic turn-start that must be
-/// claimed only AFTER the prior turn on the same channel finalizes.
-///
-/// All fields are primitives so the JSON survives a dcserver version swap; the
-/// lease is rehydrated from these fields on restart
-/// (`record_external_input_turn_lease`), never from a serialized lease struct.
+/// Durable ownership and source values for a deferred synthetic claim.
+/// Restart restores the relay lease without resubmitting the provider prompt.
+#[cfg_attr(test, derive(Default))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct TuiDirectPendingStart {
     pub provider: String,
@@ -95,6 +96,10 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
     /// Codex native turn the deferred input opened, so the worker's claim starts at its record.
     #[serde(default)]
     pub native_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_source: Option<crate::services::tui_prompt_dedupe::hosted_source::HostedSourcePin>,
+    #[serde(default)]
+    pub hosted_source_checked: bool,
 }
 
 impl TuiDirectPendingStart {
@@ -329,6 +334,9 @@ pub(in crate::services::discord) fn persist(record: &TuiDirectPendingStart) -> R
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    if clear_waiting::cleared(&record.key()) {
+        return Err("pending input superseded by clear".into());
+    }
     mark_present(record.key());
     write_record(record)?;
     Ok(())
@@ -347,8 +355,12 @@ fn delete_locked(record: &TuiDirectPendingStart) {
     mark_absent(&record.key());
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
-        let _ = std::fs::remove_file(path);
+        let _ = unlink_record_file(&path);
     }
+}
+
+fn unlink_record_file(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
 }
 
 /// Delete the record of a turn whose output is already committed so neither its
@@ -376,17 +388,6 @@ pub(in crate::services::discord) fn retire_completed(
 }
 
 /// The record's turn already finished; its worker exits without claiming or retrying.
-pub(super) fn take_retired(record: &TuiDirectPendingStart) -> bool {
-    let key = record.key();
-    let was_retired = retired().remove(&key);
-    if was_retired {
-        tracing::info!(
-            ?key,
-            "tui_direct_pending_start: retired record's worker exits"
-        );
-    }
-    was_retired
-}
 
 /// Save a claim's row only while its pending start is not retired (`Ok(false)` otherwise).
 pub(in crate::services::discord) fn save_row_unless_retired(
@@ -396,7 +397,7 @@ pub(in crate::services::discord) fn save_row_unless_retired(
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let key = (state.provider.clone(), state.channel_id, state.user_msg_id);
-    if retired().contains(&key) {
+    if retired().contains(&key) || clear_waiting::cleared(&key) {
         return Ok(false);
     }
     inflight::save_inflight_state_if_absent(state)
@@ -407,7 +408,7 @@ pub(super) fn update_claim_attempt_count(record: &mut TuiDirectPendingStart, cla
     let _guard = PRESENCE_RECONCILE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if retired().contains(&record.key()) {
+    if retired().contains(&record.key()) || clear_waiting::cleared(&record.key()) {
         return;
     }
     if let Err(error) = write_record(record) {

@@ -26,6 +26,8 @@ async fn pending_start_worker_writes_its_claimed_row_and_consumes_the_record() {
     );
     let anchor = 6_325_961u64;
     let record = tui_direct_pending_start::TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id: channel.get(),
         tmux_session_name: tmux.to_string(),

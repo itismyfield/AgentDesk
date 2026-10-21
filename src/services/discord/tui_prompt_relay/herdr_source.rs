@@ -87,7 +87,7 @@ async fn reconcile(
     pool: &PgPool,
     owner: &HostedOwner,
     reader: &dyn HerdrExecutionReader,
-) -> (HostReconcile, Option<String>, Option<String>) {
+) -> (HostReconcile, Option<String>, Option<String>, HostedLookup) {
     let lookup = load(pool, owner).await;
     let nonce = match &lookup {
         HostedLookup::Found(found) => match &found.record {
@@ -98,7 +98,7 @@ async fn reconcile(
     };
     let recorded = Recorded(reader, RefCell::new(None));
     let verdict = reconcile_hosted(&lookup, &recorded);
-    (verdict, nonce, recorded.1.into_inner())
+    (verdict, nonce, recorded.1.into_inner(), lookup)
 }
 
 /// The pane's logged records in order; refusal audits do not move the pane.
@@ -161,7 +161,7 @@ pub(in crate::services::discord) async fn attach_launched_herdr_source(
     reader: &dyn HerdrExecutionReader,
 ) -> HerdrSourceAttach {
     let logical = owner.logical_key.as_str();
-    let (verdict, row_nonce, agent) = reconcile(pool, owner, reader).await;
+    let (verdict, row_nonce, agent, _) = reconcile(pool, owner, reader).await;
     match verdict {
         HostReconcile::Legacy => return HerdrSourceAttach::NotHerdr,
         HostReconcile::Pending(HerdrExecutionMatch::Match)
@@ -216,7 +216,7 @@ pub(in crate::services::discord) async fn attach_launched_codex_herdr_source(
     reader: &dyn HerdrExecutionReader,
 ) -> HerdrSourceAttach {
     let logical = owner.logical_key.as_str();
-    let (verdict, row_nonce, agent) = reconcile(pool, owner, reader).await;
+    let (verdict, row_nonce, agent, _) = reconcile(pool, owner, reader).await;
     let bound = match verdict {
         HostReconcile::Legacy => return HerdrSourceAttach::NotHerdr,
         _ if row_nonce.as_deref() != Some(nonce) => None,
@@ -278,7 +278,7 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
     reader: &dyn HerdrExecutionReader,
 ) -> HerdrSourceAttach {
     let logical = owner.logical_key.as_str();
-    let (verdict, row_nonce, agent) = reconcile(pool, owner, reader).await;
+    let (verdict, row_nonce, agent, observed) = reconcile(pool, owner, reader).await;
     let nonce = match (verdict, row_nonce) {
         (HostReconcile::Legacy, _) => return HerdrSourceAttach::NotHerdr,
         (verdict, Some(nonce)) if verdict.admits_reconnect() => nonce,
@@ -287,6 +287,10 @@ pub(in crate::services::discord) async fn attach_restarted_herdr_source(
             return HerdrSourceAttach::Refused(verdict);
         }
     };
+    if load(pool, owner).await != observed {
+        withhold_herdr_execution(logical, Some(&nonce));
+        return HerdrSourceAttach::NotPublished;
+    }
     let codex = owner.provider == "codex";
     let Some(source) = nonce_baseline(channel, logical, &nonce) else {
         if !codex && awaits_own_clear(channel, logical, &nonce) {

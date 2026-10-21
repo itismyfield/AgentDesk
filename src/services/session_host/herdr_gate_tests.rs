@@ -2108,6 +2108,19 @@ pub(crate) mod p11 {
                 .await
         }
 
+        fn record_at_runtime_root(&self, state: HostedState) -> HostedExecution {
+            let mut record = stored(&self.server, state);
+            record.owner.runtime_root = crate::config::runtime_root()
+                .expect("a runtime root for the termination fixture")
+                .display()
+                .to_string();
+            record
+                .source_ref
+                .runtime_root
+                .clone_from(&record.owner.runtime_root);
+            record
+        }
+
         async fn insert(
             &self,
             pool: &sqlx::PgPool,
@@ -2121,7 +2134,7 @@ pub(crate) mod p11 {
             std::fs::write(marker, "herdr").unwrap();
             self.os
                 .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
-            let mut record = stored(&self.server, state);
+            let mut record = self.record_at_runtime_root(state);
             if !evidence {
                 record.expected = None;
             }
@@ -2145,7 +2158,7 @@ pub(crate) mod p11 {
         /// The record `bind` stored, as a fresh input target would read it.
         pub(crate) fn record(&self, token_hash: &str, session_key: &str) -> HostedExecution {
             let logical = session_key.rsplit_once(':').unwrap().1;
-            let mut record = stored(&self.server, HostedState::Bound);
+            let mut record = self.record_at_runtime_root(HostedState::Bound);
             record.owner.discord_token_hash = token_hash.into();
             record.owner.channel_id = self.channel.to_string();
             record.owner.logical_key = logical.into();
@@ -2190,7 +2203,7 @@ pub(crate) mod p11 {
             provider: &str,
         ) -> HostedExecution {
             let logical = session_key.rsplit_once(':').unwrap().1;
-            let mut record = stored(&self.server, state);
+            let mut record = self.record_at_runtime_root(state);
             record.owner.provider = provider.into();
             record.owner.discord_token_hash = token_hash.into();
             record.owner.channel_id = self.channel.to_string();
@@ -2459,3 +2472,6 @@ pub(crate) mod p11 {
         std::mem::forget(herdr_registry::force_for_test(HerdrRegistry::build(&none)));
     }
 }
+
+#[path = "herdr_gate/root_replaced_tests.rs"]
+mod root_replaced_tests;

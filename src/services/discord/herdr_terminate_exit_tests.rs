@@ -190,6 +190,9 @@ fn clear_root_replaced_retires_without_close_pg() {
         let key = key(&shared, channel, &provider, None).await.unwrap();
         let bound = herdr::HostedState::Bound;
         let _switches = rig.bind(&pool, &shared.token_hash, &key, bound).await;
+        let root = crate::config::runtime_root().unwrap().display().to_string();
+        sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(hosted_execution, '{owner,runtime_root}', to_jsonb($2::text)), '{source_ref,runtime_root}', to_jsonb($2::text)) WHERE session_key = $1")
+            .bind(&key).bind(root).execute(&pool).await.unwrap();
         rig.restore_shell();
 
         let http = std::sync::Arc::new(poise::serenity_prelude::Http::new(""));

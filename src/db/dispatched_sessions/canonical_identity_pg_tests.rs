@@ -75,7 +75,7 @@ impl CanonicalIdentityPgDatabase {
     }
 }
 
-fn params<'a>(key: &'a str, channel_id: &'a str) -> HookSessionUpsert<'a> {
+pub(crate) fn params<'a>(key: &'a str, channel_id: &'a str) -> HookSessionUpsert<'a> {
     HookSessionUpsert {
         session_key: key,
         instance_id: Some("test-node"),
@@ -1837,7 +1837,7 @@ async fn insert_session(pool: &PgPool, key: &str, status: &str, thread: Option<&
     .unwrap()
 }
 
-async fn set_raw(pool: &PgPool, key: &str, raw: Option<Value>) {
+pub(crate) async fn set_raw(pool: &PgPool, key: &str, raw: Option<Value>) {
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
         .bind(key)
         .bind(raw)
@@ -2186,7 +2186,7 @@ fn owner_other() -> HostedOwner {
     owner("1479671301387059999")
 }
 
-async fn raw_of(pool: &PgPool, key: &str) -> Option<Value> {
+pub(crate) async fn raw_of(pool: &PgPool, key: &str) -> Option<Value> {
     sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE session_key = $1")
         .bind(key)
         .fetch_one(pool)

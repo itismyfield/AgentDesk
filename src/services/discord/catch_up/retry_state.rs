@@ -507,8 +507,21 @@ pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_back
     channel_id: ChannelId,
 ) -> ClearChannelResult {
     let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    discard_cleared_backlog(shared, provider, channel_id, &cleared);
+    cleared
+}
+
+pub(in crate::services::discord) fn discard_cleared_backlog(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    cleared: &ClearChannelResult,
+) {
     // The clear discarded these ids whatever its writes did, so no sweep may run them again.
     shared.catch_up_retry_pending.remove(&channel_id);
+    if let Some(mut slot) = shared.catch_up_scan_in_progress.get_mut(&channel_id) {
+        slot.1 = None;
+    }
     // Only real Discord ids are cursors: a synthetic headless/voice id would hide every later message.
     let real = |id: &u64| {
         is_real_discord_message_id_value(*id) && !is_synthetic_headless_message_id_raw(*id)
@@ -517,7 +530,6 @@ pub(in crate::services::discord) async fn clear_channel_discarding_catch_up_back
     if let Some(newest) = discarded.filter(real).max() {
         advance_last_message_checkpoint(shared, provider, channel_id, MessageId::new(newest));
     }
-    cleared
 }
 
 #[cfg(test)]

@@ -201,6 +201,7 @@ impl Turn {
         &self,
     ) -> ExternalInputRelayLease {
         let prompt = ObservedTuiPrompt {
+            hosted_source: None,
             provider: CLAUDE.to_string(),
             tmux_session_name: self.tmux.clone(),
             prompt: PROMPT.to_string(),
@@ -219,7 +220,6 @@ impl Turn {
         let deferred =
             super::super::super::super::synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
                 &self.shared,
-                CLAUDE,
                 self.channel,
                 &prompt,
                 self.anchor(),

@@ -52,6 +52,7 @@ fn token_count_line() -> String {
 /// Codex's Stop hook for `turn` on the live hook broadcast the rollout tail reads.
 fn publish_stop(tmux: &str, turn: &str) {
     crate::services::claude_tui::hook_server::publish_hook_event_for_tests(HookEvent {
+        original_context: None,
         provider: "codex".to_string(),
         session_id: tmux.to_string(),
         kind: HookEventKind::Stop,
@@ -186,6 +187,7 @@ impl Fixture {
     fn send_hook(&self, prompt: &str, turn: &str) {
         self.hooks
             .send(HookEvent {
+                original_context: None,
                 provider: "codex".to_string(),
                 session_id: self.codex.tmux.clone(),
                 kind: HookEventKind::UserPromptSubmit,
@@ -302,14 +304,30 @@ impl Fixture {
     }
 
     fn completed_turns(&mut self) -> usize {
-        let mut turns = 0;
-        while let Ok(signal) = self.finalized.try_recv() {
-            if matches!(signal, inflight::InflightSignal::Completed { channel_id, .. } if channel_id == self.codex.channel.get())
-            {
-                turns += 1;
-            }
-        }
-        turns
+        completion_wait_tests::drain(&mut self.finalized, self.codex.channel.get()).len()
+    }
+
+    /// HTTP precedes finalization; each owning bridge turn must finish before the settle drain.
+    async fn wait_completed_turns(&mut self, turn_ids: &[u64]) -> usize {
+        let tmux = self.codex.tmux.clone();
+        let settle = async move {
+            let visits = poll_notes(&tmux, PollNote::Visit);
+            assert!(
+                wait_for(Duration::from_secs(10), || poll_notes(
+                    &tmux,
+                    PollNote::Visit
+                ) >= visits + 2)
+                .await,
+                "the idle loop stopped during the completion settle window"
+            );
+        };
+        completion_wait_tests::wait(
+            &mut self.finalized,
+            self.codex.channel.get(),
+            turn_ids,
+            settle,
+        )
+        .await
     }
 
     /// The answer only edits `anchor` (streaming edits included) and its last edit's JSON
@@ -408,7 +426,7 @@ impl Fixture {
                 "answers keep input order"
             );
         }
-        assert_eq!(self.completed_turns(), answers.len());
+        assert_eq!(self.wait_completed_turns(&anchors).await, answers.len());
         if let Some(tails) = tails {
             assert_eq!(tail_starts(self.codex.channel), tails, "one tail per input");
         }
@@ -546,7 +564,11 @@ async fn cursor_past_prompt(root: PathBuf, channel: u64, tmux: &str, answer_firs
     );
     tokio::time::sleep(Duration::from_secs(2)).await;
     fx.assert_answer(RESPONSE, anchor);
-    assert_eq!(fx.completed_turns(), 1, "one bridge turn delivers");
+    assert_eq!(
+        fx.wait_completed_turns(&[anchor]).await,
+        1,
+        "one bridge turn delivers"
+    );
     assert_eq!(tail_starts(fx.codex.channel), 1, "one tail");
     fx.assert_released().await;
     fx.assert_cursor_follows_eof().await;
@@ -654,7 +676,7 @@ fn codex_direct_answer_keeps_its_boundary_when_a_discord_prompt_lands_first() {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, anchor);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(
                 tail_starts(fx.codex.channel),
                 1,
@@ -967,7 +989,7 @@ fn codex_direct_answer_keeps_its_boundary_behind_a_burst_of_later_inputs() {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, anchor);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
@@ -1209,6 +1231,8 @@ fn codex_direct_deferred_input_restored_under_a_later_lease_keeps_its_boundary()
     });
 }
 
+/// Completion identity and the final settle drain shared by direct-input fixtures.
+mod completion_wait_tests;
 /// A TUI input typed while a Discord prompt is handed to Codex, across a restart too.
 mod handoff_tests;
 /// Answers ending around a Stop hook, a queued shell turn, or a Discord turn's steer.
@@ -1279,7 +1303,7 @@ fn codex_6903_discovery_keeps_live_input_out_of_bootstrap_history() {
             fx.polls(3).await;
             assert_eq!(fx.sent("LIVE_DISCOVERY_6903_ANSWER").len(), 1);
             fx.assert_answer("LIVE_DISCOVERY_6903_ANSWER", anchor);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             while let Ok(event) = fx.observed.try_recv() {
                 assert!(
