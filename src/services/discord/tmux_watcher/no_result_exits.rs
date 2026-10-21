@@ -602,11 +602,6 @@ pub(super) async fn handle_no_result_exits(
             return NoResultExitOutcome::BreakWatcherLoop;
         }
 
-        // A fresh idle without a terminal keeps the source carry for the next read.
-        if fresh_ready_for_input_idle {
-            return NoResultExitOutcome::ContinueWatcherLoop;
-        }
-
         if let Some(notice) = ready_for_input_failure_notice {
             let notice_ok = match *state.placeholder_msg_id {
                 Some(msg_id) => {

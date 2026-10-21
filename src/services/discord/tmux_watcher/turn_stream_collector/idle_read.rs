@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) enum IdleReadOutcome {
     Break,
-    Continue,
     Fallthrough,
 }
 

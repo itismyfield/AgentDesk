@@ -691,7 +691,6 @@ async fn collect_turn_stream_body(
                     .await
                     {
                         idle_read::IdleReadOutcome::Break => break,
-                        idle_read::IdleReadOutcome::Continue => continue,
                         idle_read::IdleReadOutcome::Fallthrough => {}
                     }
                 }
