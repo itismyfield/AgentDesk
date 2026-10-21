@@ -76,10 +76,23 @@ impl RetiredExclusion {
     /// Disconnects the session while its row still records this retired execution and no dispatch
     /// but the bound one; `Ok(false)` means the row moved on and nothing was written.
     pub(crate) async fn disconnect_session(&self, pool: &PgPool) -> Result<bool, String> {
+        self.disconnect(pool, false).await
+    }
+
+    /// [`Self::disconnect_session`] that keeps the provider session id, as a session force-kill does.
+    pub(crate) async fn disconnect_session_keeping_provider(
+        &self,
+        pool: &PgPool,
+    ) -> Result<bool, String> {
+        self.disconnect(pool, true).await
+    }
+
+    async fn disconnect(&self, pool: &PgPool, keep_provider_session: bool) -> Result<bool, String> {
         let HostedRecord::Known(record) = &self.row.record else {
             return Err("retired row has no known record".into());
         };
         let id = self.row.session_id();
-        disconnect_retired_pg(pool, id, record, self.dispatch()).await
+        let keep = keep_provider_session;
+        disconnect_retired_pg(pool, id, record, self.dispatch(), keep).await
     }
 }

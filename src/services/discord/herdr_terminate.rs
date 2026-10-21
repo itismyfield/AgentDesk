@@ -210,6 +210,7 @@ thread_local! {
     static AFTER_FENCE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static BEFORE_POSTLUDE: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static BEFORE_SELECTION: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -240,6 +241,16 @@ pub(crate) fn probe_after_close(probe: SettlementWindowProbe) {
 #[cfg(test)]
 pub(crate) fn probe_before_postlude(probe: SettlementWindowProbe) {
     BEFORE_POSTLUDE.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+/// Runs once when a forced HTTP branch is about to pick its execution, after the request's own
+/// session read.
+#[cfg(test)]
+pub(crate) fn probe_before_selection(probe: SettlementWindowProbe) {
+    BEFORE_SELECTION.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+#[cfg(test)]
+pub(crate) async fn run_before_selection_probe() {
+    run_probe(&BEFORE_SELECTION).await;
 }
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {

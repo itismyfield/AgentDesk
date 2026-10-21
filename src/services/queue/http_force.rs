@@ -12,7 +12,9 @@ use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_executio
 use crate::services::cluster::channel_home::current_command;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::http_force::terminate_for_http;
-use crate::services::discord::herdr_terminate::{OperatorTerminate, terminate_enabled};
+use crate::services::discord::herdr_terminate::{
+    OperatorTerminate, TerminationResult, terminate_enabled,
+};
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ServiceError, ServiceResult};
@@ -20,19 +22,23 @@ use crate::services::session_forwarding::{CancelTurnSessionInfo, load_cancel_tur
 
 const REASON: &str = "queue-api cancel_turn (force)";
 
-/// The forced cancel's answer when `session_key`, the cancel's own pick, is a Herdr execution of
-/// this channel; `None` leaves the cancel to its existing path. The switch is read before any IO.
+/// The forced cancel's answer when `selected`, the cancel's own pick of session and dispatch, is a
+/// Herdr execution of this channel; `None` leaves the cancel to its existing path. The switch is
+/// read before any IO. A re-read naming another dispatch is refused: the pick binds the run.
 pub(super) async fn herdr_force(
     force: bool,
     health_registry: Option<&Arc<HealthRegistry>>,
     pool: Option<&PgPool>,
     channel_id: &str,
-    session_key: Option<&str>,
+    selected: (Option<&str>, Option<&str>),
 ) -> Option<ServiceResult<Value>> {
     if !force || !terminate_enabled() {
         return None;
     }
     let (registry, pool) = (health_registry?, pool?);
+    let (session_key, dispatch) = selected;
+    #[cfg(test)]
+    crate::services::discord::herdr_terminate::run_before_selection_probe().await;
     let (info, row) = load_cancel_turn_hosted(pool, channel_id).await.ok()??;
     let record = herdr_execution(row.hosted.as_ref(), &row.identity)?;
     let provider = ProviderKind::from_str(&record.owner.provider);
@@ -43,13 +49,17 @@ pub(super) async fn herdr_force(
     if !chosen {
         return None;
     }
+    if info.dispatch_id.as_deref() != dispatch {
+        let moved = TerminationResult::Refused("selected dispatch changed".into());
+        return Some(answer(channel_id, &info, moved.outcome(), None));
+    }
     let request = OperatorTerminate {
         session_key: info.session_key.clone(),
         execution_nonce: record.execution_nonce,
     };
     let (effects_pool, key) = (pool.clone(), info.session_key.clone());
     let permit = current_command(channel_id, "cancel_turn");
-    let bound = (request, info.dispatch_id.clone());
+    let bound = (request, dispatch.map(str::to_string));
     let (result, effects) = terminate_for_http(registry, pool.clone(), bound, permit, REASON, {
         move |exclusion| herdr_force_effects(exclusion, effects_pool, key).boxed()
     })

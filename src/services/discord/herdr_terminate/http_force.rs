@@ -12,8 +12,15 @@ use super::{
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
 use crate::services::cluster::channel_home::{CommandPermit, command_scope};
 
+/// A postlude's outcome, finished once the exclusion is gone: work that must not run while the
+/// channel is excluded, such as a drain of the queue the termination kept.
+pub(crate) trait Released: Send + Sized + 'static {
+    fn released(self) -> BoxFuture<'static, Self>;
+}
+
 /// Runs the scoped terminate bound to `dispatch` and, only on a retire, `postlude` while the
-/// exclusion is held; `permit` keeps the channel's home command open until the result is logged.
+/// exclusion is held, then its released step; `permit` keeps the channel's home command open
+/// until the result is logged.
 pub(crate) async fn terminate_for_http<T, P>(
     registry: &HealthRegistry,
     pool: PgPool,
@@ -23,7 +30,7 @@ pub(crate) async fn terminate_for_http<T, P>(
     postlude: P,
 ) -> (TerminationResult, Option<T>)
 where
-    T: Send + 'static,
+    T: Released,
     P: for<'a> FnOnce(&'a RetiredExclusion) -> BoxFuture<'a, T> + Send + 'static,
 {
     if !terminate_enabled() {
@@ -50,6 +57,7 @@ where
                     super::run_probe(&super::BEFORE_POSTLUDE).await;
                     let applied = postlude(&exclusion).await;
                     drop(exclusion);
+                    let applied = applied.released().await;
                     (TerminationResult::Retired, Some(applied))
                 }
                 Err(result) => (result, None),

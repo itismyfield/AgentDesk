@@ -29,8 +29,10 @@ mod tmux_cleanup;
 use tmux_cleanup::kill_tmux_session_impl;
 
 mod force_kill;
+#[cfg(unix)]
+mod herdr_force;
 mod hook;
-use force_kill::force_kill_session_impl_with_reason_and_forwarding;
+use force_kill::{Entry, force_kill_session_impl_with_reason_and_forwarding};
 pub use hook::{HookSessionQuery, hook_session_with_query};
 
 fn spawn_auto_queue_activate_for_agent(state: AppState, agent_id: String) {
@@ -402,12 +404,15 @@ pub(crate) async fn force_kill_session_impl_with_reason(
     retry: bool,
     reason: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let headers = HeaderMap::new();
+    let key = session_key;
     force_kill_session_impl_with_reason_and_forwarding(
         state,
-        &HeaderMap::new(),
-        session_key,
+        &headers,
+        key,
         retry,
         reason,
+        Entry::Direct,
     )
     .await
 }
@@ -461,12 +466,14 @@ pub async fn force_kill_session(
     Json(body): Json<ForceKillOptions>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let reason = body.reason.as_deref().unwrap_or("force-kill API invoked");
+    let (key, retry) = (&session_key, body.retry);
     force_kill_session_impl_with_reason_and_forwarding(
         &state,
         &headers,
-        &session_key,
-        body.retry,
+        key,
+        retry,
         reason,
+        Entry::Http,
     )
     .await
 }

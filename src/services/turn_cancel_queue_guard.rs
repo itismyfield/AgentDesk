@@ -2,12 +2,14 @@
 
 use std::collections::HashSet;
 
-use poise::serenity_prelude::MessageId;
+use poise::serenity_prelude::{ChannelId, MessageId};
 use sqlx::PgPool;
 
 use crate::db::relay_dead_letter::{RelayDeadLetterRecord, record_detached_reporting};
 use crate::services::turn_lifecycle::TurnLifecycleTarget;
-use crate::services::turn_orchestrator::{ChannelMailboxRegistry, Intervention};
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, ChannelMailboxRegistry, Intervention,
+};
 
 /// `relay_dead_letter.kind` for a queued user message a cancel removed.
 pub(crate) const KIND_CANCEL_QUEUE_DISCARD: &str = "cancel_queue_discard";
@@ -93,6 +95,13 @@ pub(crate) async fn capture_queue_before_cancel(
     let Some(handle) = ChannelMailboxRegistry::global_handle(channel_id) else {
         return CancelQueueCapture::default();
     };
+    capture_queue_before_cancel_on(&handle).await
+}
+
+/// [`capture_queue_before_cancel`] on `handle`, the actor a caller already holds.
+pub(crate) async fn capture_queue_before_cancel_on(
+    handle: &ChannelMailboxHandle,
+) -> CancelQueueCapture {
     match handle.try_snapshot().await {
         Ok(snapshot) => CancelQueueCapture {
             items: snapshot.intervention_queue,
@@ -109,6 +118,32 @@ pub(crate) async fn record_queue_loss_after_cancel(
     pool: Option<&PgPool>,
     witness: CancelRemovalWitness,
     reason: &'static str,
+) -> CancelQueueLoss {
+    let after = ChannelMailboxRegistry::global_handle;
+    record_queue_loss(target, capture, pool, witness, reason, after).await
+}
+
+/// [`record_queue_loss_after_cancel`] reading the post-cancel queue of `handle`, the actor the
+/// capture and the removal used, never whichever one the channel registers by then.
+pub(crate) async fn record_queue_loss_after_cancel_on(
+    handle: &ChannelMailboxHandle,
+    target: &TurnLifecycleTarget,
+    capture: &CancelQueueCapture,
+    pool: Option<&PgPool>,
+    witness: CancelRemovalWitness,
+    reason: &'static str,
+) -> CancelQueueLoss {
+    let after = |_| Some(handle.clone());
+    record_queue_loss(target, capture, pool, witness, reason, after).await
+}
+
+async fn record_queue_loss(
+    target: &TurnLifecycleTarget,
+    capture: &CancelQueueCapture,
+    pool: Option<&PgPool>,
+    witness: CancelRemovalWitness,
+    reason: &'static str,
+    after: impl FnOnce(ChannelId) -> Option<ChannelMailboxHandle>,
 ) -> CancelQueueLoss {
     let mut outcome = CancelQueueLoss {
         proved_nothing_removed: capture.observed
@@ -134,7 +169,7 @@ pub(crate) async fn record_queue_loss_after_cancel(
         return outcome;
     };
 
-    let snapshot = match ChannelMailboxRegistry::global_handle(channel_id) {
+    let snapshot = match after(channel_id) {
         Some(handle) => handle.try_snapshot().await.ok(),
         None => None,
     };

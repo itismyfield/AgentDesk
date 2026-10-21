@@ -28,6 +28,13 @@ const DISPATCH: &str = "dispatch-e07";
 const SUCCESSOR: &str = "dispatch-e07-successor";
 const JSON: (&str, &str) = ("content-type", "application/json");
 
+/// A postlude with nothing to release.
+impl super::Released for () {
+    fn released(self) -> futures::future::BoxFuture<'static, Self> {
+        async {}.boxed()
+    }
+}
+
 /// The rig for test `name` in its own child, on a current-thread runtime so every probe runs.
 fn rig_child(name: &str) -> Option<(herdr::P11TerminationRig, tokio::runtime::Runtime)> {
     rig_child_with(name, false)

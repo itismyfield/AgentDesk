@@ -31,16 +31,19 @@ pub(crate) async fn active_dispatch_pg(
 
 /// Disconnects the row only while it still records `record` retired, field by field, with
 /// `dispatch` or, once that dispatch's cancel cleared it, none active; successors stay untouched.
+/// `keep_provider_session` leaves the provider session id for a later resume.
 pub(crate) async fn disconnect_retired_pg(
     pool: &PgPool,
     session_id: i64,
     record: &HostedExecution,
     dispatch: Option<&str>,
+    keep_provider_session: bool,
 ) -> Result<bool, String> {
     let owner = &record.owner;
     let updated = sqlx::query(
         "UPDATE sessions
-         SET status = 'disconnected', active_dispatch_id = NULL, claude_session_id = NULL
+         SET status = 'disconnected', active_dispatch_id = NULL,
+             claude_session_id = CASE WHEN $10 THEN claude_session_id END
          WHERE id = $1
            AND hosted_execution->>'state' = 'retired'
            AND hosted_execution->>'execution_nonce' = $2
@@ -61,6 +64,7 @@ pub(crate) async fn disconnect_retired_pg(
     .bind(&owner.owner_node)
     .bind(&owner.runtime_root)
     .bind(dispatch)
+    .bind(keep_provider_session)
     .execute(pool)
     .await
     .map_err(|error| format!("disconnect retired session: {error}"))?;

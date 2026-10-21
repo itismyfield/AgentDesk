@@ -21,9 +21,9 @@ mod herdr_stop;
 mod http_force;
 
 pub(super) use cancel_effects::force_purge_channel_mailbox;
-use cancel_effects::schedule_post_cancel_queue_drain;
+pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
 #[cfg(test)]
-pub(crate) use cancel_effects::set_pre_purge_hook_for_test;
+pub(crate) use cancel_effects::{set_pre_purge_hook_for_test, set_pre_purge_probe_for_test};
 
 #[derive(Clone)]
 pub struct QueueService {
@@ -465,8 +465,8 @@ impl QueueService {
         #[cfg(unix)]
         {
             let pool = self.pg_pool.as_ref();
-            let key = session_key.as_deref();
-            let forced = http_force::herdr_force(force, health_registry, pool, channel_id, key);
+            let selected = (session_key.as_deref(), dispatch_id.as_deref());
+            let forced = http_force::herdr_force(force, health_registry, pool, channel_id, selected);
             if let Some(answer) = forced.await {
                 return answer;
             }

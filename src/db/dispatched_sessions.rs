@@ -12,7 +12,12 @@ use crate::services::session_activity::SessionActivityResolver;
 mod force_kill;
 #[path = "dispatched_sessions/hosted_execution.rs"]
 pub(crate) mod hosted_execution;
-pub(crate) use force_kill::{disconnect_session_and_prepare_retry_pg, load_force_kill_session_pg};
+#[cfg(unix)]
+pub(crate) use force_kill::{ForceKillHosted, load_force_kill_session_hosted_pg};
+pub(crate) use force_kill::{
+    disconnect_session_and_prepare_retry_pg, load_force_kill_session_pg,
+    prepare_force_kill_retry_pg,
+};
 #[path = "dispatched_sessions/thread_gc.rs"]
 mod thread_gc;
 pub use thread_gc::gc_stale_thread_sessions_pg;

@@ -1,5 +1,6 @@
 //! The session reads and writes of a session force-kill.
 
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use super::{
@@ -8,27 +9,69 @@ use super::{
 use crate::db::agents::resolve_agent_channel_for_provider_pg;
 use crate::db::session_agent_resolution::normalize_thread_channel_id;
 
+/// Active dispatch, agent, runtime channel, stored provider and owner instance of a session.
+type ForceKillSession = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 pub(crate) async fn load_force_kill_session_pg(
     pool: &PgPool,
     session_key: &str,
     provider_name: Option<&str>,
-) -> Result<
-    Option<(
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )>,
-    String,
-> {
+) -> Result<Option<ForceKillSession>, String> {
+    let selected = select(pool, session_key, provider_name, |_| Ok(())).await?;
+    Ok(selected.map(|(session, ())| session))
+}
+
+/// The selected row's own key, identity columns (provider, identity kind, token hash, channel)
+/// and hosted execution record, as the same read returned them.
+#[cfg(unix)]
+pub(crate) struct ForceKillHosted {
+    pub(crate) session_key: String,
+    pub(crate) identity: [Option<String>; 4],
+    pub(crate) hosted: Option<serde_json::Value>,
+}
+
+/// [`load_force_kill_session_pg`]'s read with the selected row's hosted record.
+#[cfg(unix)]
+pub(crate) async fn load_force_kill_session_hosted_pg(
+    pool: &PgPool,
+    session_key: &str,
+    provider_name: Option<&str>,
+) -> Result<Option<(ForceKillSession, ForceKillHosted)>, String> {
+    select(pool, session_key, provider_name, |row| {
+        Ok(ForceKillHosted {
+            session_key: row.try_get("session_key")?,
+            identity: [
+                row.try_get("provider")?,
+                row.try_get("identity_kind")?,
+                row.try_get("discord_token_hash")?,
+                row.try_get("channel_id")?,
+            ],
+            hosted: row.try_get("hosted_execution")?,
+        })
+    })
+    .await
+}
+
+async fn select<R>(
+    pool: &PgPool,
+    session_key: &str,
+    provider_name: Option<&str>,
+    read: impl Fn(&PgRow) -> Result<R, sqlx::Error>,
+) -> Result<Option<(ForceKillSession, R)>, String> {
     let resolved_session_key =
         resolve_session_locator_pg(pool, session_key, "force-kill session").await?;
     let Some(resolved_session_key) = resolved_session_key else {
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT active_dispatch_id, agent_id, thread_channel_id, provider, instance_id
+        "SELECT active_dispatch_id, agent_id, thread_channel_id, provider, instance_id,
+                session_key, identity_kind, discord_token_hash, channel_id, hosted_execution
          FROM sessions
          WHERE session_key = $1",
     )
@@ -61,6 +104,7 @@ pub(crate) async fn load_force_kill_session_pg(
     let instance_id: Option<String> = row
         .try_get("instance_id")
         .map_err(|error| format!("decode instance_id for {session_key}: {error}"))?;
+    let read = read(&row).map_err(|error| format!("decode row for {session_key}: {error}"))?;
 
     let effective_provider = provider_name.or(session_provider.as_deref());
     let runtime_channel_id =
@@ -79,13 +123,14 @@ pub(crate) async fn load_force_kill_session_pg(
             None
         };
 
-    Ok(Some((
+    let session = (
         active_dispatch_id,
         agent_id,
         runtime_channel_id,
         session_provider,
         instance_id,
-    )))
+    );
+    Ok(Some((session, read)))
 }
 
 pub(crate) async fn disconnect_session_and_prepare_retry_pg(
@@ -118,7 +163,17 @@ pub(crate) async fn disconnect_session_and_prepare_retry_pg(
             .await
             .map_err(|error| format!("commit postgres force-kill transaction: {error}"))?;
     }
+    prepare_force_kill_retry_pg(pool, session_key, active_dispatch_id, retry).await
+}
 
+/// Fails the force-killed session's dispatch or, with `retry`, reads what its retry copies; a
+/// terminal dispatch is never rewritten. The session row is not touched here.
+pub(crate) async fn prepare_force_kill_retry_pg(
+    pool: &PgPool,
+    session_key: &str,
+    active_dispatch_id: Option<&str>,
+    retry: bool,
+) -> Result<Option<RetryDispatchMeta>, String> {
     let mut retry_meta = None;
     if let Some(dispatch_id) = active_dispatch_id {
         let current_status = sqlx::query_scalar::<_, Option<String>>(

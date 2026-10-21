@@ -39,11 +39,31 @@ pub(crate) fn set_pre_purge_hook_for_test(
 }
 
 #[cfg(test)]
+type PrePurgeProbe = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
+
+#[cfg(test)]
+static PRE_PURGE_PROBE_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, PrePurgeProbe>>> =
+    LazyLock::new(Default::default);
+
+/// Runs `probe` once when a purge of `channel` is about to reach its actor.
+#[cfg(test)]
+pub(crate) fn set_pre_purge_probe_for_test(channel: ChannelId, probe: PrePurgeProbe) {
+    PRE_PURGE_PROBE_FOR_TESTS
+        .lock()
+        .unwrap()
+        .insert(channel, probe);
+}
+
+#[cfg(test)]
 async fn run_pre_purge_hook_for_test(
     provider: &ProviderKind,
     channel: ChannelId,
     handle: &ChannelMailboxHandle,
 ) {
+    let probe = PRE_PURGE_PROBE_FOR_TESTS.lock().unwrap().remove(&channel);
+    if let Some(probe) = probe {
+        probe().await;
+    }
     let entry = PRE_PURGE_HOOK_FOR_TESTS.lock().unwrap().remove(&channel);
     if let Some((items, token)) = entry {
         handle
@@ -53,7 +73,7 @@ async fn run_pre_purge_hook_for_test(
 }
 
 /// Schedule preserved work and return only the depth observed after the drain attempt.
-pub(super) async fn schedule_post_cancel_queue_drain(
+pub(crate) async fn schedule_post_cancel_queue_drain(
     health_registry: Option<&Arc<HealthRegistry>>,
     target: &TurnLifecycleTarget,
     reason: &'static str,
@@ -172,17 +192,20 @@ pub(super) mod herdr {
 
     use super::{PurgeCounts, TurnLifecycleTarget, purge_on};
     use crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg;
+    use futures::FutureExt;
+    use futures::future::BoxFuture;
+
     use crate::services::discord::TmuxCleanupPolicy;
     use crate::services::discord::herdr_terminate::RetiredExclusion;
+    use crate::services::discord::herdr_terminate::http_force::Released;
     use crate::services::turn_cancel_finalizer::{
         FinalizeTurnCancelRequest, FinalizedTurnCancel, TurnCancelCorrelation, finalize_turn_cancel,
     };
     use crate::services::turn_cancel_queue_guard::{
-        CancelQueueLoss, CancelRemovalWitness, capture_queue_before_cancel,
-        record_queue_loss_after_cancel,
+        CancelQueueLoss, CancelRemovalWitness, capture_queue_before_cancel_on,
+        record_queue_loss_after_cancel_on,
     };
     use crate::services::turn_lifecycle::cleanup_policy_observability_surface;
-    use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
     pub(in crate::services::queue) const HERDR_TERMINATE: &str = "herdr-terminate";
 
@@ -193,6 +216,13 @@ pub(super) mod herdr {
         pub(in crate::services::queue) purge: Option<PurgeCounts>,
         pub(in crate::services::queue) loss: Option<CancelQueueLoss>,
         pub(in crate::services::queue) cancelled: FinalizedTurnCancel,
+    }
+
+    /// A forced cancel purged its queue under the exclusion, so nothing is left to release.
+    impl Released for HerdrForceEffects {
+        fn released(self) -> BoxFuture<'static, Self> {
+            futures::future::ready(self).boxed()
+        }
     }
 
     /// Cancels the bound dispatch, disconnects the retired row, then captures, purges and records
@@ -255,23 +285,21 @@ pub(super) mod herdr {
             return (None, None, None);
         };
         let (provider, channel) = (exclusion.provider(), exclusion.channel());
-        // The loss record reads the channel's registered actor, so that must be this one.
-        let registered = ChannelMailboxRegistry::global_handle(channel);
-        if !registered.is_some_and(|registered| registered.same_actor(actor)) {
-            return (Some("channel actor replaced".into()), None, None);
-        }
         let target = TurnLifecycleTarget {
             provider: Some(provider.clone()),
             channel_id: Some(channel),
             tmux_name: String::new(),
         };
-        let capture = capture_queue_before_cancel(&target).await;
+        // Capture, purge and record all address the exclusion's actor, whatever the channel registers.
+        let capture = capture_queue_before_cancel_on(actor).await;
         let purge = purge_on(actor, provider, channel, Some(session_key), false).await;
         let purge = purge.map(PurgeCounts::from);
         let witness = CancelRemovalWitness::Purge(purge);
         let reason = "queue_api_cancel_turn_force";
+        let pool = Some(pool);
         let loss =
-            record_queue_loss_after_cancel(&target, &capture, Some(pool), witness, reason).await;
+            record_queue_loss_after_cancel_on(actor, &target, &capture, pool, witness, reason);
+        let loss = loss.await;
         let failed = purge.is_none().then(|| "queue purge refused".to_string());
         (failed, purge, Some(loss))
     }
