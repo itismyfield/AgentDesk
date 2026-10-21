@@ -1868,6 +1868,8 @@ src/
 │   │   │   ├── host_guard_tests.rs
 │   │   │   ├── retirement_await_tests.rs
 │   │   │   └── stale_busy_identity.rs
+│   │   ├── tmux_restart_handoff_mailbox_tests/
+│   │   │   └── fresh_start_failure_tests.rs
 │   │   ├── tmux_session_files/
 │   │   │   └── orphan_sweep_tests.rs
 │   │   ├── tmux_watcher/
