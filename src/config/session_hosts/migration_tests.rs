@@ -7,6 +7,56 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
 
 const CHANNEL: u64 = 41;
 
+struct Observed {
+    hosts: BootSessionHosts,
+    meta: super::super::BootMigration,
+}
+
+impl std::ops::Deref for Observed {
+    type Target = BootSessionHosts;
+
+    fn deref(&self) -> &Self::Target {
+        &self.hosts
+    }
+}
+
+impl Observed {
+    fn migration(&self) -> Option<&Diagnostic> {
+        self.meta.migration()
+    }
+
+    fn admission_stopped(&self) -> bool {
+        self.meta.admission_stopped()
+    }
+}
+
+impl HostsBootSelection {
+    fn into_hosts(self) -> Observed {
+        let (hosts, meta) = self.into_parts();
+        Observed { hosts, meta }
+    }
+}
+
+struct CountWrites<'a> {
+    inner: &'a FileApprovalStore,
+    writes: Cell<usize>,
+}
+
+impl ApprovalStore for CountWrites<'_> {
+    fn load(&self) -> Loaded {
+        self.inner.load()
+    }
+
+    fn save(&self, hosts: &BootSessionHosts) -> Result<(), String> {
+        self.writes.set(self.writes.get() + 1);
+        self.inner.save(hosts)
+    }
+
+    fn recovery_action(&self) -> String {
+        self.inner.recovery_action()
+    }
+}
+
 struct Store {
     approved: Option<BootSessionHosts>,
     unavailable: Option<&'static str>,
@@ -157,7 +207,7 @@ fn row(record: HostedRecord) -> MigrationRow {
     }
 }
 
-fn reason(hosts: &BootSessionHosts) -> Option<&str> {
+fn reason(hosts: &Observed) -> Option<&str> {
     hosts.migration().map(|diagnostic| diagnostic.reason)
 }
 
@@ -531,6 +581,31 @@ fn migration_file_store_distinguishes_absence_corrupt_and_unreadable() {
         FileApprovalStore(None).load(),
         Loaded::Unavailable("approval_snapshot_unreadable")
     ));
+    let markers = tempfile::tempdir().unwrap();
+    let store = FileApprovalStore(Some(markers.path().to_owned()));
+    let candidate = fixture();
+    std::fs::write(markers.path().join("current.json"), snapshot(1, &candidate)).unwrap();
+    for bytes in [
+        b"pending".as_slice(),
+        b"{".as_slice(),
+        b"{}".as_slice(),
+        br#"{"state":"pending","had_previous":true}"#.as_slice(),
+        br#"{"state":"invalid","had_previous":false}"#.as_slice(),
+        br#"{"state":"pending","had_previous":false,"extra":true}"#.as_slice(),
+    ] {
+        std::fs::write(markers.path().join("pending"), bytes).unwrap();
+        assert!(
+            matches!(
+                store.load(),
+                Loaded::Unavailable("approval_snapshot_not_durable")
+            ),
+            "an unknown marker cannot prove an initial seed: {bytes:?}"
+        );
+    }
+    std::fs::write(markers.path().join("pending"), b"committed").unwrap();
+    let (loaded, warning) = known(store.load());
+    assert_eq!(Projection::of(&loaded), Projection::of(&candidate));
+    assert_eq!(warning, None);
 }
 
 #[test]
@@ -689,10 +764,19 @@ async fn migration_failed_publication_keeps_server_and_read_only_cli_on_old_gene
         let (loaded, warning) = known(store.load());
         assert_eq!(Projection::of(&loaded), Projection::of(&old));
         assert_eq!(warning, Some("approval_snapshot_not_durable"));
-        let cli = select(candidate, &store, &Rows::new(vec![]), &NoHoldStore, true)
+        let counted = CountWrites {
+            inner: &store,
+            writes: Cell::new(0),
+        };
+        let cli = select(candidate, &counted, &Rows::new(vec![]), &NoHoldStore, true)
             .await
             .into_hosts();
         assert_eq!(Projection::of(&cli), Projection::of(&old));
+        assert_eq!(
+            counted.writes.get(),
+            0,
+            "the read-only CLI must not repair a pending commit"
+        );
     }
 }
 
@@ -710,4 +794,177 @@ fn migration_dangling_snapshot_entry_is_unreadable_instead_of_a_first_boot() {
         store.load(),
         Loaded::Unavailable("approval_snapshot_unreadable")
     ));
+    std::fs::write(
+        temp.path().join("pending"),
+        br#"{"state":"pending","had_previous":false}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        temp.path().join("missing-previous"),
+        temp.path().join("previous.json"),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            store.load(),
+            Loaded::Unavailable("approval_snapshot_not_durable")
+        ),
+        "a dangling previous generation is not proof of absence"
+    );
+}
+
+#[tokio::test]
+async fn migration_interrupted_first_seed_reseeds_without_stopping_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileApprovalStore(Some(temp.path().to_owned()));
+    let candidate = fixture();
+    super::super::approval_store::FAIL_CURRENT_SYNC.with(|fault| fault.set(true));
+    assert!(store.save(&candidate).is_err());
+    assert!(matches!(
+        std::fs::symlink_metadata(temp.path().join("previous.json")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(
+        matches!(store.load(), Loaded::Missing),
+        "initial seed recovery must be missing"
+    );
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join("pending")).unwrap()).unwrap();
+    assert_eq!(
+        marker,
+        serde_json::json!({"state": "pending", "had_previous": false})
+    );
+    let counted = CountWrites {
+        inner: &store,
+        writes: Cell::new(0),
+    };
+    let rows = Rows::new(Vec::new());
+    let holds = Holds::<true>::new(Err("an initial seed does not query holds".into()));
+    let selected = select(candidate.clone(), &counted, &rows, &holds, false)
+        .await
+        .into_hosts();
+    assert_eq!(Projection::of(&selected), Projection::of(&candidate));
+    assert_eq!(reason(&selected), None);
+    assert!(
+        !selected.admission_stopped(),
+        "an interrupted initial seed must not stop admission"
+    );
+    assert_eq!(counted.writes.get(), 1);
+    assert!(rows.requested.borrow().is_empty());
+    assert_eq!(holds.calls.get(), 0);
+    assert_eq!(
+        std::fs::read(temp.path().join("pending")).unwrap(),
+        b"committed"
+    );
+    let (loaded, warning) = known(store.load());
+    assert_eq!(Projection::of(&loaded), Projection::of(&candidate));
+    assert_eq!(warning, None);
+    let action = store.recovery_action();
+    assert!(action.contains(&temp.path().join("pending").display().to_string()));
+    assert!(
+        action.contains("Restart") && action.contains("permissions") && action.contains("storage")
+    );
+}
+
+#[tokio::test]
+async fn migration_interrupted_update_retries_commit_and_keeps_live_guard() {
+    for (retry_changed, live) in [(true, false), (false, false), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FileApprovalStore(Some(temp.path().to_owned()));
+        let old = fixture();
+        store.save(&old).unwrap();
+        let proposed = remap(old.clone(), "/fixture/new.sock");
+        super::super::approval_store::FAIL_CLEANUP_SYNC.with(|fault| fault.set(true));
+        assert!(store.save(&proposed).is_err());
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join("pending")).unwrap()).unwrap();
+        assert_eq!(
+            marker,
+            serde_json::json!({"state": "pending", "had_previous": true})
+        );
+        let (loaded, warning) = known(store.load());
+        assert_eq!(Projection::of(&loaded), Projection::of(&old));
+        assert_eq!(warning, Some("approval_snapshot_not_durable"));
+        let retry = if retry_changed { proposed } else { old.clone() };
+        let rows = Rows::new(if live {
+            vec![row(located(HostedState::Bound))]
+        } else {
+            Vec::new()
+        });
+        let counted = CountWrites {
+            inner: &store,
+            writes: Cell::new(0),
+        };
+        let selected = select(retry.clone(), &counted, &rows, &NoHoldStore, false)
+            .await
+            .into_hosts();
+        assert_eq!(
+            counted.writes.get(),
+            usize::from(!live),
+            "pending update recovery must attempt exactly one commit"
+        );
+        let expected = if live { &old } else { &retry };
+        assert_eq!(Projection::of(&selected), Projection::of(expected));
+        assert_eq!(
+            reason(&selected),
+            live.then_some("session_hosts_migration_refused")
+        );
+        assert!(!selected.admission_stopped());
+        assert_eq!(rows.requested.borrow().len(), usize::from(retry_changed));
+        if live {
+            let (loaded, warning) = known(store.load());
+            assert_eq!(Projection::of(&loaded), Projection::of(&old));
+            assert_eq!(warning, Some("approval_snapshot_not_durable"));
+        } else {
+            assert_eq!(
+                std::fs::read(temp.path().join("pending")).unwrap(),
+                b"committed"
+            );
+            let (loaded, warning) = known(store.load());
+            assert_eq!(Projection::of(&loaded), Projection::of(&retry));
+            assert_eq!(warning, None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn migration_no_pool_only_blocks_changes_to_herdr_channels() {
+    let old = fixture();
+    let store = Store::new(Some(old.clone()));
+    let selected = select(old.clone(), &store, &PgRows(None), &NoHoldStore, false)
+        .await
+        .into_hosts();
+    assert_eq!(Projection::of(&selected), Projection::of(&old));
+    assert_eq!(
+        reason(&selected),
+        None,
+        "unchanged no-pool must have no diagnostic"
+    );
+    assert!(store.saved.borrow().is_empty());
+
+    let mut guarded = old.clone();
+    guarded.config.claude_guard_channels.insert(42);
+    let store = Store::new(Some(old.clone()));
+    let selected = select(guarded.clone(), &store, &PgRows(None), &NoHoldStore, false)
+        .await
+        .into_hosts();
+    assert_eq!(
+        Projection::of(&selected),
+        Projection::of(&guarded),
+        "guard-only migration needs no database"
+    );
+    assert_eq!(reason(&selected), None);
+    assert_eq!(&*store.saved.borrow(), &[Projection::of(&guarded)]);
+
+    let candidate = remap(old.clone(), "/fixture/new.sock");
+    let store = Store::new(Some(old.clone()));
+    let selected = select(candidate, &store, &PgRows(None), &NoHoldStore, false)
+        .await
+        .into_hosts();
+    assert_eq!(Projection::of(&selected), Projection::of(&old));
+    assert_eq!(
+        reason(&selected),
+        Some("session_hosts_migration_unverified")
+    );
+    assert!(store.saved.borrow().is_empty());
 }

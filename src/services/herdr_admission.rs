@@ -79,8 +79,8 @@ static PROCESS: OnceLock<Admission> = OnceLock::new();
 
 /// The process switch, built on first use: only a configured channel's judgement reaches it.
 pub(crate) fn check() -> Result<(), StopCause> {
-    if crate::config::session_hosts::with_boot(|boot| {
-        boot.is_some_and(|boot| boot.admission_stopped())
+    if crate::config::session_hosts::with_boot_migration(|metadata| {
+        metadata.is_some_and(|metadata| metadata.admission_stopped())
     }) {
         return Err(StopCause::ApprovalSnapshot);
     }

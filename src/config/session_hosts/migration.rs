@@ -15,7 +15,7 @@ pub(crate) struct Diagnostic {
     pub reason: &'static str,
     pub channels: Vec<u64>,
     pub blockers: Vec<String>,
-    pub action: &'static str,
+    pub action: String,
 }
 
 pub(crate) struct HostsBootSelection {
@@ -35,11 +35,15 @@ impl HostsBootSelection {
         }
     }
 
-    pub(crate) fn into_hosts(mut self) -> BootSessionHosts {
-        self.hosts.candidate = Some(Box::new(self.candidate));
-        self.hosts.migration = self.diagnostic.map(Box::new);
-        self.hosts.admission_stopped = self.admission_stopped;
-        self.hosts
+    pub(crate) fn into_parts(self) -> (BootSessionHosts, super::BootMigration) {
+        (
+            self.hosts,
+            super::BootMigration {
+                candidate: self.candidate,
+                diagnostic: self.diagnostic,
+                admission_stopped: self.admission_stopped,
+            },
+        )
     }
 
     fn diagnose(
@@ -52,7 +56,7 @@ impl HostsBootSelection {
             reason,
             channels: channels.iter().copied().collect(),
             blockers,
-            action: "Keep the approved endpoints; clear/terminate/retire live rows and resolve holds there, then restart. Repair approval snapshots before retrying an unverified migration.",
+            action: "Keep the approved endpoints; clear/terminate/retire live rows and resolve holds there, then restart. Repair approval snapshots before retrying an unverified migration.".into(),
         });
         self
     }
@@ -191,6 +195,21 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
     holds: &H,
     read_only: bool,
 ) -> HostsBootSelection {
+    let mut selected = select_projection(candidate, store, rows, holds, read_only).await;
+    if let Some(diagnostic) = &mut selected.diagnostic {
+        diagnostic.action.push(' ');
+        diagnostic.action.push_str(&store.recovery_action());
+    }
+    selected
+}
+
+async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
+    candidate: BootSessionHosts,
+    store: &S,
+    rows: &R,
+    holds: &H,
+    read_only: bool,
+) -> HostsBootSelection {
     let loaded = store.load();
     let (approved, warning) =
         match loaded {
@@ -223,25 +242,35 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
             }
             Loaded::Known(approved, warning) => (approved, warning),
         };
-    let changes = affected(&approved, &candidate);
+    let unchanged = Projection::of(&approved) == Projection::of(&candidate);
+    let changes = if unchanged {
+        BTreeSet::new()
+    } else {
+        affected(&approved, &candidate)
+    };
     let selection = HostsBootSelection::new(approved.clone(), &candidate);
-    if let Some(reason) = warning {
+    let recovering = warning == Some("approval_snapshot_not_durable");
+    if let Some(reason) = warning.filter(|_| !recovering) {
         return selection.diagnose(reason, &changes, vec![]);
     }
-    if !rows.available() {
-        return selection.diagnose(
-            "session_hosts_migration_unverified",
-            &changes,
-            vec!["postgres pool unavailable".into()],
-        );
-    }
-    if Projection::of(&approved) == Projection::of(&candidate) {
-        return selection;
+    if unchanged && !recovering {
+        return HostsBootSelection::new(candidate.clone(), &candidate);
     }
     if read_only {
-        return selection.diagnose("session_hosts_migration_pending", &changes, vec![]);
+        return selection.diagnose(
+            warning.unwrap_or("session_hosts_migration_pending"),
+            &changes,
+            vec![],
+        );
     }
     if !changes.is_empty() {
+        if !rows.available() {
+            return selection.diagnose(
+                "session_hosts_migration_unverified",
+                &changes,
+                vec!["postgres pool unavailable".into()],
+            );
+        }
         let live = match rows.rows(&changes).await {
             Ok(live) => live,
             Err(error) => {

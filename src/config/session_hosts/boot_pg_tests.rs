@@ -80,7 +80,14 @@ fn boot_entries_select_approved_hosts_pg() {
     const CELL: &str = "ADK_TEST_HOSTS_BOOT_CELL";
     let Ok(cell) = std::env::var(CELL) else {
         for entry in ["dcserver", "runserver", "cli"] {
-            for scenario in ["first", "refused", "removed-agent", "unreadable", "no-pool"] {
+            for scenario in [
+                "first",
+                "unchanged",
+                "refused",
+                "removed-agent",
+                "unreadable",
+                "no-pool",
+            ] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
@@ -112,10 +119,26 @@ fn boot_entries_select_approved_hosts_pg() {
     runtime.block_on(async {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
-        let old_config = config(&root, "old.sock");
+        let mut old_config = config(&root, "old.sock");
+        if matches!(scenario, "first" | "unchanged") {
+            // The installed snapshot must keep the source shape used by existing equality consumers.
+            let herdr = &mut old_config.session_hosts.herdr;
+            herdr
+                .endpoints
+                .get_mut("herdr.default")
+                .unwrap()
+                .execution_node = " test-node ".into();
+            for (raw, padded) in [("41", " 41"), ("42", "42 ")] {
+                let endpoint = herdr.channels.remove(raw).unwrap();
+                herdr.channels.insert(padded.into(), endpoint);
+            }
+        }
         let mut candidate = old_config.clone();
         let old = BootSessionHosts::from_config(&old_config).unwrap();
         let store = FileApprovalStore::runtime();
+        if scenario == "unchanged" {
+            store.save(&old).unwrap();
+        }
         if matches!(scenario, "refused" | "removed-agent" | "no-pool") {
             store.save(&old).unwrap();
             candidate = config(&root, "new.sock");
@@ -146,6 +169,15 @@ fn boot_entries_select_approved_hosts_pg() {
             crate::bootstrap::prepare_and_install_boot_snapshots(&candidate, passed_pool)
                 .await
                 .unwrap();
+        }
+        if matches!(scenario, "first" | "unchanged") {
+            session_hosts::with_boot(|boot| {
+                assert_eq!(
+                    boot.unwrap(),
+                    &BootSessionHosts::from_config(&candidate).unwrap(),
+                    "boot equality contract: {scenario} ({entry})"
+                );
+            });
         }
         if scenario == "unreadable" {
             use crate::services::turn_host::{HerdrRefusal, TurnHost, for_turn};
@@ -199,11 +231,11 @@ fn boot_entries_select_approved_hosts_pg() {
         let health = herdr_health(&candidate, &pool).await;
         assert_eq!(health["restart_required"], false);
         match scenario {
-            "first" => {
+            "first" | "unchanged" => {
                 assert!(health.get("migration").is_none());
                 assert_eq!(
                     store.0.as_ref().unwrap().join("current.json").exists(),
-                    entry != "cli",
+                    entry != "cli" || scenario == "unchanged",
                     "the read-only CLI never seeds approval"
                 );
             }
@@ -224,7 +256,8 @@ fn boot_entries_select_approved_hosts_pg() {
                     true,
                 )
                 .await
-                .into_hosts();
+                .into_parts()
+                .0;
                 assert_eq!(
                     cli.channels(),
                     old.channels(),

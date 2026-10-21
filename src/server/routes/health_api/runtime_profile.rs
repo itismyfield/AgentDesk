@@ -15,42 +15,44 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
 /// until a launch records one. Admission is read only once a channel is configured.
 pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
-    use crate::config::session_hosts::{BootSessionHosts, with_boot};
-    let view = |boot: &BootSessionHosts| {
-        let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
-        let admission = match channels.is_empty() {
-            true => "not_evaluated".to_string(),
-            false => match crate::services::herdr_admission::check() {
-                Ok(()) => "open".to_string(),
-                Err(cause) => format!("stopped({})", cause.as_str()),
-            },
+    use crate::config::session_hosts::{BootSessionHosts, with_boot, with_boot_migration};
+    with_boot_migration(|metadata| {
+        let view = |boot: &BootSessionHosts| {
+            let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
+            let admission = match channels.is_empty() {
+                true => "not_evaluated".to_string(),
+                false => match crate::services::herdr_admission::check() {
+                    Ok(()) => "open".to_string(),
+                    Err(cause) => format!("stopped({})", cause.as_str()),
+                },
+            };
+            let mut endpoints = serde_json::Map::new();
+            for (key, endpoint) in &boot.config().herdr.endpoints {
+                let node = endpoint.execution_node.trim();
+                let local = boot.local_node() == Some(node);
+                let entry = serde_json::json!({"node": node, "local": local, "last_e7": "never"});
+                endpoints.insert(key.clone(), entry);
+            }
+            let mut view = serde_json::json!({
+                "configured_channels": channels,
+                "admission": admission,
+                "endpoints": endpoints,
+                "restart_required": metadata.map_or(boot.config() != &config.session_hosts, |m| m.restart_required(config)),
+            });
+            if let Some(migration) = metadata.and_then(|m| m.migration()) {
+                view["migration_refused"] =
+                    (migration.reason == "session_hosts_migration_refused").into();
+                view["migration"] = serde_json::json!(migration);
+                view["candidate"] = serde_json::json!(metadata.map(|m| m.candidate()));
+                view["applied"] = serde_json::json!(boot.config());
+            }
+            attach_local_herdr(&mut view);
+            view
         };
-        let mut endpoints = serde_json::Map::new();
-        for (key, endpoint) in &boot.config().herdr.endpoints {
-            let node = endpoint.execution_node.trim();
-            let local = boot.local_node() == Some(node);
-            let entry = serde_json::json!({"node": node, "local": local, "last_e7": "never"});
-            endpoints.insert(key.clone(), entry);
-        }
-        let mut view = serde_json::json!({
-            "configured_channels": channels,
-            "admission": admission,
-            "endpoints": endpoints,
-            "restart_required": boot.restart_required(config),
-        });
-        if let Some(migration) = boot.migration() {
-            view["migration_refused"] =
-                (migration.reason == "session_hosts_migration_refused").into();
-            view["migration"] = serde_json::json!(migration);
-            view["candidate"] = serde_json::json!(boot.candidate());
-            view["applied"] = serde_json::json!(boot.config());
-        }
-        attach_local_herdr(&mut view);
-        view
-    };
-    with_boot(|boot| match boot {
-        Some(boot) => view(boot),
-        None => view(&BootSessionHosts::default()),
+        with_boot(|boot| match boot {
+            Some(boot) => view(boot),
+            None => view(&BootSessionHosts::default()),
+        })
     })
 }
 

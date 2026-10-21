@@ -95,9 +95,6 @@ pub(crate) struct BootSessionHosts {
     config: SessionHostsConfig,
     channels: BTreeMap<u64, ChannelEndpoint>,
     local_node: Option<String>,
-    candidate: Option<Box<SessionHostsConfig>>,
-    migration: Option<Box<migration::Diagnostic>>,
-    admission_stopped: bool,
 }
 
 const GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
@@ -158,7 +155,6 @@ impl BootSessionHosts {
             config: effective.session_hosts.clone(),
             channels,
             local_node: local_node.filter(|id| !id.is_empty()).map(str::to_owned),
-            ..Self::default()
         })
     }
 
@@ -180,22 +176,6 @@ impl BootSessionHosts {
 
     pub(crate) fn claude_guarded(&self, channel: u64) -> bool {
         self.config.claude_guard_channels.contains(&channel)
-    }
-
-    pub(crate) fn restart_required(&self, config: &Config) -> bool {
-        self.candidate.as_deref().unwrap_or(&self.config) != &config.session_hosts
-    }
-
-    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
-        self.candidate.as_deref().unwrap_or(&self.config)
-    }
-
-    pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
-        self.migration.as_deref()
-    }
-
-    pub(crate) fn admission_stopped(&self) -> bool {
-        self.admission_stopped
     }
 }
 
@@ -304,6 +284,33 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
     Ok(())
 }
 
+/// Migration metadata stays outside the boot configuration's equality contract.
+#[derive(Debug, Clone)]
+pub(crate) struct BootMigration {
+    candidate: SessionHostsConfig,
+    diagnostic: Option<migration::Diagnostic>,
+    admission_stopped: bool,
+}
+
+impl BootMigration {
+    pub(crate) fn restart_required(&self, config: &Config) -> bool {
+        self.candidate != config.session_hosts
+    }
+
+    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
+        &self.candidate
+    }
+
+    pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    pub(crate) fn admission_stopped(&self) -> bool {
+        self.admission_stopped
+    }
+}
+
+static BOOT_MIGRATION: OnceLock<BootMigration> = OnceLock::new();
 static BOOT: OnceLock<BootSessionHosts> = OnceLock::new();
 
 #[cfg(test)]
@@ -314,7 +321,11 @@ pub(crate) fn install(config: &Config) -> Result<()> {
 }
 
 pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
-    let _ = BOOT.set(selection.into_hosts());
+    let (hosts, migration) = selection.into_parts();
+    BOOT.get_or_init(|| {
+        let _ = BOOT_MIGRATION.set(migration);
+        hosts
+    });
 }
 
 /// The boot section, or `None` before install, which configures nothing.
@@ -324,6 +335,14 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
         return read(Some(&forced));
     }
     read(BOOT.get())
+}
+
+pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
+    #[cfg(test)]
+    if FORCED.with(|forced| forced.borrow().is_some()) {
+        return read(None);
+    }
+    read(BOOT_MIGRATION.get())
 }
 
 pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
@@ -404,7 +423,6 @@ pub(crate) fn force_with_claude_guard_for_test(
         config,
         channels,
         local_node: local_node.map(str::to_owned),
-        ..BootSessionHosts::default()
     };
     ForcedSessionHosts(FORCED.with(|forced| forced.replace(Some(boot))))
 }

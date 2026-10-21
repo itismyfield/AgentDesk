@@ -15,9 +15,19 @@ pub(crate) enum Loaded {
 pub(crate) trait ApprovalStore {
     fn load(&self) -> Loaded;
     fn save(&self, hosts: &BootSessionHosts) -> Result<(), String>;
+    fn recovery_action(&self) -> String {
+        "Restart to retry an interrupted approval; repair approval-store permissions and storage before retrying if it fails again.".into()
+    }
 }
 
 pub(crate) struct FileApprovalStore(pub(crate) Option<PathBuf>);
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingMarker {
+    state: String,
+    had_previous: bool,
+}
 
 impl FileApprovalStore {
     pub(crate) fn runtime() -> Self {
@@ -61,7 +71,19 @@ impl ApprovalStore for FileApprovalStore {
         let pending = root.join("pending");
         let interrupted = match std::fs::symlink_metadata(&pending) {
             Ok(meta) if meta.is_file() => match std::fs::read(&pending) {
-                Ok(bytes) => bytes != b"committed",
+                Ok(bytes) if bytes == b"committed" => false,
+                Ok(bytes) => {
+                    let initial_seed = serde_json::from_slice::<PendingMarker>(&bytes)
+                        .is_ok_and(|marker| marker.state == "pending" && !marker.had_previous);
+                    // Only a known first seed may ignore its uncommitted current file.
+                    if initial_seed
+                        && matches!(std::fs::symlink_metadata(root.join("previous.json")),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        return Loaded::Missing;
+                    }
+                    true
+                }
                 Err(_) => true,
             },
             Ok(_) => true,
@@ -105,15 +127,24 @@ impl ApprovalStore for FileApprovalStore {
     }
 
     fn save(&self, hosts: &BootSessionHosts) -> Result<(), String> {
-        if let Loaded::Known(previous, _) = self.load() {
+        let previous = match self.load() {
+            Loaded::Known(previous, _) => Some(previous),
+            _ => None,
+        };
+        let had_previous = previous.is_some();
+        if let Some(previous) = previous {
             self.write("previous.json", &previous)?;
         }
+        let marker = serde_json::to_string(&serde_json::json!({
+            "state": "pending", "had_previous": had_previous
+        }))
+        .map_err(|error| error.to_string())?;
         let root = self.0.as_ref().ok_or("runtime root unavailable")?;
         std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
         let pending = root.join("pending");
         runtime_store::critical_atomic_write(
             &pending,
-            "pending",
+            &marker,
             AtomicWriteContext::new("session_hosts_approval"),
         )?;
         runtime_store::fsync_parent_dir(&pending).map_err(|error| error.to_string())?;
@@ -127,7 +158,7 @@ impl ApprovalStore for FileApprovalStore {
         if let Err(error) = cleanup_sync(&pending) {
             runtime_store::critical_atomic_write(
                 &root.join("pending"),
-                "pending",
+                &marker,
                 AtomicWriteContext::new("session_hosts_approval"),
             )
             .map_err(|restore| {
@@ -139,6 +170,16 @@ impl ApprovalStore for FileApprovalStore {
             return Err(format!("approval marker sync: {error}"));
         }
         Ok(())
+    }
+
+    fn recovery_action(&self) -> String {
+        match &self.0 {
+            Some(root) => format!(
+                "Restart to retry the interrupted approval at {}. If it fails again, repair this directory's permissions or storage and restart; preserve previous.json while live rows still use it.",
+                root.join("pending").display()
+            ),
+            None => "Restore AGENTDESK_ROOT_DIR so the approval-store pending path can be resolved, repair permissions or storage, then restart.".into(),
+        }
     }
 }
 
