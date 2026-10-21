@@ -33,10 +33,18 @@ fn footer_only_marker_renders_background_summary_and_result_preview() {
     );
 
     let marker = event.footer_only_marker_content();
-    assert!(marker.starts_with("⚙️ Background complete\n"));
+    assert_eq!(
+        marker,
+        "-# ✅ Background command \"short task\" completed (exit code 0)"
+    );
     assert!(marker.contains("Background command \"short task\" completed (exit code 0)"));
-    assert!(marker.contains("> Validated the changed files."));
-    assert!(marker.contains("> No follow-up action is needed."));
+    assert!(!marker.contains("Validated the changed files."));
+    assert!(
+        event
+            .payload
+            .render(1)
+            .contains("> Validated the changed files.")
+    );
 }
 
 #[test]
@@ -49,7 +57,7 @@ fn footer_only_marker_omits_private_task_anchors_from_rendered_preview() {
     );
 
     let marker = event.footer_only_marker_content();
-    assert!(marker.contains("> Visible result line."));
+    assert!(!marker.contains("Visible result line."));
     assert!(
         ![
             "<task-notification>",
@@ -60,6 +68,49 @@ fn footer_only_marker_omits_private_task_anchors_from_rendered_preview() {
         .iter()
         .any(|anchor| marker.contains(anchor))
     );
+}
+
+#[test]
+fn footer_only_marker_is_one_bounded_sanitized_status_summary() {
+    for (status, summary, expected) in [
+        (
+            "failed",
+            "Background command failed",
+            "-# ❌ Background command failed",
+        ),
+        ("stopped", "", "-# 🛑 Task stopped"),
+        ("completed", "", "-# ✅ Task completed"),
+        ("", "", "-# 📋 Task notification"),
+        (
+            "completed",
+            "Background command &quot;two\nlines&quot; ``` done",
+            "-# ✅ Background command \"two lines\" ` ` ` done",
+        ),
+    ] {
+        let event = TaskCardEvent::from_task_prompt(
+            4912,
+            "claude",
+            "fixture",
+            &format!(
+                "<task-notification><task-id>one</task-id><status>{status}</status><summary>{summary}</summary></task-notification>"
+            ),
+        );
+        assert_eq!(event.footer_only_marker_content(), expected);
+    }
+    let event = TaskCardEvent::from_task_prompt(
+        4912,
+        "claude",
+        "fixture",
+        &format!(
+            "<task-notification><status>failed</status><summary>{}</summary></task-notification>",
+            "🦀".repeat(3000),
+        ),
+    );
+    let marker = event.footer_only_marker_content();
+    assert!(marker.starts_with("-# ❌ "));
+    assert_eq!(marker.lines().count(), 1);
+    assert!(marker.chars().count() <= 603);
+    assert!(marker.encode_utf16().count() <= 2000);
 }
 
 #[tokio::test]

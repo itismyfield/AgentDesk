@@ -158,7 +158,7 @@ pub(crate) use recovery::{
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
-use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
+pub(super) use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_shared};
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{

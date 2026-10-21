@@ -486,6 +486,7 @@ jobs:
               - 'src/services/discord/terminal_ui_obligation/sweep_tests.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs'
+              - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
