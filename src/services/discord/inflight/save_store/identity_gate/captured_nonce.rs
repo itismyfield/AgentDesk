@@ -2,11 +2,16 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "nonce_collision_tests.rs"]
+mod nonce_collision_tests;
+
 impl InflightTurnState {
-    /// Exact `Option` equality with the nonce a turn captured when it started; `None` matches
-    /// only `None`, so a legacy actor never adopts a successor's nonced row or the reverse.
+    /// Exact `Option` equality with the nonce a turn captured when it started; `None` matches only
+    /// `None`. An empty nonce counts as `None`, as `CancelToken::from_persisted_turn_nonce` reads it.
     pub(in crate::services::discord) fn owned_by_turn_nonce(&self, captured: Option<&str>) -> bool {
-        self.turn_nonce.as_deref() == captured
+        let own = self.turn_nonce.as_deref().filter(|nonce| !nonce.is_empty());
+        own == captured.filter(|nonce| !nonce.is_empty())
     }
 
     /// The one writer that may move a persisted episode to a newly admitted actor's nonce. `self`

@@ -3885,6 +3885,7 @@ fn s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only() {
     inflight::save_inflight_state(&synthetic).expect("save authoritative synthetic row");
     let before = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
     bridge.started_at = before.started_at.clone();
+    bridge.turn_nonce = before.turn_nonce.clone();
     bridge.external_turn_id = Some("bridge-must-not-restamp-durable-key".into());
     assert!(matches!(
         inflight::patch_bridge_entry_state_if_identity_unchanged(

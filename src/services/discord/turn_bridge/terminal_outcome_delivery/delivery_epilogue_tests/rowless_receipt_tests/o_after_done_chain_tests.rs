@@ -241,7 +241,9 @@ async fn bridge_turn(o_owns: bool, drains: &[&[Frame]]) -> (BridgeCompletionSign
             },
         },
     };
-    let cancel = Arc::new(CancelToken::new());
+    let cancel = Arc::new(CancelToken::from_persisted_turn_nonce(
+        driver.inflight.turn_nonce.clone(),
+    ));
     let user_msg = MessageId::new(DRIVER_USER_MSG_ID);
     assert!(
         crate::services::discord::mailbox_try_start_turn(

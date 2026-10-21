@@ -49,7 +49,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     );
     let captured = Arc::new(CapturingGateway::default());
     let gateway: Arc<dyn TurnGateway> = captured.clone();
-    let cancel = CancelToken::new();
+    let cancel = CancelToken::from_persisted_turn_nonce(inflight.turn_nonce.clone());
     let mut full_response = inflight.full_response.clone();
     let (mut sent, mut confirmed) = (inflight.response_sent_offset, 0usize);
     let (mut dirty, mut panel_dirty) = (false, false);

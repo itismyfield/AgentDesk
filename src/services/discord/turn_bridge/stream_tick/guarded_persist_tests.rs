@@ -1209,3 +1209,52 @@ fn heartbeat_touches_same_owner_but_skips_successor() {
         assert_eq!(persisted.user_msg_id, 99_999);
     });
 }
+
+/// A local the successor's row already overwrote carries the successor's nonce on both sides, so
+/// only the bridge actor's own start nonce can refuse the exit flush that would bind it.
+#[tokio::test(flavor = "current_thread")]
+async fn exit_flush_nonce_collision_7219() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+    let channel = ChannelId::new(7_219_201);
+    let successor = owner_state(channel.get(), 77_010);
+    save_inflight_state(&successor).expect("seed the successor episode");
+    let path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Codex,
+        channel.get(),
+    );
+    let successor_bytes = std::fs::read(&path).unwrap();
+    let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&successor);
+    let mut baseline = successor.clone();
+    let mut local = successor.clone();
+    local.current_msg_id = 2;
+    local.current_msg_len = 10;
+    let (mut expected_message, mut current) = ((0, 0), MessageId::new(2));
+    let (mut pending, mut created) = (Some(current), Some(current));
+    assert_ne!(successor.turn_nonce.as_deref(), Some("bridge-actor-a"));
+    assert!(
+        !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+            gateway: &gateway,
+            provider: &ProviderKind::Codex,
+            token_hash: "exit-flush-nonce-7219",
+            channel_id: channel,
+            persisted_baseline: &mut baseline,
+            inflight_state: &mut local,
+            expected_identity: &expected,
+            expected_current_message: &mut expected_message,
+            current_msg_id: &mut current,
+            pending_current_message_candidate: &mut pending,
+            bridge_created_response_placeholder_msg_id: &mut created,
+            captured_nonce: Some("bridge-actor-a"),
+        })
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), successor_bytes);
+    assert_eq!(pending, None);
+    assert_eq!(
+        gateway.deletes.lock().expect("deletes lock").as_slice(),
+        &[2]
+    );
+}
