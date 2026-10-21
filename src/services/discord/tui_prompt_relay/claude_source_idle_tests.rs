@@ -291,8 +291,9 @@ fn legacy_inflight_discovery_preserves_the_first_prompt_until_finalize() {
         let delivered = || requests.lock().unwrap().iter().any(|(method, _, body)|
             matches!(method.as_str(), "POST" | "PATCH") && body.contains("B_NEW_BODY"));
         let actor = Arc::new(CancelToken::new());
-        pane.shared.mailbox(pane.channel).restore_active_turn(actor, serenity::UserId::new(1), MessageId::new(991)).await;
-        let row = pane.row();
+        pane.shared.mailbox(pane.channel).restore_active_turn(actor.clone(), serenity::UserId::new(1), MessageId::new(991)).await;
+        let mut row = pane.row();
+        row.turn_nonce = actor.turn_nonce().map(str::to_owned);
         inflight::save_inflight_state(&row).unwrap();
         let old_prompt = serde_json::json!({"type":"user", "sessionId":pane.b, "uuid":"b-old-user",
             "entrypoint":"cli", "message":{"role":"user", "content":"previous B prompt"}});
@@ -313,7 +314,10 @@ fn legacy_inflight_discovery_preserves_the_first_prompt_until_finalize() {
         assert_eq!((retained.output_path, retained.last_offset), (row.output_path.clone(), row.last_offset));
         assert_eq!(posts(), 0, "B is registered but A still owns the body");
         let finalized = Box::pin(pane.shared.turn_finalizer.submit_terminal(
-            TurnKey::new(pane.channel, row.effective_finalizer_turn_id(), pane.shared.restart.current_generation),
+            // Keyed to the row's episode like the watcher; clear=true retires the row through the
+            // finalizer's episode-captured clear, the path every clear=true producer takes.
+            TurnKey::new(pane.channel, row.effective_finalizer_turn_id(), pane.shared.restart.current_generation)
+                .with_episode_nonce(row.turn_nonce.as_deref()),
             ProviderKind::Claude, TerminalEvent::Complete,
             FinalizeContext { clear_inflight: true, ..FinalizeContext::watcher() }, pane.shared.clone())).await;
         assert!(matches!(finalized, FinalizeOutcome::Finalized { .. }), "A must finalize through the production actor");

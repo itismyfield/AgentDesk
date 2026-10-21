@@ -45,6 +45,9 @@ pub(super) struct Transitions {
 }
 
 impl Transitions {
+    pub(super) fn has_job(&self) -> bool {
+        self.job.is_some()
+    }
     pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
         let job = None;
         Self {
@@ -160,6 +163,23 @@ fn path_unchanged(source: &SourceId, later: Option<&Observation>) -> bool {
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     /// Takes requests only once the sources are restored: at most one envelope and one step a poll.
     pub(super) fn poll_transition(&mut self, resumed: bool, unsettled: &Unsettled) {
+        let suspended = !self.writer.suspension.is_empty();
+        #[cfg(test)]
+        let suspended = suspended
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
+        if suspended {
+            if let Some(receiver) = &mut self.transitions.receiver
+                && let Ok(Some(envelope)) = receiver.try_next()
+            {
+                let id = match &envelope.operation {
+                    Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
+                };
+                let _ = envelope
+                    .reply
+                    .send(Reply::refused(id, Refused::CodexDeferred));
+            }
+            return;
+        }
         if !resumed || self.writer.is_stopped() {
             return;
         }
@@ -554,6 +574,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         drop(context.permit);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_transition_tests.rs"]
+pub(super) mod scoped_tests;
 
 #[cfg(test)]
 pub(crate) mod test_hooks {

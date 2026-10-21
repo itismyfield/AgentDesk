@@ -122,6 +122,10 @@ host_terminate spelling outside its declared sites, and any identity/delivery pa
 mismatch.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
 review the JSON diff in the same commit.
+
+Unchanged canonical snapshots retain their measurement SHA, so regeneration
+after a baseline-only commit is byte-identical. Changed snapshot content is
+measured at the current source HEAD.
 """
 
 from __future__ import annotations
@@ -152,6 +156,12 @@ CATEGORIES = (
     "host_terminate",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
+REGISTRY_REMOVE_COMMENT = (
+    "Measured production external removals are 3/5/4/2 (total 14). "
+    "The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, "
+    "which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked "
+    "is classified as direct channel remove, not remove_tmux_session_locked."
+)
 HOST_TERMINATE_COMMENT = (
     "Herdr close RPC spellings (pane.close, server.stop, their method names and "
     "aliases). Only src/services/termination_audit/host_terminate.rs uses this "
@@ -773,6 +783,7 @@ def _snapshot(
             "watcher_cancel": {"files": dict(sorted(counts["watcher_cancel"].items()))},
             "process_kill": {"files": dict(sorted(counts["process_kill"].items()))},
             "registry_remove": {
+                "comment": REGISTRY_REMOVE_COMMENT,
                 "files": dict(sorted(counts["registry_remove"].items())),
             },
             "identity_fence_bind": {
@@ -849,12 +860,23 @@ def write_baseline(
     counts: Mapping[str, Mapping[str, int]],
     registry_subcounts: Mapping[str, int],
     measured_sha: str,
-) -> None:
+) -> str:
+    snapshot = _snapshot(counts, registry_subcounts, measured_sha)
+    if path.is_file():
+        try:
+            _counts, previous = load_baseline(path)
+        except RatchetError:
+            pass
+        else:
+            unchanged = dict(snapshot, measured_at_sha=previous["measured_at_sha"])
+            if previous == unchanged:
+                snapshot = unchanged
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(_snapshot(counts, registry_subcounts, measured_sha), indent=2) + "\n",
+        json.dumps(snapshot, indent=2) + "\n",
         encoding="utf-8",
     )
+    return snapshot["measured_at_sha"]
 
 
 def _totals(counts: Mapping[str, Mapping[str, int]]) -> str:
@@ -878,8 +900,8 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
                 ["git", "rev-parse", "HEAD"], cwd=root, text=True,
                 capture_output=True, check=True,
             ).stdout.strip()
-            write_baseline(root / BASELINE_PATH, counts, registry_subcounts, sha)
-            print(f"WROTE destructive call-site baseline at {sha}: {_totals(counts)}")
+            measured = write_baseline(root / BASELINE_PATH, counts, registry_subcounts, sha)
+            print(f"WROTE destructive call-site baseline at {measured}: {_totals(counts)}")
             return 0
         baseline, _payload = load_baseline(root / BASELINE_PATH)
         errors = (

@@ -448,6 +448,89 @@ async fn image_prod_options_and_sent_cleanup_preserve_sentinel_pg() {
     db.drop().await;
 }
 
+/// Enqueues one row per kind (`i` image, `t` text) in id order.
+async fn enqueue_kinds(pool: &PgPool, prefix: &str, kinds: &str) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for (index, kind) in kinds.chars().enumerate() {
+        let reason = format!("{prefix}-{index}");
+        let mut tx = pool.begin().await.unwrap();
+        let attachment = (kind == 'i').then(image);
+        ids.push(
+            enqueue_outbox_pg_with_attachment_on_tx(&mut tx, message(&reason), attachment)
+                .await
+                .unwrap(),
+        );
+        tx.commit().await.unwrap();
+    }
+    ids
+}
+
+async fn claim_ids(pool: &PgPool) -> Vec<i64> {
+    claim_pending_message_outbox_batch_pg(pool, "order-owner")
+        .await
+        .iter()
+        .map(|row| row.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn claim_batches_are_id_prefixes_ending_before_second_image_pg() {
+    let (db, pool) = image_pool().await;
+    let ids = enqueue_kinds(&pool, "iit", "iit").await;
+    assert_eq!(
+        claim_ids(&pool).await,
+        ids[..1],
+        "text must not overtake img2"
+    );
+    assert_eq!(claim_ids(&pool).await, ids[1..]);
+    let ids = enqueue_kinds(&pool, "titit", "titit").await;
+    assert_eq!(claim_ids(&pool).await, ids[..3]);
+    assert_eq!(claim_ids(&pool).await, ids[3..]);
+    assert!(claim_ids(&pool).await.is_empty());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn claim_text_only_and_single_image_batches_keep_existing_shape_pg() {
+    let (db, pool) = image_pool().await;
+    for kinds in ["tit", "itt", "tti", "ttt"] {
+        let ids = enqueue_kinds(&pool, kinds, kinds).await;
+        assert_eq!(
+            claim_ids(&pool).await,
+            ids,
+            "{kinds} claims every candidate"
+        );
+    }
+    let ids = enqueue_kinds(&pool, "text-only", &"t".repeat(12)).await;
+    assert_eq!(claim_ids(&pool).await, ids[..10]);
+    assert_eq!(claim_ids(&pool).await, ids[10..]);
+    assert!(claim_ids(&pool).await.is_empty());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn stale_processing_reclaim_follows_the_same_prefix_rule_pg() {
+    let (db, pool) = image_pool().await;
+    let ids = enqueue_kinds(&pool, "stale", "iit").await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT set_config('agentdesk.outbox_image_consumer_v1', 'enabled', true)")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE message_outbox SET status='processing', claim_owner='dead', claimed_at=NOW() - INTERVAL '1 day' WHERE id = ANY($1)")
+        .bind(vec![ids[0], ids[2]])
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(claim_ids(&pool).await, ids[..1]);
+    assert_eq!(claim_ids(&pool).await, ids[1..]);
+    pool.close().await;
+    db.drop().await;
+}
+
 #[tokio::test]
 async fn image_claim_batch_budget_and_old_consumer_barrier_pg() {
     let (db, pool) = image_pool().await;
@@ -473,17 +556,17 @@ async fn image_claim_batch_budget_and_old_consumer_barrier_pg() {
         "old outbox consumer must never claim an image as text"
     );
     let batch = claim_pending_message_outbox_batch_pg(&pool, "budget-new").await;
-    assert_eq!(batch.len(), 3);
+    assert_eq!(batch.len(), 1, "a second image ends the batch prefix");
+    assert_eq!(batch[0].id, first);
+    let second = claim_pending_message_outbox_batch_pg(&pool, "budget-next").await;
+    assert_eq!(second.len(), 3);
     assert_eq!(
-        batch
+        second
             .iter()
             .filter(|row| row.attachment.as_ref().unwrap().is_some())
             .count(),
         1
     );
-    let second = claim_pending_message_outbox_batch_pg(&pool, "budget-next").await;
-    assert_eq!(second.len(), 1);
-    assert!(second[0].attachment.as_ref().unwrap().is_some());
     let row = batch.iter().find(|r| r.id == first).unwrap();
     let error = sqlx::query(
         "UPDATE message_outbox SET claim_owner='old-reclaim', claimed_at=NOW() WHERE id=$1",

@@ -6,13 +6,27 @@ use crate::services::{
 };
 use std::{sync::Arc, time::Duration};
 
+#[cfg(test)]
+pub(crate) static HOLD_ENTERED_FOR_TESTS: std::sync::Mutex<
+    Option<std::sync::mpsc::Sender<String>>,
+> = std::sync::Mutex::new(None);
+
 pub(crate) fn existing_incarnation(tmux: &str) -> bool {
     dedupe::codex_verified_requires_proof(tmux) && !dedupe::clear_relaunch::relaunch_open(tmux)
 }
 
 pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(sender) = HOLD_ENTERED_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        let _ = sender.send(tmux.to_owned());
+    }
     tracing::info!(
         tmux_session = tmux,
+        reason = dedupe::codex_verified_hold_detail(tmux),
         "Codex verified turn is waiting for admission; preserving its source and pane"
     );
     while !cancel_requested(cancel.map(Arc::as_ref)) {

@@ -36,6 +36,8 @@ const AFTER_CLEAR: &str = "first instruction after clear";
 pub(in crate::services::discord) const NEW_NATIVE_ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 const TEST_BOT: &str = "e51-isolated-test-bot";
 
+pub(in crate::services::discord) mod absent_launch_tests;
+
 struct SourceMode(Option<CodexSourceMode>);
 
 fn mode_name(mode: CodexSourceMode) -> &'static str {
@@ -117,7 +119,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     pub(in crate::services::discord) fake: FakeTmux,
     pub(in crate::services::discord) shared: Arc<SharedData>,
     pub(in crate::services::discord) context: BindingContext,
-    old_source: p5::SourceId,
+    pub(in crate::services::discord) old_source: p5::SourceId,
     alive: Arc<AtomicBool>,
     pub(in crate::services::discord) root: tempfile::TempDir,
     _confirmation: TestConfirmation,
@@ -126,6 +128,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     _hosts: crate::config::session_hosts::ForcedSessionHosts,
     _env: [crate::config::TestEnvVarGuard; 2],
     _source_env: crate::config::TestEnvVarGuard,
+    _host_env: Option<crate::config::TestEnvVarGuard>,
     _binding_env: crate::config::TestEnvVarGuard,
     _hosting: Hosting,
     _isolation: Isolation,
@@ -146,8 +149,22 @@ impl CanaryFixture {
     }
 
     async fn build(prefix: u64, process_mode: CodexSourceMode) -> Self {
+        Self::build_with_host(prefix, process_mode, None).await
+    }
+
+    pub(in crate::services::discord) async fn build_with_host(
+        prefix: u64,
+        process_mode: CodexSourceMode,
+        host: Option<&str>,
+    ) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
+        let host_env = host.map(|host| {
+            crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_INSTANCE_ID",
+                std::ffi::OsStr::new(host),
+            )
+        });
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let isolation = Isolation {
             _dedupe: dedupe_lock,
@@ -209,7 +226,7 @@ impl CanaryFixture {
             tmux_session: CANARY_TMUX.into(),
             channel_id: Some(CANARY_CHANNEL),
             owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
-            host: None,
+            host: host.map(str::to_owned),
             expected_native_session_id: None,
             launch_mode: "fresh".into(),
             provider_root: Some(sessions.canonicalize().unwrap()),
@@ -354,10 +371,26 @@ impl CanaryFixture {
             _hosts: hosts,
             _env: env,
             _source_env: source_env,
+            _host_env: host_env,
             _binding_env: binding_env,
             _hosting: hosting,
             _isolation: isolation,
         }
+    }
+
+    fn warm_followup(&self, enabled: bool) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
+            std::ffi::OsStr::new(if enabled { "1" } else { "0" }),
+        )
+    }
+
+    pub(in crate::services::discord) fn scoped_test_env(
+        &self,
+        key: &'static str,
+        value: &std::ffi::OsStr,
+    ) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(key, value)
     }
 
     pub(in crate::services::discord) fn history(&self) -> PathBuf {
@@ -638,6 +671,92 @@ async fn clear_and_first_input(
     }
 }
 
+pub(in crate::services::discord) async fn settled_owner_observation<T, F, Fut>(
+    counter: &str,
+    mut observe: F,
+    transient: impl Fn(&T) -> bool,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let mut retries = 0;
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        for read in 0..50 {
+            let sample = observe().await;
+            if !transient(&sample) {
+                return Some(sample);
+            }
+            retries += 1;
+            if read + 1 < 50 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        None
+    })
+    .await;
+    eprintln!("{counter}={retries}");
+    observed
+        .expect("owner observation remained transient past the bounded reread timeout")
+        .expect("owner observation remained transient through the bounded reread limit")
+}
+
+pub(in crate::services::discord) fn owner_epoch_error<T, E: AsRef<str>>(
+    observed: &Result<T, E>,
+) -> bool {
+    matches!(observed, Err(reason) if reason.as_ref() == "owner_epoch")
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_keeps_unrelated_error_on_first_observation() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT unrelated_error_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("fixture_io".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Err("fixture_io".to_owned()),
+        "a non-owner-epoch error must remain the first observation"
+    );
+    assert_eq!(calls.get(), 1, "an unrelated error must not be reread");
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_rechecks_one_transient_before_stable_hold() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT transient_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("owner_epoch".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Ok("Hold(\"owner_unresolved\")".to_owned()),
+        "an owner-epoch error must be reread before accepting the observation"
+    );
+    assert_eq!(calls.get(), 2, "only the transient observation is retried");
+}
+
 async fn clear_and_first_input_at_tick(
     external_inventory: bool,
     without_core: bool,
@@ -760,15 +879,37 @@ async fn clear_and_first_input_at_tick(
         clear_persist_failure_tests::queue_len(&fixture.shared, channel).await,
         0
     );
-    let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let observed = settled_owner_observation(
+        "E51_AFTER_CLEAR superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
+    assert_eq!(
+        (observed.activity, observed.reason),
+        if external_inventory {
+            (Activity::Unknown, "session_identity_unresolved")
+        } else {
+            (Activity::Idle, "no_session")
+        }
+    );
     let cancelled_probe = Arc::new(CancelToken::new());
     cancelled_probe.cancelled.store(true, Ordering::SeqCst);
     let clear_preflight_open =
         crate::services::codex_tui::verified_hold::preflight(CANARY_TMUX, Some(&cancelled_probe))
             .is_none();
-    let underlying =
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await;
+    let underlying = settled_owner_observation(
+        "E51_AFTER_CLEAR underlying_owner_epoch_retries",
+        || {
+            activity::tests::unbound_verdict_for_tests(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+        },
+        owner_epoch_error,
+    )
+    .await;
     eprintln!(
         "E51_AFTER_CLEAR activity={:?} reason={} underlying={underlying:?}",
         observed.activity, observed.reason
@@ -856,16 +997,8 @@ async fn clear_and_first_input_at_tick(
     );
     if external_inventory {
         assert_eq!(underlying.unwrap(), "Hold(\"owner_unresolved\")");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Unknown, "session_identity_unresolved")
-        );
     } else {
         assert_eq!(underlying.unwrap(), "Absent(LocalInventory)");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Idle, "no_session")
-        );
     }
     let new = new.unwrap_or_else(|| {
         panic!(

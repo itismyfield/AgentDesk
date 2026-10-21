@@ -322,6 +322,11 @@ fn persist_checkpoint(
     }
     let mut marker = linked_marker(authority, binding)?
         .ok_or_else(|| io::Error::other("Codex cursor marker unavailable"))?;
+    #[cfg(all(test, unix))]
+    let previous_offset = marker
+        .get("rollout_start_offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     marker["rollout_start_offset"] = json!(binding.last_offset);
     if let Some(path) = binding.relay_output_path.as_deref() {
         let (dev, ino, len) = relay_identity(authority, path)
@@ -355,6 +360,13 @@ fn persist_checkpoint(
     temp.write_all(format!("{marker}\n").as_bytes())?;
     temp.as_file().sync_all()?;
     temp.persist(&path).map_err(|error| error.error)?;
+    #[cfg(all(test, unix))]
+    crate::services::codex::actual_submit_tests::source_io::advance(
+        Path::new(&binding.output_path),
+        "durable_cursor_commit",
+        previous_offset,
+        binding.last_offset,
+    );
     crate::services::discord::runtime_store::fsync_parent_dir(Path::new(&path))
 }
 
@@ -467,6 +479,13 @@ fn advance_cursor(
         }
         entry.value = binding;
         entry.recorded_at = Instant::now();
+        #[cfg(all(test, unix))]
+        crate::services::codex::actual_submit_tests::source_io::advance(
+            Path::new(output_path),
+            "runtime_cursor_commit",
+            start,
+            last_offset,
+        );
         Advance::Advanced {
             source: source.1,
             start,

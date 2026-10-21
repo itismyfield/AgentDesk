@@ -880,23 +880,17 @@ pub(super) async fn run_completion_postlude(
                 inflight_state.turn_nonce.as_deref(),
             ) {
                 GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {}
-                GuardedClearOutcome::UserMsgMismatch => {
-                    tracing::debug!(
-                        "[turn_bridge] preserving inflight row in channel {}: a newer turn now owns it (this turn user_msg_id {})",
-                        channel_id,
-                        this_turn_user_msg_id
-                    );
-                }
-                GuardedClearOutcome::PlannedRestartSkipped
-                | GuardedClearOutcome::RebindOriginSkipped => {}
-                GuardedClearOutcome::IoError => {
-                    tracing::warn!(
-                        provider = %provider.as_str(),
-                        channel_id = channel_id.get(),
-                        this_turn_user_msg_id,
-                        "turn bridge epilogue inflight guarded-clear hit IoError; sweeper will retry"
-                    );
-                }
+                // A newer turn's row, a restart/rebind marker or an I/O error kept the row.
+                outcome => tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel_id = channel_id.get(),
+                    this_turn_user_msg_id,
+                    row_finalizer_turn_id = inflight_state.effective_finalizer_turn_id(),
+                    expected_save_generation = inflight_state.save_generation,
+                    gate = "cas",
+                    reason = ?outcome,
+                    "turn bridge epilogue kept the inflight row: guarded clear did not remove it"
+                ),
             }
         } else {
             // #3161 (codex P1): a zero-id turn (recovery / external-input /

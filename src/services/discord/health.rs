@@ -69,7 +69,11 @@ pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
 mod turn_deliver;
+mod unbound_owners;
 mod unpaired_active_token;
+#[cfg(test)]
+pub(crate) use super::tmux_watcher_registry::owner_publication_fence_held_for_tests;
+pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
 pub(in crate::services::discord) mod watcher_respawn;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
@@ -122,6 +126,8 @@ pub(crate) use turn_deliver::{
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.
+#[cfg(test)]
+pub(crate) use recovery::STALL_WATCHDOG_INTERVAL_SECS;
 #[cfg(all(test, unix))]
 pub(crate) use recovery::StaleSweepWarrantFixture;
 #[allow(unused_imports)]
@@ -145,7 +151,7 @@ pub use recovery::{
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{
-    STALL_WATCHDOG_INTERVAL_SECS, channel_has_active_turn, clear_resume_runtime_owner_after_death,
+    channel_has_active_turn, clear_resume_runtime_owner_after_death,
     rebind_channel_provider_session, release_zombie_foreground_turn_by_tmux_name,
     resume_runtime_for_channel, retain_resume_runtime_owner_before_teardown, stop_channel_runtime,
 };
@@ -638,18 +644,6 @@ impl HealthRegistry {
         hashes
     }
 
-    /// #3293: every registered runtime regardless of provider. Used by the
-    /// provider-unfiltered mailbox-registry purge, which must visit every
-    /// instance registry because a bogus entry may live in any of them.
-    pub(in crate::services::discord) async fn all_registered_shared(&self) -> Vec<Arc<SharedData>> {
-        self.providers
-            .lock()
-            .await
-            .iter()
-            .map(|entry| entry.shared.clone())
-            .collect()
-    }
-
     pub(super) async fn register_http(&self, provider: String, http: Arc<serenity::Http>) {
         self.discord_http.lock().await.push((provider, http));
     }
@@ -702,7 +696,7 @@ impl HealthRegistry {
 
     /// `expected_episode` pins the inflight row the absence sweep observed, so
     /// the rebind adopts that row instead of clearing and re-minting it.
-    pub(crate) async fn rebind_inflight_after_force_clean(
+    pub(in crate::services::discord) async fn rebind_inflight_after_force_clean(
         &self,
         provider: &crate::services::provider::ProviderKind,
         channel_id: u64,

@@ -23,16 +23,15 @@ pub(super) async fn finalize_stale_busy_turn(
     );
     let outcome = shared
         .turn_finalizer
-        .submit_terminal_with_episode_nonce(
+        .submit_stale_busy_cancel(
             turn_finalizer::TurnKey::new(
                 channel_id,
                 observed_user_msg_id.get(),
                 shared.restart.current_generation,
             ),
             provider.clone(),
-            turn_finalizer::TerminalEvent::Cancel,
-            turn_finalizer::FinalizeContext::stale_busy_mailbox(),
             observed_turn_nonce,
+            tmux_session_name.to_string(),
             shared.clone(),
         )
         .await;

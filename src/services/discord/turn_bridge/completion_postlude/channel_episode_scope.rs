@@ -462,6 +462,7 @@ mod tests {
                 "services/discord/router/message_handler/headless_turn/process_mailbox/bridge_tests.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/router/message_handler/provider_dispatch_live_end_tests.rs",
+                "services/discord/tmux_restart_handoff_mailbox_tests/fresh_start_failure_tests.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests/provider_failure_tests.rs",

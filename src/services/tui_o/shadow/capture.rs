@@ -160,6 +160,8 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     file.take(len).read_to_end(&mut bytes)?;
+    #[cfg(all(test, unix))]
+    self::io_trace::record_source(file, "source_capture", bytes.len() as u64);
     #[cfg(test)]
     self::io_trace::record(offset, bytes.len() as u64, false);
     Ok(bytes)
@@ -170,6 +172,8 @@ fn hash_prefix(mut file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let copied = io::copy(&mut file.take(len), &mut hasher)?;
+    #[cfg(all(test, unix))]
+    self::io_trace::record_source(file, "source_prefix", copied);
     #[cfg(test)]
     self::io_trace::record(0, copied, true);
     if copied < len {
@@ -608,6 +612,10 @@ pub mod observation;
 #[cfg(test)]
 pub(crate) mod io_trace {
     use std::cell::RefCell;
+    #[cfg(unix)]
+    pub(crate) fn record_source(file: &std::fs::File, tag: &'static str, len: u64) {
+        crate::services::codex::actual_submit_tests::source_io::read(file, tag, len);
+    }
     thread_local! {
         static READS: RefCell<Vec<(u64, u64, bool)>> = const { RefCell::new(Vec::new()) };
     }
