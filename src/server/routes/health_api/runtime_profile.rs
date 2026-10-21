@@ -36,8 +36,15 @@ fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
             "configured_channels": channels,
             "admission": admission,
             "endpoints": endpoints,
-            "restart_required": *boot.config() != config.session_hosts,
+            "restart_required": boot.restart_required(config),
         });
+        if let Some(migration) = boot.migration() {
+            view["migration_refused"] =
+                (migration.reason == "session_hosts_migration_refused").into();
+            view["migration"] = serde_json::json!(migration);
+            view["candidate"] = serde_json::json!(config.session_hosts);
+            view["applied"] = serde_json::json!(boot.config());
+        }
         attach_local_herdr(&mut view);
         view
     };

@@ -112,11 +112,21 @@ mod node {
 
     pub(super) fn run(command: HerdrCommand) -> Result<(), String> {
         let config = crate::config::load().map_err(|error| format!("load config: {error}"))?;
-        crate::config::session_hosts::install(&config).map_err(|error| format!("{error}"))?;
         super::super::direct::run_async(async move {
             let pool = crate::db::postgres::connect(&config)
                 .await?
                 .ok_or("postgres pool unavailable for herdr")?;
+            let candidate = crate::config::session_hosts::BootSessionHosts::from_config(&config)
+                .map_err(|error| format!("{error}"))?;
+            let selection = crate::config::session_hosts::migration::select(
+                candidate,
+                &crate::config::session_hosts::approval_store::FileApprovalStore::runtime(),
+                &crate::config::session_hosts::migration::PgRows(Some(&pool)),
+                &crate::config::session_hosts::migration::NoHoldStore,
+                true,
+            )
+            .await;
+            crate::config::session_hosts::install_selected(selection);
             let result = match command {
                 HerdrCommand::Status => status(&pool).await.map(|status| pretty(&status)),
                 HerdrCommand::Retire { channel } => match retire(&pool, channel).await {
