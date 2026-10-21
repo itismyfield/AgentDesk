@@ -86,7 +86,7 @@ fn consent_one_card_preserves_original_fifo_and_custody_after_denial_expiry_and_
 #[test]
 fn consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decision() {
     let temp = tempfile::tempdir().unwrap();
-    let store = ConsentStore::new(Some(temp.path().into()));
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
     let current = store.hold(question("first"), 10).unwrap();
     assert!(
         store.decide(&current, 2, true, 11).is_err(),
@@ -123,7 +123,7 @@ fn consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decis
         store.record_apply(&accepted, result.clone()).unwrap().apply,
         Some(result)
     );
-    let encoded = std::fs::read_dir(temp.path())
+    let encoded = std::fs::read_dir(temp.path().join("consents"))
         .unwrap()
         .filter_map(Result::ok)
         .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
@@ -138,7 +138,7 @@ fn consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decis
 #[test]
 fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
     let temp = tempfile::tempdir().unwrap();
-    let store = ConsentStore::new(Some(temp.path().into()));
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
     let first = store.hold(question("first"), 1).unwrap();
     for dimension in 0..6 {
         let mut next = question("first");
@@ -171,7 +171,7 @@ fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
 #[test]
 fn consent_independent_store_instances_serialize_the_first_owner_decision() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().to_path_buf();
+    let root = temp.path().join("consents");
     let current = ConsentStore::new(Some(root.clone()))
         .hold(question("first"), 1)
         .unwrap();
