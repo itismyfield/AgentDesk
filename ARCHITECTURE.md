@@ -157,6 +157,7 @@ src/
 │   │   │   └── legacy_return_tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
+│   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── rebind_override.rs
@@ -1204,6 +1205,7 @@ src/
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force.rs
+│   │   │   ├── http_force_e08_tests.rs
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
@@ -2727,7 +2729,11 @@ src/
 │   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
+│   │   ├── herdr_kill/
+│   │   │   └── effects.rs
 │   │   ├── canonical_identity.rs
+│   │   ├── force_kill.rs
+│   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
 │   │   ├── output.rs
 │   │   └── tmux_cleanup.rs

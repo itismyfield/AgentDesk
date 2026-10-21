@@ -288,7 +288,13 @@ fn e08_retry_waits_for_terminated_handler_pg() {
                 .expect("the run reached its end check after the close")
                 .unwrap();
             let held = node.killed(&rig).await;
-            assert_eq!(held.closes(), untouched.closes() + 1, "the close was sent");
+            // The rig's pane stays ended after the first run, so only that one sends a close.
+            let sent = usize::from(!retry);
+            assert_eq!(
+                held.closes(),
+                untouched.closes() + sent,
+                "the close was sent once"
+            );
             assert_eq!(held.but_writes(&untouched), untouched, "retry={retry}");
             let current = test_turn::active(&node.shared, channel()).await;
             assert!(

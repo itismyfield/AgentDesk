@@ -3276,8 +3276,8 @@ const E07_CANCEL: &str = "src/services/queue.rs";
 const E07_BRANCH: &str = "src/services/queue/http_force.rs";
 const E07_EFFECTS: &str = "src/services/queue/cancel_effects.rs";
 const E08_KILL: &str = "src/services/dispatched_sessions/force_kill.rs";
-const E08_BRANCH: &str = "src/services/dispatched_sessions/herdr_force.rs";
-const E08_EFFECTS: &str = "src/services/dispatched_sessions/herdr_force/effects.rs";
+const E08_BRANCH: &str = "src/services/dispatched_sessions/herdr_kill.rs";
+const E08_EFFECTS: &str = "src/services/dispatched_sessions/herdr_kill/effects.rs";
 
 /// The operator terminate chain's production names, each reached from its one caller only.
 fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
@@ -3553,7 +3553,7 @@ fn e07_e08_herdr_effect_census() {
     );
     let mut caller = sources.clone();
     caller.get_mut(E08_KILL).unwrap().push_str(
-        "\nasync fn again(s: &AppState, p: &Prepared<'_>) { let _ = super::herdr_force::herdr_force_kill(s, p, true, \"r\").await; }",
+        "\nasync fn again(s: &AppState, p: &Prepared<'_>) { let _ = super::herdr_kill::herdr_force_kill(s, p, true, \"r\").await; }",
     );
     assert!(
         !e07_effect_violations(&caller).is_empty(),

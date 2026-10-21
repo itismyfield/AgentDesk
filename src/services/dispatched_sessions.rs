@@ -30,7 +30,7 @@ use tmux_cleanup::kill_tmux_session_impl;
 
 mod force_kill;
 #[cfg(unix)]
-mod herdr_force;
+mod herdr_kill;
 mod hook;
 use force_kill::{Entry, force_kill_session_impl_with_reason_and_forwarding};
 pub use hook::{HookSessionQuery, hook_session_with_query};

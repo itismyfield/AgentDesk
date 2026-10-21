@@ -51,7 +51,7 @@ pub(super) async fn force_kill_session_impl_with_reason_and_forwarding(
         Err(reply) => return reply,
     };
     #[cfg(unix)]
-    if let Some(reply) = super::herdr_force::herdr_force_kill(state, &prepared, retry, reason).await
+    if let Some(reply) = super::herdr_kill::herdr_force_kill(state, &prepared, retry, reason).await
     {
         return reply;
     }
