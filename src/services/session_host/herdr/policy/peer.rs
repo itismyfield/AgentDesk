@@ -3,11 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::super::super::contract::{ServerHello, ServerWitness};
+use super::super::super::model::{HERDR_PROTOCOL, VERIFIED_HERDR_VERSIONS};
+use super::super::super::provenance::{ProcessStart, StartIdentity};
 use super::Unverified;
 use super::file::FileToken;
-use crate::services::session_host::herdr::contract::{ServerHello, ServerWitness};
-use crate::services::session_host::herdr::model::{HERDR_PROTOCOL, VERIFIED_HERDR_VERSIONS};
-use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PeerEnvironment {

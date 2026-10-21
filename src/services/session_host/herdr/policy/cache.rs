@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use super::super::super::contract::ServerWitness;
 use super::{ConfigChecker, NextRestartProof, PeerSource, StartupProof, Unverified, file};
-use crate::services::session_host::herdr::contract::ServerWitness;
 
 #[derive(Default)]
 struct State {

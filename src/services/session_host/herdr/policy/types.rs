@@ -1,5 +1,5 @@
+use super::super::super::contract::ServerWitness;
 use super::{PeerSource, Unverified, file::FileToken, peer::PeerSnapshot};
-use crate::services::session_host::herdr::contract::ServerWitness;
 
 /// Current whole-config validation, bound to the peer and both file identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
