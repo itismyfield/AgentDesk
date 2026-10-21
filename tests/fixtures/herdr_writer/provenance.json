@@ -28,7 +28,7 @@
         ]
       ]
     },
-    "upstream_unit_tests.rs": {
+    "upstream_unit_tests.txt": {
       "sha256": "9e6c2c36b6885e2b54f6e91a16d60d98e86359ded13ac0a7e8cab5f9856d44b2",
       "io_lines": [
         [

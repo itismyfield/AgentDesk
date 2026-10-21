@@ -15,7 +15,7 @@ const FUNCTIONS: &str = include_str!(concat!(
 ));
 const UNIT_TESTS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/herdr_writer/upstream_unit_tests.rs"
+    "/tests/fixtures/herdr_writer/upstream_unit_tests.txt"
 ));
 const UNIT_OUTPUTS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -51,7 +51,7 @@ fn pinned_upstream_writer_fixtures_have_recorded_sha256() {
     );
     for (name, source, expected) in [
         ("upstream_functions.rs", FUNCTIONS, FUNCTIONS_SHA256),
-        ("upstream_unit_tests.rs", UNIT_TESTS, UNIT_TESTS_SHA256),
+        ("upstream_unit_tests.txt", UNIT_TESTS, UNIT_TESTS_SHA256),
         (
             "upstream_unit_outputs.json",
             UNIT_OUTPUTS,
