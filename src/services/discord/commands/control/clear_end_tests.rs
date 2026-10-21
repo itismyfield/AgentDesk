@@ -376,6 +376,22 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
         let _switches = rig
             .bind(&pool, &shared.token_hash, &key, herdr::HostedState::Retired)
             .await;
+        let mut foreign = rig.record_as(
+            (&shared.token_hash, &key),
+            herdr::HostedState::Retired,
+            provider.as_str(),
+        );
+        foreign.owner.runtime_root = "another-runtime".into();
+        foreign
+            .source_ref
+            .runtime_root
+            .clone_from(&foreign.owner.runtime_root);
+        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE session_key = $2")
+            .bind(serde_json::to_value(foreign).unwrap())
+            .bind(&key)
+            .execute(&pool)
+            .await
+            .unwrap();
         let managed = Managed::launch(&shared, &provider, (channel, "p11-clear")).await;
 
         let reply = clear(&shared, &provider, channel).await;
