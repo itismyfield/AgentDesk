@@ -449,6 +449,7 @@ src/
 │   │   │   ├── discord_mentions.rs
 │   │   │   ├── image_activation_tests.rs
 │   │   │   ├── image_input.rs
+│   │   │   ├── image_json_error_tests.rs
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
