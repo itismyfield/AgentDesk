@@ -21222,15 +21222,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:3b0609cc1c319871828403e4ccd572ef290fe7e1b4ff625159ff86d2a8f707a2"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:456633ab9edc0d2db7b39f91d79259c27e01993a4d821456621214903293d783"
     },
     {
@@ -21273,10 +21264,28 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/server/outbox_worker/attachment_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:3cb2998febf138d369fc6ed0fa21a919936c2e5bc40d2f326f848cc9dda48cef"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:09cc39bdc37d36dc1eb9286556805677ba07547618efa6db9b89774074827c16"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:61e5d016745b6765fa0c687d89076b70b7d1e756d8631ea7ba46d5c7c3be13ab"
     },
     {
       "root": "src",
@@ -21322,6 +21331,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ba7cdbbf3725dfe93f266d8c9d65ea3496788417138191572d318a118db9c8d7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c44cd7b7a22a72c1967c5604bada67d3f70fd954f44b800a06aaef1b91bd42d2"
     },
     {
       "root": "src",
