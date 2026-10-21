@@ -713,6 +713,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::task_notification_delivery::tests::confirmed_missing_edit_uses_revision_nonce_for_one_replacement
   services::discord::task_notification_delivery::tests::durable_response_turn_key_uses_shared_recovery_identity_for_degenerate_turns
   services::discord::task_notification_delivery::tests::footer_background_marker_key_is_stable_across_delivery_paths
+  services::discord::task_notification_delivery::tests::footer_only_marker_is_one_bounded_sanitized_status_summary
   services::discord::task_notification_delivery::tests::footer_only_marker_omits_private_task_anchors_from_rendered_preview
   services::discord::task_notification_delivery::tests::footer_only_marker_renders_background_summary_and_result_preview
   services::discord::task_notification_delivery::tests::footer_only_observation_keeps_full_card_for_later_promotion

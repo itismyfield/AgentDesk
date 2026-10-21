@@ -220,6 +220,18 @@ mod tests {
 
     #[test]
     fn boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff() {
+        let provider_id = serenity::UserId::new(2002);
+        assert!(super::should_skip_self_authored_turn_message(
+            provider_id,
+            provider_id
+        ));
+        assert!(!should_admit_turn_message(
+            &[2002],
+            None,
+            2002,
+            true,
+            "-# ✅ Background command done",
+        ));
         let marked = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
             "DISPATCH:watchdog alert",
         );

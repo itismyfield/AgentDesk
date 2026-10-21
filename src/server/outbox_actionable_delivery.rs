@@ -40,6 +40,17 @@ pub(super) fn delivery_options(
     Ok(crate::services::discord::health::ManualOutboundOptions {
         allow_unbound_internal_channel: true,
         trusted_internal_outbox: true,
+        channel_owner_provider: if row.source
+            == crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
+            && row.reason_code.as_deref() == Some("lifecycle.background_task_complete")
+        {
+            Some(
+                crate::services::provider::ProviderKind::from_str(&row.bot)
+                    .ok_or("background completion requires its provider bot")?,
+            )
+        } else {
+            None
+        },
         image_attachment: attachment,
         ..Default::default()
     })
@@ -134,6 +145,52 @@ pub(super) fn failure_action(
 #[cfg(test)]
 mod tests {
     use super::{delivery_content, should_fallback_to_notify};
+
+    #[test]
+    fn background_notice_selects_provider_owner_and_defers_without_notify_fallback() {
+        let mut row = super::PendingMessageOutboxRow {
+            id: 1,
+            target: "channel:42".into(),
+            content: "-# ✅ done".into(),
+            bot: "claude".into(),
+            source: "lifecycle_notifier".into(),
+            reason_code: Some("lifecycle.background_task_complete".into()),
+            session_key: Some("footer_background:ch:42:event".into()),
+            retry_count: 0,
+            attachment: Ok(None),
+            claim_owner: "fixture".into(),
+            claimed_at: chrono::Utc::now(),
+        };
+        let options = super::delivery_options(&row).unwrap();
+        assert_eq!(
+            options.channel_owner_provider,
+            Some(crate::services::provider::ProviderKind::Claude)
+        );
+        assert!(options.trusted_internal_outbox);
+        assert_eq!(
+            super::delivery_content(&row.content, &row.source, row.reason_code.as_deref()),
+            row.content
+        );
+        assert!(!should_fallback_to_notify(
+            "503 Service Unavailable",
+            "claude",
+            &row.source,
+            row.reason_code.as_deref()
+        ));
+        assert!(matches!(
+            super::failure_action(&row, "503 Service Unavailable"),
+            super::super::MessageOutboxFailureAction::Retry { .. }
+        ));
+        row.bot = "notify".into();
+        assert!(super::delivery_options(&row).is_err());
+        row.reason_code = Some("runtime_started".into());
+        assert!(
+            super::delivery_options(&row)
+                .unwrap()
+                .channel_owner_provider
+                .is_none()
+        );
+    }
 
     #[test]
     fn notify_fallback_requires_a_failed_actionable_announce_delivery() {
