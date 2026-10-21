@@ -111,14 +111,13 @@ fn a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal() {
 }
 
 /// The reader's terminal and admission's replay of `lines`, each stamped after the input.
+type TerminalCoordinates = (u64, NativeTerminalKind, u64);
+
 fn read_and_replay(
     path: &Path,
     lines: &[serde_json::Value],
     alive_for: Duration,
-) -> (
-    Option<(NativeTerminalKind, u64)>,
-    Option<(u64, NativeTerminalKind, u64)>,
-) {
+) -> (Option<TerminalCoordinates>, Option<TerminalCoordinates>) {
     let input = chrono::Utc::now();
     let stamp = (input + chrono::Duration::seconds(1)).to_rfc3339();
     let stamped: Vec<String> = lines
@@ -134,7 +133,7 @@ fn read_and_replay(
     let mut file = std::fs::File::open(path).unwrap();
     let len = file.metadata().unwrap().len();
     let replayed = replay_herdr_turn(&mut file, input, len);
-    (terminal.map(|t| (t.kind, t.end)), replayed)
+    (terminal.map(|t| (t.start, t.kind, t.end)), replayed)
 }
 
 /// A compact summary is neither a turn's own prompt nor the next turn's head; a second ordinary
@@ -167,7 +166,7 @@ fn a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn() {
         // The terminal is the record before the next turn's, so it ends where that one begins.
         let body = std::fs::read_to_string(&path).unwrap();
         let end = body.trim_end().rfind('\n').unwrap() as u64 + 1;
-        assert_eq!(read, Some((kind, end)), "{name}");
+        assert_eq!(read, Some((0, kind, end)), "{name}");
         assert_eq!(replayed, Some((0, kind, end)), "{name}");
     }
 
