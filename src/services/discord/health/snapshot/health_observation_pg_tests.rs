@@ -139,23 +139,16 @@ fn health_handler_actor_and_db_share_one_deadline() {
     );
     let slow_runtime = parked_runtime();
     parked_turn(&slow_runtime, &claude, slow);
-    let reconfirm_runtime = parked_runtime();
-    parked_turn(&reconfirm_runtime, &claude, reconfirm);
-    let (db, addr) = main.block_on(async {
+    let (db, addr, _barrier) = main.block_on(async {
         nameless_turn(&claude, normal).await;
+        nameless_turn(&claude, reconfirm).await;
+        // The reconfirm actor answers its first read and then reads nothing more.
+        let barrier = claude.mailboxes.install_health_barrier_for_test(reconfirm);
         let db = Db::start(RTT, 8).await;
         let addr = serve(&db.pool, registry.clone()).await;
-        (db, addr)
+        (db, addr, barrier)
     });
-    let handle = claude.mailbox_peek(reconfirm).unwrap();
     let _slow = Driver::answer_from(slow_runtime, Duration::from_millis(800));
-    let _once = Driver::start(
-        reconfirm_runtime,
-        Duration::from_millis(300),
-        |_| async move {
-            let _ = handle.try_snapshot().await;
-        },
-    );
     main.block_on(async {
         let (status, body, elapsed) = http_get(addr, "/api/health/detail").await;
         assert!(elapsed < BUDGET, "{elapsed:?}: {status} {body}");
@@ -230,36 +223,59 @@ fn deploy_ready(body: &Value, jq: bool) -> bool {
 }
 
 /// Deploy readiness refuses a stalled actor's public body with and without jq, which names no
-/// channel; the same node without that actor is ready, so the new reason is what refuses it.
+/// channel; the same node without that actor is ready, so the new reason is what refuses it. An
+/// actor that answers 1.2s into the request is still ready: its first read may use the deadline.
 #[test]
 fn health_timeout_consumers_keep_existing_gates() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let main = runtime();
-    let parked = parked_runtime();
+    let (parked, slow_parked) = (parked_runtime(), parked_runtime());
     let stalled_registry = Arc::new(HealthRegistry::new());
     let ready_registry = Arc::new(HealthRegistry::new());
+    let slow_registry = Arc::new(HealthRegistry::new());
     let stalled = poise::serenity_prelude::ChannelId::new(6_871_360_001);
-    let shared = main.block_on(async {
+    let slow = poise::serenity_prelude::ChannelId::new(6_871_360_002);
+    let (shared, slow_shared) = main.block_on(async {
         gateway(&ready_registry).await;
-        gateway(&stalled_registry).await
+        (
+            gateway(&stalled_registry).await,
+            gateway(&slow_registry).await,
+        )
     });
     parked_turn(&parked, &shared, stalled);
+    parked_turn(&slow_parked, &slow_shared, slow);
+    let mut slow_parked = Some(slow_parked);
+    // Dropped after `block_on`: the driver hands back a runtime, which cannot drop in async code.
+    let mut driver = None;
     main.block_on(async {
         let db = Db::start(Duration::ZERO, 4).await;
         let mut bodies = Vec::new();
-        for registry in [&ready_registry, &stalled_registry] {
+        for registry in [&ready_registry, &stalled_registry, &slow_registry] {
             let addr = serve(&db.pool, registry.clone()).await;
+            let slow_actor = Arc::ptr_eq(registry, &slow_registry);
+            if slow_actor {
+                let parked = slow_parked.take().unwrap();
+                driver = Some(Driver::answer_from(parked, Duration::from_millis(1_200)));
+            }
             let (_, mut body, elapsed) = http_get(addr, "/api/health").await;
             assert!(elapsed < BUDGET, "{elapsed:?}: {body}");
+            assert!(
+                !slow_actor || elapsed >= Duration::from_millis(1_150),
+                "the actor was not slow: {elapsed:?}"
+            );
             // No dashboard is built in tests; the axis is not what this test exercises.
             body["dashboard"] = true.into();
             bodies.push(body);
         }
-        let [ready, refused] = <[Value; 2]>::try_from(bodies).unwrap();
+        let [ready, refused, slow_body] = <[Value; 3]>::try_from(bodies).unwrap();
         for jq in [true, false] {
             assert!(
                 deploy_ready(&ready, jq),
                 "control must be ready (jq={jq}): {ready}"
+            );
+            assert!(
+                deploy_ready(&slow_body, jq),
+                "slow actor body must be ready (jq={jq}): {slow_body}"
             );
             assert!(
                 !deploy_ready(&refused, jq),
@@ -288,4 +304,5 @@ fn health_timeout_consumers_keep_existing_gates() {
 
         db.finish().await;
     });
+    drop(driver);
 }

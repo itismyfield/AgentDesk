@@ -1,7 +1,6 @@
 //! The health snapshot against mailbox actors the scheduler has not reached: each such actor
 //! lives on a runtime nothing drives until the test lets it, the shape of a busy dcserver.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,38 +42,27 @@ pub(crate) fn parked_turn(parked: &Runtime, shared: &Arc<SharedData>, channel: C
     parked.block_on(nameless_turn(shared, channel));
 }
 
-/// Drives a parked runtime on its own thread from `after` until `work` ends, then drops it.
+/// Drives a parked runtime on its own thread from `after` until dropped, then drops it.
 pub(crate) struct Driver {
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<Runtime>>,
 }
 
 impl Driver {
-    pub(crate) fn start<F>(
-        parked: Runtime,
-        after: Duration,
-        work: impl FnOnce(oneshot::Receiver<()>) -> F + Send + 'static,
-    ) -> Self
-    where
-        F: Future<Output = ()>,
-    {
-        let (stop, stopped) = oneshot::channel();
+    /// Actors on `parked` answer from `after` until the driver is dropped.
+    pub(crate) fn answer_from(parked: Runtime, after: Duration) -> Self {
+        let (stop, stopped) = oneshot::channel::<()>();
         let thread = std::thread::spawn(move || {
             std::thread::sleep(after);
-            parked.block_on(work(stopped));
+            parked.block_on(async move {
+                let _ = stopped.await;
+            });
             parked
         });
         Self {
             stop: Some(stop),
             thread: Some(thread),
         }
-    }
-
-    /// Actors on `parked` answer from `after` until the driver is dropped.
-    pub(crate) fn answer_from(parked: Runtime, after: Duration) -> Self {
-        Self::start(parked, after, |stopped| async move {
-            let _ = stopped.await;
-        })
     }
 }
 
@@ -265,50 +253,53 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
     });
 }
 
+/// After a barrier's release every read of the same actors answers, for this registry and a new one.
+async fn assert_answers_after_release(registry: &HealthRegistry, shared: &Arc<SharedData>) {
+    let (json, _) = detail(registry).await;
+    assert_eq!(read_failures(&json), Vec::new(), "the same registry");
+    let fresh = HealthRegistry::new();
+    fresh.register("claude".to_string(), shared.clone()).await;
+    let (json, _) = detail(&fresh).await;
+    assert_eq!(read_failures(&json), Vec::new(), "a new registry");
+}
+
 /// A build that starts 800ms after its request set the deadline still ends by that deadline: the
-/// reconfirm that never answers is cut there and the other channels keep their entries.
+/// reconfirm that never answers is cut there and the other channels keep their entries. Starting
+/// 350ms later still changes nothing, as the actor stops only once its first read is answered.
 #[test]
 fn health_snapshot_by_late_start_keeps_the_request_deadline() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let main = main_runtime();
     let registry = HealthRegistry::new();
     let claude = main.block_on(provider(&registry, "claude"));
-    let (silent, normal) = (channel(6_871_390_000, 1), channel(6_871_390_000, 2));
-    let silent_runtime = parked_runtime();
-    parked_turn(&silent_runtime, &claude, silent);
-    let handle = claude.mailbox_peek(silent).unwrap();
-    main.block_on(nameless_turn(&claude, normal));
-    let started = Instant::now();
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
-    // Dropped after `block_on`: the driver hands back a runtime, which cannot drop in async code.
-    let mut driver = None;
-    main.block_on(async {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        let build = registry.health_snapshot_by(true, deadline);
-        let mut build = std::pin::pin!(tokio::time::timeout(Duration::from_secs(6), build));
-        // The first poll queues the first reads; the silent actor is not driven, so it cannot end.
-        assert!(futures::poll!(build.as_mut()).is_pending());
-        // Queued behind the health read, so driving stops once that read has been answered.
-        driver = Some(Driver::start(
-            silent_runtime,
-            Duration::ZERO,
-            |_| async move {
-                let _ = handle.try_snapshot().await;
-            },
-        ));
-        let snapshot = build.await.expect("the health snapshot must finish");
-        let elapsed = started.elapsed();
-        assert!(elapsed < BUDGET, "request took {elapsed:?}");
-        let json = serde_json::to_value(snapshot).unwrap();
-        assert_eq!(
-            read_failures(&json),
-            vec![failed("claude", silent, "reconfirm")]
-        );
-        let entry = mailbox(&json, "claude", silent).expect("the first read answered");
-        assert_eq!(entry["has_cancel_token"], true);
-        assert!(mailbox(&json, "claude", normal).is_some());
-    });
-    drop(driver);
+    for (n, late) in [(1, 800), (3, 1_150)] {
+        let (silent, normal) = (channel(6_871_390_000, n), channel(6_871_390_000, n + 1));
+        main.block_on(async {
+            nameless_turn(&claude, silent).await;
+            nameless_turn(&claude, normal).await;
+            let mut barrier = claude.mailboxes.install_health_barrier_for_test(silent);
+            let started = Instant::now();
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
+            tokio::time::sleep(Duration::from_millis(late)).await;
+            let build = registry.health_snapshot_by(true, deadline);
+            let snapshot = tokio::time::timeout(Duration::from_secs(6), build)
+                .await
+                .expect("the health snapshot must finish");
+            let elapsed = started.elapsed();
+            assert!(elapsed < BUDGET, "request took {elapsed:?} (late {late}ms)");
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(
+                read_failures(&json),
+                vec![failed("claude", silent, "reconfirm")]
+            );
+            let entry = mailbox(&json, "claude", silent).expect("the first read answered");
+            assert_eq!(entry["has_cancel_token"], true);
+            assert!(mailbox(&json, "claude", normal).is_some());
+            barrier.first_answered().await;
+            barrier.release();
+            assert_answers_after_release(&registry, &claude).await;
+        });
+    }
 }
 
 /// First reads answer, then a paired thread's read and an unpaired-token reconfirm stall: both
@@ -326,22 +317,13 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
         channel(base, 3),
         channel(base, 4),
     );
-    // Each actor answers its pending first read and one more, then stalls before the later
-    // reads arrive; a stalled first read would leave no time for any later read.
-    let mut drivers = Vec::new();
-    for channel in [thread, reconfirm] {
-        let runtime = parked_runtime();
-        parked_turn(&runtime, &claude, channel);
-        let handle = claude.mailbox_peek(channel).unwrap();
-        drivers.push(Driver::start(
-            runtime,
-            Duration::from_millis(300),
-            |_| async move {
-                let _ = handle.try_snapshot().await;
-            },
-        ));
-    }
     main.block_on(async {
+        // Each actor answers its first read and then reads nothing until released.
+        let mut barriers = Vec::new();
+        for channel in [thread, reconfirm] {
+            nameless_turn(&claude, channel).await;
+            barriers.push(claude.mailboxes.install_health_barrier_for_test(channel));
+        }
         claude.mailboxes.handle(parent);
         claude.dispatch.thread_parents.insert(parent, thread);
         nameless_turn(&claude, normal).await;
@@ -378,6 +360,8 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
         assert_eq!(entry["has_cancel_token"], true);
         assert!(mailbox(&json, "claude", normal).is_some());
         assert!(reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
+        barriers.iter_mut().for_each(|barrier| barrier.release());
+        assert_answers_after_release(&registry, &claude).await;
     });
 }
 
@@ -499,28 +483,25 @@ fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
     let registry = HealthRegistry::new();
     let claude = main.block_on(provider(&registry, "claude"));
     let (replaced, control) = (channel(6_871_340_000, 3), channel(6_871_340_000, 4));
-    // Aged turns behind a watcher: a confirmed unpaired token classifies as `unpaired_active_token`.
-    let replaced_runtime = parked_runtime();
-    for (runtime, channel) in [(&replaced_runtime, replaced), (&main, control)] {
-        runtime.block_on(async {
+    let json = main.block_on(async {
+        // Aged turns behind a watcher: a confirmed unpaired token classifies as `unpaired_active_token`.
+        for channel in [replaced, control] {
             nameless_turn(&claude, channel).await;
             let handle = claude.mailbox_peek(channel).unwrap();
             handle
                 .age_active_turn_for_test(Duration::from_secs(700))
                 .await;
-        });
-        discord::register_resume_watcher_for_tests(
-            &claude,
-            channel,
-            &format!("b2-{}", channel.get()),
-        );
-    }
-    let shared = claude.clone();
-    let _replace = Driver::start(
-        replaced_runtime,
-        Duration::from_millis(300),
-        move |stopped| async move {
-            let handle = shared.mailbox_peek(replaced).unwrap();
+            discord::register_resume_watcher_for_tests(
+                &claude,
+                channel,
+                &format!("b2-{}", channel.get()),
+            );
+        }
+        let mut barrier = claude.mailboxes.install_health_barrier_for_test(replaced);
+        // First sample read, then the episode replaced, then the reconfirm let through.
+        let replace = async {
+            barrier.first_answered().await;
+            let handle = barrier.actor();
             handle.hard_stop().await;
             let token = Arc::new(CancelToken::new());
             let user_message = MessageId::new(replaced.get() + 2);
@@ -529,11 +510,9 @@ fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
                     .try_start_turn(token, UserId::new(8), user_message)
                     .await
             );
-            let _ = stopped.await;
-        },
-    );
-    let json = main.block_on(async {
-        let (json, elapsed) = detail(&registry).await;
+            barrier.release();
+        };
+        let ((json, elapsed), ()) = tokio::join!(detail(&registry), replace);
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
         json
     });
