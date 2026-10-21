@@ -184,7 +184,7 @@ pub(crate) fn apply(
             sync(file.as_file(), stage)?;
             let (_, path) = file.keep().map_err(|e| e.to_string())?;
             backup = Some(path);
-            sync(&directory, stage)?;
+            sync_parent(&plan.target, stage)?;
         }
         let mut temporary = tempfile::Builder::new()
             .prefix(".agentdesk-candidate-")
@@ -228,7 +228,7 @@ pub(crate) fn apply(
         temporary.persist(&plan.target).map_err(|e| e.to_string())?;
         published = true;
         stage = Stage::ParentSync;
-        sync(&directory, stage)?;
+        sync_parent(&plan.target, stage)?;
         stage = Stage::PostCheck;
         checkpoint(stage)?;
         let final_read = file::read(&plan.logical).map_err(|e| format!("{e:?}"))?;
@@ -278,6 +278,10 @@ pub(crate) fn apply(
 fn sync(file: &File, stage: Stage) -> Result<(), String> {
     checkpoint(stage)?;
     file.sync_all().map_err(|e| e.to_string())
+}
+fn sync_parent(path: &Path, stage: Stage) -> Result<(), String> {
+    checkpoint(stage)?;
+    crate::services::discord::runtime_store::fsync_parent_dir(path).map_err(|e| e.to_string())
 }
 fn checkpoint(stage: Stage) -> Result<(), String> {
     #[cfg(test)]
