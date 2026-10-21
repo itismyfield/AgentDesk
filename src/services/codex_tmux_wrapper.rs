@@ -12,7 +12,10 @@ use crate::services::task_completion_v1::TaskCompletionV1;
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
+mod deferred_error;
 mod input;
+#[cfg(all(test, unix))]
+mod reconnect_tests;
 
 const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
 #[allow(clippy::too_many_arguments)]
@@ -338,6 +341,7 @@ fn run_turn(
         .map_err(|e| format!("Failed to wait for Codex: {e}"))?;
     let stderr = finish_reader(&stderr_handle);
 
+    deferred_error::emit_at_eof(output, &mut state);
     if !status.success() && !state.saw_turn_completed {
         let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         let message = if stderr.is_empty() {
@@ -404,6 +408,7 @@ impl CodexCallTokenUsage {
 #[derive(Default)]
 struct CodexWrapperTurnState {
     final_text: String,
+    pending_error: Option<String>,
     saw_turn_completed: bool,
     // #3275: per-call context occupancy from the latest `token_count` event
     // (`info.last_token_usage` only — never the session-cumulative
@@ -534,14 +539,7 @@ fn handle_codex_wrapper_event(
         "turn.completed" => {
             emit_success_result(output, json, thread_id, state, start)?;
         }
-        "error" => {
-            let message = json
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown Codex error");
-            emit_result_error(output, message);
-            state.saw_turn_completed = true;
-        }
+        "error" => deferred_error::record(state, json),
         event_type => {
             record_unknown_codex_event(output, state, event_type, json)?;
         }
