@@ -7,6 +7,7 @@ use crate::services::tui_o::store::OEra;
 pub(super) enum BindingBoot {
     Existing,
     Rehydrate,
+    RehydrateAfter(Duration),
     Missing,
 }
 
@@ -28,11 +29,13 @@ pub(super) fn rehydrate(
     mode: BindingBoot,
     binding: Option<dedupe::TuiRuntimeBinding>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if !matches!(mode, BindingBoot::Rehydrate) {
-        return None;
-    }
+    let delay = match mode {
+        BindingBoot::Rehydrate => Duration::from_millis(200),
+        BindingBoot::RehydrateAfter(delay) => delay,
+        _ => return None,
+    };
     Some(tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(delay).await;
         let restored = dedupe::reconcile_rehydrated_tmux_runtime_binding_with_authority(
             "codex",
             CANARY_TMUX,
@@ -53,8 +56,27 @@ pub(super) fn rehydrate(
         assert!(dedupe::codex_verified_channel_delivery_allowed(
             CANARY_CHANNEL
         ));
-        eprintln!("B1B_FRESH_PROCESS binding_rehydrated=1 delay_ms=200");
+        eprintln!(
+            "B1B_FRESH_PROCESS binding_rehydrated=1 delay_ms={}",
+            delay.as_millis()
+        );
     }))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_two_second_rehydration_posts_once_without_alarm_pg() {
+    if test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::ordinary_two_second_rehydration_posts_once_without_alarm_pg"
+    )) {
+        restart_with_binding(
+            Pending::Approval,
+            false,
+            None,
+            BindingBoot::RehydrateAfter(Duration::from_secs(2)),
+        )
+        .await;
+    }
 }
 
 pub(super) async fn wait_retry_post(

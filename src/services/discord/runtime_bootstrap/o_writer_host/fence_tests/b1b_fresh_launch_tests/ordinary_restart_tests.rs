@@ -21,6 +21,7 @@ impl crate::services::tui_o::alarm::AlarmNotifier for RestartAlarms {
     }
 }
 
+mod boot_gate_alarm_tests;
 mod fresh_process_tests;
 mod fresh_scope_restart_tests;
 
@@ -253,12 +254,24 @@ async fn restart_with_binding(
     let rehydration = fresh_process_tests::rehydrate(binding_boot, saved_binding);
     let result = std::panic::AssertUnwindSafe(async {
         if fault.is_some() || matches!(binding_boot, fresh_process_tests::BindingBoot::Missing) {
+            let paused = matches!(binding_boot, fresh_process_tests::BindingBoot::Missing);
+            if paused {
+                tokio::time::pause();
+            }
             for _ in 0..100 {
                 assert!(
                     readiness.submission(CANARY_CHANNEL).is_none(),
                     "invalid persisted scope must never publish a live actor"
                 );
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                if paused {
+                    tokio::time::advance(Duration::from_millis(200)).await;
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            if paused {
+                tokio::time::resume();
             }
             assert!(!readiness.accepts(CANARY_CHANNEL));
             assert!(
@@ -353,7 +366,11 @@ async fn restart_with_binding(
             );
             assert_eq!(channel.ledger().next_serial(), sent_serial);
             drop(channel);
-            if matches!(binding_boot, fresh_process_tests::BindingBoot::Rehydrate) {
+            if matches!(
+                binding_boot,
+                fresh_process_tests::BindingBoot::Rehydrate
+                    | fresh_process_tests::BindingBoot::RehydrateAfter(_)
+            ) {
                 fresh_process_tests::wait_retry_post(
                     &store,
                     &era,
