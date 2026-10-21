@@ -98,6 +98,12 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── session_hosts/
+│   │   ├── approval_store.rs
+│   │   ├── boot_pg_tests.rs
+│   │   ├── migration.rs
+│   │   ├── migration_tests.rs
+│   │   └── projection.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs

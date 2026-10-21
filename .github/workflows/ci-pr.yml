@@ -213,12 +213,12 @@ jobs:
               #   python3 scripts/check_pg_test_lane_membership.py --write-pg-db-paths
               # which scripts/ci-script-checks.sh reruns, demanding an empty diff. paths-
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
-              - 'src/bootstrap_tests.rs'
               - 'src/cli/channel_home_tests.rs'
               - 'src/cli/dcserver_pg_bootstrap.rs'
               - 'src/cli/doctor/orchestrator/dispatch_outbox_tests.rs'
               - 'src/cli/doctor/orchestrator/observation_tests.rs'
               - 'src/cli/herdr_tests.rs'
+              - 'src/config/session_hosts/boot_pg_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'

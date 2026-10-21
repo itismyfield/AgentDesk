@@ -51,7 +51,7 @@ async fn seed(
 fn boot_entries_select_approved_hosts_pg() {
     const CELL: &str = "ADK_TEST_HOSTS_BOOT_CELL";
     let Ok(cell) = std::env::var(CELL) else {
-        for entry in ["dcserver", "runserver"] {
+        for entry in ["dcserver", "runserver", "cli"] {
             for scenario in ["first", "refused", "removed-agent", "unreadable", "no-pool"] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
@@ -104,13 +104,24 @@ fn boot_entries_select_approved_hosts_pg() {
             std::fs::write(store.0.as_ref().unwrap().join("current.json"), "{").unwrap();
         }
         let passed_pool = (scenario != "no-pool").then_some(&pool);
-        if entry == "dcserver" && scenario != "no-pool" {
+        if entry == "cli" {
+            crate::cli::herdr::install_observation_hosts(&candidate, &pool).await.unwrap();
+        } else if entry == "dcserver" && scenario != "no-pool" {
             crate::bootstrap::prepare_dcserver_boot(&candidate, &pool).await;
         } else if entry == "runserver" {
             crate::launch::after_database_ready(&candidate, passed_pool, || async { Ok(()) }).await.unwrap();
         } else {
             crate::bootstrap::prepare_and_install_boot_snapshots(&candidate, passed_pool).await.unwrap();
         }
+        if scenario == "unreadable" {
+
+                use crate::services::turn_host::{TurnHost, HerdrRefusal, for_turn};
+                let mut tmux = 0;
+                let result = for_turn(Some(&pool), &crate::services::provider::ProviderKind::Claude, 41, Some("no-such-session")).await;
+                if matches!(result, TurnHost::Tmux) { tmux += 1; }
+                assert!(matches!(result, TurnHost::Refused(HerdrRefusal::AdmissionStopped { cause: crate::services::herdr_admission::StopCause::ApprovalSnapshot })), "{result:?}");
+                assert_eq!(tmux, 0, "an unreadable approval cannot send a new channel to tmux");
+                    }
         session_hosts::with_boot(|boot| {
             let boot = boot.unwrap();
             assert_eq!(boot.channels(), old.channels(), "installed registry differs from the pre-change registry");
@@ -131,10 +142,14 @@ fn boot_entries_select_approved_hosts_pg() {
         let health = crate::server::routes::health_api::runtime_profile::herdr_health(&candidate);
         assert_eq!(health["restart_required"], false);
         match scenario {
-            "first" => assert!(health.get("migration").is_none()),
+            "first" => {
+                assert!(health.get("migration").is_none());
+                assert_eq!(store.0.as_ref().unwrap().join("current.json").exists(), entry != "cli", "the read-only CLI never seeds approval");
+            },
             "refused" | "removed-agent" => {
-                assert_eq!(health["migration_refused"], true);
-                assert_eq!(health["migration"]["reason"], "session_hosts_migration_refused");
+                let reason = if entry == "cli" { "session_hosts_migration_pending" } else { "session_hosts_migration_refused" };
+                assert_eq!(health["migration_refused"], entry != "cli");
+                assert_eq!(health["migration"]["reason"], reason);
                 let before = std::fs::read(store.0.as_ref().unwrap().join("current.json")).unwrap();
                 let cli = migration::select(BootSessionHosts::from_config(&candidate).unwrap(), &store, &PgRows(Some(&pool)), &NoHoldStore, true).await.into_hosts();
                 assert_eq!(cli.channels(), old.channels(), "read-only CLI must follow the approved endpoint");
@@ -142,15 +157,8 @@ fn boot_entries_select_approved_hosts_pg() {
                 candidate.session_hosts.herdr.endpoints.get_mut("herdr.default").unwrap().herdr_session.push_str("-edited");
                 assert_eq!(crate::server::routes::health_api::runtime_profile::herdr_health(&candidate)["restart_required"], true);
             },
-            "unreadable" => {
-                use crate::services::turn_host::{TurnHost, HerdrRefusal, for_turn};
-                let mut tmux = 0;
-                let result = for_turn(Some(&pool), &crate::services::provider::ProviderKind::Claude, 41, Some("no-such-session")).await;
-                if matches!(result, TurnHost::Tmux) { tmux += 1; }
-                assert!(matches!(result, TurnHost::Refused(HerdrRefusal::AdmissionStopped { cause: crate::services::herdr_admission::StopCause::ApprovalSnapshot })), "{result:?}");
-                assert_eq!(tmux, 0, "an unreadable approval cannot send a new channel to tmux");
-            },
-            "no-pool" => assert_eq!(health["migration"]["reason"], "session_hosts_migration_unverified"),
+            "unreadable" => {},
+            "no-pool" => assert_eq!(health["migration"]["reason"], if entry == "cli" { "session_hosts_migration_pending" } else { "session_hosts_migration_unverified" }),
             _ => unreachable!(),
         }
         pool.close().await;

@@ -139,5 +139,5 @@ pub(crate) async fn prepare_dcserver_boot(config: &crate::config::Config, pool: 
 }
 
 #[cfg(all(test, unix))]
-#[path = "bootstrap_tests.rs"]
+#[path = "config/session_hosts/boot_pg_tests.rs"]
 mod tests;

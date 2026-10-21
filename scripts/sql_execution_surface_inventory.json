@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d8628a48a44b6700a60566b1dc52a86be31241e6",
+  "measured_at_sha": "687afacf76afd3c4d627835834a2165d65d6566d",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2683,6 +2683,42 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:34b4e076fd092e4c92798a789a7122d75db5fd2b9746ab3d2718516781717c31"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:350d2d30a430a9a7950ccefa1367340771b4b648df5ab3b69905f118de32d279"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9dc0ba8c8a0fb56581c72ae37e8bffdd898429ad98587a9294af9beb6f24ef73"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a13d3589997ba6ac597863a97cf82c508b2ccb6add79dd73a11ecf28fe4f8f3c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f655d8425f801d73775b8ad28c9979109a64c5b293bb213a53e21b36b67c0c72"
     },
     {
       "root": "src",

@@ -76,6 +76,25 @@ fn terminate(base: &str, body: &Value) -> Result<(), String> {
 }
 
 #[cfg(unix)]
+pub(crate) async fn install_observation_hosts(
+    config: &crate::config::Config,
+    pool: &sqlx::PgPool,
+) -> Result<(), String> {
+    let candidate = crate::config::session_hosts::BootSessionHosts::from_config(config)
+        .map_err(|error| format!("{error}"))?;
+    let selection = crate::config::session_hosts::migration::select(
+        candidate,
+        &crate::config::session_hosts::approval_store::FileApprovalStore::runtime(),
+        &crate::config::session_hosts::migration::PgRows(Some(pool)),
+        &crate::config::session_hosts::migration::NoHoldStore,
+        true,
+    )
+    .await;
+    crate::config::session_hosts::install_selected(selection);
+    Ok(())
+}
+
+#[cfg(unix)]
 mod node {
     use serde_json::{Value, json};
     use sqlx::PgPool;
@@ -116,17 +135,7 @@ mod node {
             let pool = crate::db::postgres::connect(&config)
                 .await?
                 .ok_or("postgres pool unavailable for herdr")?;
-            let candidate = crate::config::session_hosts::BootSessionHosts::from_config(&config)
-                .map_err(|error| format!("{error}"))?;
-            let selection = crate::config::session_hosts::migration::select(
-                candidate,
-                &crate::config::session_hosts::approval_store::FileApprovalStore::runtime(),
-                &crate::config::session_hosts::migration::PgRows(Some(&pool)),
-                &crate::config::session_hosts::migration::NoHoldStore,
-                true,
-            )
-            .await;
-            crate::config::session_hosts::install_selected(selection);
+            super::install_observation_hosts(&config, &pool).await?;
             let result = match command {
                 HerdrCommand::Status => status(&pool).await.map(|status| pretty(&status)),
                 HerdrCommand::Retire { channel } => match retire(&pool, channel).await {
