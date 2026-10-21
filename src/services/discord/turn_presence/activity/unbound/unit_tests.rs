@@ -588,6 +588,7 @@ fn scope(
         exact_key: key,
         exact,
         canonical,
+        legacy_absence: false,
         evidence,
         marker,
         inflight: row,

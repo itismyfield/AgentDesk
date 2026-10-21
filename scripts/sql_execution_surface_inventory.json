@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "588d1f878a43f8bc04ba9ad41eb9e176358704db",
+  "measured_at_sha": "85e5459a309c9336d2bf8b9f9f36d50b20bc04b9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -37216,6 +37216,51 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:497b61d6041008d18ee5cda8e09216b0d8d5d011e867d05bb03bd084031e5deb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/legacy_divergence.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b11c99cedb66d0ad5c3eabf89582a7d2191e2393a19e34fc8bcdc78e60aa6075"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:55ad0ef02cefc014f84215952d5d2df0da052030c8be82ba85c624ec16d294cc"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fa0733fbe2012ab4fd630136d8b90064ffc86ab4b7e45d1f5ca6c543346c1895"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:100252b81bf4c07a1649c262a5dd807817a63e1a3c161b06fb282d0ce314b431"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:66187699833b7d1c6aad8a4625e93dcbcac59cfdd0116135f851a70ec403527c"
     },
     {
       "root": "src",

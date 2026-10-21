@@ -331,13 +331,14 @@ async fn a_mailbox_token_keeps_presence_from_typing() {
     assert_eq!(fake.typed_secs(channel), [TYPING_EVERY.as_secs() * 6]);
 }
 
-/// Unknown for a full minute posts one notice; it does not post again within 30 minutes, even
-/// across a recovery and a new unknown, and may once that half hour has passed.
+/// Unknown with waiting input for a full minute posts one notice; it does not post again within
+/// 30 minutes, even across recovery and a new unknown, and may after that half hour has passed.
 #[tokio::test(start_paused = true)]
 async fn unknown_for_a_minute_notices_once_per_half_hour() {
     let channel = 6_200_004;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let run = supervise(&fake);
     wait(59).await;
     assert_eq!(fake.notices(), []);
@@ -352,6 +353,90 @@ async fn unknown_for_a_minute_notices_once_per_half_hour() {
     assert_eq!(fake.notice_secs(), [60, 1860]);
     assert!(fake.notices()[0].1.contains("(사유: facts_halted)"));
     assert!(status(channel).unwrap()["unknown_notice"]["posted_at"].is_string());
+}
+
+/// An unaffected Unknown consumes no notice deadline; waiting input gets the overdue notice
+/// immediately and keeps the existing half-hour throttle when the input leaves and returns.
+#[tokio::test(start_paused = true)]
+async fn unknown_without_input_notices_only_when_a_waiting_head_is_affected() {
+    let channel = 6_200_017;
+    let _confirmed = TestConfirmation::new(channel);
+    let fake = Fake::new(&[channel], UNKNOWN);
+    let mut supervisor = Supervisor::new(fake.clone());
+    let presence = supervisor.presence(channel);
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(NOTICE_EVERY + Duration::from_secs(1)).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert!(fake.notices().is_empty());
+    assert!(lock(&presence).last_notice_at.is_none());
+    assert!(lock(&presence).notice_posted_at.is_none());
+
+    *lock(&fake.head) = Some(7);
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [1801]);
+    tokio::time::advance(NOTICE_EVERY - Duration::from_secs(1)).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [1801]);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [1801, 3601]);
+
+    let last_notice = lock(&presence).last_notice_at;
+    let posted = lock(&presence).notice_posted_at;
+    *lock(&fake.head) = None;
+    tokio::time::advance(NOTICE_EVERY).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [1801, 3601]);
+    assert_eq!(lock(&presence).last_notice_at, last_notice);
+    assert_eq!(lock(&presence).notice_posted_at, posted);
+
+    *lock(&fake.head) = Some(8);
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [1801, 3601, 5401]);
+    assert!(fake.kick_secs().is_empty(), "Unknown never wakes the queue");
+}
+
+/// A token alone still needs warnings after the grace period, and releasing the token suppresses
+/// further warnings without consuming the next notice deadline.
+#[tokio::test(start_paused = true)]
+async fn unknown_with_only_a_token_notices_until_the_token_is_released() {
+    let channel = 6_200_018;
+    let _confirmed = TestConfirmation::new(channel);
+    let fake = Fake::new(&[channel], UNKNOWN);
+    fake.token.store(true, Ordering::SeqCst);
+    let mut supervisor = Supervisor::new(fake.clone());
+    let presence = supervisor.presence(channel);
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(UNKNOWN_NOTICE_AFTER - Duration::from_secs(1)).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert!(fake.notices().is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [60]);
+    tokio::time::advance(NOTICE_EVERY).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [60, 1860]);
+
+    let last_notice = lock(&presence).last_notice_at;
+    let posted = lock(&presence).notice_posted_at;
+    fake.token.store(false, Ordering::SeqCst);
+    tokio::time::advance(NOTICE_EVERY).await;
+    supervisor.tick(Instant::now()).await;
+    tokio::task::yield_now().await;
+    assert_eq!(fake.notice_secs(), [60, 1860]);
+    assert_eq!(lock(&presence).last_notice_at, last_notice);
+    assert_eq!(lock(&presence).notice_posted_at, posted);
 }
 
 /// A new supervisor over an idle channel sends nothing, wakes nothing and posts nothing.
@@ -444,13 +529,14 @@ async fn a_marker_left_on_disk_alone_is_woken_at_once_and_every_half_minute() {
     assert_eq!(fake.kick_secs(), [12, 42, 72]);
 }
 
-/// A notice that takes 30 seconds to post holds neither another channel's typing nor its stop.
+/// A waiting input's notice that takes 30 seconds holds neither another channel's typing nor stop.
 #[tokio::test(start_paused = true)]
 async fn a_slow_notice_holds_only_its_own_channel() {
     let (unknown, busy) = (6_200_014, 6_200_015);
     let _confirmed = (TestConfirmation::new(unknown), TestConfirmation::new(busy));
     let fake = Fake::new(&[unknown, busy], BUSY);
     fake.set(unknown, UNKNOWN);
+    *lock(&fake.head) = Some(7);
     *lock(&fake.notice_delay) = Some(Duration::from_secs(30));
     let run = supervise(&fake);
     wait(70).await;

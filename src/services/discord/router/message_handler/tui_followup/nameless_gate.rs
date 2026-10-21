@@ -23,7 +23,18 @@ pub(super) async fn nameless_promote_blocked(
     }
     park.clear_promote_hold(channel_id, "codex_verified");
     let nameless = crate::services::discord::host_defer_gate::nameless_channel_deferred;
-    nameless(shared, provider, channel_id.get()).await
+    let held = nameless(shared, provider, channel_id.get()).await;
+    #[cfg(unix)]
+    if held && crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+        let reading = crate::services::discord::turn_presence::activity::reading_now(
+            shared, provider, channel_id,
+        )
+        .await;
+        if reading.local_legacy_absence_for_start(None).await {
+            return false;
+        }
+    }
+    held
 }
 
 #[cfg(unix)]
@@ -122,6 +133,19 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     }
     let host = crate::services::discord::host_defer_gate::channel_session_deferred;
     if host(shared, provider, channel_id.get(), &tmux_session_name).await {
+        #[cfg(unix)]
+        if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+            let reading = crate::services::discord::turn_presence::activity::reading_now(
+                shared, provider, channel_id,
+            )
+            .await;
+            if reading
+                .local_legacy_absence_for_start(Some(&tmux_session_name))
+                .await
+            {
+                return false;
+            }
+        }
         return true;
     }
     // A recorded remote profile prevents a local-only busy probe even if that profile is missing.

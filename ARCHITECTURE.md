@@ -2450,6 +2450,9 @@ src/
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
+│   │   │   │   │   ├── legacy_divergence.rs
+│   │   │   │   │   ├── legacy_divergence_entry_tests.rs
+│   │   │   │   │   ├── legacy_divergence_tests.rs
 │   │   │   │   │   ├── live.rs
 │   │   │   │   │   ├── live_owner_nonce_tests.rs
 │   │   │   │   │   ├── live_owner_tests.rs

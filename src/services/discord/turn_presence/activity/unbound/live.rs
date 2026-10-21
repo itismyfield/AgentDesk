@@ -247,6 +247,22 @@ impl Files {
             })
         })
     }
+    fn include_legacy(&mut self, proof: &legacy_divergence::Proof) -> Result<(), String> {
+        let candidates = self.candidates.as_mut().map_err(|error| error.clone())?;
+        if !candidates
+            .names
+            .iter()
+            .any(|candidate| candidate.name == proof.name)
+        {
+            candidates.names.push(Candidate {
+                name: proof.name.clone(),
+                origin: Origin::Canonical,
+            });
+        }
+        self.traces
+            .insert(proof.name.clone(), local_trace(&proof.name));
+        Ok(())
+    }
     fn same(&self, other: &Self) -> bool {
         self.fallback == other.fallback
             && self.bindings == other.bindings
@@ -298,6 +314,7 @@ struct Snapshot {
     files: Files,
     exact: HostedLookup,
     canonical: HostedLookup,
+    legacy_absence: Option<Result<legacy_divergence::Proof, String>>,
     canonical_target: Option<Result<canonical_target::CanonicalTarget, String>>,
     owners: BTreeMap<String, Option<u64>>,
     ownership: Option<ownership::OwnerInputs>,
@@ -383,6 +400,28 @@ impl Snapshot {
             },
         )
         .await;
+        let legacy_absence = match name {
+            Some(name)
+                if exact != canonical && local_registration(&config, channel.get(), provider) =>
+            {
+                Some(
+                    legacy_divergence::collect(
+                        pool,
+                        provider,
+                        &shared.token_hash,
+                        channel.get(),
+                        name,
+                        &exact,
+                        &canonical,
+                    )
+                    .await,
+                )
+            }
+            _ => None,
+        };
+        if let Some(Ok(proof)) = &legacy_absence {
+            files.include_legacy(proof)?;
+        }
         Ok(Self {
             shared: Arc::downgrade(shared),
             provider: provider.clone(),
@@ -393,6 +432,7 @@ impl Snapshot {
             files,
             exact,
             canonical,
+            legacy_absence,
             canonical_target,
             owners: BTreeMap::new(),
             ownership: None,
@@ -442,6 +482,7 @@ impl Snapshot {
             && self.files.same(&other.files)
             && self.exact == other.exact
             && self.canonical == other.canonical
+            && self.legacy_absence == other.legacy_absence
             && self.canonical_target == other.canonical_target
             && match (&self.ownership, &other.ownership) {
                 (Some(old), Some(new)) => old.same(new),
@@ -478,7 +519,7 @@ impl Snapshot {
             )
         };
         if matches!(verdict, Verdict::Absent(_))
-            && self.files.recovered.is_some()
+            && (self.files.recovered.is_some() || matches!(self.legacy_absence, Some(Ok(_))))
             && !self.ownership.as_ref().is_some_and(|owners| {
                 self.files
                     .candidates
@@ -565,6 +606,11 @@ impl Snapshot {
                 return false;
             }
         }
+        if let Some(Ok(proof)) = &self.legacy_absence {
+            if files.include_legacy(proof).is_err() {
+                return false;
+            }
+        }
         self.files.same(&files) && self.memory_current()
     }
     fn scope(&self, shared: &SharedData) -> HostScope {
@@ -646,6 +692,7 @@ impl Snapshot {
             exact_key: &key,
             exact: &self.exact,
             canonical: &self.canonical,
+            legacy_absence: matches!(self.legacy_absence, Some(Ok(_))),
             evidence: Ok(raw_evidence(
                 Some(key.clone()),
                 Some(name.into()),
@@ -674,6 +721,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
+#[path = "legacy_divergence.rs"]
+mod legacy_divergence;
 #[path = "live_ownership.rs"]
 mod ownership;
 #[path = "live_publication.rs"]
@@ -806,3 +855,30 @@ mod owner_tests;
 #[cfg(test)]
 #[path = "stale_binding_tests.rs"]
 mod stale_binding_tests;
+
+#[cfg(test)]
+#[path = "legacy_divergence_tests.rs"]
+mod legacy_divergence_tests;
+
+impl super::super::Reading {
+    /// Only a revalidated local Legacy absence releases queue admission, never teardown.
+    pub(in crate::services::discord) async fn local_legacy_absence_for_start(
+        &self,
+        name: Option<&str>,
+    ) -> bool {
+        let proved = self
+            .unbound
+            .as_ref()
+            .and_then(|stamp| stamp.snapshot.as_ref())
+            .is_some_and(|snapshot| {
+                matches!(snapshot.legacy_absence, Some(Ok(_)))
+                    && snapshot.files.candidates.as_ref().is_ok_and(|c| {
+                        c.current.is_some()
+                            && name.is_none_or(|name| c.current.as_deref() == Some(name))
+                    })
+            });
+        self.observed == observed(Activity::Idle, "no_session")
+            && proved
+            && self.publish_if_current(|| ()).await.is_some()
+    }
+}
