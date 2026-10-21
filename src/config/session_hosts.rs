@@ -186,6 +186,10 @@ impl BootSessionHosts {
         self.candidate.as_ref().unwrap_or(&self.config) != &config.session_hosts
     }
 
+    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
+        self.candidate.as_ref().unwrap_or(&self.config)
+    }
+
     pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
         self.migration.as_ref()
     }
@@ -302,7 +306,6 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
 
 static BOOT: OnceLock<BootSessionHosts> = OnceLock::new();
 
-/// Fixes the section for the process lifetime; a later install keeps the first one.
 #[cfg(test)]
 pub(crate) fn install(config: &Config) -> Result<()> {
     let boot = BootSessionHosts::from_config(config)?;
@@ -310,7 +313,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn install_selected(selection: migration::BootSelection) {
+pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
     let _ = BOOT.set(selection.into_hosts());
 }
 

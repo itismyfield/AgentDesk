@@ -215,8 +215,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn final_boot_boundary_rejects_retired_before_installing_mirrors() {
+    #[test]
+    fn final_boot_boundary_rejects_retired_before_installing_mirrors() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _lock = provider_hosting::TEST_CONFIG_LOCK
             .lock()
@@ -225,8 +225,13 @@ mod tests {
         provider_hosting::install_provider_hosting_config(&fixture(Some("pipe"), false, "claude"));
         let before = provider_hosting::resolve_provider_session_selection(&ProviderKind::Claude);
         let config = fixture(Some("claude_e"), false, "claude");
-        let error = crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
-            .await
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::bootstrap::prepare_and_install_boot_snapshots(
+                &config, None,
+            ))
             .unwrap_err();
         assert!(format!("{error:#}").contains(REMOVED), "{error:#}");
         assert_eq!(

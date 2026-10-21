@@ -14,7 +14,7 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
 
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
 /// until a launch records one. Admission is read only once a channel is configured.
-fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
+pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
     use crate::config::session_hosts::{BootSessionHosts, with_boot};
     let view = |boot: &BootSessionHosts| {
         let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
@@ -42,7 +42,7 @@ fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
             view["migration_refused"] =
                 (migration.reason == "session_hosts_migration_refused").into();
             view["migration"] = serde_json::json!(migration);
-            view["candidate"] = serde_json::json!(config.session_hosts);
+            view["candidate"] = serde_json::json!(boot.candidate());
             view["applied"] = serde_json::json!(boot.config());
         }
         attach_local_herdr(&mut view);

@@ -25,7 +25,7 @@ mod host_guard_tests;
 /// Disclosure rules for the unauthenticated `/api/health` body.
 mod public_projection;
 mod response;
-mod runtime_profile;
+pub(crate) mod runtime_profile;
 mod session_repair;
 #[cfg(all(test, unix))]
 mod unread_tail_attribution_tests;

@@ -21,6 +21,8 @@ mod herdr_clear_adapter;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+#[cfg(all(test, unix))]
+pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
 // The operator terminate path against real Herdr servers its runner starts; ignored otherwise.

@@ -15,6 +15,7 @@ NON_PG_SKIP_ARGS=(
   --skip _pg
   --skip pg_
   --skip postgres
+  --skip bootstrap::tests
   --skip cli::channel_home::tests
   --skip cli::doctor::orchestrator::dispatch_outbox::tests
   --skip cli::doctor::orchestrator::observation_tests

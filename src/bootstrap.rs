@@ -96,7 +96,7 @@ pub(crate) fn initialize() -> Result<BootstrapState> {
 /// Static config errors abort boot; migration refusal is carried by the selected hosts.
 pub(crate) fn install_boot_snapshots(
     config: &crate::config::Config,
-    selection: crate::config::session_hosts::migration::BootSelection,
+    selection: crate::config::session_hosts::migration::HostsBootSelection,
 ) -> Result<()> {
     crate::config::validate_config(config)?;
     crate::services::tui_o::channel_policy::install(config)?;
@@ -108,7 +108,7 @@ pub(crate) fn install_boot_snapshots(
 pub(crate) async fn prepare_session_hosts_boot(
     candidate: crate::config::session_hosts::BootSessionHosts,
     pool: Option<&sqlx::PgPool>,
-) -> crate::config::session_hosts::migration::BootSelection {
+) -> crate::config::session_hosts::migration::HostsBootSelection {
     use crate::config::session_hosts::{approval_store::FileApprovalStore, migration};
     migration::select(
         candidate,
@@ -137,3 +137,7 @@ pub(crate) async fn prepare_dcserver_boot(config: &crate::config::Config, pool: 
         std::process::exit(1);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "bootstrap_tests.rs"]
+mod tests;

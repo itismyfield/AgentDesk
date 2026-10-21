@@ -38,6 +38,10 @@ impl FileApprovalStore {
             &bytes,
             AtomicWriteContext::new("session_hosts_approval"),
         )?;
+        #[cfg(test)]
+        if name == "current.json" && FAIL_CURRENT_SYNC.with(|fault| fault.replace(false)) {
+            return Err("injected current snapshot directory sync failure".into());
+        }
         runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
         if !runtime_store::PARENT_DIR_FSYNC_FLUSHES {
             return Err("approval snapshot directory durability unavailable".into());
@@ -51,10 +55,34 @@ impl ApprovalStore for FileApprovalStore {
         let Some(root) = &self.0 else {
             return Loaded::Unavailable("approval_snapshot_unreadable");
         };
-        let mut problem = None;
+        if std::fs::symlink_metadata(root).is_ok_and(|meta| !meta.is_dir()) {
+            return Loaded::Unavailable("approval_snapshot_unreadable");
+        }
+        let pending = root.join("pending");
+        let interrupted = match std::fs::symlink_metadata(&pending) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Loaded::Unavailable("approval_snapshot_unreadable"),
+        };
+        let mut problem = interrupted.then_some("approval_snapshot_not_durable");
         for name in ["current.json", "previous.json"] {
-            match std::fs::read(root.join(name)) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            if interrupted && name == "current.json" {
+                continue;
+            }
+            let path = root.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if !meta.is_file() => {
+                    problem.get_or_insert("approval_snapshot_unreadable");
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    problem.get_or_insert("approval_snapshot_unreadable");
+                    continue;
+                }
+                _ => {}
+            }
+            match std::fs::read(path) {
                 Err(_) => {
                     problem.get_or_insert("approval_snapshot_unreadable");
                 }
@@ -76,6 +104,26 @@ impl ApprovalStore for FileApprovalStore {
         if let Loaded::Known(previous, _) = self.load() {
             self.write("previous.json", &previous)?;
         }
-        self.write("current.json", hosts)
+        let root = self.0.as_ref().ok_or("runtime root unavailable")?;
+        std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+        let pending = root.join("pending");
+        runtime_store::critical_atomic_write(
+            &pending,
+            "pending",
+            AtomicWriteContext::new("session_hosts_approval"),
+        )?;
+        runtime_store::fsync_parent_dir(&pending).map_err(|error| error.to_string())?;
+        self.write("current.json", hosts)?;
+        std::fs::remove_file(&pending).map_err(|error| error.to_string())?;
+        // The approved file is already durable; a stale pending marker only selects the older generation.
+        if let Err(error) = runtime_store::fsync_parent_dir(&pending) {
+            tracing::warn!(%error, "approval snapshot durable; pending-marker cleanup may replay");
+        }
+        Ok(())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

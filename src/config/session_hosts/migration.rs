@@ -18,14 +18,14 @@ pub(crate) struct Diagnostic {
     pub action: &'static str,
 }
 
-pub(crate) struct BootSelection {
+pub(crate) struct HostsBootSelection {
     hosts: BootSessionHosts,
     candidate: SessionHostsConfig,
     diagnostic: Option<Diagnostic>,
     admission_stopped: bool,
 }
 
-impl BootSelection {
+impl HostsBootSelection {
     fn new(hosts: BootSessionHosts, candidate: &BootSessionHosts) -> Self {
         Self {
             hosts,
@@ -175,7 +175,7 @@ fn blocks(row: &MigrationRow, old: &BootSessionHosts, new: &BootSessionHosts) ->
                 boot.channels
                     .get(&row.channel)
                     .and_then(|ep| boot.config.herdr.endpoints.get(&ep.key))
-                    .map(|ep| (ep.mode, &ep.herdr_home))
+                    .map(|ep| (ep.mode, ep.herdr_home.clone()))
             };
             old.local_node != new.local_node
                 || !locator_matches(endpoint)
@@ -190,41 +190,41 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
     rows: &R,
     holds: &H,
     read_only: bool,
-) -> BootSelection {
+) -> HostsBootSelection {
     let loaded = store.load();
-    let (approved, warning) = match loaded {
-        Loaded::Missing => {
-            let selection = BootSelection::new(candidate.clone(), &candidate);
-            if !read_only && store.save(&candidate).is_err() {
-                return selection.diagnose(
-                    "approval_snapshot_not_durable",
-                    &BTreeSet::new(),
-                    vec![],
-                );
+    let (approved, warning) =
+        match loaded {
+            Loaded::Missing => {
+                let selection = HostsBootSelection::new(candidate.clone(), &candidate);
+                if !read_only {
+                    if let Err(error) = store.save(&candidate) {
+                        return selection.diagnose(
+                            "approval_snapshot_not_durable",
+                            &BTreeSet::new(),
+                            vec![error],
+                        );
+                    }
+                }
+                return if rows.available() {
+                    selection
+                } else {
+                    selection.diagnose(
+                        "session_hosts_migration_unverified",
+                        &BTreeSet::new(),
+                        vec!["postgres pool unavailable".into()],
+                    )
+                };
             }
-            return if rows.available() {
-                selection
-            } else {
-                selection.diagnose(
-                    "session_hosts_migration_unverified",
-                    &BTreeSet::new(),
-                    vec!["postgres pool unavailable".into()],
-                )
-            };
-        }
-        Loaded::Unavailable(reason) => {
-            let mut selection = BootSelection::new(candidate.clone(), &candidate).diagnose(
-                reason,
-                &BTreeSet::new(),
-                vec![],
-            );
-            selection.admission_stopped = true;
-            return selection;
-        }
-        Loaded::Known(approved, warning) => (approved, warning),
-    };
+            Loaded::Unavailable(reason) => {
+                let mut selection = HostsBootSelection::new(candidate.clone(), &candidate)
+                    .diagnose(reason, &BTreeSet::new(), vec![]);
+                selection.admission_stopped = true;
+                return selection;
+            }
+            Loaded::Known(approved, warning) => (approved, warning),
+        };
     let changes = affected(&approved, &candidate);
-    let selection = BootSelection::new(approved.clone(), &candidate);
+    let selection = HostsBootSelection::new(approved.clone(), &candidate);
     if let Some(reason) = warning {
         return selection.diagnose(reason, &changes, vec![]);
     }
@@ -284,5 +284,9 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
     if let Err(error) = store.save(&candidate) {
         return selection.diagnose("approval_snapshot_not_durable", &changes, vec![error]);
     }
-    BootSelection::new(candidate.clone(), &candidate)
+    HostsBootSelection::new(candidate.clone(), &candidate)
 }
+
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod tests;
