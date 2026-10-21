@@ -164,80 +164,85 @@ mod tests {
         assert_eq!(marker.2, "-# ❌ Task failed");
     }
 
-    #[tokio::test]
-    async fn background_marker_provider_outbox_survives_restart_replay_pg() {
-        use sqlx::Row;
-        let Some(db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "background_marker_provider_replay",
-            "background marker outbox contract",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = db.connect_and_migrate().await;
-        let event = background_event("completed", Some("Background command done"));
-        let marker = || SuppressedTaskNotificationMarker {
-            channel_id: ChannelId::new(4912),
-            tmux_session_name: "AgentDesk-claude-4912",
-            data_start_offset: 44,
-            kind: TaskNotificationKind::Background,
-            background_event: Some(&event),
-            event_count: 1,
-            monitor_entry_keys: &[],
-        };
-        let key = marker().render().unwrap().0;
-        // A pending old-format row is upgraded on observation, preserving its identity.
-        crate::services::message_outbox::enqueue_lifecycle_notification_pg(
-            &pool,
-            "channel:4912",
-            Some(&key),
-            "lifecycle.background_task_complete",
-            "old marker",
-        )
-        .await
-        .unwrap();
-        let (prompt_id, watcher_enqueued) = tokio::join!(
-            event.enqueue_footer_only_marker(Some(&pool)),
-            enqueue_suppressed_task_notification(Some(&pool), marker()),
-        );
-        assert!(watcher_enqueued);
-        let id = prompt_id.unwrap();
-        let row =
-            sqlx::query("SELECT bot, content, dedupe_expires_at FROM message_outbox WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.get::<String, _>("bot"), "claude");
-        assert_eq!(
-            row.get::<String, _>("content"),
-            "-# ✅ Background command done"
-        );
-        assert!(
-            row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("dedupe_expires_at")
-                .is_none()
-        );
-        sqlx::query("UPDATE message_outbox SET status = 'sent', created_at = NOW() - INTERVAL '2 days' WHERE id = $1")
-            .bind(id).execute(&pool).await.unwrap();
-        assert_eq!(
-            event.enqueue_footer_only_marker(Some(&pool)).await.unwrap(),
-            id
-        );
-        assert!(enqueue_suppressed_task_notification(Some(&pool), marker()).await);
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE session_key = $1")
-                .bind(&key)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            count, 1,
-            "both producers and aged replay own one durable row"
-        );
-        assert!(event.enqueue_footer_only_marker(None).await.is_err());
-        pool.close().await;
-        db.drop().await;
+    mod pg_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn background_marker_provider_outbox_survives_restart_replay_pg() {
+            use sqlx::Row;
+            let Some(db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+                "background_marker_provider_replay",
+                "background marker outbox contract",
+            )
+            .await
+            else {
+                return;
+            };
+            let pool = db.connect_and_migrate().await;
+            let event = background_event("completed", Some("Background command done"));
+            let marker = || SuppressedTaskNotificationMarker {
+                channel_id: ChannelId::new(4912),
+                tmux_session_name: "AgentDesk-claude-4912",
+                data_start_offset: 44,
+                kind: TaskNotificationKind::Background,
+                background_event: Some(&event),
+                event_count: 1,
+                monitor_entry_keys: &[],
+            };
+            let key = marker().render().unwrap().0;
+            // A pending old-format row is upgraded on observation, preserving its identity.
+            crate::services::message_outbox::enqueue_lifecycle_notification_pg(
+                &pool,
+                "channel:4912",
+                Some(&key),
+                "lifecycle.background_task_complete",
+                "old marker",
+            )
+            .await
+            .unwrap();
+            let (prompt_id, watcher_enqueued) = tokio::join!(
+                event.enqueue_footer_only_marker(Some(&pool)),
+                enqueue_suppressed_task_notification(Some(&pool), marker()),
+            );
+            assert!(watcher_enqueued);
+            let id = prompt_id.unwrap();
+            let row = sqlx::query(
+                "SELECT bot, content, dedupe_expires_at FROM message_outbox WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row.get::<String, _>("bot"), "claude");
+            assert_eq!(
+                row.get::<String, _>("content"),
+                "-# ✅ Background command done"
+            );
+            assert!(
+                row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("dedupe_expires_at")
+                    .is_none()
+            );
+            sqlx::query("UPDATE message_outbox SET status = 'sent', created_at = NOW() - INTERVAL '2 days' WHERE id = $1")
+                .bind(id).execute(&pool).await.unwrap();
+            assert_eq!(
+                event.enqueue_footer_only_marker(Some(&pool)).await.unwrap(),
+                id
+            );
+            assert!(enqueue_suppressed_task_notification(Some(&pool), marker()).await);
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE session_key = $1")
+                    .bind(&key)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                count, 1,
+                "both producers and aged replay own one durable row"
+            );
+            assert!(event.enqueue_footer_only_marker(None).await.is_err());
+            pool.close().await;
+            db.drop().await;
+        }
     }
 
     #[test]

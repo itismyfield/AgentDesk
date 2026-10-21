@@ -8491,7 +8491,7 @@ services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_ga
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests::watcher_terminal_resend_skips_when_range_already_committed
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_includes_summary_and_preserves_event_identity
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_omits_missing_summary
-services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_provider_outbox_survives_restart_replay_pg
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::subagent_marker_remains_suppressed
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_frontier_realigned_by_another_resetter_is_not_rewound
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_frontier_realigned_during_a_retry_sleep_is_not_rewound

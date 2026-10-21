@@ -185,7 +185,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_ui_obligation::sweep_tests
   --skip services::discord::terminal_ui_obligation::tests
-  --skip services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
@@ -743,9 +742,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation
   services::discord::terminal_ui_obligation::tests::terminal_ui_reconcile_action_prefers_complete_then_deadline_then_wait
   services::discord::terminal_ui_obligation::tests::terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag
-  services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_includes_summary_and_preserves_event_identity
-  services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_omits_missing_summary
-  services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::subagent_marker_remains_suppressed
   services::discord::tmux::tmux_watcher::path_b_record::tests::path_b_records_the_late_row_else_only_the_pin_of_this_committed_range
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
