@@ -27,7 +27,7 @@ impl FileGrantStore {
                     .read(&key)?
                     .ok_or_else(|| directory.failure(&key, "grant disappeared"))?;
                 let grant = LaunchAdmissionGrant::decode_any(&bytes)
-                    .map_err(|reason| directory.failure(&key, &reason))?;
+                    .map_err(|reason| directory.failure(&key, reason))?;
                 if durable::key(&(grant.endpoint(), grant.nonce()))? != key {
                     return Err(directory.failure(&key, "grant filename mismatch"));
                 }
@@ -56,7 +56,7 @@ impl LaunchGrantStore for FileGrantStore {
                 .read(&key)?
                 .map(|bytes| {
                     LaunchAdmissionGrant::decode(&bytes, &endpoint, &nonce)
-                        .map_err(|reason| directory.failure(&key, &reason))
+                        .map_err(|reason| directory.failure(&key, reason))
                 })
                 .transpose()
         })
@@ -87,6 +87,6 @@ impl LaunchGrantStore for FileGrantStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "grant_store_tests.rs"]
 mod tests;
