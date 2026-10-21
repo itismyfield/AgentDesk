@@ -505,16 +505,17 @@ async fn legacy_launch_keeps_restore_errors_without_proof_or_grant_reads_pg() {
             .unwrap();
         seed_row(&pool, None).await;
         let mut fixture = PolicyHost::new(&pool, EndpointMode::LegacyDedicated);
-        fixture.inner = fixture.inner.reading(if first {
-            &[RestoreResume::On]
+        let readings = if first {
+            vec![RestoreResume::On]
         } else {
-            &[
+            vec![
                 RestoreResume::Off {
                     witness: ServerWitness::for_test(1),
                 },
                 RestoreResume::On,
             ]
-        });
+        };
+        fixture.inner = fixture.inner.reading(&readings);
         let host = Arc::new(fixture);
         let result =
             launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone()).await;
