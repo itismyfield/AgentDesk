@@ -567,7 +567,7 @@ fn e08_force_kill_non_target_equivalence_pg() {
 
         // The session's thread is another channel than the execution's.
         let node = Node::again_e08(node, &rig).await;
-        node.sql("UPDATE sessions SET thread_channel_id = $2 WHERE session_key = $1", Some(&OTHER.to_string())).await;
+        node.sql("UPDATE sessions SET thread_channel_id = $2 WHERE session_key = $1", Some("677210900000001")).await;
         compare(&node).await;
 
         // The record's owner is not the row's identity.

@@ -3275,6 +3275,9 @@ const RETIRED_EXCLUSION: &str = "src/services/discord/herdr_terminate/retired_ex
 const E07_CANCEL: &str = "src/services/queue.rs";
 const E07_BRANCH: &str = "src/services/queue/http_force.rs";
 const E07_EFFECTS: &str = "src/services/queue/cancel_effects.rs";
+const E08_KILL: &str = "src/services/dispatched_sessions/force_kill.rs";
+const E08_BRANCH: &str = "src/services/dispatched_sessions/herdr_force.rs";
+const E08_EFFECTS: &str = "src/services/dispatched_sessions/herdr_force/effects.rs";
 
 /// The operator terminate chain's production names, each reached from its one caller only.
 fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
@@ -3293,9 +3296,11 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                 "terminate_scoped",
                 &[(TERMINATE_SERVICE, 1), (HTTP_ADAPTER, 1)],
             ),
-            ("terminate_for_http", &[(E07_BRANCH, 1)]),
+            ("terminate_for_http", &[(E07_BRANCH, 1), (E08_BRANCH, 1)]),
             ("herdr_force", &[(E07_CANCEL, 1)]),
             ("herdr_force_effects", &[(E07_BRANCH, 1)]),
+            ("herdr_force_kill", &[(E08_KILL, 1)]),
+            ("herdr_force_kill_effects", &[(E08_BRANCH, 1)]),
             ("disconnect_retired_pg", &[(RETIRED_EXCLUSION, 1)]),
             ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
             (
@@ -3331,8 +3336,11 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
         ("terminate_scoped", TERMINATE_SERVICE),
         ("terminate_scoped", HTTP_ADAPTER),
         ("terminate_for_http", E07_BRANCH),
+        ("terminate_for_http", E08_BRANCH),
         ("herdr_force", E07_CANCEL),
         ("herdr_force_effects", E07_BRANCH),
+        ("herdr_force_kill", E08_KILL),
+        ("herdr_force_kill_effects", E08_BRANCH),
         ("host_terminated", TERMINATE_SERVICE),
         ("post_json_local_at", HERDR_CLI),
     ];
@@ -3378,8 +3386,8 @@ fn exclusion_built_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<Stri
     )]
 }
 
-/// Effects a forced Herdr cancel reaches only through the terminate service and its exclusion:
-/// lifecycle and raw kills, token cancels, SQL, and queue purges or drains.
+/// Effects a forced Herdr cancel or session kill reaches only through the terminate service and
+/// its exclusion: lifecycle and raw kills, token cancels, SQL, queue purges, drains and wakes.
 const E07_FORBIDDEN: &[&str] = &[
     "force_kill_turn",
     "force_kill_turn_for_row",
@@ -3418,6 +3426,16 @@ const E07_FORBIDDEN: &[&str] = &[
     "disconnect_session",
     "capture_queue_before_cancel",
     "record_queue_loss_after_cancel",
+    "capture_queue_before_cancel_on",
+    "record_queue_loss_after_cancel_on",
+    "disconnect_session_keeping_provider",
+    "disconnect_session_and_prepare_retry_pg",
+    "prepare_force_kill_retry_pg",
+    "fail_force_killed_dispatch_without_retry_pg",
+    "create_retry_dispatch_pg",
+    "fail_or_retry",
+    "spawn_auto_queue_activate_for_agent",
+    "record_termination_with_handles",
 ];
 
 /// The macros the forced branch and its adapter may invoke; any other could hide a call.
@@ -3430,14 +3448,14 @@ fn e07_effect_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
     let files = scan_files(sources, &mut violations);
     for needle in E07_FORBIDDEN {
         let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
-        for owner in [E07_BRANCH, HTTP_ADAPTER] {
+        for owner in [E07_BRANCH, E08_BRANCH, HTTP_ADAPTER] {
             if let Some((used, _)) = uses.get(owner).filter(|(used, _)| *used > 0) {
                 violations.push(format!("{owner}: {needle} used x{used}"));
             }
         }
     }
     let invoked = regex::Regex::new(r"\b(\w+)\s*!\s*[\(\[\{]").unwrap();
-    for owner in [E07_BRANCH, HTTP_ADAPTER] {
+    for owner in [E07_BRANCH, E08_BRANCH, HTTP_ADAPTER] {
         let Some(file) = files.get(owner) else {
             violations.push(format!("{owner}: missing"));
             continue;
@@ -3459,6 +3477,37 @@ fn e07_effect_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
         violations.push(format!(
             "{E07_EFFECTS}: herdr_force_effects takes no exclusion"
         ));
+    }
+    violations.extend(e08_effect_violations(&files));
+    violations
+}
+
+/// The session kill's effects take the exclusion, and its drain and auto-queue wake are called
+/// only in the released step, which runs once the exclusion is gone.
+fn e08_effect_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<String> {
+    let Some(code) = files.get(E08_EFFECTS).map(|file| file.code.as_str()) else {
+        return vec![format!("{E08_EFFECTS}: missing")];
+    };
+    let mut violations = Vec::new();
+    let held =
+        regex::Regex::new(r"fn\s+herdr_force_kill_effects\s*\(\s*\w+\s*:\s*&\s*RetiredExclusion\b");
+    if !held.unwrap().is_match(code) {
+        violations.push(format!(
+            "{E08_EFFECTS}: herdr_force_kill_effects takes no exclusion"
+        ));
+    }
+    let released = fn_body(code, "fn released(");
+    for released_only in [
+        "schedule_post_cancel_queue_drain",
+        "spawn_auto_queue_activate_for_agent",
+    ] {
+        let call = regex::Regex::new(&format!(r"\b{released_only}\s*\(")).unwrap();
+        let inside = call.find_iter(&code[released.clone()]).count();
+        if call.find_iter(code).count() != 1 || inside != 1 {
+            violations.push(format!(
+                "{E08_EFFECTS}: {released_only} called outside the released step"
+            ));
+        }
     }
     violations
 }
@@ -3490,6 +3539,26 @@ fn e07_e08_herdr_effect_census() {
         !e07_effect_violations(&built).is_empty(),
         "a second builder"
     );
+    // The session kill's drain moved under the exclusion, beside its other effects.
+    let early = edited(&sources, E08_EFFECTS, |text| {
+        text.replacen(
+            "let steps = kill_steps(",
+            "let _ = schedule_post_cancel_queue_drain(None, &t, \"x\"); let steps = kill_steps(",
+            1,
+        )
+    });
+    assert!(
+        !e07_effect_violations(&early).is_empty(),
+        "a drain under the exclusion"
+    );
+    let mut caller = sources.clone();
+    caller.get_mut(E08_KILL).unwrap().push_str(
+        "\nasync fn again(s: &AppState, p: &Prepared<'_>) { let _ = super::herdr_force::herdr_force_kill(s, p, true, \"r\").await; }",
+    );
+    assert!(
+        !e07_effect_violations(&caller).is_empty(),
+        "a second session-kill caller"
+    );
 }
 
 /// `sources` with the forced branch's text replaced by `edit` of it.
@@ -3508,19 +3577,21 @@ fn edited(
 fn e07_e08_census_comment_string_forgery() {
     let sources = production_sources();
     let call = "terminate_for_http(";
-    assert!(sources[E07_BRANCH].contains(call));
     // The real call gone, its name left in a comment, a string or a raw string.
-    for forged in [
-        "/* terminate_for_http( */ drop(",
-        "{ let _ = \"terminate_for_http(\"; } drop(",
-        "{ let _ = r#\"terminate_for_http(\"#; } drop(",
-    ] {
-        let forged = edited(&sources, E07_BRANCH, |text| text.replacen(call, forged, 1));
+    for (branch, forged) in [E07_BRANCH, E08_BRANCH].into_iter().flat_map(|branch| {
+        [
+            "/* terminate_for_http( */ drop(",
+            "{ let _ = \"terminate_for_http(\"; } drop(",
+            "{ let _ = r#\"terminate_for_http(\"#; } drop(",
+        ]
+        .map(|forged| (branch, forged))
+    }) {
+        assert!(sources[branch].contains(call));
+        let forged = edited(&sources, branch, |text| text.replacen(call, forged, 1));
         let violations = e07_effect_violations(&forged);
+        let lost = format!("{branch}: terminate_for_http used x0");
         assert!(
-            violations
-                .iter()
-                .any(|v| v.contains("terminate_for_http used x0")),
+            violations.iter().any(|v| v.contains(&lost)),
             "{forged:?}: {violations:?}"
         );
     }
@@ -3560,6 +3631,22 @@ fn e07_e08_census_alias_and_indirection() {
         (
             E07_BRANCH,
             "macro_rules! hide { () => {} } fn f() { hide!(); }",
+        ),
+        (
+            E08_BRANCH,
+            "use super::spawn_auto_queue_activate_for_agent as wake;\nfn f(s: AppState) { wake(s, String::new()); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f(p: &PgPool) { let _ = sqlx::query(\"UPDATE sessions SET status = 'x'\").execute(p); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f() { let retry = crate::db::dispatched_sessions::create_retry_dispatch_pg; drop(retry); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f() { let kill = crate::services::turn_lifecycle::force_kill_turn_for_row; drop(kill); }",
         ),
     ] {
         let smuggled = edited(&sources, file, |text| format!("{text}\n{smuggled}"));

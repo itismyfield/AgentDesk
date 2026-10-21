@@ -21,7 +21,7 @@ use effects::{HERDR_TERMINATE, HerdrKillEffects, KillInput, herdr_force_kill_eff
 const COMMAND: &str = "force_kill_session";
 
 /// The answer when the force-kill's read picked a Claude/Codex Herdr execution its row owns, under
-/// the requested key and channel, bound to that read's dispatch; `None` keeps the legacy path.
+/// the requested key and no other runtime channel, bound to that read's dispatch; else `None`.
 pub(super) async fn herdr_force_kill(
     state: &AppState,
     prepared: &Prepared<'_>,
@@ -33,7 +33,7 @@ pub(super) async fn herdr_force_kill(
     let provider = ProviderKind::from_str(&record.owner.provider);
     let named = prepared.provider_info.as_ref();
     let chosen = hosted.session_key == prepared.session_key
-        && prepared.runtime_channel_id.as_deref() == Some(record.owner.channel_id.as_str())
+        && (prepared.runtime_channel_id.as_deref()).is_none_or(|c| c == record.owner.channel_id)
         && named.is_none_or(|(named, _)| Some(named) == provider.as_ref())
         && matches!(provider, Some(ProviderKind::Claude | ProviderKind::Codex));
     if !chosen {
