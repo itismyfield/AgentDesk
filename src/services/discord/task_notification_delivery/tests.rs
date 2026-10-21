@@ -2508,28 +2508,29 @@ async fn equal_second_history_page_boundary_reconciles_by_snowflake_order_pg() {
     .expect("age prepared response");
     let same_second = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
         .expect("whole-second Discord timestamp");
-    let mut history = transport.messages.lock().expect("fake response history");
-    for offset in 0..=100_u64 {
-        let is_target = offset == 0;
-        history.push(ResponseChunkHistoryMessage {
-            channel_id: event.scope.channel_id,
-            message_id: 400_000 + offset,
-            author_id: transport.bot_user_id,
-            nonce: Some(if is_target {
-                nonce.clone()
-            } else {
-                format!("unrelated-{offset}")
-            }),
-            content_hash: content_hash(if is_target {
-                "reconcile equal second"
-            } else {
-                "unrelated"
-            }),
-            referenced_message_id: is_target.then_some(card.message_id),
-            created_at: same_second,
-        });
+    {
+        let mut history = transport.messages.lock().expect("fake response history");
+        for offset in 0..=100_u64 {
+            let is_target = offset == 0;
+            history.push(ResponseChunkHistoryMessage {
+                channel_id: event.scope.channel_id,
+                message_id: 400_000 + offset,
+                author_id: transport.bot_user_id,
+                nonce: Some(if is_target {
+                    nonce.clone()
+                } else {
+                    format!("unrelated-{offset}")
+                }),
+                content_hash: content_hash(if is_target {
+                    "reconcile equal second"
+                } else {
+                    "unrelated"
+                }),
+                referenced_message_id: is_target.then_some(card.message_id),
+                created_at: same_second,
+            });
+        }
     }
-    drop(history);
     let reconciled =
         send_task_response_chunks(Some(&pool), &transport, &claim, "reconcile equal second")
             .await
@@ -2972,24 +2973,27 @@ async fn old_posting_chunk_with_bounded_history_ambiguity_fails_closed_and_backs
     .await
     .expect("release quarantine for history page-cap case");
     let base = chrono::Utc::now();
-    let mut history = response_transport
-        .messages
-        .lock()
-        .expect("fake response history");
-    history.clear();
-    for index in 0..1_000_u64 {
-        history.push(ResponseChunkHistoryMessage {
-            channel_id: event.scope.channel_id,
-            message_id: 300_000 + index,
-            author_id: response_transport.bot_user_id,
-            nonce: Some(format!("unrelated-{index}")),
-            content_hash: content_hash("unrelated"),
-            referenced_message_id: None,
-            created_at: base
-                - chrono::Duration::milliseconds(i64::try_from(999 - index).expect("millis") * 50),
-        });
+    {
+        let mut history = response_transport
+            .messages
+            .lock()
+            .expect("fake response history");
+        history.clear();
+        for index in 0..1_000_u64 {
+            history.push(ResponseChunkHistoryMessage {
+                channel_id: event.scope.channel_id,
+                message_id: 300_000 + index,
+                author_id: response_transport.bot_user_id,
+                nonce: Some(format!("unrelated-{index}")),
+                content_hash: content_hash("unrelated"),
+                referenced_message_id: None,
+                created_at: base
+                    - chrono::Duration::milliseconds(
+                        i64::try_from(999 - index).expect("millis") * 50,
+                    ),
+            });
+        }
     }
-    drop(history);
     assert!(matches!(
         send_task_response_chunks(
             Some(&pool),

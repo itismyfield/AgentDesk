@@ -281,6 +281,19 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
     } else {
         Vec::new()
     };
+    if matches!(
+        task_notification_kind,
+        Some(TaskNotificationKind::Background)
+    ) && task_notification_context
+        .and_then(task_notification_delivery::TaskNotificationContext::summary)
+        .is_none()
+    {
+        tracing::debug!(
+            channel_id = channel_id.get(),
+            data_start_offset,
+            "background completion marker used fallback without task summary"
+        );
+    }
     let background_event = task_notification_context
         .filter(|context| context.footer_only_marker_event_key().is_some())
         .map(|context| {

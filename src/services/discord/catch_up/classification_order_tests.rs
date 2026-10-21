@@ -683,11 +683,13 @@ fn write_role_map(root: &std::path::Path, provider: &ProviderKind, channel_id: C
     .expect("write role map");
 }
 
+type ScriptedHistoryFetches = Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>;
+
 struct TestCatchUpApi {
     current_user_id: Option<u64>,
     messages: Vec<serenity::Message>,
     phase2_messages: Option<Vec<serenity::Message>>,
-    scripted_fetches: Option<Mutex<VecDeque<Result<Vec<serenity::Message>, String>>>>,
+    scripted_fetches: Option<ScriptedHistoryFetches>,
     fetch_calls: AtomicUsize,
     dead_letters: Arc<Mutex<Vec<crate::db::relay_dead_letter::RelayDeadLetterRecord>>>,
     announce_resolution: UtilityBotUserIdResolution,

@@ -138,6 +138,10 @@ impl TaskNotificationContext {
         &self.event_key
     }
 
+    pub(super) fn summary(&self) -> Option<&str> {
+        (!self.summary.is_empty()).then_some(self.summary.as_str())
+    }
+
     /// Mirrors the footer-only eligibility used by the card policy: background
     /// notifications need a stable task or tool identity to own a footer slot.
     /// All other terminal notifications remain card-owned.
