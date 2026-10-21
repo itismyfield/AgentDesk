@@ -182,6 +182,9 @@ impl Drop for TestBindingRoot {
 #[path = "codex_stop_delivery_tests.rs"]
 mod tests;
 
+#[path = "codex_stop_idle_evidence.rs"]
+mod idle_evidence;
+
 enum TurnIdentity {
     Claude(ClaudeStopTurnIdentity),
     Codex(CodexStopTurnIdentity),
@@ -671,7 +674,12 @@ pub(super) async fn interrupt_herdr(
     }
     let attempted = Arc::new(AtomicBool::new(false));
     let writer_attempted = attempted.clone();
+    // Tests capture the writer's events on the caller's thread-local subscriber.
+    #[cfg(test)]
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _trace = tracing::dispatcher::set_default(&dispatch);
         #[cfg(test)]
         let _root = TestBindingRoot::enter(binding_root.as_deref());
         #[cfg(test)]
@@ -726,6 +734,8 @@ fn deliver(
     attempted: &AtomicBool,
 ) -> HerdrDelivery {
     use HerdrNotSent::*;
+    // A Claude idle refusal's evidence, logged only once the composer lock is released.
+    let idle = std::cell::Cell::new(None);
     let attempt = || -> Result<HerdrDelivery, HerdrNotSent> {
         let held = || {
             holder(channel)
@@ -793,6 +803,7 @@ fn deliver(
                 _ => target.capture(-160),
             }
             .ok_or_else(unobserved)?;
+            let mut judged = None;
             let running = match provider {
                 ProviderKind::Claude => {
                     use crate::services::tmux_common as screen_state;
@@ -801,6 +812,7 @@ fn deliver(
                     );
                     // The tmux stop's pane evidence and phase, plus modal and draft vetoes.
                     let (ready, active, draft) = claude_tui_stop_pane_evidence(&screen);
+                    judged = Some((structured, ready, active, draft));
                     !screen_state::tmux_capture_indicates_claude_tui_interactive_modal(&screen)
                         && !draft
                         && classify_tui_interrupt_phase(structured, ready || draft, active)
@@ -812,6 +824,13 @@ fn deliver(
                 _ => false,
             };
             if !running && !mutant("running") {
+                if let Some(judged) = judged {
+                    let at = (channel, logical.as_str(), nonce);
+                    let sources = (&binding, &current);
+                    idle.set(Some(idle_evidence::IdleEvidence::new(
+                        token, provider, at, sources, judged, &screen,
+                    )));
+                }
                 return Err(Idle);
             }
             target.pin(HerdrMutation::Cancel).map_err(|_| Gate)?;
@@ -871,5 +890,11 @@ fn deliver(
             _ => Err(NotAdmitted),
         }
     };
-    attempt().unwrap_or_else(HerdrDelivery::NotSent)
+    let result = attempt();
+    if result == Err(Idle)
+        && let Some(evidence) = idle.take()
+    {
+        evidence.emit();
+    }
+    result.unwrap_or_else(HerdrDelivery::NotSent)
 }
