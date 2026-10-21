@@ -211,6 +211,7 @@ thread_local! {
     static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static BEFORE_POSTLUDE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static BEFORE_SELECTION: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static BEFORE_RELEASED: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -251,6 +252,15 @@ pub(crate) fn probe_before_selection(probe: SettlementWindowProbe) {
 #[cfg(test)]
 pub(crate) async fn run_before_selection_probe() {
     run_probe(&BEFORE_SELECTION).await;
+}
+/// Runs once when a postlude's released step starts, after the exclusion was dropped.
+#[cfg(test)]
+pub(crate) fn probe_before_released(probe: SettlementWindowProbe) {
+    BEFORE_RELEASED.with(|slot| *slot.borrow_mut() = Some(probe));
+}
+#[cfg(test)]
+pub(crate) async fn run_before_released_probe() {
+    run_probe(&BEFORE_RELEASED).await;
 }
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {

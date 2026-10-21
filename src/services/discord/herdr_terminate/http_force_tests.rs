@@ -1149,3 +1149,106 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
         node.finish().await;
     });
 }
+
+// The cancel's own read binds the run: when its turn ended and the successor's dispatch took the
+// channel right after that read, the re-read is refused before any close and the successor lives.
+#[test]
+fn e07_selection_change_refuses_before_close_pg() {
+    let Some((rig, runtime)) = rig_child("e07_selection_change_refuses_before_close_pg") else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
+        node.start(51, "turn-a", Some(DISPATCH)).await;
+        let flag = ran();
+        super::super::probe_before_selection(e08::successor_takes_over(&node, flag.clone()));
+        let untouched = node.effects(&rig).await;
+        let (status, reply) = node.cancel().await;
+        assert!(flag.load(Ordering::SeqCst));
+        let refused = result("refused", "selected dispatch changed");
+        assert_eq!(
+            termination(status, &reply),
+            (StatusCode::CONFLICT, refused),
+            "{reply}"
+        );
+        let after = node.effects(&rig).await;
+        assert_eq!(
+            after,
+            Effects {
+                session: active(Some(SUCCESSOR)),
+                ..untouched
+            }
+        );
+        let b = test_turn::active(&node.shared, channel())
+            .await
+            .expect("B runs");
+        assert_eq!(b.turn_nonce(), Some("turn-b"));
+        assert!(!b.cancelled.load(Ordering::SeqCst));
+        node.finish().await;
+    });
+}
+
+// Capture, purge and loss record address the exclusion's actor even when another registry
+// publishes its own actor for the channel while the purge waits: the record and the reported
+// depth are the exclusion actor's, and the other actor's queue is left as it was.
+#[test]
+fn e07_purge_records_on_the_exclusion_actor_pg() {
+    let Some((rig, runtime)) = rig_child("e07_purge_records_on_the_exclusion_actor_pg") else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
+        let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
+        node.start(51, "turn-a", Some(DISPATCH)).await;
+        test_queue::queue_original(&node.shared, channel()).await;
+        let (flag, other) = (ran(), Arc::new(Mutex::new(None)));
+        let (probe_flag, probe_other) = (flag.clone(), other.clone());
+        crate::services::queue::set_pre_purge_probe_for_test(
+            channel(),
+            Box::new(move || {
+                async move {
+                    let registry = ChannelMailboxRegistry::default();
+                    let handle = registry.handle(channel());
+                    let persistence =
+                        QueuePersistenceContext::new(&ProviderKind::Claude, "other-registry", None);
+                    handle
+                        .replace_queue(
+                            vec![intervention(99, "the other actor's input")],
+                            persistence,
+                        )
+                        .await;
+                    *probe_other.lock().unwrap() = Some((registry, handle));
+                    probe_flag.store(true, Ordering::SeqCst);
+                }
+                .boxed()
+            }),
+        );
+        let (status, reply) = node.cancel().await;
+        assert!(flag.load(Ordering::SeqCst));
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        let claims = (
+            &reply["queue_dead_lettered_message_ids"],
+            &reply["queued_remaining"],
+        );
+        assert_eq!(claims, (&json!([61]), &json!(0)), "{reply}");
+        let (_registry, handle) = other.lock().unwrap().take().unwrap();
+        let state = handle.snapshot().await;
+        let texts: Vec<_> = state
+            .intervention_queue
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            ["the other actor's input"],
+            "the other actor keeps its queue"
+        );
+        assert_eq!(node.effects(&rig).await.dead_lettered, dead(&[61]));
+        node.finish().await;
+    });
+}
+
+#[path = "http_force_e08_tests.rs"]
+mod e08;
