@@ -86,6 +86,10 @@ impl FakeHost {
 }
 
 impl HerdrLaunchHost for FakeHost {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        crate::config::session_hosts::EndpointMode::LegacyDedicated
+    }
+
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
         let next = self.restore.lock().unwrap().pop_front();
         next.unwrap_or(RestoreResume::Off {

@@ -667,6 +667,7 @@ src/
 │   │   └── worker.rs
 │   ├── claude/
 │   │   ├── herdr_turn/
+│   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
@@ -2998,9 +2999,13 @@ src/
 │   ├── session_host/
 │   │   ├── herdr/
 │   │   │   ├── policy/
+│   │   │   │   ├── apply.rs
+│   │   │   │   ├── apply_tests.rs
 │   │   │   │   ├── cache.rs
 │   │   │   │   ├── checker.rs
 │   │   │   │   ├── checker_tests.rs
+│   │   │   │   ├── editor.rs
+│   │   │   │   ├── editor_tests.rs
 │   │   │   │   ├── file.rs
 │   │   │   │   ├── file_tests.rs
 │   │   │   │   ├── loaded_image.rs
@@ -3009,7 +3014,8 @@ src/
 │   │   │   │   ├── peer_tests.rs
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
-│   │   │   │   └── types.rs
+│   │   │   │   ├── types.rs
+│   │   │   │   └── writer_compat.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs

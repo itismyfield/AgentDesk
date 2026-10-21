@@ -86,7 +86,7 @@ fn writer_accepts(channel: u64) -> bool {
 }
 
 /// A configured Herdr endpoint; no field falls back to a default socket, session or pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct HerdrLaunchEndpoint {
     pub execution_node: String,
     pub config_key: String,
@@ -135,9 +135,7 @@ pub(crate) struct EvidenceProbe {
 
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
 pub(crate) trait HerdrLaunchHost: Send + Sync {
-    fn mode(&self, _: &HerdrLaunchEndpoint) -> EndpointMode {
-        EndpointMode::LegacyDedicated
-    }
+    fn mode(&self, endpoint: &HerdrLaunchEndpoint) -> EndpointMode;
     fn create_permit<'a>(&'a self, _: &'a HerdrLaunchEndpoint) -> PermitFuture<'a> {
         Box::pin(async { Err("user-default policy source unavailable".into()) })
     }
@@ -206,6 +204,8 @@ pub(crate) enum HerdrLaunchError {
     /// The retired predecessor's input hold is not confirmed durably absent.
     RetiredHold(String),
     Prepare(String),
+    /// The grant store cannot establish whether authority was recorded.
+    GrantUnavailable(String),
     /// Pending did not commit; nothing was created.
     Pending(String),
     /// Pending committed without its markers; nothing was created, so its Pending is retired.
@@ -351,7 +351,8 @@ pub(crate) async fn launch_herdr_session(
                     .grants()
                     .load(&endpoint, &record.execution_nonce)
                     .await
-                    .map_err(HerdrLaunchError::Prepare)?;
+                    .map_err(HerdrLaunchError::GrantUnavailable)?
+                    .ok_or_else(|| HerdrLaunchError::Prepare("pending grant missing".into()))?;
                 let granted = grant
                     .witness_for(&endpoint, &record.execution_nonce)
                     .map_err(|why| HerdrLaunchError::Prepare(format!("{why:?}")))?
@@ -434,9 +435,13 @@ pub(crate) async fn launch_herdr_session(
     let (witness, created, sent_at) = if let Some(permit) = create_permit {
         let grant = permit.grant(&nonce);
         if let Err(detail) = host.grants().save(grant.clone()).await {
-            return Err(
-                retire_unsent(pool, &owner, &nonce, HerdrLaunchError::NotSent(detail)).await,
-            );
+            return Err(retire_unsent(
+                pool,
+                &owner,
+                &nonce,
+                HerdrLaunchError::GrantUnavailable(detail),
+            )
+            .await);
         }
         host.remember_grant(grant);
         let witness = permit.witness().clone();

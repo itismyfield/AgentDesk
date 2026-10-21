@@ -23,7 +23,7 @@ pub(crate) trait LaunchGrantStore: Send + Sync {
         &self,
         endpoint: &HerdrLaunchEndpoint,
         nonce: &str,
-    ) -> Result<LaunchAdmissionGrant, String>;
+    ) -> Result<Option<LaunchAdmissionGrant>, String>;
     /// Success acknowledges durable recording of this exact grant; failures grant no authority.
     async fn save(&self, grant: LaunchAdmissionGrant) -> Result<(), String>;
 }
@@ -31,7 +31,11 @@ pub(crate) trait LaunchGrantStore: Send + Sync {
 pub(crate) struct UnintroducedGrantStore;
 #[async_trait::async_trait]
 impl LaunchGrantStore for UnintroducedGrantStore {
-    async fn load(&self, _: &HerdrLaunchEndpoint, _: &str) -> Result<LaunchAdmissionGrant, String> {
+    async fn load(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _: &str,
+    ) -> Result<Option<LaunchAdmissionGrant>, String> {
         Err("launch admission grant store is not introduced".into())
     }
     async fn save(&self, _: LaunchAdmissionGrant) -> Result<(), String> {

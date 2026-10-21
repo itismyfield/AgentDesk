@@ -214,6 +214,12 @@ impl HerdrRegistry {
         }
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
+        self.launch = Some(host);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_reads(self, reads: TestReads) -> Self {
         Self {
@@ -257,13 +263,13 @@ impl HerdrRegistry {
                         launch.mutation_evidence(&r.endpoint, &stored.execution_nonce)
                     })
                 })
-                .unwrap_or_default()
+                .unwrap_or_else(|| Ok(ExistingMutationEvidence::default()))
         } else {
-            ExistingMutationEvidence::default()
+            Ok(ExistingMutationEvidence::default())
         };
         #[cfg(not(unix))]
-        let evidence = ExistingMutationEvidence::default();
-        self.target_with_evidence(stored, evidence)
+        let evidence = Ok(ExistingMutationEvidence::default());
+        self.target_with_evidence_result(stored, evidence)
     }
 
     /// Preloaded evidence only; constructing or judging a target performs no store lookup.
@@ -272,9 +278,17 @@ impl HerdrRegistry {
         stored: &HostedExecution,
         evidence: ExistingMutationEvidence,
     ) -> Option<HerdrTarget> {
+        self.target_with_evidence_result(stored, Ok(evidence))
+    }
+
+    pub(crate) fn target_with_evidence_result(
+        &self,
+        stored: &HostedExecution,
+        evidence: Result<ExistingMutationEvidence, super::herdr::policy::Unverified>,
+    ) -> Option<HerdrTarget> {
         let target = self.endpoints.iter().find_map(|registered| {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
-            HerdrTarget::new_with_evidence(
+            HerdrTarget::new_with_evidence_result(
                 registered.endpoint.clone(),
                 transport,
                 stored,

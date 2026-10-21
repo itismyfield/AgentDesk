@@ -30,8 +30,8 @@ pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
-    witnessed: Mutex<HashMap<String, ServerWitness>>,
-    grants: Mutex<HashMap<(String, String), LaunchAdmissionGrant>>,
+    witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
+    grants: Mutex<HashMap<(HerdrLaunchEndpoint, String), LaunchAdmissionGrant>>,
     next_id: AtomicU64,
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     os: Box<dyn ProcessOs>,
@@ -130,33 +130,46 @@ impl SocketHerdrLaunchHost {
                     &launch.herdr_session,
                 )
             })
-            .map(|index| self.sources[index].clone())
+            .and_then(|index| self.sources.get(index))
+            .cloned()
     }
 
     pub(crate) fn mutation_evidence(
         &self,
         endpoint: &HerdrEndpoint,
         nonce: &str,
-    ) -> ExistingMutationEvidence {
-        let startup = self
+    ) -> Result<ExistingMutationEvidence, Unverified> {
+        let key = HerdrLaunchEndpoint {
+            execution_node: endpoint.execution_node().into(),
+            config_key: endpoint.config_key().into(),
+            socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
+            herdr_session: endpoint.herdr_session().into(),
+        };
+        let witness = self
             .witnessed
             .lock()
-            .ok()
-            .and_then(|known| {
-                known
-                    .get(&endpoint.socket_path().to_string_lossy().into_owned())
-                    .cloned()
-            })
-            .and_then(|witness| self.policy.startup_for(&witness).ok().flatten());
-        let grant = self.grants.lock().ok().and_then(|grants| {
-            grants
-                .get(&(
-                    endpoint.socket_path().to_string_lossy().into_owned(),
-                    nonce.into(),
-                ))
-                .cloned()
-        });
-        ExistingMutationEvidence { startup, grant }
+            .map_err(|_| Unverified::Cache)?
+            .get(&key)
+            .cloned();
+        let startup = witness
+            .map(|w| self.policy.startup_for(&w))
+            .transpose()?
+            .flatten();
+        let grant = self
+            .grants
+            .lock()
+            .map_err(|_| Unverified::Cache)?
+            .get(&(key, nonce.into()))
+            .cloned();
+        Ok(ExistingMutationEvidence { startup, grant })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_grants_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.grants.lock().unwrap();
+            panic!("injected grant cache failure");
+        }));
     }
 
     fn call(&self, request: HerdrRequest) -> HerdrCall {
@@ -261,10 +274,7 @@ impl SocketHerdrLaunchHost {
 impl HerdrLaunchHost for SocketHerdrLaunchHost {
     fn remember_grant(&self, grant: LaunchAdmissionGrant) {
         if let Ok(mut grants) = self.grants.lock() {
-            grants.insert(
-                (grant.endpoint().socket_addr.clone(), grant.nonce().into()),
-                grant,
-            );
+            grants.insert((grant.endpoint().clone(), grant.nonce().into()), grant);
         }
     }
 
@@ -287,7 +297,7 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
             self.witnessed
                 .lock()
                 .map_err(|_| "policy cache unavailable")?
-                .insert(launch.socket_addr.clone(), proof.witness().clone());
+                .insert(launch.clone(), proof.witness().clone());
             CreatePermit::new(launch.clone(), proof).map_err(|why| format!("{why:?}"))
         })
     }

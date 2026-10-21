@@ -263,7 +263,7 @@ fn policy_peer_mapped_inode_cannot_be_replaced_with_path_stat() {
 fn policy_loaded_image_construction_is_os_adapter_only() {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/services/session_host/herdr/policy");
-    for entry in std::fs::read_dir(directory).unwrap() {
+    for entry in std::fs::read_dir(&directory).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy();
         if path.extension().is_none_or(|ext| ext != "rs")
@@ -280,9 +280,22 @@ fn policy_loaded_image_construction_is_os_adapter_only() {
             path.display()
         );
     }
-    let adapter = include_str!("loaded_image.rs");
+    let adapter = std::fs::read_to_string(directory.join("loaded_image.rs")).unwrap();
     assert!(
         !adapter.contains("file::image("),
         "loaded_image_adapter_never_path_stats_contract"
+    );
+    let linux = adapter
+        .split("#[cfg(target_os = \"linux\")]")
+        .nth(1)
+        .and_then(|body| body.split("#[cfg(not(target_os").next())
+        .expect("Linux loaded-image adapter is present");
+    assert!(
+        linux.contains("\"/proc/{pid}/exe\""),
+        "loaded_image_linux_procfs_adapter_contract"
+    );
+    assert!(
+        !linux.contains("process_exec_path") && !linux.contains("canonicalize"),
+        "loaded_image_linux_adapter_forbids_pathname_fallback_contract"
     );
 }

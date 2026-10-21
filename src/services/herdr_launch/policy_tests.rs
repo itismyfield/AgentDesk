@@ -20,14 +20,14 @@ struct Grants {
 
 #[async_trait::async_trait]
 impl LaunchGrantStore for Grants {
-    async fn load(&self, _: &HerdrLaunchEndpoint, _: &str) -> Result<LaunchAdmissionGrant, String> {
+    async fn load(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _: &str,
+    ) -> Result<Option<LaunchAdmissionGrant>, String> {
         self.loads.fetch_add(1, Ordering::SeqCst);
         self.events.lock().unwrap().push("grant_load");
-        self.saved
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| "grant missing".into())
+        Ok(self.saved.lock().unwrap().clone())
     }
 
     async fn save(&self, grant: LaunchAdmissionGrant) -> Result<(), String> {
@@ -333,7 +333,11 @@ async fn user_default_pending_retry_reads_grant_and_current_witness_without_recr
             assert_eq!(host.inner.probes.load(Ordering::SeqCst), 1);
         } else {
             assert!(
-                matches!(result, Err(HerdrLaunchError::Prepare(_))),
+                if refusal == "unintroduced" {
+                    matches!(result, Err(HerdrLaunchError::GrantUnavailable(_)))
+                } else {
+                    matches!(result, Err(HerdrLaunchError::Prepare(_)))
+                },
                 "pending_refuses_before_probe_contract: {refusal}: {result:?}"
             );
             assert_eq!(host.inner.probes.load(Ordering::SeqCst), 0);
@@ -375,7 +379,10 @@ async fn user_default_failed_or_unintroduced_grant_storage_never_mutates_pg() {
         } else {
             "injected grant durability failure"
         };
-        assert_eq!(result, Err(HerdrLaunchError::NotSent(expected.into())));
+        assert_eq!(
+            result,
+            Err(HerdrLaunchError::GrantUnavailable(expected.into()))
+        );
         assert!(
             matches!(decoded(stored(&pool).await), HostedRecord::Known(row) if row.state == HostedState::Retired && row.location.is_none() && row.expected.is_none())
         );

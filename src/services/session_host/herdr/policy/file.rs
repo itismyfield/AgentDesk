@@ -19,6 +19,9 @@ pub(crate) struct FileIdentity {
     dev: u64,
     ino: u64,
     size: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
     modified: SystemTime,
     changed: SystemTime,
 }
@@ -47,6 +50,28 @@ pub(crate) struct FileSnapshot {
 }
 
 impl FileToken {
+    #[cfg(all(test, unix))]
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.hash
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn resolved_path(&self) -> &Path {
+        &self.resolved_path
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn ownership(&self) -> (u32, u32, u32) {
+        (self.identity.uid, self.identity.gid, self.identity.mode)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn same_path(&self, other: &Self) -> bool {
+        self.logical_path == other.logical_path
+            && self.resolved_path == other.resolved_path
+            && self.symlink_chain == other.symlink_chain
+    }
+
     pub(crate) fn logical_path(&self) -> &Path {
         &self.logical_path
     }
@@ -246,6 +271,9 @@ fn identity(metadata: &Metadata) -> Result<FileIdentity, Unverified> {
         dev: metadata.dev(),
         ino: metadata.ino(),
         size: metadata.len(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        mode: metadata.mode() & 0o7777,
         modified: time(metadata.mtime(), metadata.mtime_nsec())?,
         changed: time(metadata.ctime(), metadata.ctime_nsec())?,
     })
@@ -259,3 +287,45 @@ fn identity(_: &Metadata) -> Result<FileIdentity, Unverified> {
 #[cfg(all(test, unix))]
 #[path = "file_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MissingToken {
+    logical: PathBuf,
+    pub(crate) target: PathBuf,
+    parent: (u64, u64),
+    chain: Vec<SymlinkIdentity>,
+}
+
+#[cfg(all(test, unix))]
+impl MissingToken {
+    pub(crate) fn read(logical: &Path) -> Result<Self, Unverified> {
+        if !matches!(std::fs::symlink_metadata(logical), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Err(Unverified::File);
+        }
+        let parent = logical.parent().ok_or(Unverified::File)?;
+        let (resolved, chain) = resolve(parent)?;
+        let target = resolved.join(logical.file_name().ok_or(Unverified::File)?);
+        Ok(Self {
+            logical: logical.into(),
+            target,
+            parent: directory_identity(&resolved)?,
+            chain,
+        })
+    }
+
+    pub(crate) fn unchanged(&self) -> Result<(), Unverified> {
+        if &Self::read(&self.logical)? == self {
+            Ok(())
+        } else {
+            Err(Unverified::Changed)
+        }
+    }
+
+    pub(crate) fn matches_path(&self, token: &FileToken) -> bool {
+        self.logical == token.logical_path
+            && self.target == token.resolved_path
+            && self.chain == token.symlink_chain
+    }
+}

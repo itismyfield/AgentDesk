@@ -194,3 +194,45 @@ async fn policy_fence_unchanged_evidence_creates_and_sends_once_without_e7() {
         "UserDefault must not invoke startup-Off E7"
     );
 }
+
+#[test]
+fn policy_endpoint_keys_do_not_alias_and_missing_source_is_a_refusal() {
+    let server = serve(created("/tmp".into()));
+    let mut host = launch_host(&server);
+    let endpoint = host.endpoints[0].0.clone();
+    let grant = crate::services::session_host::policy::permit::grant_for_test(
+        &launch_endpoint(&server),
+        "same-nonce",
+        ServerWitness {
+            socket: server.path.clone(),
+            pid: 7,
+            start: start_of(7).identity,
+        },
+    );
+    host.remember_grant(grant);
+    assert!(
+        host.mutation_evidence(&endpoint, "same-nonce")
+            .unwrap()
+            .grant
+            .is_some()
+    );
+    let other = HerdrEndpoint::new(
+        endpoint.execution_node(),
+        "other-key",
+        endpoint.socket_path(),
+        endpoint.herdr_session(),
+    )
+    .unwrap();
+    assert!(
+        host.mutation_evidence(&other, "same-nonce")
+            .unwrap()
+            .grant
+            .is_none(),
+        "grant_keys_include_whole_endpoint_contract"
+    );
+    host.sources.clear();
+    assert!(
+        host.source(&launch_endpoint(&server)).is_none(),
+        "missing_source_is_not_an_index_panic_contract"
+    );
+}

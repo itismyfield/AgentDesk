@@ -186,7 +186,7 @@ struct PaneGate {
     logical_key: String,
     expected: ExpectedExecution,
     read_restore: fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume,
-    evidence: ExistingMutationEvidence,
+    evidence: Result<ExistingMutationEvidence, Unverified>,
     os: Arc<dyn ProcessOs>,
     next_id: AtomicU64,
     /// The latest judgment, waiting for the send it admits.
@@ -252,6 +252,15 @@ impl HerdrTarget {
         transport: Arc<dyn HerdrTransport>,
         stored: &HostedExecution,
         evidence: ExistingMutationEvidence,
+    ) -> Option<Self> {
+        Self::new_with_evidence_result(endpoint, transport, stored, Ok(evidence))
+    }
+
+    pub(crate) fn new_with_evidence_result(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+        evidence: Result<ExistingMutationEvidence, Unverified>,
     ) -> Option<Self> {
         let live = matches!(stored.state, HostedState::Pending | HostedState::Bound);
         let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
@@ -719,6 +728,10 @@ impl PaneGate {
             _ => return Err(HerdrGateRefusal::MarkerUnverified),
         }
         if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
+            let evidence = self
+                .evidence
+                .as_ref()
+                .map_err(|why| HerdrGateRefusal::PolicyUnverified(*why))?;
             let witness = self
                 .transport
                 .server_witness()
@@ -729,7 +742,7 @@ impl PaneGate {
                 socket_addr: self.endpoint.socket_path().to_string_lossy().into_owned(),
                 herdr_session: self.endpoint.herdr_session().into(),
             };
-            return ExistingMutationPermit::issue(&endpoint, &self.nonce, witness, &self.evidence)
+            return ExistingMutationPermit::issue(&endpoint, &self.nonce, witness, evidence)
                 .map(|permit| permit.witness().clone())
                 .map_err(HerdrGateRefusal::PolicyUnverified);
         }

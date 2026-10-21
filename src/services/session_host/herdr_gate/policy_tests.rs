@@ -1,3 +1,4 @@
+// close 송신 시험(fake rig)
 use std::cell::Cell;
 
 use super::*;
@@ -291,6 +292,33 @@ fn policy_legacy_admission_and_terminate_version_refusals_stay_exact() {
     assert_eq!(
         target.pin_terminate(),
         Err(HerdrGateRefusal::TerminateUnsupportedServer)
+    );
+    assert!(rig.server.mutations().is_empty());
+}
+
+#[test]
+fn policy_grant_cache_failure_is_distinct_and_probes_nothing() {
+    let rig = rig();
+    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+        vec![configured.clone()],
+        Default::default(),
+    );
+    host.poison_grants_for_test();
+    let registry = HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
+        .with_launch_host(host)
+        .with_reads((counted_off, launched_os(&rig)));
+    let target = registry
+        .target(&stored(&rig.server, HostedState::Bound))
+        .unwrap();
+    assert_eq!(
+        target.pin(Mutation::Cancel),
+        Err(HerdrGateRefusal::PolicyUnverified(Unverified::Cache)),
+        "grant_cache_failure_is_not_absent_authority_contract"
+    );
+    assert!(
+        rig.server.conns().is_empty(),
+        "cache failure probes zero peers"
     );
     assert!(rig.server.mutations().is_empty());
 }
