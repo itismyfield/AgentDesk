@@ -42,6 +42,11 @@ impl QueuedRestoreOwner {
                 self.dispatch_lease.clone(),
             )
             .await;
+            if restored.refusal_reason
+                == Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SupersededByClear)
+            {
+                return super::super::IntakeExecution::ConsumedProtected;
+            }
             if restored.enqueued && restored.persistence_error.is_none() {
                 break;
             }
@@ -228,6 +233,9 @@ pub(crate) async fn finish_admitted_queued_intake(
     let mut owner = admitted
         .restore_owner
         .expect("local queued admission owns its original and lease");
+    if owner.dispatch_lease.superseded_by_clear() {
+        return Ok(super::super::IntakeExecution::ConsumedProtected);
+    }
     if let Some(announcement) = owner.original.voice_announcement.as_ref() {
         crate::voice::announce_meta::global_store()
             .insert_accepted_replay(owner.original.message_id, announcement.clone());
@@ -245,6 +253,8 @@ pub(crate) async fn finish_admitted_queued_intake(
     }
 }
 
+#[cfg(test)]
+mod clear_discard_tests;
 #[cfg(test)]
 pub(in crate::services::discord::router) mod transition_busy_tests;
 

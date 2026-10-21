@@ -50,7 +50,7 @@ pub(super) use state::{
     PENDING_START_MAX_BACKSTOP_CYCLES, PENDING_START_MAX_CLAIM_ATTEMPTS, PENDING_START_POLL,
     PendingStartState, PriorTurnObservation, PriorTurnView, ReclaimOrphanFn,
     ReclaimStaleForeignOutcome, STALE_FOREIGN_INFLIGHT_MIN_AGE_SECS, TuiDirectPendingStart, ViewFn,
-    backstop_claim_is_safe, delete, load_all, mark_present_on_restore,
+    backstop_claim_is_safe, delete, discard_legacy_waiting, load_all, mark_present_on_restore,
     pending_synthetic_start_blocks_idle_kickoff, pending_synthetic_start_present, persist,
     prior_turn_finalized, record_claim_marker_if_watcher_owned, retire_completed,
     save_row_unless_retired, should_defer_synthetic_turn_start,

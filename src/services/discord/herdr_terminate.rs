@@ -1,4 +1,6 @@
 //! Explicit termination of one Herdr execution, by the operator route or a user clear.
+pub(crate) mod root_replaced;
+
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
@@ -390,7 +392,7 @@ pub(crate) async fn terminate_explicit_herdr(
     }
     let read_target = target.clone();
     match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         other => {
             fence.reopen();
             return TerminationResult::Refused(format!("termination provenance: {other:?}"));

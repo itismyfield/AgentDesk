@@ -938,7 +938,7 @@ mod tests {
             kind,
             received_at: Utc::now(),
             payload,
-            fanout: None,
+            ..Default::default()
         }
     }
 
@@ -946,8 +946,8 @@ mod tests {
         Some(Utc::now() - chrono::Duration::seconds(1))
     }
 
-    #[tokio::test]
-    async fn http_fanout_preserves_alias_only_live_and_registry_waits() {
+    #[test]
+    fn http_fanout_preserves_alias_only_live_and_registry_waits() {
         use crate::services::claude_tui::hook_registry::{RegistryKey, global};
         use crate::services::claude_tui::hook_server::{
             HookServerState, hook_receiver_router_with_state,
@@ -966,91 +966,91 @@ mod tests {
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let command = "echo-wait-command";
-        let alias = "echo-wait-alias";
-        for sid in [command, alias] {
-            crate::services::tui_prompt_dedupe::register_provider_session(
-                "claude",
-                sid,
-                "echo-wait-pane",
-            );
-        }
-        let state = HookServerState::new();
-        let mut live = state.subscribe();
-        let key = RegistryKey::new("claude", Some(alias), None).unwrap();
-        let _ = global().claim_once(key.clone());
-        for kind in ["Stop", "SubagentStop", "Notification"] {
-            let payload = json!({"session_id": alias, "text": "ready-alias-token"});
-            let response = hook_receiver_router_with_state(state.clone())
-                .oneshot(
-                    Request::builder()
-                        .method(Method::POST)
-                        .uri(format!("/hooks/claude/{kind}?session_id={command}"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(payload.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert!(response.status().is_success());
-            let primary = tokio::time::timeout(Duration::from_secs(5), live.recv())
-                .await
-                .expect("primary fanout missing")
-                .unwrap();
-            let event = tokio::time::timeout(Duration::from_secs(5), live.recv())
-                .await
-                .expect("alias fanout missing")
-                .unwrap();
-            assert_eq!(event.session_id, alias);
-            assert_eq!(event.payload, primary.payload);
-            assert_eq!(event.received_at, primary.received_at);
-            let wire = serde_json::to_value(&event).unwrap();
-            assert!(wire.get("fanout").is_none());
-            let mode = if kind == "Notification" {
-                "token"
-            } else {
-                "stop"
-            };
-            let boundary = Some(event.received_at);
-            assert!(event_matches(
-                &event,
-                Some("claude"),
-                Some(alias),
-                mode,
-                Some("ready-alias-token"),
-                boundary
-            ));
-            assert!(!event_matches(
-                &event,
-                Some("claude"),
-                Some(alias),
-                mode,
-                Some(command),
-                Some(event.received_at + chrono::Duration::milliseconds(1))
-            ));
-            assert!(!event_matches(
-                &event,
-                Some("claude"),
-                Some(alias),
-                "token",
-                Some(command),
-                boundary
-            ));
-            let replay = global()
-                .claim_matching_once(key.clone(), |candidate| {
-                    event_matches_registry_replay(
-                        candidate,
-                        Some("claude"),
-                        Some(alias),
-                        mode,
-                        Some("ready-alias-token"),
-                        boundary,
+        #[tokio::main(flavor = "current_thread")]
+        async fn run() {
+            let (command, alias) = ("echo-wait-command", "echo-wait-alias");
+            for sid in [command, alias] {
+                crate::services::tui_prompt_dedupe::register_provider_session(
+                    "claude",
+                    sid,
+                    "echo-wait-pane",
+                );
+            }
+            let state = HookServerState::new();
+            let mut live = state.subscribe();
+            let key = RegistryKey::new("claude", Some(alias), None).unwrap();
+            let _ = global().claim_once(key.clone());
+            for kind in ["Stop", "SubagentStop", "Notification"] {
+                let payload = json!({"session_id": alias, "text": "ready-alias-token"});
+                let response = hook_receiver_router_with_state(state.clone())
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri(format!("/hooks/claude/{kind}?session_id={command}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(payload.to_string()))
+                            .unwrap(),
                     )
-                })
-                .expect("alias-only registry waiter");
-            assert_eq!(replay.payload, event.payload);
-            assert_eq!(replay.received_at, event.received_at);
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+                let primary = tokio::time::timeout(Duration::from_secs(5), live.recv())
+                    .await
+                    .expect("primary fanout missing")
+                    .unwrap();
+                let event = tokio::time::timeout(Duration::from_secs(5), live.recv())
+                    .await
+                    .expect("alias fanout missing")
+                    .unwrap();
+                assert_eq!(event.session_id, alias);
+                assert_eq!(event.payload, primary.payload);
+                assert_eq!(event.received_at, primary.received_at);
+                assert!(json!(event).get("fanout").is_none());
+                let mode = match kind {
+                    "Notification" => "token",
+                    _ => "stop",
+                };
+                assert!(event_matches(
+                    &event,
+                    Some("claude"),
+                    Some(alias),
+                    mode,
+                    Some("ready-alias-token"),
+                    Some(event.received_at)
+                ));
+                assert!(!event_matches(
+                    &event,
+                    Some("claude"),
+                    Some(alias),
+                    mode,
+                    Some(command),
+                    Some(event.received_at + chrono::Duration::milliseconds(1))
+                ));
+                assert!(!event_matches(
+                    &event,
+                    Some("claude"),
+                    Some(alias),
+                    "token",
+                    Some(command),
+                    Some(event.received_at)
+                ));
+                let replay = global()
+                    .claim_matching_once(key.clone(), |candidate| {
+                        event_matches_registry_replay(
+                            candidate,
+                            Some("claude"),
+                            Some(alias),
+                            mode,
+                            Some("ready-alias-token"),
+                            Some(event.received_at),
+                        )
+                    })
+                    .expect("alias-only registry waiter");
+                assert_eq!(replay.payload, event.payload);
+                assert_eq!(replay.received_at, event.received_at);
+            }
         }
+        run();
     }
 
     #[test]

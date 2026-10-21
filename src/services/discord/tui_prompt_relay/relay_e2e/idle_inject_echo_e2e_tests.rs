@@ -45,6 +45,7 @@ fn observer(rt: &Runtime) -> tokio::sync::broadcast::Sender<HookEvent> {
 
 fn submit_hook(tx: &tokio::sync::broadcast::Sender<HookEvent>, session: &str, text: &str) {
     tx.send(HookEvent {
+        original_context: None,
         provider: "claude".into(),
         session_id: session.into(),
         kind: HookEventKind::UserPromptSubmit,

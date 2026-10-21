@@ -168,6 +168,10 @@ impl ChannelMailboxState {
     ) -> Option<EnqueueRefusalReason> {
         let injected = super::injected_inputs::enqueue_refusal(self, intervention);
         injected
+            .or_else(|| {
+                super::clear_fence::refuses(self, intervention)
+                    .then_some(EnqueueRefusalReason::SupersededByClear)
+            })
             .or_else(|| active_turn_enqueue_refusal(self, intervention))
             .or_else(|| {
                 let sources = &intervention.source_message_ids;

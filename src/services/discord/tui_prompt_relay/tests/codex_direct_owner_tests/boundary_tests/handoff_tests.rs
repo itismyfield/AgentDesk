@@ -490,7 +490,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
     );
     let anchor = fx.anchor_of(STEER_ANSWER);
     fx.assert_answer(STEER_ANSWER, anchor);
-    assert_eq!(fx.completed_turns(), 1);
+    assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
     if let Some(row) = admitted_row.as_ref() {
         assert!(
             wait_for(Duration::from_secs(5), || !native_receipts(
@@ -1220,7 +1220,7 @@ async fn codex_6903_main_writer_first_complete(root: PathBuf, writer_first: bool
     );
     let anchor = fx.anchor_of(STEER_ANSWER);
     fx.assert_answer(STEER_ANSWER, anchor);
-    assert_eq!(fx.completed_turns(), 1);
+    assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
     let receipts = native_receipts(fx.codex.channel.get());
     assert_eq!(receipts.len(), 1);
     let record = crate::services::discord::outbound::delivery_record::read_record(
@@ -1431,6 +1431,7 @@ fn send_captured_hook_on(
             received_at: chrono::Utc::now(),
             payload,
             fanout: None,
+            original_context: None,
         })
         .expect("hook observer listening");
 }
@@ -1724,13 +1725,48 @@ fn codex_scan_of_an_earlier_discord_prompt_record_binds_nothing() {
     });
 }
 
-/// After a Discord turn ended with no input, a later direct input the scan reads first owns
-/// its turn.
+/// The Codex scanner owns the next input after a Discord turn without a host-kind marker.
+/// Its native source evidence keeps the tmux claim outside hosted admission.
 #[test]
 fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
     run(|root| {
         Box::pin(async move {
+            use crate::services::tmux_common::host_marker::{
+                HostKindMarker, read_host_kind_marker,
+            };
+
+            let _bindings = dedupe::hosted_source::tests::BindingRoot::at(&root);
+            let nonce = crate::services::tui_prompt_dedupe::hosted_source::tests::N1;
+            let logical = "AgentDesk-codex-5845-scan";
+            assert_eq!(
+                read_host_kind_marker(logical),
+                HostKindMarker::Absent,
+                "the production Codex tmux path has no host-kind marker"
+            );
+            let marker = crate::services::tmux_common::session_temp_path(logical, "spawn_nonce");
+            std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(marker, nonce).unwrap();
+            dedupe::register_tmux_channel(logical, 5_845_050);
             let mut fx = Fixture::start(&root, 5_845_050, "AgentDesk-codex-5845-scan").await;
+            let source = crate::services::tui_o::shadow::binding_reader::source_id_for(
+                "s-5704",
+                &fx.codex.rollout,
+            )
+            .unwrap();
+            dedupe::binding_events::record_verified(
+                &dedupe::binding_events::Proposal {
+                    channel_id: fx.codex.channel.get(),
+                    provider: "codex",
+                    tmux_session: &fx.codex.tmux,
+                    session_id: Some("s-5704"),
+                    path: fx.codex.rollout.to_str().unwrap(),
+                    replaced: None,
+                    cause: dedupe::binding_events::CauseSource::Observed,
+                    hook: None,
+                },
+                &source,
+            )
+            .unwrap();
             let (t1, t2) = (turn(1), turn(2));
             discord_row(&fx, 5_845_051);
             let guard = reserve(&fx);
@@ -1760,12 +1796,47 @@ fn codex_input_scanned_after_a_finished_discord_turn_owns_its_turn() {
                 .await
                 .unwrap()
                 .unwrap();
+            let pin = event
+                .hosted_source
+                .as_ref()
+                .expect("the actual idle rollout scanner carried its source");
+            assert_eq!(pin.execution_nonce, nonce);
+            assert_eq!(pin.source, source);
+            let hosted_admission_required = pin.hosted_admission_required;
             assert_eq!(event.prompt, PROMPT3);
             assert_eq!(event.tmux_session_name, fx.codex.tmux);
             assert!(!event.steer_echo);
             assert_eq!(event.native_turn_id.as_deref(), Some(t2.as_str()));
+            assert_eq!(read_host_kind_marker(logical), HostKindMarker::Absent);
             super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
-            let anchor = fx.codex.row().expect("the input's row").user_msg_id;
+            let saved = fx
+                .codex
+                .row()
+                .expect("the markerless scanner input claimed and saved its inflight");
+            let anchor = saved.user_msg_id;
+            assert_eq!(saved.provider, "codex");
+            assert_eq!(saved.channel_id, fx.codex.channel.get());
+            assert_eq!(saved.tmux_session_name.as_deref(), Some(logical));
+            assert_eq!(saved.output_path.as_deref(), fx.codex.rollout.to_str());
+            assert_eq!(saved.native_turn_id.as_deref(), Some(t2.as_str()));
+            assert_eq!(
+                saved.turn_source,
+                crate::services::discord::inflight::TurnSource::ExternalInput
+            );
+            assert!(saved.hosted_record_id.is_none());
+            assert!(saved.hosted_execution_nonce.is_none());
+            let actor =
+                crate::services::discord::mailbox_snapshot(&fx.shared, fx.codex.channel).await;
+            assert_eq!(
+                actor.active_user_message_id.map(|id| id.get()),
+                Some(anchor)
+            );
+            assert!(actor.cancel_token.is_some());
+            assert_eq!(read_host_kind_marker(logical), HostKindMarker::Absent);
+            assert!(
+                !hosted_admission_required,
+                "the markerless native source must not require hosted admission"
+            );
             fx.append(&answer_for(&t2, RESPONSE3));
             resume.notify_one();
             fx.assert_answers_in_order(&[RESPONSE3], Some(1)).await;
@@ -2238,7 +2309,7 @@ async fn markerless_saved_custody(root: PathBuf, custody: bool) {
                 .await
                 .is_empty()
         );
-        assert_eq!(fx.completed_turns(), 1);
+        assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
     } else {
         fx.polls(3).await;
         assert!(

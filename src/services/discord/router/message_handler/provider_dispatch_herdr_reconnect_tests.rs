@@ -6,6 +6,9 @@ use crate::services::discord::recovery_engine::herdr_reader::{
     ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
 
+#[path = "root_replaced_recovery_tests.rs"]
+mod root_replaced_recovery_tests;
+
 /// A first turn launches the pane and binds it, as T-E1 does; returns the launched nonce and
 /// session.
 fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {

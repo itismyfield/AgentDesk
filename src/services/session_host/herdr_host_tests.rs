@@ -1903,6 +1903,7 @@ const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 fn herdr_items_have_no_production_caller() {
     const ESCAPE_DELIVERY: &str =
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs";
+    const HOSTED_SOURCE_OBSERVER: &str = "src/services/tui_prompt_dedupe/hosted_source.rs";
     const OWNERS: &[(&str, usize)] = &[
         ("src/services/session_host.rs", 0),
         // Dormant Escape uses the registered target; no host is constructed or stop path wired.
@@ -1948,6 +1949,8 @@ fn herdr_items_have_no_production_caller() {
         ),
         // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
         (WATCH_HOST, 1),
+        // The shared synthetic evidence reader names Herdr but never builds a host.
+        (HOSTED_SOURCE_OBSERVER, 1),
         // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
         // Operator transition context: checks the row sits on a registered endpoint, never a host.
@@ -2025,6 +2028,7 @@ fn herdr_items_have_no_production_caller() {
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
                 UNBOUND_ADAPTER,
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         (
@@ -2042,6 +2046,7 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         (
@@ -2059,6 +2064,7 @@ fn herdr_items_have_no_production_caller() {
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),

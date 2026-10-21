@@ -11,13 +11,24 @@ use crate::services::turn_orchestrator::ClearChannelResult;
 
 const RETRY_FAILED: &str = "일부 저장을 한 번 재시도했지만 완료하지 못했어요. 재시작 후 버린 메시지나 이전 세션이 복원될 수 있어요.";
 const RETRY_LANDED: &str = "일부 저장이 처음에 실패했지만 재시도로 완료했어요.";
+const HERDR_CLEANUP_UNCONFIRMED: &str =
+    "일부 정리를 완료하지 못했어요. 재시작 후 대기 메시지나 이전 세션이 복원될 수 있어요.";
 const STOP_UNCONFIRMED: &str = "실행 중이던 턴의 종료를 확인하지 못했어요.";
 const TRANSITION_BUSY: &str = "진행 중이던 세션 작업이 끝나기를 기다리지 않고 초기화했어요.";
+const HERDR_TRANSITION_BUSY: &str = "진행 중인 세션 작업의 완료를 확인하지 못했어요.";
 const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
 const COUNT_UNKNOWN: &str = "대기 메시지 수를 확인하지 못했어요.";
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ExecutionCleanup {
+    Held(String),
+    Pending(String),
+    Retired,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct ClearReport {
+    pub(super) execution: Option<ExecutionCleanup>,
     /// Writes whose retry landed.
     pub(super) retried: Vec<&'static str>,
     /// Writes that never landed; a restart may restore what they would have removed.
@@ -34,11 +45,16 @@ impl ClearReport {
     /// One line naming every cause, or none when the clear left nothing behind.
     pub(in crate::services::discord) fn warning(&self) -> Option<String> {
         let saved = match (self.failed.is_empty(), self.retried.is_empty()) {
+            (false, _) if self.execution.is_some() => Some(HERDR_CLEANUP_UNCONFIRMED),
             (false, _) => Some(RETRY_FAILED),
             (true, false) => Some(RETRY_LANDED),
             (true, true) => None,
         };
-        let busy = self.transition_busy.then_some(TRANSITION_BUSY);
+        let busy_message = match &self.execution {
+            Some(ExecutionCleanup::Held(_) | ExecutionCleanup::Pending(_)) => HERDR_TRANSITION_BUSY,
+            _ => TRANSITION_BUSY,
+        };
+        let busy = self.transition_busy.then_some(busy_message);
         let stop = self.stop_unconfirmed.then_some(STOP_UNCONFIRMED);
         let end = self.end_unconfirmed.then_some(END_UNCONFIRMED);
         let causes: Vec<&str> = [saved, busy, stop, end].into_iter().flatten().collect();
@@ -51,23 +67,45 @@ impl ClearReport {
             Some(ids) => format!("대기 메시지 {}건을 비웠어요.", ids.len()),
             None => COUNT_UNKNOWN.to_string(),
         };
-        match self.warning() {
-            Some(warning) => format!("{SESSION_CLEARED_RESPONSE}\n{count}\n{warning}"),
-            None => format!("{SESSION_CLEARED_RESPONSE}\n{count}"),
+        let execution = match &self.execution {
+            Some(ExecutionCleanup::Held(reason)) => {
+                format!("이전 Herdr 실행은 정리하지 못했어요. {reason}")
+            }
+            Some(ExecutionCleanup::Pending(reason)) => {
+                format!("이전 Herdr 실행은 퇴역했지만 정리가 남아 있어요. {reason}")
+            }
+            Some(ExecutionCleanup::Retired)
+                if !self.failed.is_empty() || self.discarded.is_none() =>
+            {
+                "이전 Herdr 실행을 정리했어요.".into()
+            }
+            _ => SESSION_CLEARED_RESPONSE.into(),
+        };
+        let complete = self.execution == Some(ExecutionCleanup::Retired)
+            && self.failed.is_empty()
+            && self.discarded.is_some();
+        let mut lines = if self.execution.is_some() && !complete {
+            vec![count, execution]
+        } else {
+            vec![execution, count]
+        };
+        if let Some(warning) = self.warning() {
+            lines.push(warning);
         }
+        lines.join("\n")
     }
 
     /// Takes the mailbox clear's write outcome and the queued and marker ids it discarded, each
     /// source id once, without the active or starting turn's.
     pub(super) fn absorb(&mut self, cleared: &ClearChannelResult) {
-        self.retried.clone_from(&cleared.persistence.retried);
-        self.failed.clone_from(&cleared.persistence.failed);
+        self.retried.extend_from_slice(&cleared.persistence.retried);
+        self.failed.extend_from_slice(&cleared.persistence.failed);
         self.discarded = (!cleared.persistence.count_unknown).then(|| {
-            let items = cleared.queue_exit_events.iter().map(|e| &e.intervention);
-            let ids =
-                items.flat_map(|item| item.source_message_ids.iter().chain([&item.message_id]));
             let not_waiting = &cleared.persistence.not_waiting;
-            ids.filter(|id| !not_waiting.contains(id))
+            cleared
+                .discarded_message_ids
+                .iter()
+                .filter(|id| !not_waiting.contains(id))
                 .copied()
                 .collect()
         });
@@ -111,6 +149,36 @@ impl ClearReport {
     }
 }
 
+pub(super) async fn notify(
+    shared: &std::sync::Arc<super::SharedData>,
+    channel: poise::serenity_prelude::ChannelId,
+    source: &str,
+    mode: super::SoftClearNotifyMode,
+    session_key: Option<&str>,
+    report: &ClearReport,
+) {
+    if let Some((reason, content)) = super::soft_clear_lifecycle_notify_row(source, mode) {
+        let content = if report.execution.is_some() {
+            report.reply()
+        } else {
+            report
+                .warning()
+                .map_or(content.clone(), |warning| format!("{content}\n{warning}"))
+        };
+        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
+            shared.pg_pool.as_ref(),
+            &format!("channel:{}", channel.get()),
+            session_key,
+            reason,
+            &content,
+        );
+    }
+}
+
 #[cfg(test)]
 #[path = "clear_count_tests.rs"]
 mod clear_count_tests;
+
+#[cfg(test)]
+#[path = "herdr_report_tests.rs"]
+mod herdr_report_tests;

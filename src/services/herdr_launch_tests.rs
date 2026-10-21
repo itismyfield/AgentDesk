@@ -909,3 +909,11 @@ fn a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn() {
     ));
     channel_home::unregister(&LATE.to_string());
 }
+
+#[cfg(unix)]
+#[path = "herdr_launch_tests/retired_hold_tests.rs"]
+mod retired_hold_tests;
+
+#[cfg(unix)]
+#[path = "herdr_launch/retired_hold/tests.rs"]
+pub(crate) mod retired_durability_tests;

@@ -165,6 +165,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/text_commands.rs` | admission | `current_command` :37, `admit_command` :389·:1300 |
 | `src/services/discord/commands/text_commands/native_stop.rs` | admission | `admit_command` :10, `command_scope` :14; !stop preflight·ACK·종료 확인이 같은 permit 안에서 실행된다 |
 | `src/services/discord/turn_bridge/tmux_runtime/native_stop.rs` | command context | `current_command`·`command_scope`; 전달 task가 caller 취소 뒤에도 받은 permit을 I/O 완료까지 보유한다 |
+| `src/services/discord/herdr_terminate/root_replaced.rs` | admission | `admit_command` :226 뒤 같은 permit을 proof·retirement·cleanup까지 보유. blocking proof :265·:290와 cleanup :347은 `command_worker_scope`를 복원하며 새 home 권위를 만들지 않음 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |

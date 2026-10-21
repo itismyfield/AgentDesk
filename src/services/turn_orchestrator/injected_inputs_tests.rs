@@ -127,8 +127,8 @@ fn a_reservation_holds_past_the_fail_open_and_the_dequeued_head_exceptions() {
     let stalled = Instant::now() - INBOUND_ORDER_FAIL_OPEN_AFTER - Duration::from_secs(1);
     let behind = TurnAdmissionOrder::BehindQueue;
     let kind = ActiveTurnKind::UserOrAgent;
-    let lease = Arc::new(InjectionLease);
-    let dispatch = Arc::new(DispatchLease);
+    let lease = Arc::new(InjectionLease::default());
+    let dispatch = Arc::new(DispatchLease::default());
     let mut observed = Vec::new();
     for reserve in [false, true] {
         let mut fail_open = ChannelMailboxState::default();
@@ -388,7 +388,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
     let removed = registry.remove_idle_entry(channel).await;
     let reserve = handle.reserve_injection(None, None, context()).await;
     let ticket = InjectionTicket {
-        lease: Arc::new(InjectionLease),
+        lease: Arc::new(InjectionLease::default()),
         message: None,
     };
     let settle = InjectionSettlement::Delivered(InjectionOutcome::Observed);
@@ -400,7 +400,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
         _ => "landed".to_string(),
     };
     let ticket = InjectionTicket {
-        lease: Arc::new(InjectionLease),
+        lease: Arc::new(InjectionLease::default()),
         message: None,
     };
     let abandoned = handle
@@ -597,7 +597,7 @@ fn an_injected_claim_yields_before_the_yield_helpers_count_or_clear_anything() {
             ..ChannelMailboxState::default()
         };
         let mut kind = ActiveTurnKind::UserOrAgent;
-        let lease = Arc::new(DispatchLease);
+        let lease = Arc::new(DispatchLease::default());
         match case {
             "background_pending_only" => {
                 kind = ActiveTurnKind::Background;

@@ -2,6 +2,10 @@
 //! execution are checked on one server before every input, which goes only to that server.
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(unix)]
+#[path = "herdr_gate/root_replaced.rs"]
+pub(crate) mod root_replaced;
+
 #[path = "herdr_gate/legacy_return.rs"]
 pub(crate) mod legacy_return;
 
@@ -283,8 +287,8 @@ impl HerdrTarget {
         Ok(TerminationFence(permit, was_closing))
     }
 
-    pub(crate) fn revalidate_termination_reads(&self) -> Result<(), HerdrGateRefusal> {
-        self.0.restore_witness(Mutation::Terminate).map(|_| ())
+    pub(crate) fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
+        self.0.restore_witness(Mutation::Terminate)
     }
 
     pub(crate) fn provider_absent(&self) -> Result<bool, String> {
@@ -563,18 +567,23 @@ impl HerdrPaneView {
     /// The pane's presence, root shell and provider, every answer from one server; no input.
     pub(crate) fn read_execution(&self) -> PaneReading {
         let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
+        let witness = match self.transport.server_witness() {
+            Ok(witness) => witness,
+            Err(why) => return unreadable(&why),
+        };
+        self.read_execution_on(&witness)
+    }
+
+    fn read_execution_on(&self, witness: &ServerWitness) -> PaneReading {
+        let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
         let reads = Reads {
             transport: self.transport.as_ref(),
             next_id: &self.next_id,
             pane: &self.pane,
         };
-        let witness = match self.transport.server_witness() {
-            Ok(witness) => witness,
-            Err(why) => return unreadable(&why),
-        };
         let call = next_call(&self.next_id, HerdrRequest::SessionSnapshot {});
         let (outcome, answered) = self.transport.call(&call);
-        if answered.as_ref() != Ok(&witness) {
+        if answered.as_ref() != Ok(witness) {
             return unreadable(&"snapshot from another server");
         }
         match contract::snapshot_observation(&call, outcome, &self.pane).presence() {
@@ -583,7 +592,7 @@ impl HerdrPaneView {
             other => return unreadable(&other),
         }
         let (read, answered) = reads.processes();
-        if answered.as_ref() != Ok(&witness) {
+        if answered.as_ref() != Ok(witness) {
             return unreadable(&"processes from another server");
         }
         let (root, foreground) = match read {
@@ -600,7 +609,7 @@ impl HerdrPaneView {
         let provider = if foreground == [root.pid] {
             PaneProvider::Exited
         } else {
-            match reads.provider_on(&self.provider, &self.nonce, self.os.as_ref(), &witness) {
+            match reads.provider_on(&self.provider, &self.nonce, self.os.as_ref(), witness) {
                 Ok(now) if now.root == root => PaneProvider::Execution(now.provider_process),
                 Ok(_) => PaneProvider::Unverified("root shell changed between readings".into()),
                 Err(gap) => PaneProvider::Unverified(format!("{gap:?}")),

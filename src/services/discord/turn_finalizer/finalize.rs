@@ -48,6 +48,28 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
     released: Option<crate::services::turn_orchestrator::FinishTurnResult>,
     active_debited: bool,
 ) -> FinalizeOutcome {
+    let release = (released, active_debited);
+    let witness = super::episode::RuntimeWitness {
+        probed_tmux: None,
+        claim_snapshot: submit_snapshot,
+    };
+    do_finalize_with_probe(key, provider, event, ctx, witness, shared, release).await
+}
+
+/// `do_finalize_with_release` whose drifted-row retirement may use `witness`.
+pub(super) async fn do_finalize_with_probe(
+    key: TurnKey,
+    provider: ProviderKind,
+    event: &TerminalEvent,
+    ctx: FinalizeContext,
+    witness: super::episode::RuntimeWitness<'_>,
+    shared: &Arc<SharedData>,
+    (released, active_debited): (
+        Option<crate::services::turn_orchestrator::FinishTurnResult>,
+        bool,
+    ),
+) -> FinalizeOutcome {
+    let submit_snapshot = witness.claim_snapshot;
     let mute_settlement = event.is_mute_settlement();
     #[cfg(test)]
     super::test_panic_hook::maybe_panic_in_finalize();
@@ -61,12 +83,13 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
             snapshot: None,
         })
     } else {
-        match super::episode::claim_normal_episode(
+        match super::episode::claim_episode(
             shared,
             &provider,
             key,
             ctx.clear_inflight,
             expected_actor,
+            Some(witness),
         )
         .await
         {
@@ -137,23 +160,10 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
         RelayOwnerKind::None
     };
 
-    // (A) inflight clear. Only the gate-timeout backstop and the immediate
-    //     no-owner restored-watcher path set `clear_inflight` (live bridge /
-    //     watcher sites clear inline, pass `false`). They consolidate the
-    //     pre-#3016 IDENTITY-GUARDED 1800s sweeper: a real identity clears via
-    //     `clear_inflight_state_if_matches` — never a newer turn's inflight,
-    //     preserving `PlannedRestartSkipped` / `RebindOriginSkipped`; a true
-    //     orphan (id-0, nothing to authenticate) keeps the unguarded clear.
+    // (A) inflight clear: the episode claim retires rows; a finalize without
+    //     episode evidence names no row it could safely remove, so it only logs.
     if ctx.clear_inflight && captured.is_none() {
-        if key.user_msg_id != 0 {
-            let _ = crate::services::discord::inflight::clear_inflight_state_if_matches(
-                &provider,
-                channel_id.get(),
-                key.user_msg_id,
-            );
-        } else {
-            crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
-        }
+        super::episode::warn_no_episode_evidence(&provider, key, "finalize");
     }
 
     // (B) mailbox cancel_token release — the routed sites' single, idempotent

@@ -3,17 +3,21 @@ use serenity::{CreateAttachment, MessageId};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(test)]
+use crate::services::provider::CancelToken;
+use crate::services::provider::ProviderKind;
 
 use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::stop_active_turn_with_outcome;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
+use clear_teardown::stop_released_turn;
 mod clear_report;
 mod clear_teardown;
+#[cfg(unix)]
+mod herdr_recovery;
 pub(in crate::services::discord) use clear_report::ClearReport;
 pub(in crate::services::discord) mod home_fence;
 mod managed_reset;
@@ -327,23 +331,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     .await
 }
 
-/// Keep all stop sites converging on `stop_active_turn` so the
-/// abort-key-then-SIGKILL ordering can never regress to the legacy pattern.
-/// False when the released turn's host refused the stop, so it may still run.
-async fn stop_released_turn(
-    provider: &ProviderKind,
-    token: Option<Arc<CancelToken>>,
-    clear_source: &str,
-) -> bool {
-    let Some(token) = token else {
-        return true;
-    };
-    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-    let stop = stop_active_turn_with_outcome(provider, &token, policy, clear_source).await;
-    // Only a legacy settlement says the stop reached the turn's host.
-    stop.may_clear_inflight()
-}
-
 /// Only a channel another node holds is refused; past that the clear always commits.
 async fn clear_channel_session_state_fenced(
     http: &Arc<serenity::Http>,
@@ -409,6 +396,28 @@ async fn clear_channel_session_state_body(
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
 
+    #[cfg(unix)]
+    if herdr_recovery::clear(
+        shared,
+        provider,
+        channel_id,
+        transition_guard.as_ref().ok(),
+        &mut report,
+    )
+    .await
+    {
+        clear_report::notify(
+            shared,
+            channel_id,
+            clear_source,
+            notify_mode,
+            explicit_session_key,
+            &report,
+        )
+        .await;
+        return Ok(report);
+    }
+
     // The clear commits here, in memory: no write below can restore what it discarded.
     let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
@@ -465,21 +474,15 @@ async fn clear_channel_session_state_body(
     )
     .await;
 
-    if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
-    {
-        let content = match report.warning() {
-            Some(warning) => format!("{content}\n{warning}"),
-            None => content,
-        };
-        // Notify bot message for clear paths that have no direct provider reply.
-        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            shared.pg_pool.as_ref(),
-            &format!("channel:{}", channel_id.get()),
-            session_key.as_deref(),
-            reason_code,
-            &content,
-        );
-    }
+    clear_report::notify(
+        shared,
+        channel_id,
+        clear_source,
+        notify_mode,
+        session_key.as_deref(),
+        &report,
+    )
+    .await;
 
     Ok(report)
 }

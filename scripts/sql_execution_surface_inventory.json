@@ -31500,6 +31500,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:a4c339b9e5719f6d82b24795bb5b27b5e0c1e97f8e8c9ec11b7c974cbe2ac661"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/control/clear_end_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:d406d5ab7a68a6fa79f11551a7ff0ec417d5753f5a4ac31f969d0921b6844454"
     },
     {
@@ -31762,6 +31771,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:079600e87121fa0e84d6d5c195ea2bec33ef61617587470aeabe27df4c1cfd2a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/herdr_terminate_exit_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:89ac67f70b3a05fb9652774d488a009131ed8ba4a72dbec39ccdfa75ad78b2ea"
     },
     {
       "root": "src",

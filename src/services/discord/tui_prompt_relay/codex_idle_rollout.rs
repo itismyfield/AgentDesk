@@ -330,6 +330,18 @@ async fn replay_and_relay_codex_sources(
         }
         #[cfg(test)]
         note_poll(&tmux_session_name, PollNote::BodyScan);
+        let original_snapshot = crate::services::tmux_common::with_tmux_source_authority(
+            &tmux_session_name,
+            |authority| {
+                if !crate::services::tui_prompt_dedupe::codex_verified_requires_proof_under_source_authority(authority) {
+                    return Ok(None);
+                }
+                crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot::capture(
+                    authority,
+                )
+                .map(Some)
+            },
+        );
         let scan = match super::idle_transcript_scan::scan_codex_records(
             match std::fs::File::open(&rollout_path) {
                 Ok(file) => file,
@@ -435,12 +447,40 @@ async fn replay_and_relay_codex_sources(
                         line_end_offset,
                     )
                 });
+                let pin = match original_snapshot.as_ref() {
+                    Ok(Some(snapshot))
+                        if snapshot.execution().source.path == rollout_path
+                            && crate::services::tmux_common::with_tmux_source_authority(
+                                &tmux_session_name,
+                                |authority| snapshot.recheck(authority),
+                            )
+                            .is_ok() =>
+                    {
+                        crate::services::tui_prompt_dedupe::hosted_source::capture_scanned(
+                            "codex",
+                            &tmux_session_name,
+                            channel_id.get(),
+                            &rollout_path,
+                            Some(snapshot.context()),
+                            evidence.create_time,
+                        )
+                    }
+                    Ok(None) => crate::services::tui_prompt_dedupe::hosted_source::capture(
+                        "codex",
+                        &tmux_session_name,
+                        channel_id.get(),
+                        &rollout_path,
+                        None,
+                    ),
+                    _ => None,
+                };
                 let observation =
-                    crate::services::tui_prompt_dedupe::observe_restored_codex_record_prompt_at(
+                    crate::services::tui_prompt_dedupe::hosted_source::observe_codex_record_at(
                         &tmux_session_name,
                         (&rollout_path, prompt_start, &evidence),
                         (&prompt, entry_id.as_deref(), own_turn.as_deref()),
                         observed_at,
+                        pin.clone(),
                     );
                 tracing::info!(
                     tmux_session_name = %tmux_session_name,
@@ -457,14 +497,13 @@ async fn replay_and_relay_codex_sources(
                     );
                     continue;
                 }
-                let lease = record_external_turn_lease_for_output(
-                    shared,
+                let lease = super::relay_ownership::record_source_external_turn_lease_for_output(
+                    &shared,
                     &ProviderKind::Codex,
                     channel_id,
                     &tmux_session_name,
                     binding.runtime_kind,
-                    &rollout_path,
-                    observed_at,
+                    (&rollout_path, observed_at, pin),
                 );
                 #[cfg(test)]
                 super::synthetic_start::bridge_handoff::pause_for_test(
