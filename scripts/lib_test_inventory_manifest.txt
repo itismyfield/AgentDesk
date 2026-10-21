@@ -12615,7 +12615,6 @@ services::session_host::herdr::policy::editor::tests::editor_refuses_invalid_dup
 services::session_host::herdr::policy::editor::tests::editor_refuses_noncanonical_writer_shapes_even_when_already_false
 services::session_host::herdr::policy::editor::tests::personal_apply_modules_are_absent_from_production_compilation
 services::session_host::herdr::policy::editor::tests::pinned_toast_removal_replay_keeps_the_current_resume_policy
-services::session_host::herdr::policy::editor::tests::pinned_writer_golden_cases_cover_insert_replace_and_noncanonical_headers
 services::session_host::herdr::policy::editor::tests::semantic_false_recognizes_inline_dotted_and_quoted_paths_without_editing_them
 services::session_host::herdr::policy::editor::tests::writer_replay_fixture_matches_pinned_section_boundary_behavior
 services::session_host::herdr::policy::editor::tests::writer_replay_preserves_false_across_theme_sound_toast_and_onboarding
@@ -12646,6 +12645,7 @@ services::session_host::herdr::policy::tests::fresh_false_can_have_no_startup_pr
 services::session_host::herdr::policy::tests::local_checker_is_usable_by_proof_builder
 services::session_host::herdr::policy::tests::semantic_false_and_whole_checker_are_both_required
 services::session_host::herdr::policy::tests::startup_requires_config_and_live_socket_to_share_directory
+services::session_host::herdr::policy::writer_compat::tests::pinned_writer_golden_cases_cover_insert_replace_and_noncanonical_headers
 services::session_host::herdr::provenance::tests::e7_config_read_refuses_a_file_changed_or_replaced_mid_read
 services::session_host::herdr::provenance::tests::e7_os_reads_prove_off_for_a_real_bootstrapped_process_only
 services::session_host::herdr::provenance::tests::e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal

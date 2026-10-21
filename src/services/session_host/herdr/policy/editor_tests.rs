@@ -148,31 +148,6 @@ fn semantic_false_recognizes_inline_dotted_and_quoted_paths_without_editing_them
 }
 
 #[test]
-fn pinned_writer_golden_cases_cover_insert_replace_and_noncanonical_headers() {
-    for (raw, expected) in [
-        ("", "[session]\nresume_agents_on_restore = false\n"),
-        (
-            "[session]\nresume_agents_on_restore=true # old\n",
-            "[session]\nresume_agents_on_restore = false\n",
-        ),
-        (
-            "[theme]\nname='dark'\n",
-            "[theme]\nname='dark'\n\n[session]\nresume_agents_on_restore = false\n",
-        ),
-        (
-            "[session] # comment\nresume_agents_on_restore=true\n",
-            "[session] # comment\nresume_agents_on_restore=true\n\n[session]\nresume_agents_on_restore = false\n",
-        ),
-    ] {
-        assert_eq!(
-            writer_compat::upsert(raw, "session", "resume_agents_on_restore", "false"),
-            expected,
-            "pinned_writer_exactness_contract"
-        );
-    }
-}
-
-#[test]
 fn personal_apply_modules_are_absent_from_production_compilation() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

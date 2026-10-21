@@ -3015,7 +3015,8 @@ src/
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
 │   │   │   │   ├── types.rs
-│   │   │   │   └── writer_compat.rs
+│   │   │   │   ├── writer_compat.rs
+│   │   │   │   └── writer_compat_tests.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs

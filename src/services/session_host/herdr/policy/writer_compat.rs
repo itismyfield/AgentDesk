@@ -116,3 +116,7 @@ pub(crate) fn verify(candidate: &str) -> Result<(), EditError> {
         Err(EditError::WriterIncompatible)
     }
 }
+
+#[cfg(test)]
+#[path = "writer_compat_tests.rs"]
+mod tests;
