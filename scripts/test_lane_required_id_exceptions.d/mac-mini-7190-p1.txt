@@ -1,1 +1,1 @@
-services::discord::runtime_store::durable_publish::probe | helper-module | #7190 | expires=2027-10-22 | records and injects directory-flush steps for the durable publication tests; it holds no test of its own
+services::discord::runtime_store::durable_publish::flush_probe | helper-module | #7190 | expires=2027-10-22 | records and injects directory-flush steps for the durable publication tests; it holds no test of its own

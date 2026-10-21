@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::probe::{Gate, Plan, Step, Watch};
+use super::flush_probe::{Gate, Plan, Step, Watch};
 use super::*;
 use crate::services::discord::runtime_store::rename_fault;
 use crate::services::discord::{tui_direct_abort_marker as abort, tui_direct_pending_start};

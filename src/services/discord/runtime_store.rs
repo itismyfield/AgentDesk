@@ -8,7 +8,7 @@ pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
 #[cfg(test)]
-pub(crate) use durable_publish::{critical_atomic_write, probe as durable_probe};
+pub(crate) use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
 
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
     #[cfg(test)]

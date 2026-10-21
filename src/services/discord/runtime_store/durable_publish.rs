@@ -83,17 +83,17 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(".{file_name}.{unique}.tmp"));
     #[cfg(test)]
-    probe::inject(path, probe::Step::CreateTemp, &tmp)
+    flush_probe::inject(path, flush_probe::Step::CreateTemp, &tmp)
         .map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
     let mut file =
         fs::File::create(&tmp).map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
     #[cfg(test)]
-    probe::inject(path, probe::Step::Write, &tmp)
+    flush_probe::inject(path, flush_probe::Step::Write, &tmp)
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
     file.write_all(data.as_bytes())
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
     #[cfg(test)]
-    probe::inject(path, probe::Step::FileSync, &tmp)
+    flush_probe::inject(path, flush_probe::Step::FileSync, &tmp)
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     file.sync_all()
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
@@ -141,16 +141,16 @@ pub(super) fn flush_dir(
     sync_stage: SyncStage,
 ) -> Result<(), (SyncStage, io::Error)> {
     #[cfg(test)]
-    match probe::dir_decision(target, open_stage, dir) {
-        probe::Decision::Proceed => {}
-        probe::Decision::Fail(stage, error) => return Err((stage, error)),
+    match flush_probe::dir_decision(target, open_stage, dir) {
+        flush_probe::Decision::Proceed => {}
+        flush_probe::Decision::Fail(stage, error) => return Err((stage, error)),
     }
     #[cfg(not(test))]
     let _ = target;
     let opened = fs::File::open(dir).map_err(|error| (open_stage, error));
     let synced = opened.and_then(|file| file.sync_all().map_err(|error| (sync_stage, error)));
     #[cfg(test)]
-    probe::record(
+    flush_probe::record(
         target,
         synced.as_ref().err().map_or(sync_stage, |e| e.0),
         dir,
@@ -296,7 +296,7 @@ pub(crate) fn critical_atomic_write(
 mod tests;
 
 #[cfg(test)]
-pub(crate) mod probe {
+pub(crate) mod flush_probe {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};
 
