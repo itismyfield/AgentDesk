@@ -723,14 +723,15 @@ impl PaneGate {
                 .transport
                 .server_witness()
                 .map_err(|_| HerdrGateRefusal::PolicyUnverified(Unverified::Peer))?;
-            return ExistingMutationPermit::issue(
-                &self.endpoint,
-                &self.nonce,
-                witness,
-                &self.evidence,
-            )
-            .map(|permit| permit.witness().clone())
-            .map_err(HerdrGateRefusal::PolicyUnverified);
+            let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
+                execution_node: self.endpoint.execution_node().into(),
+                config_key: self.endpoint.config_key().into(),
+                socket_addr: self.endpoint.socket_path().to_string_lossy().into_owned(),
+                herdr_session: self.endpoint.herdr_session().into(),
+            };
+            return ExistingMutationPermit::issue(&endpoint, &self.nonce, witness, &self.evidence)
+                .map(|permit| permit.witness().clone())
+                .map_err(HerdrGateRefusal::PolicyUnverified);
         }
         let witness = match (self.read_restore)(self.transport.as_ref(), &self.endpoint) {
             RestoreResume::Off { witness } => witness,

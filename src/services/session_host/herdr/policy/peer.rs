@@ -1,10 +1,10 @@
 //! Typed peer observations are verified without consulting AgentDesk's own HOME or PATH.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
-use super::super::contract::{HerdrTransport, ServerHello, ServerWitness};
+use super::super::contract::{ServerHello, ServerWitness};
 use super::super::model::{HERDR_PROTOCOL, VERIFIED_HERDR_VERSIONS};
 use super::super::provenance::{self, ProcessStart, StartIdentity};
 use super::PeerSource;
@@ -116,15 +116,21 @@ pub(crate) fn validate(observed: PeerObservation) -> Result<PeerSnapshot, Unveri
 
 /// Synchronous OS reads belong to the async owner's blocking task, never the gate.
 pub(crate) struct SocketPeerSource {
-    transport: Arc<dyn HerdrTransport>,
+    hello: Box<dyn Fn() -> Result<ServerHello, Unverified> + Send + Sync>,
+    witness: Box<dyn Fn() -> Result<ServerWitness, Unverified> + Send + Sync>,
     expected_socket: PathBuf,
     checker: Mutex<Option<FileToken>>,
 }
 
 impl SocketPeerSource {
-    pub(crate) fn new(transport: Arc<dyn HerdrTransport>, expected_socket: PathBuf) -> Self {
+    pub(crate) fn new(
+        expected_socket: PathBuf,
+        hello: impl Fn() -> Result<ServerHello, Unverified> + Send + Sync + 'static,
+        witness: impl Fn() -> Result<ServerWitness, Unverified> + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            transport,
+            hello: Box::new(hello),
+            witness: Box::new(witness),
             expected_socket,
             checker: Mutex::new(None),
         }
@@ -135,7 +141,7 @@ impl PeerSource for SocketPeerSource {
     fn snapshot(&self) -> Result<PeerSnapshot, Unverified> {
         let parent = self.expected_socket.parent().ok_or(Unverified::Peer)?;
         let socket_dir = file::directory_identity(parent)?;
-        let hello = self.transport.hello().map_err(|_| Unverified::Peer)?;
+        let hello = (self.hello)()?;
         let pid = hello.witness.pid;
         let process = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
         let entries = provenance::process_environ(pid).map_err(|_| Unverified::Peer)?;
@@ -159,10 +165,7 @@ impl PeerSource for SocketPeerSource {
             cached.as_ref().ok_or(Unverified::Identity)?.clone()
         };
         let loaded = loaded_image::for_process(pid).ok();
-        let current = self
-            .transport
-            .server_witness()
-            .map_err(|_| Unverified::Peer)?;
+        let current = (self.witness)()?;
         if socket_dir != file::directory_identity(parent)? {
             return Err(Unverified::Changed);
         }

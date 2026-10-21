@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::policy::permit::{CreatePermit, ExistingMutationEvidence, LaunchAdmissionGrant};
-use super::policy::{LocalChecker, PeerSource, ProofCache, peer::SocketPeerSource};
+use super::policy::{LocalChecker, PeerSource, ProofCache, Unverified, peer::SocketPeerSource};
 use crate::config::session_hosts::EndpointMode;
 use crate::services::herdr_launch::policy::{PermitFuture, UserDefaultCreateRequest};
 use std::collections::HashMap;
@@ -36,6 +36,14 @@ pub(crate) struct SocketHerdrLaunchHost {
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     os: Box<dyn ProcessOs>,
     provider_window: Duration,
+}
+
+struct PaneCommand<'a> {
+    endpoint: &'a HerdrLaunchEndpoint,
+    label: &'a str,
+    cwd: &'a Path,
+    command: &'a str,
+    witness: &'a ServerWitness,
 }
 
 fn same_endpoint(
@@ -73,10 +81,12 @@ impl SocketHerdrLaunchHost {
         let sources = endpoints
             .iter()
             .map(|(endpoint, transport)| {
-                let transport: Arc<dyn HerdrTransport> = transport.clone();
+                let hello = transport.clone();
+                let witness = transport.clone();
                 Arc::new(SocketPeerSource::new(
-                    transport,
                     endpoint.socket_path().into(),
+                    move || hello.hello().map_err(|_| Unverified::Peer),
+                    move || witness.server_witness().map_err(|_| Unverified::Peer),
                 )) as Arc<dyn PeerSource>
             })
             .collect();
@@ -183,19 +193,26 @@ impl SocketHerdrLaunchHost {
         (read.map_err(|error| format!("{error:?}")), witness)
     }
 
-    /// The create after the local checks: everything from the first socket call on.
-    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
-        let Some(configured) = self.endpoint(&request.endpoint) else {
+    /// Both policies share the two send sites; each supplies its own authorization fence.
+    fn create_checked(
+        &self,
+        request: PaneCommand<'_>,
+        fence: impl Fn(
+            &(HerdrEndpoint, Arc<HerdrSocketTransport>),
+            &ServerWitness,
+        ) -> Result<(), String>,
+    ) -> HerdrCreateOutcome {
+        let Some(configured) = self.endpoint(request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
-        let witness = &request.restore_off_witness;
-        if let Err(detail) = self.still_off(configured, witness) {
+        let witness = request.witness;
+        if let Err(detail) = fence(configured, witness) {
             return HerdrCreateOutcome::NotSent(detail);
         }
         let transport = &configured.1;
         let call = self.call(HerdrRequest::WorkspaceCreate {
             cwd: request.cwd.to_string_lossy().into_owned(),
-            label: request.label.clone(),
+            label: request.label.to_string(),
             focus: false,
         });
         let outcome = transport.call_with_witness(&call, witness);
@@ -208,15 +225,15 @@ impl SocketHerdrLaunchHost {
             pane_id: pane.pane_id.clone(),
             detail,
         };
-        if !same_dir(&request.cwd, pane.cwd.as_deref()) {
+        if !same_dir(request.cwd, pane.cwd.as_deref()) {
             return unconfirmed(format!("pane opened in {:?}", pane.cwd));
         }
-        if let Err(detail) = self.still_off(configured, witness) {
+        if let Err(detail) = fence(configured, witness) {
             return unconfirmed(detail);
         }
         let call = self.call(HerdrRequest::PaneSendInput {
             pane_id: pane.pane_id.clone(),
-            text: request.command.clone(),
+            text: request.command.to_string(),
             keys: vec!["enter".to_string()],
         });
         let outcome = transport.call_with_witness(&call, witness);
@@ -226,6 +243,18 @@ impl SocketHerdrLaunchHost {
             },
             other => unconfirmed(format!("command input: {other:?}")),
         }
+    }
+    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        self.create_checked(
+            PaneCommand {
+                endpoint: &request.endpoint,
+                label: &request.label,
+                cwd: &request.cwd,
+                command: &request.command,
+                witness: &request.restore_off_witness,
+            },
+            |configured, witness| self.still_off(configured, witness),
+        )
     }
 }
 
@@ -275,54 +304,27 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
             return HerdrCreateOutcome::NotSent(detail);
         }
-        let Some((_, transport)) = self.endpoint(&request.endpoint) else {
+        if self.endpoint(&request.endpoint).is_none() {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
-        };
+        }
         let Some(source) = self.source(&request.endpoint) else {
             return HerdrCreateOutcome::NotSent("policy source unavailable".into());
         };
-        if let Err(why) = request.permit.fence(&request.endpoint, source.as_ref()) {
-            return HerdrCreateOutcome::NotSent(format!("policy fence: {why:?}"));
-        }
-        let witness = request.permit.witness();
-        let call = self.call(HerdrRequest::WorkspaceCreate {
-            cwd: request.cwd.to_string_lossy().into_owned(),
-            label: request.label.clone(),
-            focus: false,
-        });
-        let pane =
-            match contract::created_result(&call, transport.call_with_witness(&call, witness)) {
-                CreatedPane::Root(pane) => pane,
-                CreatedPane::NotSent(detail) => return HerdrCreateOutcome::NotSent(detail),
-                CreatedPane::Indeterminate(detail) => {
-                    return HerdrCreateOutcome::Indeterminate(detail);
-                }
-            };
-        let unconfirmed = |detail| HerdrCreateOutcome::CreatedUnconfirmed {
-            pane_id: pane.pane_id.clone(),
-            detail,
-        };
-        if !same_dir(&request.cwd, pane.cwd.as_deref()) {
-            return unconfirmed(format!("pane opened in {:?}", pane.cwd));
-        }
-        if let Err(why) = request.permit.fence(&request.endpoint, source.as_ref()) {
-            return unconfirmed(format!("policy fence: {why:?}"));
-        }
-        let call = self.call(HerdrRequest::PaneSendInput {
-            pane_id: pane.pane_id.clone(),
-            text: request.command.clone(),
-            keys: vec!["enter".into()],
-        });
-        match contract::mutation_result(
-            &call,
-            transport.call_with_witness(&call, witness),
-            &pane.pane_id,
-        ) {
-            Ok(HostMutation::Confirmed) => HerdrCreateOutcome::Created {
-                pane_id: pane.pane_id,
+        self.create_checked(
+            PaneCommand {
+                endpoint: &request.endpoint,
+                label: &request.label,
+                cwd: &request.cwd,
+                command: &request.command,
+                witness: request.permit.witness(),
             },
-            other => unconfirmed(format!("command input: {other:?}")),
-        }
+            |_, _| {
+                request
+                    .permit
+                    .fence(&request.endpoint, source.as_ref())
+                    .map_err(|why| format!("policy fence: {why:?}"))
+            },
+        )
     }
 
     fn restore_resume(&self, launch: &HerdrLaunchEndpoint) -> RestoreResume {

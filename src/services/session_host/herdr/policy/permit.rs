@@ -1,7 +1,6 @@
 //! Execution authority is historical; a current file edit cannot revoke its exact witness.
 
 use super::super::contract::ServerWitness;
-use super::super::model::HerdrEndpoint;
 use super::{NextRestartProof, PeerSource, StartupProof, Unverified};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 
@@ -83,20 +82,14 @@ pub(crate) struct ExistingMutationPermit(ServerWitness);
 
 impl ExistingMutationPermit {
     pub(crate) fn issue(
-        endpoint: &HerdrEndpoint,
+        endpoint: &HerdrLaunchEndpoint,
         nonce: &str,
         current: ServerWitness,
         evidence: &ExistingMutationEvidence,
     ) -> Result<Self, Unverified> {
-        if current.socket != endpoint.socket_path() {
+        if current.socket != std::path::Path::new(&endpoint.socket_addr) {
             return Err(Unverified::Peer);
         }
-        let launch = HerdrLaunchEndpoint {
-            execution_node: endpoint.execution_node().into(),
-            config_key: endpoint.config_key().into(),
-            socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
-            herdr_session: endpoint.herdr_session().into(),
-        };
         let admitted = evidence
             .startup
             .as_ref()
@@ -104,7 +97,7 @@ impl ExistingMutationPermit {
             || evidence
                 .grant
                 .as_ref()
-                .is_some_and(|g| g.witness_for(&launch, nonce) == Ok(&current));
+                .is_some_and(|g| g.witness_for(endpoint, nonce) == Ok(&current));
         if !admitted {
             return Err(Unverified::Identity);
         }
@@ -120,7 +113,7 @@ impl ExistingMutationPermit {
 
 #[cfg(test)]
 pub(crate) fn grant_for_test(
-    endpoint: &HerdrEndpoint,
+    endpoint: &HerdrLaunchEndpoint,
     nonce: &str,
     witness: ServerWitness,
 ) -> LaunchAdmissionGrant {
@@ -129,12 +122,7 @@ pub(crate) fn grant_for_test(
     std::fs::write(&config, b"[session]\nresume_agents_on_restore=false\n").unwrap();
     let file = super::file::read(&config).unwrap().token;
     LaunchAdmissionGrant {
-        endpoint: HerdrLaunchEndpoint {
-            execution_node: endpoint.execution_node().into(),
-            config_key: endpoint.config_key().into(),
-            socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
-            herdr_session: endpoint.herdr_session().into(),
-        },
+        endpoint: endpoint.clone(),
         nonce: nonce.into(),
         proof: NextRestartProof {
             peer: super::peer::PeerSnapshot {
@@ -156,14 +144,7 @@ pub(crate) fn create_for_test(
     endpoint: HerdrLaunchEndpoint,
     witness: ServerWitness,
 ) -> CreatePermit {
-    let configured = HerdrEndpoint::new(
-        &endpoint.execution_node,
-        &endpoint.config_key,
-        std::path::Path::new(&endpoint.socket_addr),
-        &endpoint.herdr_session,
-    )
-    .unwrap();
-    let grant = grant_for_test(&configured, "fixture", witness);
+    let grant = grant_for_test(&endpoint, "fixture", witness);
     CreatePermit::new(endpoint, grant.proof).unwrap()
 }
 

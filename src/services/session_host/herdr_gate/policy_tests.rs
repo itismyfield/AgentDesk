@@ -48,7 +48,12 @@ fn admitted(rig: &Rig, nonce: &str, pid: u32) -> ExistingMutationEvidence {
     ExistingMutationEvidence {
         startup: None,
         grant: Some(grant_for_test(
-            &endpoint(&rig.server).with_mode(EndpointMode::UserDefault),
+            &crate::services::herdr_launch::HerdrLaunchEndpoint {
+                execution_node: endpoint(&rig.server).execution_node().into(),
+                config_key: endpoint(&rig.server).config_key().into(),
+                socket_addr: rig.server.path.to_string_lossy().into_owned(),
+                herdr_session: endpoint(&rig.server).herdr_session().into(),
+            },
             nonce,
             witness(rig, pid),
         )),
