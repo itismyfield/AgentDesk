@@ -150,9 +150,9 @@ fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
             4 => next.key.config = "/other/config".into(),
             _ => next.key.target = "/other/target".into(),
         }
-        assert_ne!(
-            store.hold(next, 1).unwrap().nonce,
-            first.nonce,
+        let distinct = store.hold(next, 1);
+        assert!(
+            matches!(distinct, Ok(ref value) if value.nonce != first.nonce),
             "consent_full_dedup_key_contract: {dimension}"
         );
     }
@@ -322,4 +322,39 @@ fn consent_absent_corrupt_newer_and_permissions_have_distinct_results() {
         current,
         "consent_original_schema_round_trip_contract"
     );
+}
+
+#[test]
+fn consent_apply_result_from_older_accepted_card_keeps_later_custody_and_fifo() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(temporary.path().join("consents")));
+    let pending = store.hold(question("first"), 1).unwrap();
+    let accepted = store.decide(&pending, 1, true, 2).unwrap();
+    let appended = store.hold(question("second"), 3).unwrap();
+    assert_eq!(appended.state, State::Accepted);
+    assert_eq!(appended.nonce, accepted.nonce);
+    assert_eq!(accepted.intents.len(), 1);
+    assert_eq!(appended.intents.len(), 2);
+    let result = ApplyResult {
+        before: Some([1; 32]),
+        after: Some([4; 32]),
+        backup: Some("/fixture/backup".into()),
+        detail: None,
+    };
+    let applied = store.record_apply(&accepted, result).unwrap();
+    assert_eq!(applied.state, State::Applied);
+    assert_eq!(
+        applied.intents, appended.intents,
+        "consent_apply_cas_preserves_later_appended_custody_contract"
+    );
+    assert_eq!(
+        applied
+            .intents
+            .iter()
+            .map(|intent| (intent.id.as_str(), intent.fifo))
+            .collect::<Vec<_>>(),
+        [("first", 10), ("second", 11)],
+        "consent_apply_cas_preserves_later_appended_fifo_contract"
+    );
+    assert_eq!(store.load(&applied.key).unwrap().unwrap(), applied);
 }

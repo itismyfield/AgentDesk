@@ -12618,6 +12618,7 @@ services::session_host::herdr::policy::checker::tests::checker_rejects_stderr_di
 services::session_host::herdr::policy::checker::tests::checker_rejects_stdout_diagnostics_even_when_exit_is_successful
 services::session_host::herdr::policy::checker::tests::checker_timeout_returns_without_waiting_for_busy_child
 services::session_host::herdr::policy::consent::tests::consent_absent_corrupt_newer_and_permissions_have_distinct_results
+services::session_host::herdr::policy::consent::tests::consent_apply_result_from_older_accepted_card_keeps_later_custody_and_fifo
 services::session_host::herdr::policy::consent::tests::consent_explicit_retry_replaces_revision_nonce_and_rejects_the_old_card
 services::session_host::herdr::policy::consent::tests::consent_independent_store_instances_serialize_the_first_owner_decision
 services::session_host::herdr::policy::consent::tests::consent_key_normalization_keeps_one_card_without_collapsing_scope
@@ -12632,6 +12633,7 @@ services::session_host::herdr::policy::durable::tests::durable_interrupted_publi
 services::session_host::herdr::policy::durable::tests::durable_new_snapshot_failure_leaves_no_committed_authority_after_restart
 services::session_host::herdr::policy::durable::tests::durable_publication_preserves_bytes_and_private_modes
 services::session_host::herdr::policy::durable::tests::durable_repair_requires_verified_snapshot_and_explicit_marker_recovery
+services::session_host::herdr::policy::durable::tests::durable_store_root_symlink_is_refused_without_following_or_writing
 services::session_host::herdr::policy::editor::tests::editor_changes_only_the_boolean_token_and_keeps_utf8_crlf_comments
 services::session_host::herdr::policy::editor::tests::editor_inserts_only_into_a_semantically_identified_bare_section
 services::session_host::herdr::policy::editor::tests::editor_refuses_invalid_duplicate_and_non_boolean_policy

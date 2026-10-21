@@ -206,3 +206,28 @@ fn durable_new_snapshot_failure_leaves_no_committed_authority_after_restart() {
         );
     }
 }
+
+#[test]
+fn durable_store_root_symlink_is_refused_without_following_or_writing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let actual = temporary.path().join("actual");
+    fs::create_dir(&actual).unwrap();
+    let logical = temporary.path().join("linked-store");
+    std::os::unix::fs::symlink(&actual, &logical).unwrap();
+    let directory = Directory(Some(logical.clone()));
+    let name = key(&"must-not-follow").unwrap();
+    assert!(
+        directory.read(&name).is_err()
+            && directory.keys().is_err()
+            && directory
+                .change(&name, |_| Ok(b"untrusted".to_vec()))
+                .is_err(),
+        "durable_store_root_symlink_is_not_authority_contract"
+    );
+    assert_eq!(
+        fs::read_dir(&actual).unwrap().count(),
+        0,
+        "durable_root_symlink_never_writes_through_contract"
+    );
+    assert_eq!(fs::read_link(logical).unwrap(), actual);
+}
