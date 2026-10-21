@@ -34,6 +34,8 @@ fn reads_hosted(entry: Entry) -> bool {
     #[cfg(unix)]
     return entry == Entry::Http && crate::services::discord::herdr_terminate::terminate_enabled();
     #[cfg(not(unix))]
+    let _ = entry;
+    #[cfg(not(unix))]
     return false;
 }
 

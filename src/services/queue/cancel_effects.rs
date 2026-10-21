@@ -46,7 +46,7 @@ static PRE_PURGE_PROBE_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, PrePurgeProb
     LazyLock::new(Default::default);
 
 /// Runs `probe` once when a purge of `channel` is about to reach its actor.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_pre_purge_probe_for_test(channel: ChannelId, probe: PrePurgeProbe) {
     PRE_PURGE_PROBE_FOR_TESTS
         .lock()

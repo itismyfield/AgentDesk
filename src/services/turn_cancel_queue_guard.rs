@@ -125,6 +125,7 @@ pub(crate) async fn record_queue_loss_after_cancel(
 
 /// [`record_queue_loss_after_cancel`] reading the post-cancel queue of `handle`, the actor the
 /// capture and the removal used, never whichever one the channel registers by then.
+#[cfg(unix)]
 pub(crate) async fn record_queue_loss_after_cancel_on(
     handle: &ChannelMailboxHandle,
     target: &TurnLifecycleTarget,
