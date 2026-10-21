@@ -122,3 +122,32 @@ fn durable_grant_codec_binds_endpoint_nonce_and_witness_without_promoting_create
         "grant_codec_witness_endpoint_contract"
     );
 }
+
+#[test]
+fn durable_grant_codec_requires_version_and_complete_validation_tokens() {
+    let endpoint = endpoint("one");
+    let expected = grant(&endpoint, "nonce", 7);
+    let value: serde_json::Value = serde_json::from_slice(&expected.encode().unwrap()).unwrap();
+    for missing in ["config", "checker"] {
+        let mut incomplete = value.clone();
+        incomplete.as_object_mut().unwrap().remove(missing);
+        assert!(
+            LaunchAdmissionGrant::decode_any(&serde_json::to_vec(&incomplete).unwrap()).is_err(),
+            "grant_codec_requires_validation_tokens_contract: {missing}"
+        );
+    }
+    let mut zero = value.clone();
+    zero["schema"] = 0.into();
+    assert!(
+        LaunchAdmissionGrant::decode_any(&serde_json::to_vec(&zero).unwrap()).is_err(),
+        "grant_codec_requires_known_schema_contract"
+    );
+    let mut future = value;
+    future["schema"] = 2.into();
+    future["future_field"] = true.into();
+    let result = LaunchAdmissionGrant::decode_any(&serde_json::to_vec(&future).unwrap());
+    assert!(
+        matches!(result, Err(ref reason) if reason.starts_with("admission_grant_newer:")),
+        "grant_newer_schema_is_not_corruption_contract: {result:?}"
+    );
+}

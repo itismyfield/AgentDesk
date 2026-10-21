@@ -192,3 +192,134 @@ fn consent_independent_store_instances_serialize_the_first_owner_decision() {
         "consent_concurrent_first_decision_contract"
     );
 }
+
+#[test]
+fn consent_key_normalization_keeps_one_card_without_collapsing_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
+    let first = store.hold(question("first"), 1).unwrap();
+    let mut alias = question("second");
+    alias.key.node = " one ".into();
+    alias.key.named_session = " agentdesk ".into();
+    alias.key.socket = "/fixture//./socket".into();
+    alias.key.config = "/home/.config/./herdr/config.toml".into();
+    alias.key.target = "/actual/./config.toml".into();
+    let same = store.hold(alias, 2).unwrap();
+    assert_eq!(same.nonce, first.nonce, "consent_normalized_key_contract");
+    assert_eq!(same.key, first.key);
+    let mut parent_path = question("parent");
+    parent_path.key.config = "/home/link/../config.toml".into();
+    assert!(
+        store.hold(parent_path, 3).is_err(),
+        "consent_parent_directory_components_are_refused_contract"
+    );
+    let mut unsafe_path = question("bad");
+    unsafe_path.key.socket = "relative.sock".into();
+    assert!(
+        store.hold(unsafe_path, 3).is_err(),
+        "consent_relative_key_is_refused_contract"
+    );
+}
+
+#[test]
+fn consent_owner_decision_expires_at_thirty_minutes_without_expire_call() {
+    for elapsed in [TTL - 1, TTL, TTL + 1] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ConsentStore::new(Some(temp.path().join("consents")));
+        let current = store.hold(question("first"), 100).unwrap();
+        assert_eq!(current.expires, 100 + TTL);
+        let decided = store.decide(&current, 1, true, 100 + elapsed);
+        assert_eq!(
+            decided.is_ok(),
+            elapsed < TTL,
+            "consent_thirty_minute_owner_decision_contract: elapsed={elapsed}"
+        );
+        if elapsed >= TTL {
+            assert_eq!(
+                store.load(&current.key).unwrap().unwrap().intents,
+                current.intents,
+                "consent_expired_decision_keeps_custody_contract"
+            );
+        }
+    }
+}
+
+#[test]
+fn consent_explicit_retry_replaces_revision_nonce_and_rejects_the_old_card() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
+    let first = store.hold(question("first"), 1).unwrap();
+    let denied = store.decide(&first, 1, false, 2).unwrap();
+    let mut changed = question("second");
+    changed.preview.revision = 2;
+    changed.preview.target_hash[0] += 1;
+    assert!(
+        store.hold(changed, 3).is_err(),
+        "consent_changed_policy_requires_explicit_retry_contract"
+    );
+    let retried = store.retry(question("second"), 4).unwrap();
+    assert_ne!(retried.nonce, denied.nonce);
+    assert!(retried.preview.revision > denied.preview.revision);
+    assert!(
+        store.decide(&denied, 1, true, 5).is_err(),
+        "consent_old_card_cannot_decide_retry_contract"
+    );
+    assert_eq!(
+        retried
+            .intents
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"],
+        "consent_retry_retains_original_custody_contract"
+    );
+    let mut forged = question("first");
+    forged.intent.fifo += 1;
+    forged.preview.revision = retried.preview.revision;
+    assert!(
+        store.hold(forged, 5).is_err(),
+        "consent_custody_identity_cannot_be_replaced_contract"
+    );
+}
+
+#[test]
+fn consent_absent_corrupt_newer_and_permissions_have_distinct_results() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("consents");
+    let store = ConsentStore::new(Some(root.clone()));
+    let key = question("first").key;
+    assert_eq!(store.load(&key).unwrap(), None);
+    assert!(
+        !root.exists(),
+        "consent_constructor_and_absent_load_are_lazy_contract"
+    );
+    let current = store.hold(question("first"), 1).unwrap();
+    let path = root.join(format!("{}.json", durable::key(&current.key).unwrap()));
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"{").unwrap();
+    let corrupt = store.load(&key).unwrap_err();
+    assert!(
+        corrupt.contains("consent_snapshot_corrupt")
+            && corrupt.contains(&path.display().to_string()),
+        "consent_corruption_is_not_absence_contract: {corrupt}"
+    );
+    let mut newer: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    newer["schema"] = 2.into();
+    newer["future_field"] = true.into();
+    std::fs::write(&path, serde_json::to_vec(&newer).unwrap()).unwrap();
+    let future = store.load(&key).unwrap_err();
+    assert!(
+        future.contains("consent_snapshot_newer") && !future.contains("corrupt"),
+        "consent_newer_schema_is_not_corruption_contract: {future}"
+    );
+    std::fs::write(&path, &original).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(store.load(&key).unwrap_err().contains("0600"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        store.load(&key).unwrap().unwrap(),
+        current,
+        "consent_original_schema_round_trip_contract"
+    );
+}

@@ -3000,14 +3000,23 @@ src/
 │   │   ├── herdr/
 │   │   │   ├── policy/
 │   │   │   │   ├── apply.rs
+│   │   │   │   ├── apply_fs.rs
 │   │   │   │   ├── apply_tests.rs
+│   │   │   │   ├── boot_grants.rs
+│   │   │   │   ├── boot_grants_tests.rs
 │   │   │   │   ├── cache.rs
 │   │   │   │   ├── checker.rs
 │   │   │   │   ├── checker_tests.rs
+│   │   │   │   ├── consent.rs
+│   │   │   │   ├── consent_tests.rs
+│   │   │   │   ├── durable.rs
+│   │   │   │   ├── durable_tests.rs
 │   │   │   │   ├── editor.rs
 │   │   │   │   ├── editor_tests.rs
 │   │   │   │   ├── file.rs
 │   │   │   │   ├── file_tests.rs
+│   │   │   │   ├── grant_store.rs
+│   │   │   │   ├── grant_store_tests.rs
 │   │   │   │   ├── loaded_image.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
@@ -3015,6 +3024,7 @@ src/
 │   │   │   │   ├── permit.rs
 │   │   │   │   ├── proof_tests.rs
 │   │   │   │   ├── types.rs
+│   │   │   │   ├── witness_codec.rs
 │   │   │   │   ├── writer_compat.rs
 │   │   │   │   └── writer_compat_tests.rs
 │   │   │   ├── contract.rs

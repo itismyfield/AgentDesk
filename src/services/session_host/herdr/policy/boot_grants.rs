@@ -45,6 +45,7 @@ pub(crate) async fn prepare(boot: &BootSessionHosts) {
     let loaded = load(boot.config(), boot.local_node(), &store()).await;
     let _ = PREPARED.set(loaded);
 }
+#[cfg(unix)]
 pub(crate) fn prepared() -> Result<Vec<LaunchAdmissionGrant>, Unverified> {
     PREPARED.get().cloned().unwrap_or_else(|| Ok(Vec::new()))
 }

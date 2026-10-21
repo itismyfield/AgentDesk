@@ -974,7 +974,9 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::policy::policy_legacy_admission_and_terminate_version_refusals_stay_exact
   services::session_host::herdr_gate::tests::policy::policy_legacy_mutations_keep_e7_and_need_no_new_evidence
   services::session_host::herdr_gate::tests::policy::policy_missing_or_foreign_grant_refuses_before_any_exact_probe
+  services::session_host::herdr_gate::tests::policy::policy_prepared_store_failure_is_distinct_from_absent_authority
   services::session_host::herdr_gate::tests::policy::policy_registry_default_evidence_does_not_fabricate_a_grant
+  services::session_host::herdr_gate::tests::policy::policy_restored_durable_grant_reaches_input_gate_without_reading_store_again
   services::session_host::herdr_gate::tests::policy::policy_user_grant_allows_all_mutations_without_current_file_policy
   services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_every_nonabsent_original_provider
   services::session_host::herdr_gate::tests::root_replaced_tests::replaced_root_end_refuses_every_nonabsent_original_root

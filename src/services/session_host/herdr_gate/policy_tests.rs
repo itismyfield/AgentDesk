@@ -399,3 +399,85 @@ fn policy_prepared_store_failure_is_distinct_from_absent_authority() {
         );
     }
 }
+
+#[tokio::test]
+async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_again() {
+    use crate::services::herdr_launch::policy::LaunchGrantStore;
+    use crate::services::session_host::policy::grant_store::FileGrantStore;
+
+    RESTORE_READS.with(|reads| reads.set(0));
+    let rig = rig();
+    let temporary = tempfile::tempdir().unwrap();
+    let grant_root = temporary.path().join("grants");
+    let grant = admitted(&rig, NONCE, SERVER).grant.unwrap();
+    let launch_endpoint = grant.endpoint().clone();
+    let store = FileGrantStore::new(Some(grant_root.clone()));
+    store.save(grant.clone()).await.unwrap();
+    drop(store);
+    let restarted_store = FileGrantStore::new(Some(grant_root.clone()));
+    let restored = restarted_store.load_all(&[launch_endpoint]).await.unwrap();
+    assert_eq!(
+        restored,
+        [grant],
+        "restored_grant_exact_historical_authority_contract"
+    );
+    drop(restarted_store);
+    std::fs::remove_dir_all(&grant_root).unwrap();
+    assert!(
+        !grant_root.exists(),
+        "restored_grant_gate_fixture_store_is_absent_contract"
+    );
+
+    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let make_registry = |grants| {
+        let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+            vec![configured.clone()],
+            Default::default(),
+        )
+        .with_prepared_for_test(Ok(grants));
+        HerdrRegistry::with_transport(configured.clone(), transport(&rig.server, vec![SERVER]))
+            .with_launch_host(host)
+            .with_reads((counted_invalid, launched_os(&rig)))
+    };
+    let absent = make_registry(Vec::new());
+    let target = absent
+        .target(&stored(&rig.server, HostedState::Bound))
+        .unwrap();
+    assert_eq!(
+        target.pin(Mutation::Input),
+        Err(HerdrGateRefusal::PolicyUnverified(Unverified::Identity)),
+        "restored_grant_absence_refuses_input_contract"
+    );
+    assert!(
+        rig.server.mutations().is_empty(),
+        "restored_grant_absence_mutates_zero_contract"
+    );
+    let restored_registry = make_registry(restored);
+    let target = restored_registry
+        .target(&stored(&rig.server, HostedState::Bound))
+        .unwrap();
+    assert_eq!(
+        target.pin(Mutation::Input),
+        Ok(()),
+        "restored_grant_memory_reaches_input_gate_contract"
+    );
+    assert_eq!(
+        target.send_text("restored grant input").unwrap(),
+        HostMutation::Confirmed,
+        "restored_grant_memory_confirms_input_contract"
+    );
+    assert_eq!(
+        rig.server.mutations().len(),
+        1,
+        "restored_grant_input_mutates_once_contract"
+    );
+    assert_eq!(
+        RESTORE_READS.with(Cell::get),
+        0,
+        "restored_grant_does_not_reread_current_file_policy_contract"
+    );
+    assert!(
+        !grant_root.exists(),
+        "restored_grant_mutation_does_not_recreate_store_contract"
+    );
+}

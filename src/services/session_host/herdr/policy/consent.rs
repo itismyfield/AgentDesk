@@ -38,10 +38,10 @@ impl ConsentKey {
             for part in path.components() {
                 match part {
                     Component::Normal(part) => result.push(part),
-                    Component::ParentDir if !result.pop() => {
-                        return Err("consent path escapes root".into());
+                    Component::ParentDir => {
+                        return Err("consent paths must not contain parent-directory components; use an explicit absolute path".into());
                     }
-                    Component::ParentDir | Component::RootDir | Component::CurDir => {}
+                    Component::RootDir | Component::CurDir => {}
                     _ => return Err("unsupported consent path".into()),
                 }
             }
