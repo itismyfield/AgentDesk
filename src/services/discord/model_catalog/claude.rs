@@ -917,7 +917,11 @@ mod tests {
 
         assert!(!entries.iter().any(|entry| entry.value == "gateway-only"));
         assert!(entries.iter().any(|entry| entry.value == "fable"));
-        assert!(entries.iter().any(|entry| entry.value == "claude-fable-5-1"));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.value == "claude-fable-5-1")
+        );
     }
 
     #[test]
