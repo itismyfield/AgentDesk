@@ -23,7 +23,7 @@ pub(super) struct ToolCardRun {
 
 pub(super) struct ToolMeta {
     id: String,
-    label: &'static str,
+    label: String,
     summary: Option<String>,
 }
 
@@ -177,10 +177,11 @@ fn render<'a>(rows: impl Iterator<Item = &'a Row>, summaries: bool) -> String {
     while let Some(row) = rows.get(at) {
         let mut count = 1;
         if matches!(row.status, '✓' | '·') {
-            while rows
-                .get(at + count)
-                .is_some_and(|next| next.status == row.status && next.meta.label == row.meta.label)
-            {
+            while rows.get(at + count).is_some_and(|next| {
+                next.status == row.status
+                    && next.meta.label == row.meta.label
+                    && next.meta.summary == row.meta.summary
+            }) {
                 count += 1;
             }
         }
@@ -197,7 +198,8 @@ fn render<'a>(rows: impl Iterator<Item = &'a Row>, summaries: bool) -> String {
             .unwrap_or_default();
         lines.push(format!(
             "-# ▸ {}{count_label}{summary}  {}",
-            row.meta.label, row.status
+            row.meta.label.replace('_', "\\_"),
+            row.status
         ));
         at += count;
     }

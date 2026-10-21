@@ -19,7 +19,7 @@ fn panel_disposition_enters_live_known_before_another_tool() {
     };
     let meta = || ToolMeta {
         id: "off".into(),
-        label: "Bash",
+        label: "Bash".into(),
         summary: None,
     };
     assert!(matches!(run.tool(key.clone(), meta()).as_slice(),

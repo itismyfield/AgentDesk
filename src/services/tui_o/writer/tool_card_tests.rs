@@ -641,3 +641,78 @@ fn adjacent_failed_tools_never_fold_with_failure_or_success() {
         }
     }
 }
+
+#[test]
+fn successful_cards_fold_only_identical_optional_summaries() {
+    for (commands, lines, folded) in [
+        ([Some("one"), Some("two")], 2, false),
+        ([None, Some("two")], 2, false),
+        ([Some("one"), None], 2, false),
+        ([Some("one"), Some("one")], 1, true),
+        ([None, None], 1, true),
+    ] {
+        let (mut derive, _) = enabled(ShadowProvider::Claude);
+        for (n, command) in commands.into_iter().enumerate() {
+            let id = format!("fold-{n}");
+            derive.derive(&tool(&id, "Bash", json!({"command":command})));
+            derive.derive(&result(&id, false));
+        }
+        let output = pieces(&derive.derive(&body("end", "answer")))[0].1.clone();
+        assert_eq!(output.lines().count(), lines, "{commands:?}: {output}");
+        assert_eq!(output.contains("×2"), folded, "{output}");
+    }
+}
+
+#[test]
+fn distinct_summaries_keep_caps_and_native_card_boundaries() {
+    for long in [false, true] {
+        let (mut derive, _) = enabled(ShadowProvider::Claude);
+        let mut work = Vec::new();
+        for n in 0..15 {
+            let id = format!("cap-{n}");
+            let command = format!(
+                "cmd-{n} {}",
+                if long { "😀".repeat(70) } else { "ok".into() }
+            );
+            work.extend(derive.derive(&tool(&id, "Bash", json!({"command":command}))));
+            // Keep one unresolved row so the native size boundaries close the run.
+            if n > 0 {
+                work.extend(derive.derive(&result(&id, false)));
+            }
+        }
+        work.extend(derive.derive(&body("end", "answer")));
+        let cards = pieces(&work)
+            .into_iter()
+            .filter(|(key, _)| key.ends_with("#card"))
+            .collect::<Vec<_>>();
+        assert!(cards.len() >= 2, "{cards:?}");
+        assert_eq!(cards.last().unwrap().0, "cap-14:0#card");
+        for (_, output) in cards {
+            assert!(output.lines().count() <= 14);
+            assert!(output.encode_utf16().count() <= 1800);
+            assert!(
+                !output.contains('×'),
+                "distinct summaries were lost: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_card_names_are_visible_without_arguments_or_markdown() {
+    let (mut derive, _) = enabled(ShadowProvider::Claude);
+    for (n, name) in ["ToolSearch", "CronCreate", "__custom__", "Tool@everyone"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = format!("name-{n}");
+        derive.derive(&tool(&id, name, json!({"description":"ARGUMENT_SENTINEL"})));
+        derive.derive(&result(&id, false));
+    }
+    let output = pieces(&derive.derive(&body("end", "answer")))[0].1.clone();
+    assert_eq!(
+        output,
+        "-# ▸ ToolSearch  ✓\n-# ▸ CronCreate  ✓\n-# ▸ \\_\\_custom\\_\\_  ✓\n-# ▸ Tool  ✓"
+    );
+    assert!(!output.contains("ARGUMENT_SENTINEL"));
+}

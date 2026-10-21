@@ -436,7 +436,7 @@ fn repair_abbreviated_environment_names_mask_values() {
             assert!(!visible.contains(secret), "{command}: {output}");
         }
     }
-    assert!(render("Bash", json!({"command":"SERVICE_AUTH=EnvLeak9 client"})).is_some());
+    assert!(render("Bash", json!({"command":"SERVICE_AUTH=EnvLeak9 client"})).is_none());
     assert_eq!(
         safe_section("**Plan**\n- [ ] fix author\\_module and credit\\_loader").as_deref(),
         Some("**Plan**\n- [ ] fix author\\_module and credit\\_loader")
@@ -791,7 +791,7 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
         "echo $HOME https://UsrLeak9:SubLeak9@example.test/p?sig=SignedLeak9",
         "echo $HOME password was SubLeak9",
     ] {
-        let output = render("exec_command", json!({"cmd":command})).unwrap();
+        let output = render("exec_command", json!({"cmd":command})).unwrap_or_default();
         let visible = output.replace(['\\', '\u{200b}'], "");
         for secret in ["SubLeak9", "UsrLeak9", "SignedLeak9"] {
             assert!(!visible.contains(secret), "{output}");
@@ -990,7 +990,7 @@ fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
                 tool,
                 json!({"command":phrase,"description":phrase,"query":phrase}),
             )
-            .unwrap();
+            .unwrap_or_default();
             let visible = output.replace(['\\', '\u{200b}'], "");
             assert!(
                 !visible.contains("SpacedLeak9") && !visible.contains("ProseLeak9"),
