@@ -12612,6 +12612,7 @@ services::session_host::herdr::policy::peer::tests::policy_peer_path_stat_alone_
 services::session_host::herdr::policy::peer::tests::policy_peer_refuses_duplicate_empty_relative_and_missing_home
 services::session_host::herdr::policy::peer::tests::policy_peer_refuses_nondefault_xdg_even_with_default_override
 services::session_host::herdr::policy::peer::tests::policy_peer_same_loaded_image_may_have_a_different_logical_path
+services::session_host::herdr::policy::peer::tests::policy_socket_parent_resolves_final_symlink
 services::session_host::herdr::policy::tests::cache_keys_include_checker_and_exact_server_witness
 services::session_host::herdr::policy::tests::checker_cannot_span_two_server_witnesses
 services::session_host::herdr::policy::tests::corrupt_cache_and_checker_failure_return_refusals

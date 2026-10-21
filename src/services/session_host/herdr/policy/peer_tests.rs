@@ -2,6 +2,29 @@ use super::super::file;
 use super::*;
 use std::time::{Duration, UNIX_EPOCH};
 
+#[test]
+fn policy_socket_parent_resolves_final_symlink() {
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let live_dir = root.path().join("live");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::create_dir(&live_dir).unwrap();
+    let live_socket = live_dir.join("server.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&live_socket).unwrap();
+    let logical_socket = config_dir.join("server.sock");
+    std::os::unix::fs::symlink(&live_socket, &logical_socket).unwrap();
+    let observed = socket_directory(&logical_socket).unwrap();
+    assert_eq!(
+        observed,
+        (
+            std::fs::canonicalize(&live_socket).unwrap(),
+            file::directory_identity(&live_dir).unwrap()
+        ),
+        "socket_parent_resolves_final_symlink_contract"
+    );
+    assert_ne!(observed.1, file::directory_identity(&config_dir).unwrap());
+}
+
 #[cfg(unix)]
 struct Fixture {
     root: tempfile::TempDir,

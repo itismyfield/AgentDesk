@@ -139,8 +139,7 @@ impl SocketPeerSource {
 
 impl PeerSource for SocketPeerSource {
     fn snapshot(&self) -> Result<PeerSnapshot, Unverified> {
-        let parent = self.expected_socket.parent().ok_or(Unverified::Peer)?;
-        let socket_dir = file::directory_identity(parent)?;
+        let (resolved_socket, socket_dir) = socket_directory(&self.expected_socket)?;
         let hello = (self.hello)()?;
         let pid = hello.witness.pid;
         let process = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
@@ -166,7 +165,7 @@ impl PeerSource for SocketPeerSource {
         };
         let loaded = loaded_image::for_process(pid).ok();
         let current = (self.witness)()?;
-        if socket_dir != file::directory_identity(parent)? {
+        if (resolved_socket, socket_dir) != socket_directory(&self.expected_socket)? {
             return Err(Unverified::Changed);
         }
         validate(PeerObservation {
@@ -188,6 +187,13 @@ impl PeerSource for SocketPeerSource {
             },
         })
     }
+}
+
+fn socket_directory(path: &Path) -> Result<(PathBuf, (u64, u64)), Unverified> {
+    let resolved = std::fs::canonicalize(path).map_err(|_| Unverified::Peer)?;
+    let parent = resolved.parent().ok_or(Unverified::Peer)?;
+    let identity = file::directory_identity(parent)?;
+    Ok((resolved, identity))
 }
 
 fn absolute(values: &[String]) -> Result<Option<PathBuf>, Unverified> {
