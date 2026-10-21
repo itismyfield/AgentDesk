@@ -319,9 +319,8 @@ fn successor_nonce_refused_by_every_store_writer_7219() {
     );
 }
 
-/// A local the successor already overwrote no longer matches the baseline or the entry snapshot
-/// it was taken with; each writer refuses on that mismatch before reading the row. The snapshot
-/// anchor bind keeps refusing a foreign pin as it did before.
+/// A local the successor overwrote no longer matches its baseline or entry snapshot, and each
+/// writer refuses on that before reading the row; the snapshot anchor bind still refuses too.
 #[test]
 fn contaminated_local_and_snapshot_bind_refuse_the_successor_7219() {
     let root = tempfile::tempdir().expect("runtime root");

@@ -274,9 +274,8 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     assert!(captured.deletes.lock().unwrap().is_empty());
 }
 
-/// A successor saved in this turn's start second shares every identity field with it; the
-/// error arm's rejected rewind keeps this turn's own local instead of reloading the successor's
-/// row and handing it this turn's settlement authority.
+/// A successor saved in this turn's start second shares its identity; the rejected error rewind
+/// keeps this turn's local instead of reloading the successor's row into it.
 #[test]
 fn rejected_error_rewind_keeps_a_successor_episode_out_of_the_local_7219() {
     let temp = tempfile::TempDir::new().expect("isolated inflight root");
