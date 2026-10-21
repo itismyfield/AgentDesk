@@ -870,6 +870,8 @@ jobs:
               - 'src/services/codex/**'
               - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
+              # queue/ wires the forced Herdr cancel behind cfg(unix).
+              - 'src/services/queue/**'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'

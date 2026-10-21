@@ -119,6 +119,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::herdr_terminate::exit_tests
+  --skip services::discord::herdr_terminate::http_force::tests
   --skip services::discord::herdr_terminate::route_tests
   --skip services::discord::herdr_terminate::tests
   --skip services::discord::host_defer_gate::tests
