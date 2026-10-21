@@ -19,6 +19,10 @@ pub(super) fn reclaim_missing_watcher_delivery(
     ctx: &TickContext<'_>,
     tick: &mut TickRuntime<'_>,
 ) -> ControlFlow<(), bool> {
+    // The reclaim rewind captures its nonce from this local, so it must still be the actor's.
+    if !tick.inflight_state.owned_by_turn_nonce(ctx.captured_nonce) {
+        return ControlFlow::Break(());
+    }
     let live_watcher = live_watcher_registered_for_relay(
         ctx.shared_owned.as_ref(),
         *tick.watcher_owner_channel_id,

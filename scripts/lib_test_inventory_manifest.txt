@@ -5084,6 +5084,9 @@ services::discord::inflight::save_store::delivery_rewind::tests::rewind_rejects_
 services::discord::inflight::save_store::delivery_rewind::tests::terminal_reset_preserves_matching_bridge_authority
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::placeholder_clear_effect_reports_only_the_bridge_winner
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::slice_a_pair_contention
+services::discord::inflight::save_store::identity_gate::captured_nonce::nonce_collision_tests::contaminated_local_and_snapshot_bind_refuse_the_successor_7219
+services::discord::inflight::save_store::identity_gate::captured_nonce::nonce_collision_tests::same_actor_writers_still_save_7219
+services::discord::inflight::save_store::identity_gate::captured_nonce::nonce_collision_tests::successor_nonce_refused_by_every_store_writer_7219
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_failed_receipt_write_publishes_nothing
@@ -9038,6 +9041,7 @@ services::discord::tmux_reaper::tests::stale_busy_finalize_uses_identity_gate_an
 services::discord::tmux_reaper::tests::stale_busy_guard_preserves_respawned_or_reowned_turn
 services::discord::tmux_restart_handoff::mailbox_tests::fresh_start_failure_tests::a_failed_fresh_start_leaves_a_successor_episode_untouched
 services::discord::tmux_restart_handoff::mailbox_tests::fresh_start_failure_tests::a_failed_fresh_start_releases_its_mailbox_episode_and_keeps_the_queue
+services::discord::tmux_restart_handoff::mailbox_tests::fresh_start_failure_tests::same_second_fresh_failure_keeps_b_episode_7219
 services::discord::tmux_restart_handoff::mailbox_tests::watcher_death_handoff_releases_only_the_relinquished_turn_token
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_keeps_different_completion_footer_target
 services::discord::tmux_restart_handoff::notice_target_tests::restart_handoff_notice_skips_missing_current_message
@@ -9521,6 +9525,8 @@ services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::fa
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::old_unpinned_known_tmux_pending_still_claims_its_captured_source
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the_caller
 services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_rejects_a_guard_for_another_channel_runtime_or_mutex
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::synthetic_readoption_nonce_transition_7219
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::synthetic_readoption_replaced_episode_7219
 services::discord::tui_prompt_relay::synthetic_start::claim::intake_placeholder_retirement_tests::synthetic_inflight_tracks_the_actual_processing_placeholder_byte_length
 services::discord::tui_prompt_relay::synthetic_start::claim::n1a_tests::n1a_synthetic_claim_has_no_row_or_lease_until_unconfirmed
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::refused_watcher_turn_is_reowned_for_the_bridge_after_its_watcher_dies
@@ -10358,6 +10364,7 @@ services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recover
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_checkpoint_wakeup_positive_stop_off_and_absent_pg
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
 services::discord::turn_bridge::stream_loop::provider_recovery::profile_tests::only_unprocessed_anchored_classified_failures_are_replayed
+services::discord::turn_bridge::stream_loop::rewind_owner_tests::rejected_error_rewind_keeps_a_successor_episode_out_of_the_local_7219
 services::discord::turn_bridge::stream_loop::rewind_owner_tests::rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::an_unchanged_tool_arm_adoption_records_nothing
@@ -10379,6 +10386,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::abandoned_l
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::candidate_cleanup_covers_saved_competing_reowned_and_missing_rows
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::changed_durable_relay_authority_still_ends_bridge_authority
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::dirty_and_side_effect_transitions_follow_guarded_outcome
+services::discord::turn_bridge::stream_tick::guarded_persist::tests::exit_flush_nonce_collision_7219
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::heartbeat_touches_same_owner_but_skips_successor
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::io_error_candidate_retries_until_loop_exit_then_is_cleaned
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges

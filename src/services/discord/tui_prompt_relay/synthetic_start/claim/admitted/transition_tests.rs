@@ -531,3 +531,176 @@ async fn old_unpinned_known_tmux_pending_still_claims_its_captured_source() {
         assert!(saved.hosted_execution_nonce.is_none());
     }
 }
+
+impl Fixture {
+    /// The row a lost allocation left behind for this anchor: no live actor, no witness.
+    fn seed_persisted_episode(&self, nonce: Option<&str>) -> InflightTurnState {
+        let mut row = build_tui_direct_synthetic_inflight_state(
+            self.provider.clone(),
+            self.channel,
+            self.anchor,
+            None,
+            "an already submitted input",
+            &self.logical,
+            Some(self.output.as_path()),
+            0,
+            &self.lease,
+            RelayOwnerKind::None,
+        );
+        row.turn_nonce = nonce.map(str::to_owned);
+        inflight::save_inflight_state(&row).unwrap();
+        inflight::load_inflight_state_read_only(&self.provider, self.channel.get()).unwrap()
+    }
+
+    fn row(&self) -> InflightTurnState {
+        inflight::load_inflight_state_read_only(&self.provider, self.channel.get()).unwrap()
+    }
+}
+
+/// Re-adopting a persisted episode under a freshly admitted actor moves the row to that actor's
+/// nonce, from a nonced or a legacy row, and keeps every other birth axis.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn synthetic_readoption_nonce_transition_7219() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    for (id, persisted) in [(7_219_701, Some("lost-allocation-n1")), (7_219_711, None)] {
+        let fixture = Fixture::new(root.path(), id);
+        let before = fixture.seed_persisted_episode(persisted);
+        let claim = claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)).await;
+        assert!(claim.claimed, "re-adoption of {persisted:?} was refused");
+        let actor = crate::services::discord::mailbox_snapshot(&fixture.shared, fixture.channel)
+            .await
+            .cancel_token
+            .expect("the admitted actor holds the slot");
+        let after = fixture.row();
+        assert!(actor.turn_nonce().is_some());
+        assert_eq!(after.turn_nonce.as_deref(), actor.turn_nonce());
+        assert_ne!(after.turn_nonce, before.turn_nonce);
+        assert_eq!(
+            (after.user_msg_id, &after.started_at, after.born_generation),
+            (
+                before.user_msg_id,
+                &before.started_at,
+                before.born_generation
+            )
+        );
+        assert_eq!(after.request_owner_user_id, before.request_owner_user_id);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FenceRace {
+    SameEpisodeAdvanced,
+    SuccessorEpisode,
+    SameNonceOtherAllocation,
+}
+
+/// A change that lands while the transition waits on its last fence refuses the N2 save: the
+/// row keeps whatever the racing writer left, and the claim's own fresh actor is released.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn synthetic_readoption_replaced_episode_7219() {
+    use crate::services::discord::tui_prompt_relay::synthetic_start::bridge_handoff;
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let races = [
+        FenceRace::SameEpisodeAdvanced,
+        FenceRace::SuccessorEpisode,
+        FenceRace::SameNonceOtherAllocation,
+    ];
+    for (index, race) in races.into_iter().enumerate() {
+        let fixture = Fixture::new(root.path(), 7_219_721 + 10 * index as u64);
+        let persisted = fixture.seed_persisted_episode(Some("lost-allocation-n1"));
+        let pause = || {
+            let (entered, resume) = (
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(tokio::sync::Notify::new()),
+            );
+            *bridge_handoff::PREPARE_PAUSE.lock().unwrap() =
+                Some((fixture.channel.get(), entered.clone(), resume.clone()));
+            (entered, resume)
+        };
+        let (prepared, resume_prepared) = pause();
+        let racer = async {
+            let wait = std::time::Duration::from_secs(5);
+            tokio::time::timeout(wait, prepared.notified())
+                .await
+                .unwrap();
+            let (refreshing, resume_refresh) = pause();
+            resume_prepared.notify_one();
+            tokio::time::timeout(wait, refreshing.notified())
+                .await
+                .expect("the re-adoption reached its last fence");
+            let mut impostor = None;
+            match race {
+                FenceRace::SameEpisodeAdvanced => {
+                    let mut advanced = persisted.clone();
+                    advanced.full_response = "the same episode moved on".into();
+                    inflight::save_inflight_state(&advanced).unwrap();
+                }
+                FenceRace::SuccessorEpisode => {
+                    let mut successor = persisted.clone();
+                    successor.turn_nonce = Some("successor-episode".into());
+                    successor.born_generation += 1;
+                    inflight::save_inflight_state(&successor).unwrap();
+                }
+                FenceRace::SameNonceOtherAllocation => {
+                    let admitted = crate::services::discord::mailbox_snapshot(
+                        &fixture.shared,
+                        fixture.channel,
+                    )
+                    .await
+                    .cancel_token
+                    .unwrap();
+                    let other = Arc::new(CancelToken::from_persisted_turn_nonce(
+                        admitted.turn_nonce().map(str::to_owned),
+                    ));
+                    crate::services::discord::mailbox_finish_turn(
+                        &fixture.shared,
+                        &fixture.provider,
+                        fixture.channel,
+                    )
+                    .await;
+                    assert!(
+                        crate::services::discord::mailbox_try_start_turn(
+                            &fixture.shared,
+                            fixture.channel,
+                            other.clone(),
+                            serenity::UserId::new(1),
+                            fixture.anchor,
+                        )
+                        .await
+                    );
+                    impostor = Some(other);
+                }
+            }
+            let raced = serde_json::to_vec(&fixture.row()).unwrap();
+            resume_refresh.notify_one();
+            (raced, impostor)
+        };
+        let (claim, (raced, impostor)) = tokio::join!(
+            claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)),
+            racer
+        );
+        assert!(!claim.claimed, "{race:?}: the late N2 save was accepted");
+        assert_eq!(
+            serde_json::to_vec(&fixture.row()).unwrap(),
+            raced,
+            "{race:?}: the racing row was overwritten"
+        );
+        let slot = crate::services::discord::mailbox_snapshot(&fixture.shared, fixture.channel)
+            .await
+            .cancel_token;
+        match impostor {
+            Some(other) => assert!(
+                slot.is_some_and(|held| Arc::ptr_eq(&held, &other)),
+                "{race:?}: the other allocation lost its slot"
+            ),
+            None => assert!(
+                slot.is_none(),
+                "{race:?}: the refused fresh actor kept the slot"
+            ),
+        }
+    }
+}

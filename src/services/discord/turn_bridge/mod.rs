@@ -449,8 +449,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         // #3805: pinned panel epoch; create bumps it and completion proves it.
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
-        let mut resumed_placeholder_clear_applied = false;
-        let mut entry_was_rowless = false;
+        let (mut resumed_placeholder_clear_applied, mut entry_was_rowless) = (false, false);
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
@@ -461,6 +460,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 bridge_created_placeholder: &mut bridge_created_response_placeholder_msg_id,
                 last_edit_text: &mut last_edit_text,
                 resumed_placeholder_clear_applied: &mut resumed_placeholder_clear_applied,
+                captured_nonce: cancel_token.turn_nonce(),
             },
             bridge_entry_persist::BridgeEntryRuntimeState {
                 inflight_state: &mut inflight_state,

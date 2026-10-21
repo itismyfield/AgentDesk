@@ -417,6 +417,7 @@ mod tests {
                 state.channel_id,
                 &identity,
                 state.turn_start_offset,
+                state.turn_nonce.as_deref(),
             ),
             None,
             "id-0 anchor reuse must fail closed when the row lacks turn_start_offset"
@@ -425,8 +426,11 @@ mod tests {
             bind_recovery_anchor_if_matches_identity(
                 &provider,
                 state.channel_id,
-                &identity,
-                state.turn_start_offset,
+                (
+                    &identity,
+                    state.turn_start_offset,
+                    state.turn_nonce.as_deref()
+                ),
                 state.current_msg_id,
                 Some(state.current_msg_len),
                 88_006,

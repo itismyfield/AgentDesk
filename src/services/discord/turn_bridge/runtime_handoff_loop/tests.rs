@@ -79,6 +79,7 @@ async fn dispatch_process_handoff_with_pin(
     });
     let mut last_activity_heartbeat_at = None;
     let mut watcher_adopted_after_done = false;
+    let actor_nonce = state.turn_nonce.clone();
 
     let outcome = handle_runtime_handoff_loop_message(
         message,
@@ -88,6 +89,7 @@ async fn dispatch_process_handoff_with_pin(
             channel_id,
             done,
             adk_session_name: &None,
+            captured_nonce: actor_nonce.as_deref(),
         },
         RuntimeHandoffLoopState {
             terminal_control_ready_observed: &mut terminal_control_ready_observed,

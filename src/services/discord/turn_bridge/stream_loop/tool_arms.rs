@@ -50,7 +50,7 @@ pub(super) async fn handle_stream_tool_message(
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;
-    let current_msg_id = &mut *ctx.current_msg_id;
+    let (current_msg_id, captured_nonce) = (&mut *ctx.current_msg_id, ctx.captured_nonce);
 
     let mut state_dirty = *state.state_dirty;
     let inflight_state = &mut *state.inflight_state;
@@ -321,6 +321,7 @@ pub(super) async fn handle_stream_tool_message(
                     confirmed_offset,
                     any_tool_used: &mut any_tool_used,
                     has_post_tool_text: &mut has_post_tool_text,
+                    captured_nonce,
                 });
                 restart_visible_authority = Some(authority);
                 authority == VisibleMutationAuthority::Authorized
@@ -389,6 +390,7 @@ pub(super) async fn handle_stream_tool_message(
                     confirmed_offset,
                     any_tool_used: &mut any_tool_used,
                     has_post_tool_text: &mut has_post_tool_text,
+                    captured_nonce,
                 },
                 &long_running_placeholder_active,
                 &pending_long_running_retarget_after_state_save,

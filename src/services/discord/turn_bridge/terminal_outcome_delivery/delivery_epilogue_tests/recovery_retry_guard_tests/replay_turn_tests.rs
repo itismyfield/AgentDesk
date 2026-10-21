@@ -283,6 +283,8 @@ async fn bridge_turn_with(
     driver.inflight.channel_id = channel.get();
     driver.inflight.user_msg_id = user.get();
     prepare(&mut driver.inflight);
+    // Intake stamps the row with the nonce of the token the bridge then runs under.
+    driver.inflight.turn_nonce = cancel.turn_nonce().map(str::to_owned);
     crate::services::discord::inflight::save_inflight_state(&driver.inflight).unwrap();
     let started_turn = crate::services::discord::mailbox_try_start_turn(
         &shared,

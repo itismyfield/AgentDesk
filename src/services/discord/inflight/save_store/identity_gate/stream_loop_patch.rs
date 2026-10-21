@@ -1,34 +1,6 @@
+use super::stamp_merge::{apply_local_change_if_durable_unchanged, merge_stream_response_progress};
 use super::*;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
-
-fn apply_local_change_if_durable_unchanged<T: Clone + PartialEq>(
-    before: &T,
-    local: &T,
-    durable: &mut T,
-) {
-    if local != before && (durable == before || durable == local) {
-        durable.clone_from(local);
-    }
-}
-
-fn merge_stream_response_progress(
-    before: (&str, usize),
-    local: (&str, usize),
-    durable: (&str, usize),
-) -> Option<(String, usize)> {
-    let (local_body, local_offset) = local;
-    let (durable_body, durable_offset) = durable;
-    if local == before {
-        return Some((durable_body.to_string(), durable_offset));
-    }
-    if durable == before {
-        return Some((local_body.to_string(), local_offset));
-    }
-    super::merge_forward_response_progress(
-        (durable_body, durable_offset),
-        (local_body, local_offset),
-    )
-}
 
 /// Exact durable relay-authority projection used by the stream loop's
 /// lock-held visible-mutation fence.  A non-bridge projection can be a valid
@@ -169,16 +141,21 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     if !expected.matches_state(state) || !expected.matches_state(persisted_baseline) {
         return GuardedSaveOutcome::AuthorityPinned;
     }
+    let captured_nonce = state.turn_nonce.clone();
+    if !persisted_baseline.owned_by_turn_nonce(captured_nonce.as_deref()) {
+        return GuardedSaveOutcome::SuccessorOwned;
+    }
     let path = inflight_state_path(root, &provider, state.channel_id);
     let Ok(_lock) = crate::services::discord::inflight::store::try_lock_inflight_state_path(&path)
     else {
         return GuardedSaveOutcome::IoError;
     };
-    let on_disk = match super::read_inflight_state_for_guarded_write(
+    let on_disk = match super::read_owned_row_for_guarded_write(
         &path,
         &provider,
         state.channel_id,
         expected,
+        captured_nonce.as_deref(),
         caller,
     ) {
         Ok(on_disk) => on_disk,
@@ -222,8 +199,8 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         // A durable current-message epoch change is NOT rejected on its own.
         // What `authority_changed` above rules out is a changed relay-owner
         // triple. What rules out a DURABLE row belonging to another turn is the
-        // lock-held reload plus `:194-197` (`restart_mode` / `rebind_origin` /
-        // `expected.matches_state(&on_disk)`); `:169` is a separate check on the
+        // nonce-checked reload plus its refusal (`restart_mode` / `rebind_origin` /
+        // `expected.matches_state(&on_disk)`); the entry check is a separate one on the
         // two IN-MEMORY snapshots (`state` / `persisted_baseline`) and says
         // nothing about the row on disk. What is left is an epoch advance by a
         // writer that left both our identity fields and the relay-owner triple
@@ -246,14 +223,14 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         // `StrictBridgeMutation` callers — that is the shipped behaviour change
         // — but it is the same KIND of residual that `MergeConcurrentOwner`
         // already carries unguarded, since that mode skips this whole
-        // `:204-265` block and goes straight to the same merge.
+        // strict block and goes straight to the same merge.
         //
         // The epoch change deliberately gets no adopt-and-return branch of its
         // own: it falls through to the three-way merge below, so the BODY that
         // rides along with it stays subject to `merge_stream_response_progress`
         // — the only prefix-compatibility / forward-progress check in this
         // file, and a body-only one. The epoch itself gets no monotonicity
-        // check anywhere here; `:267` takes `on_disk`'s epoch as given. A
+        // check anywhere here; the merge below takes `on_disk`'s epoch as given. A
         // branch that adopted `on_disk` wholesale would additionally bypass the
         // body check and report `Saved` without writing anything.
         if !baseline_authority.bridge_owns_relay() {

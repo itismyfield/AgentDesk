@@ -519,6 +519,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
     let mut bridge_created_candidate = Some(current_msg_id);
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = persist_stream_tick_state_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -532,6 +533,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::io_error_candidate_test",
     )
@@ -540,6 +542,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
     assert_eq!(pending_candidate, Some(MessageId::new(2)));
     assert!(gateway.deletes.lock().expect("deletes lock").is_empty());
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     assert!(
         !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -553,6 +556,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -585,6 +589,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut bound_current = MessageId::new(2);
     let mut bound_pending = Some(bound_current);
     let mut bound_created = Some(bound_current);
+    let actor_nonce = bound_baseline.turn_nonce.clone();
     assert!(
         settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -598,6 +603,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             current_msg_id: &mut bound_current,
             pending_current_message_candidate: &mut bound_pending,
             bridge_created_response_placeholder_msg_id: &mut bound_created,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -626,6 +632,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut competing_current = MessageId::new(3);
     let mut competing_pending = Some(competing_current);
     let mut competing_created = Some(competing_current);
+    let actor_nonce = competing_baseline.turn_nonce.clone();
     assert!(
         settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -639,6 +646,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             current_msg_id: &mut competing_current,
             pending_current_message_candidate: &mut competing_pending,
             bridge_created_response_placeholder_msg_id: &mut competing_created,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -660,6 +668,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut stale_current = MessageId::new(4);
     let mut stale_pending = Some(stale_current);
     let mut stale_created = Some(stale_current);
+    let actor_nonce = stale_baseline.turn_nonce.clone();
     assert!(
         persist_stream_tick_state_with_candidate_cleanup(
             StreamTickCandidateSaveContext {
@@ -674,6 +683,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
                 current_msg_id: &mut stale_current,
                 pending_current_message_candidate: &mut stale_pending,
                 bridge_created_response_placeholder_msg_id: &mut stale_created,
+                captured_nonce: actor_nonce.as_deref(),
             },
             "turn_bridge::stream_tick::candidate_reowned_test",
         )
@@ -701,6 +711,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut missing_current = MessageId::new(5);
     let mut missing_pending = Some(missing_current);
     let mut missing_created = Some(missing_current);
+    let actor_nonce = missing_baseline.turn_nonce.clone();
     assert_eq!(
         persist_stream_tick_state_with_candidate_cleanup(
             StreamTickCandidateSaveContext {
@@ -715,6 +726,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
                 current_msg_id: &mut missing_current,
                 pending_current_message_candidate: &mut missing_pending,
                 bridge_created_response_placeholder_msg_id: &mut missing_created,
+                captured_nonce: actor_nonce.as_deref(),
             },
             "turn_bridge::stream_tick::candidate_missing_test",
         )
@@ -758,6 +770,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
     let intended_authority =
         crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -771,6 +784,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::strict_authority_interleaving_test",
     )
@@ -883,6 +897,7 @@ async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epo
     let mut bridge_created_candidate = Some(current_msg_id);
 
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -896,6 +911,7 @@ async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epo
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::abandoned_local_rollover_test",
     )
@@ -960,6 +976,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     let intended_authority =
         crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -973,6 +990,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::second_rollover_bind_test",
     )
@@ -985,6 +1003,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     assert_eq!(pending_candidate, Some(MessageId::new(3)));
     assert!(gateway.deletes.lock().expect("deletes lock").is_empty());
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     assert!(
         !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -998,6 +1017,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -1046,4 +1066,53 @@ fn heartbeat_touches_same_owner_but_skips_successor() {
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
         assert_eq!(persisted.user_msg_id, 99_999);
     });
+}
+
+/// A local the successor's row already overwrote carries the successor's nonce on both sides, so
+/// only the bridge actor's own start nonce can refuse the exit flush that would bind it.
+#[tokio::test(flavor = "current_thread")]
+async fn exit_flush_nonce_collision_7219() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+    let channel = ChannelId::new(7_219_201);
+    let successor = owner_state(channel.get(), 77_010);
+    save_inflight_state(&successor).expect("seed the successor episode");
+    let path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Codex,
+        channel.get(),
+    );
+    let successor_bytes = std::fs::read(&path).unwrap();
+    let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&successor);
+    let mut baseline = successor.clone();
+    let mut local = successor.clone();
+    local.current_msg_id = 2;
+    local.current_msg_len = 10;
+    let (mut expected_message, mut current) = ((0, 0), MessageId::new(2));
+    let (mut pending, mut created) = (Some(current), Some(current));
+    assert_ne!(successor.turn_nonce.as_deref(), Some("bridge-actor-a"));
+    assert!(
+        !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+            gateway: &gateway,
+            provider: &ProviderKind::Codex,
+            token_hash: "exit-flush-nonce-7219",
+            channel_id: channel,
+            persisted_baseline: &mut baseline,
+            inflight_state: &mut local,
+            expected_identity: &expected,
+            expected_current_message: &mut expected_message,
+            current_msg_id: &mut current,
+            pending_current_message_candidate: &mut pending,
+            bridge_created_response_placeholder_msg_id: &mut created,
+            captured_nonce: Some("bridge-actor-a"),
+        })
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), successor_bytes);
+    assert_eq!(pending, None);
+    assert_eq!(
+        gateway.deletes.lock().expect("deletes lock").as_slice(),
+        &[2]
+    );
 }

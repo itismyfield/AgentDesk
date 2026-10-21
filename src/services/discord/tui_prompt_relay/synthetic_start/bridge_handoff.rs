@@ -230,6 +230,8 @@ pub(super) async fn refresh_existing(
     let (actor, freshly_admitted, fence) = admission;
     use super::super::super::inflight;
     let pg_pin = original_session_pin(&row, actor).unwrap_or(pg_pin);
+    // Pin, nonce and version of the episode as classified, fixed before any mutation below.
+    let original = row.clone();
     let expected = inflight::InflightTurnIdentity::from_state(&row);
     let start = row.turn_start_offset.unwrap_or(row.last_offset);
     if !row_matches_fence(&row, lease, fence).await {
@@ -260,12 +262,26 @@ pub(super) async fn refresh_existing(
         }
         return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start);
     }
-    // Preserve the original source boundary and both consumed/delivered progress.
-    let saved = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
-        &row,
-        &expected,
-        "tui_direct_synthetic_refresh",
+    let anchor = (
+        ChannelId::new(row.channel_id),
+        MessageId::new(row.user_msg_id),
     );
+    let actor_current = match actor {
+        Some(actor) => actor_is_current(shared, anchor.0, anchor.1, actor).await,
+        None => false,
+    };
+    // Preserve the original source boundary and both consumed/delivered progress.
+    let saved = if !actor_current {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if row.turn_nonce == original.turn_nonce {
+        inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+            &row,
+            &expected,
+            "tui_direct_synthetic_refresh",
+        )
+    } else {
+        original.save_admitted_nonce_transition(&row, "tui_direct_synthetic_refresh")
+    };
     let claimed = if saved == GuardedSaveOutcome::Saved {
         record_admitted(shared, &row, actor, pg_pin, freshly_admitted).await
     } else {

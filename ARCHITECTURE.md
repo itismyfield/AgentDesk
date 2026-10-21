@@ -1253,12 +1253,15 @@ src/
 │   │   │   │   │   │   ├── claude_terminal_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
-│   │   │   │   │   │   └── herdr_terminal_restart_tests.rs
+│   │   │   │   │   │   ├── herdr_terminal_restart_tests.rs
+│   │   │   │   │   │   └── stamp_guard.rs
 │   │   │   │   │   ├── bridge_entry.rs
+│   │   │   │   │   ├── captured_nonce.rs
 │   │   │   │   │   ├── completion_preserve.rs
 │   │   │   │   │   ├── guarded_read.rs
 │   │   │   │   │   ├── heartbeat.rs
 │   │   │   │   │   ├── host_locator.rs
+│   │   │   │   │   ├── nonce_collision_tests.rs
 │   │   │   │   │   ├── runtime_stamp.rs
 │   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
@@ -1516,6 +1519,8 @@ src/
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   └── replay_hold_tests.rs
+│   │   │   ├── terminal_text_idempotency/
+│   │   │   │   └── anchor_identity.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -2212,8 +2217,9 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
-│   │   │   │   └── tests/
-│   │   │   │       └── source_guard_tests.rs
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   └── identity_and_owner.rs
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   ├── completion_postgres.rs
