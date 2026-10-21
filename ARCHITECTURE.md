@@ -879,7 +879,9 @@ src/
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
 │   ├── codex_tmux_wrapper/
-│   │   └── input.rs
+│   │   ├── deferred_error.rs
+│   │   ├── input.rs
+│   │   └── reconnect_tests.rs
 │   ├── codex_tui/
 │   │   ├── busy_inject/
 │   │   │   ├── inject_tests.rs
