@@ -161,20 +161,8 @@ async fn request(
     )
 }
 
-async fn ready(pool: &sqlx::PgPool) {
-    let caps = json!({"scheduled_messages":{"image_consumer_v1":true,"discord_mention_consumer_v1":true},"message_outbox":{"image_consumer_v1":true}});
-    for id in ["book", "mini"] {
-        sqlx::query("INSERT INTO worker_nodes (instance_id, capabilities) VALUES ($1,$2)")
-            .bind(id)
-            .bind(&caps)
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-}
-
 #[tokio::test]
-async fn postgres_image_api_create_patch_rollout_and_redaction() {
+async fn postgres_image_api_create_patch_and_redaction() {
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "image_api_activation",
         "image API activation",
@@ -185,18 +173,11 @@ async fn postgres_image_api_create_patch_rollout_and_redaction() {
     let app = crate::server::routes::domains::ops::router(state.clone()).with_state(state);
     let image = upload(b"\x89PNG\r\n\x1a\nexact API bytes");
     let body = json!({"content":"body", "targetChannelId":"7001", "scheduledAt":"2030-01-01T00:00:00Z", "dedupeKey":"image-api", "imageAttachment":image});
-    assert_eq!(
-        request(&app, "POST", "/scheduled-messages", body.clone())
-            .await
-            .0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    ready(&pool).await;
     let (status, response) = request(&app, "POST", "/scheduled-messages", body.clone()).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "image create must activate for upgraded consumers: {response}"
+        "image create must succeed: {response}"
     );
     let id = response["scheduledMessage"]["id"].as_str().unwrap();
     assert_eq!(
@@ -229,24 +210,12 @@ async fn postgres_image_api_create_patch_rollout_and_redaction() {
         metadata.image_attachment.unwrap().data.is_none(),
         "GET metadata loader must omit bytes"
     );
-    sqlx::query("UPDATE worker_nodes SET capabilities=capabilities-'message_outbox' WHERE instance_id='mini'").execute(&pool).await.unwrap();
-    assert_eq!(
-        request(&app, "PATCH", &path, json!({"title":"gate closed"}))
-            .await
-            .0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
     assert_eq!(
         request(&app, "PATCH", &path, json!({"imageAttachment":null}))
             .await
             .0,
         StatusCode::OK
     );
-    sqlx::query("UPDATE worker_nodes SET capabilities=capabilities || $1 WHERE instance_id='mini'")
-        .bind(json!({"message_outbox":{"image_consumer_v1":true}}))
-        .execute(&pool)
-        .await
-        .unwrap();
     assert_eq!(
         request(
             &app,
@@ -314,7 +283,6 @@ async fn postgres_image_route_body_limit_and_eight_mib_boundary() {
     )
     .await;
     let pool = db.connect_and_migrate_with_max_connections(4).await;
-    ready(&pool).await;
     let state = state(pool.clone());
     let app = crate::server::routes::domains::ops::router(state.clone()).with_state(state);
     let mut bytes = vec![0; crate::db::scheduled_messages::MAX_IMAGE_BYTES];
@@ -351,6 +319,149 @@ async fn postgres_image_route_body_limit_and_eight_mib_boundary() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "scheduled body limit must stay route-local"
     );
+    pool.close().await;
+    db.drop().await;
+}
+
+async fn outbox_bytes(pool: &sqlx::PgPool, id: &str) -> Vec<u8> {
+    sqlx::query_scalar("SELECT attachment_data FROM message_outbox WHERE reason_code LIKE $1")
+        .bind(format!("scheduled_message:v1:{id}:%"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn image_stale_registry_does_not_block_create_patch_fire_pg() {
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "image_stale_registry",
+        "image activation ignores worker registry",
+    )
+    .await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    let mut state = state(pool.clone());
+    state.health_registry = Some(std::sync::Arc::new(
+        crate::services::discord::health::HealthRegistry::new(),
+    ));
+    let app = crate::server::routes::domains::ops::router(state.clone()).with_state(state);
+    let caps =
+        crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state(
+            &json!({}),
+        );
+    let stale = "INSERT INTO worker_nodes (instance_id,status,last_heartbeat_at) VALUES
+        ('old-offline','offline',NOW()-INTERVAL '90 days'),
+        ('old-online','online',NOW()-INTERVAL '90 days'),
+        ('never-beat','online',NULL)";
+    for (shape, current, stale_rows, registered) in [
+        ("empty", false, false, 0),
+        ("single", true, false, 1),
+        ("stale-only", false, true, 3),
+        ("current-plus-stale", true, true, 4),
+    ] {
+        sqlx::query("DELETE FROM worker_nodes")
+            .execute(&pool)
+            .await
+            .unwrap();
+        if current {
+            sqlx::query("INSERT INTO worker_nodes (instance_id,capabilities,last_heartbeat_at) VALUES ('current',$1,NOW())")
+                .bind(&caps).execute(&pool).await.unwrap();
+        }
+        if stale_rows {
+            sqlx::query(stale).execute(&pool).await.unwrap();
+        }
+        let first = [&b"\x89PNG\r\n\x1a\n"[..], shape.as_bytes(), b" create"].concat();
+        let replaced = [&b"\x89PNG\r\n\x1a\n"[..], shape.as_bytes(), b" patch"].concat();
+        let body = json!({"content":"body", "targetChannelId":"7001",
+            "scheduledAt":"2030-01-01T00:00:00Z", "imageAttachment":upload(&first)});
+        let (status, created) = request(&app, "POST", "/scheduled-messages", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{shape} create: {created}");
+        let id = created["scheduledMessage"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = format!("/scheduled-messages/{id}");
+        for patch in [
+            json!({"title":"keeps image"}),
+            json!({"imageAttachment":upload(&replaced)}),
+        ] {
+            let (status, response) = request(&app, "PATCH", &path, patch).await;
+            assert_eq!(status, StatusCode::OK, "{shape} PATCH: {response}");
+        }
+        let (status, response) = request(
+            &app,
+            "POST",
+            &format!("{path}/trigger-now"),
+            JsonValue::Null,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "{shape} trigger-now: {response}"
+        );
+        let mut parent = String::new();
+        for _ in 0..200 {
+            parent = sqlx::query_scalar("SELECT status FROM scheduled_messages WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if parent != "firing" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(parent, "sent", "{shape} trigger-now fire must hand off");
+        assert_eq!(
+            outbox_bytes(&pool, &id).await,
+            replaced,
+            "{shape} trigger-now bytes"
+        );
+
+        let due = json!({"content":"body", "targetChannelId":"7001",
+            "scheduledAt":(chrono::Utc::now()-chrono::Duration::seconds(1)).to_rfc3339(),
+            "imageAttachment":upload(&first)});
+        let (status, created) = request(&app, "POST", "/scheduled-messages", due).await;
+        assert_eq!(status, StatusCode::CREATED, "{shape} due create: {created}");
+        let due_id = created["scheduledMessage"]["id"].as_str().unwrap();
+        let fires = crate::db::scheduled_messages::claim_due_fires_pg(
+            &pool,
+            "stale-registry-scheduler",
+            true,
+            10,
+            crate::services::scheduled_messages::LEASE_SECS,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fires.len(), 1, "{shape} scheduler claim");
+        for fire in fires {
+            crate::services::scheduled_messages::fire_claimed(
+                &pool,
+                None,
+                fire,
+                chrono::Utc::now(),
+            )
+            .await;
+        }
+        let parent: String =
+            sqlx::query_scalar("SELECT status FROM scheduled_messages WHERE id=$1")
+                .bind(due_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(parent, "sent", "{shape} scheduler fire must hand off");
+        assert_eq!(
+            outbox_bytes(&pool, due_id).await,
+            first,
+            "{shape} scheduler bytes"
+        );
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM worker_nodes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, registered, "{shape} registry rows stay in place");
+    }
     pool.close().await;
     db.drop().await;
 }

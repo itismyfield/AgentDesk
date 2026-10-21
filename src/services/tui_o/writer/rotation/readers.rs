@@ -193,7 +193,9 @@ impl<B: BindingEvents> Sources<B> {
         // Clear ends published while the actor was down, and proofs boot put to sleep, apply now.
         self.clear_due = !crate::services::tui_o::store::clear_end::mutant("resume_settle_off");
         self.settle_cleared(writer)?;
-        self.wake_resumed_proofs(writer)
+        self.wake_resumed_proofs(writer)?;
+        self.reconcile_boundary_pending(writer);
+        Ok(())
     }
 
     pub fn tend<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(

@@ -56,6 +56,7 @@ src/db/session_transcripts_native_clear_tests.rs
 src/dispatch/dispatch_cancel.rs
 src/dispatch/dispatch_context.rs
 src/dispatch/dispatch_status.rs
+src/dispatch/dispatch_status/auto_queue_terminal_sync_policy_tests/migration_value_pg_tests.rs
 src/dispatch/dispatch_status/terminal_timestamp_tests.rs
 src/engine/ops/auto_queue_ops.rs
 src/engine/ops/config_ops.rs
@@ -361,6 +362,7 @@ src/services/message_outbox_recovery_tests.rs
 src/services/observability/queries.rs
 src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
+src/services/onboarding/canonical_status_tests/migration_value_pg_tests.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
 src/services/routines/agent_executor/execution.rs
@@ -462,6 +464,7 @@ db::session_transcripts::native_clear_pg_tests
 dispatch::dispatch_cancel::pg_observability_tests
 dispatch::dispatch_context::pg_rereview_tests
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests
+dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::migration_value_pg_tests
 dispatch::dispatch_status::terminal_timestamp_tests
 engine::ops::auto_queue_ops::tests
 engine::ops::config_ops::tests
@@ -786,6 +789,7 @@ services::message_outbox_recovery_tests
 services::observability::queries::alert_authority_tests
 services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
+services::onboarding::canonical_status_tests::migration_value_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
 services::routines::agent_executor::execution::pg_tests
@@ -1236,7 +1240,7 @@ db::scheduled_messages::attachments_pg_tests::postgres_image_attachment_storage_
 db::scheduled_messages::attachments_pg_tests::postgres_image_decoder_rejects_corrupt_metadata_projection
 db::scheduled_messages::attachments_pg_tests::postgres_image_list_cannot_enter_attachment_handoff
 db::scheduled_messages::image_lifecycle::tests::postgres_image_retention_job_wiring_pg
-db::scheduled_messages::image_lifecycle::tests::postgres_image_rollout_includes_offline_members_and_outbox_consumers
+db::scheduled_messages::image_lifecycle::tests::postgres_old_scheduled_image_claim_is_rejected_and_capability_is_transaction_local
 db::scheduled_messages::image_lifecycle::tests::postgres_terminal_image_retention_reclaims_one_shots_and_preserves_recurring
 db::scheduled_messages::postgres_tests::postgres_agent_claim_waits_for_runtime_and_cancel_fences_turn_start
 db::scheduled_messages::postgres_tests::postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
@@ -1298,6 +1302,7 @@ dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgre
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::finalize_and_patch_reject_nonblank_legacy_provenance
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::normal_finalize_infers_legacy_default_only_from_persisted_null_kind
 dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::patch_completion_reconstructs_legacy_default_and_clears_gate
+dispatch::dispatch_status::auto_queue_terminal_sync_policy_tests::migration_value_pg_tests::migration_status_normalization_and_constraints_match_values_pg
 dispatch::dispatch_status::terminal_timestamp_tests::postgres_terminal_timestamps_preserve_first_finish_and_respect_touch_flag
 engine::ops::auto_queue_ops::tests::complete_run_wrapper_preserves_refused_slot_and_atomically_releases_success_pg
 engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precedence_and_fail_closed_contract
@@ -1479,7 +1484,8 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_dispatch_unobserved_reply_unreachable_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_purge_without_global_mirror_is_unknown_pg
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
-server::routes::scheduled_messages::image_input::tests::postgres_image_api_create_patch_rollout_and_redaction
+server::routes::scheduled_messages::image_input::tests::image_stale_registry_does_not_block_create_patch_fire_pg
+server::routes::scheduled_messages::image_input::tests::postgres_image_api_create_patch_and_redaction
 server::routes::scheduled_messages::image_input::tests::postgres_image_route_body_limit_and_eight_mib_boundary
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_create_persists_trimmed_explicit_bot
 server::routes::scheduled_messages::postgres_tests::postgres_scheduled_message_explicit_target_still_requires_agent_primary_channel
@@ -2812,6 +2818,7 @@ services::observability::queries::alert_authority_tests::rollup_is_aggregation_o
 services::observability::recovery_audit::tests::recovery_audit_pg_tests::recovery_audit_round_trips_and_fetches_by_turn
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_persists_round_trip
+services::onboarding::canonical_status_tests::migration_value_pg_tests::onboarding_status_is_accepted_by_migrated_constraint_pg
 services::pipeline_override::pipeline_override_pg_tests::agent_write_is_not_blocked_by_an_undeclared_key_in_the_repo_override
 services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_dangling_repo_assigned_card_context_when_repo_pair_valid
 services::pipeline_override::pipeline_override_pg_tests::agent_write_rejects_standalone_assigned_card_context_when_repo_pair_valid
@@ -2850,11 +2857,9 @@ services::scheduled_messages::postgres_tests::postgres_agent_trigger_now_retry_p
 services::scheduled_messages::postgres_tests::postgres_bound_cc_target_uses_claude_and_cc_owner_channel
 services::scheduled_messages::postgres_tests::postgres_cancel_before_push_handoff_enqueues_nothing
 services::scheduled_messages::postgres_tests::postgres_definitive_agent_failure_atomically_enqueues_one_fallback
-services::scheduled_messages::postgres_tests::postgres_dormant_image_fire_fails_without_discord_or_kakao_handoff
 services::scheduled_messages::postgres_tests::postgres_expired_running_agent_never_enqueues_raw_fallback
 services::scheduled_messages::postgres_tests::postgres_expiry_does_not_terminalize_a_still_live_agent_turn
 services::scheduled_messages::postgres_tests::postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes
-services::scheduled_messages::postgres_tests::postgres_image_rollout_query_error_interrupts_and_rearms_parent
 services::scheduled_messages::postgres_tests::postgres_launch_compat_migration_backfills_legacy_turn_as_ambiguous
 services::scheduled_messages::postgres_tests::postgres_missing_runtime_waits_without_consuming_agent_retry
 services::scheduled_messages::postgres_tests::postgres_provider_error_transcripts_fail_without_false_delivery

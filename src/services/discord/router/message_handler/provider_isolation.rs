@@ -838,9 +838,13 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
 #[cfg(all(test, unix))]
 #[path = "provider_isolation_host_tests.rs"]
 mod host_tests;
+#[cfg(test)]
+#[path = "provider_isolation_source_guard_tests.rs"]
+mod source_guard_tests;
 
 #[cfg(test)]
 mod thread_role_inheritance_tests {
+    use super::source_guard_tests::{HEADLESS_TURN, INTAKE_TURN, raw_seed_gaps, watcher_path_gaps};
     use super::*;
 
     #[test]
@@ -901,10 +905,7 @@ mod thread_role_inheritance_tests {
             (ordinary.3, headless.1.as_deref(), headless.3),
             (9, Some("/runtime/wrapper.jsonl"), 0)
         );
-        assert!(
-            include_str!("headless_turn.rs")
-                .contains("prelaunch_inflight_runtime_seed_without_codex_raw(")
-        );
+        assert_eq!(raw_seed_gaps(HEADLESS_TURN), Vec::<String>::new());
         for invalid in ["session", "kind", "offset", "start", "missing_start"] {
             let (mut marker, mut binding) = (marker.clone(), binding.clone());
             match invalid {
@@ -966,17 +967,8 @@ mod thread_role_inheritance_tests {
             Some(wrapper_path),
             "the dead-row watcher fallback must reconstruct exactly the prelaunch wrapper path",
         );
-        for caller in [
-            include_str!("intake_turn.rs"),
-            include_str!("headless_turn.rs"),
-        ] {
-            assert_eq!(
-                caller
-                    .matches("let watcher_output_path = prelaunch_watcher_output_path(")
-                    .count(),
-                1
-            );
-        }
+        let callers = [INTAKE_TURN, HEADLESS_TURN];
+        assert_eq!(watcher_path_gaps(callers), Vec::<String>::new());
     }
 
     #[test]

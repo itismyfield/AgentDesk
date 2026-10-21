@@ -921,75 +921,18 @@ mod tests {
         }
     }
 
-    // Lexical tripwire only: boot teardown is empty; lagged is not exercised by R1.
-    fn shutdown_site_pattern(site: &str) -> regex::Regex {
-        regex::Regex::new(&format!(r#"let\s+_\s*=\s*observe_relay_shutdown\s*\(\s*handle\s*\.\s*shutdown_with_result\s*\(\s*\)\s*,\s*"{}"\s*,?\s*\)\s*\.\s*await\s*;"#, regex::escape(site))).unwrap()
-    }
+    mod source_guard_tests;
+
     #[test]
     fn shutdown_observation_sites_are_branch_scoped() {
-        let source = include_str!("watcher_supervisor.rs");
-        let boundary = "#[cfg(test)]\nmod tests {";
-        assert_eq!(source.matches(boundary).count(), 1);
-        let production = source.split_once(boundary).unwrap().0;
-        let body = production
-            .split_once("pub async fn run_watcher_supervisor_loop_with_registry_and_producers(")
-            .unwrap()
-            .1;
-        let anchors = [
-            "for handle in initial_teardowns {",
-            "if let Some(handle) = to_shutdown {",
-            "for handle in teardowns {",
-            "for (session, handle) in active.drain() {",
-        ];
-        let sites = [
-            "boot_reconcile",
-            "registry_change",
-            "lagged_reconcile",
-            "final_drain",
-        ];
-        let positions: Vec<_> = anchors
-            .iter()
-            .map(|a| {
-                assert_eq!(body.matches(a).count(), 1);
-                body.find(a).unwrap()
-            })
-            .collect();
-        assert!(positions.windows(2).all(|p| p[0] < p[1]));
-        for (i, site) in sites.iter().enumerate() {
-            let interval = &body[positions[i]..positions.get(i + 1).copied().unwrap_or(body.len())];
-            let pattern = shutdown_site_pattern(site);
-            assert_eq!(pattern.find_iter(interval).count(), 1, "{site}");
-            assert_eq!(interval.matches("observe_relay_shutdown").count(), 1);
-            if i == 3 {
-                assert!(
-                    interval.find("producers.deregister(&session);").unwrap()
-                        < pattern.find(interval).unwrap().start()
-                );
-            }
-        }
-        for call in [
-            r#"let _ = observe_relay_shutdown(handle.shutdown_with_result(), "registry_change").await;"#,
-            "let _ =\n observe_relay_shutdown(\n handle.shutdown_with_result(),\n \"registry_change\",\n )\n .await;",
-        ] {
-            assert!(shutdown_site_pattern("registry_change").is_match(call));
-            assert!(!shutdown_site_pattern("final_drain").is_match(call));
-        }
-        assert!(!shutdown_site_pattern("registry_change").is_match(r#"let _ = tokio::time::timeout(Duration::from_secs(1), observe_relay_shutdown(handle.shutdown_with_result(), "registry_change")).await;"#));
+        let gaps = source_guard_tests::shutdown_site_gaps(source_guard_tests::SUPERVISOR);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]
     fn shutdown_observation_logs_classification_fields() {
-        let source = include_str!("watcher_supervisor.rs");
-        let helper = source
-            .split_once("async fn observe_relay_shutdown(")
-            .unwrap()
-            .1
-            .split_once("/// Full-control variant.")
-            .unwrap()
-            .0;
-        assert_eq!(helper.matches("tracing::info!").count(), 1);
-        let pattern = regex::Regex::new(r#"tracing::info!\s*\(\s*site\s*,\s*outcome\s*,\s*"watcher-supervisor relay shutdown observed; not a delivery acknowledgement"\s*,?\s*\)"#).unwrap();
-        assert!(pattern.is_match(helper));
+        let gaps = source_guard_tests::shutdown_log_gaps(source_guard_tests::SUPERVISOR);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     async fn shutdown_join_error(panic: bool) -> tokio::task::JoinError {

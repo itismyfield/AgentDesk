@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "guard_tests/source_guard_tests.rs"]
+mod source_guard_tests;
+
 #[tokio::test]
 async fn same_slot_originals_overlap_and_both_exclude_recovery() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -793,36 +796,14 @@ async fn row_loss_keeps_original_registration_and_blocks_self_heal_until_both_ow
 
 #[test]
 fn original_and_restore_source_coverage_preserves_admission_order() {
-    for (source, call) in [
-        (
-            include_str!("../router/message_handler/intake_turn.rs"),
-            "register_or_requeue(",
-        ),
-        (
-            include_str!("../router/message_handler/headless_turn.rs"),
-            "register_headless_original(",
-        ),
-    ] {
-        let register = source.find(call).unwrap();
-        let create = source[register..]
-            .find("save_inflight_state_create_new(")
-            .unwrap()
-            + register;
-        let producer = source[create..].find("spawn_blocking(move ||").unwrap() + create;
-        assert!(register < create && create < producer);
-        assert!(!source[register..create].contains("transcript_turns"));
-        assert!(source[producer..].contains("let _original_registration = producer_registration;"));
-        assert!(source.contains("producer_registration = original_registration.clone()"));
+    use source_guard_tests::{ENTRIES, RESTORE, admission_order_gaps, restore_reader_gaps};
+    for (source, entry, call) in ENTRIES {
+        assert_eq!(
+            admission_order_gaps(source, entry, call),
+            Vec::<String>::new()
+        );
     }
-    let restore = include_str!("../recovery_engine/restore_inflight.rs");
-    for reader in ["spawn_observed_tmux_watcher(", "read_restored_output("] {
-        let start = restore.find(reader).unwrap();
-        assert!(restore[..start].contains(if reader.starts_with("spawn") {
-            "reregister_active_turn_from_inflight("
-        } else {
-            "mailbox_recovery_kickoff("
-        }));
-    }
+    assert_eq!(restore_reader_gaps(RESTORE), Vec::<String>::new());
 }
 
 #[tokio::test]

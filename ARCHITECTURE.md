@@ -118,6 +118,8 @@ src/
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── dispatch_failure.rs
 │   │   ├── run_owner_guard/
 │   │   │   └── writes.rs
@@ -273,6 +275,8 @@ src/
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
+│   │   ├── auto_queue_terminal_sync_policy_tests/
+│   │   │   └── migration_value_pg_tests.rs
 │   │   └── terminal_timestamp_tests.rs
 │   ├── completion_hooks.rs
 │   ├── dispatch_cancel.rs
@@ -688,6 +692,7 @@ src/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
 │   │   │   │       ├── session_start_retry_tests.rs
+│   │   │   │       ├── source_guard_tests.rs
 │   │   │   │       └── tq_tests.rs
 │   │   │   ├── ordered_queue.rs
 │   │   │   ├── queue_retention.rs
@@ -796,6 +801,8 @@ src/
 │   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── route_pg_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
@@ -827,6 +834,9 @@ src/
 │   │   │   ├── source_read_proof.rs
 │   │   │   ├── source_read_proof_tests.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── watcher_supervisor/
+│   │   │   └── tests/
+│   │   │       └── source_guard_tests.rs
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
@@ -890,6 +900,7 @@ src/
 │   │   │   └── screen.rs
 │   │   ├── input/
 │   │   │   ├── tests/
+│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── startup_update_tests.rs
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
@@ -902,6 +913,8 @@ src/
 │   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
@@ -913,6 +926,8 @@ src/
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
 │   │   ├── session/
+│   │   │   ├── source_observation_tests/
+│   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
@@ -1016,6 +1031,8 @@ src/
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── text_commands/
+│   │   │   │   ├── command_dispatch_contract_tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
@@ -1213,6 +1230,8 @@ src/
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── loader_gate_observation_tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
 │   │   │   │   ├── boot_custody_tests.rs
 │   │   │   │   ├── boot_reaper.rs
@@ -1291,6 +1310,8 @@ src/
 │   │   │   ├── telemetry.rs
 │   │   │   └── worker.rs
 │   │   ├── live_bridge/
+│   │   │   ├── guard_tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
 │   │   │   └── closed_actor_tests.rs
@@ -1301,6 +1322,9 @@ src/
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
 │   │   ├── model_catalog/
+│   │   │   ├── claude/
+│   │   │   │   └── tests/
+│   │   │   │       └── source_guard_tests.rs
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
@@ -1372,6 +1396,8 @@ src/
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_controller/
 │   │   │   ├── queued_card_gate/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   └── unanswered_tests.rs
 │   │   │   └── queued_card_gate.rs
@@ -1449,6 +1475,8 @@ src/
 │   │   ├── queue_park_ledger/
 │   │   │   ├── cancel_park_tests.rs
 │   │   │   └── promote_hold.rs
+│   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
+│   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
@@ -1592,7 +1620,8 @@ src/
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
-│   │   │   │   │   └── replay_hold.rs
+│   │   │   │   │   ├── replay_hold.rs
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
 │   │   │   │   ├── initial_fresh_tests.rs
@@ -1606,6 +1635,10 @@ src/
 │   │   │   ├── intake_gate/
 │   │   │   │   ├── busy_inject/
 │   │   │   │   │   └── payload_tests.rs
+│   │   │   │   ├── live_intake_preserve_wiring_tests/
+│   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   ├── queue_effects/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── busy_duplicate_notice.rs
 │   │   │   │   ├── busy_inject.rs
 │   │   │   │   ├── busy_inject_test_support.rs
@@ -1627,6 +1660,8 @@ src/
 │   │   │   │   │   ├── process_mailbox/
 │   │   │   │   │   │   ├── bridge_tests.rs
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests/
+│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── entrypoints.rs
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
@@ -1639,6 +1674,8 @@ src/
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
 │   │   │   │   │   │   ├── queued_intake_cause.rs
 │   │   │   │   │   │   └── requeue_tests.rs
+│   │   │   │   │   ├── recovery_context_take_order_tests/
+│   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── runtime_transition/
 │   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
@@ -1694,6 +1731,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── provider_isolation_source_guard_tests.rs
 │   │   │   │   ├── root_replaced_recovery_tests.rs
 │   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
@@ -1715,6 +1753,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── queue_status_presentation.rs
 │   │   │   ├── response_format.rs
+│   │   │   ├── source_guard_support.rs
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
@@ -1785,6 +1824,9 @@ src/
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
+│   │   ├── runtime_store/
+│   │   │   └── generation_allocation_tests/
+│   │   │       └── source_guard_tests.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
@@ -1828,6 +1870,8 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── startup_reclaim/
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
@@ -1891,7 +1935,8 @@ src/
 │   │   ├── tmux_restart_handoff_mailbox_tests/
 │   │   │   └── fresh_start_failure_tests.rs
 │   │   ├── tmux_session_files/
-│   │   │   └── orphan_sweep_tests.rs
+│   │   │   ├── orphan_sweep_tests.rs
+│   │   │   └── source_guard_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1914,6 +1959,7 @@ src/
 │   │   │   │   ├── legacy_state.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   ├── retired_transport_tests.rs
+│   │   │   │   ├── source_guard_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── supervisor_relay/
 │   │   │   │   └── supervisor_frame_source.rs
@@ -2167,6 +2213,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   └── identity_and_owner.rs
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
@@ -2231,6 +2279,7 @@ src/
 │   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── footer_retirement_raw_history_tests.rs
 │   │   │   │   ├── guarded_persist.rs
+│   │   │   │   ├── guarded_persist_source_guard_tests.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
@@ -2241,6 +2290,8 @@ src/
 │   │   │   │   ├── rollover_guard.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
@@ -2280,6 +2331,7 @@ src/
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
 │   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
+│   │   │   │   ├── codex_stop_source_guard_tests.rs
 │   │   │   │   ├── herdr_http_cancel_tests.rs
 │   │   │   │   ├── herdr_stop_pane_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
@@ -2788,6 +2840,8 @@ src/
 │   │   ├── watcher_latency.rs
 │   │   └── worker.rs
 │   ├── onboarding/
+│   │   ├── canonical_status_tests/
+│   │   │   └── migration_value_pg_tests.rs
 │   │   ├── channel.rs
 │   │   ├── mod.rs
 │   │   └── provider.rs
@@ -2929,6 +2983,8 @@ src/
 │   ├── session_forwarding/
 │   │   ├── probe/
 │   │   │   └── tests.rs
+│   │   ├── tests/
+│   │   │   └── source_guard_tests.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs
@@ -3030,6 +3086,8 @@ src/
 │   │   ├── submission.rs
 │   │   └── submission_tmux.rs
 │   ├── tui_o/
+│   │   ├── alarm/
+│   │   │   └── sink.rs
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
@@ -3167,11 +3225,13 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
+│   │   │   ├── codex_launch_cause_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_pg_tests.rs
@@ -3331,6 +3391,8 @@ src/
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
+│   │   │   ├── pane_registration/
+│   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
@@ -3544,6 +3606,8 @@ src/
 │   └── writer_protocol.rs
 ├── supervisor/
 │   └── mod.rs
+├── test_support/
+│   └── source_text_tests.rs
 ├── ui/
 │   ├── ai_screen.rs
 │   └── mod.rs
@@ -3608,7 +3672,8 @@ src/
 ├── queue_contract.rs
 ├── receipt.rs
 ├── reconcile.rs
-└── test_env_panic_probe.rs
+├── test_env_panic_probe.rs
+└── test_support.rs
 ```
 <!-- END GENERATED: SRC TREE -->
 
@@ -3635,6 +3700,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
 | `src/supervisor/` | Runtime supervisor signals and recovery decisions for orphaned or stalled work. |
+| `src/test_support/` | Tests for the test-only Rust source lexer. |
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
 | `src/voice/` | Voice command, STT/TTS, prompt, progress, metrics, receiver, and barge-in helpers. |
@@ -3658,6 +3724,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
 | `src/test_env_panic_probe.rs` | Isolated test-fixture panic and environment restoration probes. |
+| `src/test_support.rs` | Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
 
 ### Discord Runtime

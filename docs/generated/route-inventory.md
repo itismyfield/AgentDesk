@@ -284,11 +284,11 @@
 | `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:429` | `src/server/routes/domains/ops.rs:183` |
 | `GET` | `/api/scheduled-messages` | `scheduled_messages::list_scheduled_messages` | `src/server/routes/scheduled_messages.rs:258` | `src/server/routes/domains/ops.rs:191` |
 | `POST` | `/api/scheduled-messages` | `scheduled_messages::create_scheduled_message` | `src/server/routes/scheduled_messages.rs:92` | `src/server/routes/domains/ops.rs:191` |
-| `DELETE` | `/api/scheduled-messages/{id}` | `scheduled_messages::cancel_scheduled_message` | `src/server/routes/scheduled_messages.rs:638` | `src/server/routes/domains/ops.rs:199` |
+| `DELETE` | `/api/scheduled-messages/{id}` | `scheduled_messages::cancel_scheduled_message` | `src/server/routes/scheduled_messages.rs:637` | `src/server/routes/domains/ops.rs:199` |
 | `GET` | `/api/scheduled-messages/{id}` | `scheduled_messages::get_scheduled_message` | `src/server/routes/scheduled_messages.rs:299` | `src/server/routes/domains/ops.rs:199` |
 | `PATCH` | `/api/scheduled-messages/{id}` | `scheduled_messages::patch_scheduled_message` | `src/server/routes/scheduled_messages.rs:343` | `src/server/routes/domains/ops.rs:199` |
-| `GET` | `/api/scheduled-messages/{id}/deliveries` | `scheduled_messages::list_scheduled_message_deliveries` | `src/server/routes/scheduled_messages.rs:764` | `src/server/routes/domains/ops.rs:212` |
-| `POST` | `/api/scheduled-messages/{id}/trigger-now` | `scheduled_messages::trigger_scheduled_message_now` | `src/server/routes/scheduled_messages.rs:677` | `src/server/routes/domains/ops.rs:208` |
+| `GET` | `/api/scheduled-messages/{id}/deliveries` | `scheduled_messages::list_scheduled_message_deliveries` | `src/server/routes/scheduled_messages.rs:763` | `src/server/routes/domains/ops.rs:212` |
+| `POST` | `/api/scheduled-messages/{id}/trigger-now` | `scheduled_messages::trigger_scheduled_message_now` | `src/server/routes/scheduled_messages.rs:676` | `src/server/routes/domains/ops.rs:208` |
 | `GET` | `/api/session-termination-events` | `termination_events::list_termination_events` | `src/server/routes/termination_events.rs:23` | `src/server/routes/domains/runtime.rs:105` |
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:931` | `src/server/routes/domains/runtime.rs:145` |
 | `GET` | `/api/sessions/{id}/output` | `dispatched_sessions::tmux_output` | `src/server/routes/dispatched_sessions.rs:100` | `src/server/routes/domains/runtime.rs:101` |

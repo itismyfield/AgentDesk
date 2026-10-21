@@ -253,17 +253,7 @@ fn t9_f1_holder_runs_only_a_trusted_fresh_request_and_refusals_send_nothing() {
 
 #[test]
 fn slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there() {
-    let source = include_str!("../../commands/control.rs");
-    let body = source.split("async fn cmd_stop").nth(1).unwrap();
-    let body = body
-        .split("pub(super) fn parse_queued_message_id")
-        .next()
-        .unwrap();
-    let home = body.find("super::stop::gateway_stop_reply(").unwrap();
-    assert_eq!(body.matches("gateway_stop_reply(").count(), 1);
-    assert!(home < body.find("forward_remote_cancel_if_needed(").unwrap());
-    let answered = &body[home..body.find("forward_remote_cancel_if_needed(").unwrap()];
-    assert!(answered.contains("ctx.say(reply)") && answered.contains("return Ok(());"));
+    super::source_guard_tests::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there();
 }
 
 #[test]

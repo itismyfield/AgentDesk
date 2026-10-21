@@ -1264,88 +1264,18 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
 #[cfg(test)]
 mod command_dispatch_contract_tests {
-    fn dispatcher() -> &'static str {
-        include_str!("text_commands.rs")
-            .split_once(
-                "pub(in crate::services::discord) async fn handle_text_command_with_uploads(",
-            )
-            .expect("actual async dispatcher exists")
-            .1
-            .split_once("\n}")
-            .expect("dispatcher ends before test module")
-            .0
-    }
+    mod source_guard_tests;
+    use source_guard_tests::{INTAKE_GATE, TEXT_COMMANDS, dispatch_gaps, skill_alias_gaps};
 
     #[test]
     fn production_selection_drives_the_same_exhaustive_dispatch_id() {
-        let body = dispatcher();
-        let anchors = [
-            "let classified = TextCommandId::from_str(cmd);",
-            "if classified.is_some() && risk.is_high_risk()",
-            "let is_owner = check_owner(msg.author.id, &data.shared).await;",
-            "let high_risk_enabled = super::high_risk_enabled_via_env();",
-            "(is_owner, high_risk_enabled)",
-            "let selected = match select_text_command(classified, is_owner, high_risk_enabled)",
-            "TextCommandSelection::Dispatch(id) => id,",
-            "denied.denial_message(cmd)",
-            "return Ok(true);",
-            "match selected {",
-        ];
-        let mut remaining = body;
-        for anchor in anchors {
-            remaining = remaining.split_once(anchor).expect(anchor).1;
-        }
-        assert!(!body.contains("Ok(false)"));
-        // Nested subcommand wildcards are legitimate; only the outer match is forbidden.
-        assert!(
-            !remaining
-                .lines()
-                .any(|line| line.starts_with("        _ =>"))
-        );
-        assert!(
-            remaining.contains("TextCommandId::Vc => {\n            super::handle_vc_text_command")
-        );
-        assert!(remaining.contains("TextCommandId::Cc | TextCommandId::Skill => {"));
+        assert_eq!(dispatch_gaps(TEXT_COMMANDS), Vec::<String>::new());
     }
 
     #[test]
     fn skill_alias_branches_match_intake_and_preserve_canonical_actions() {
-        let body = dispatcher();
-        let aliases = body
-            .split_once("match skill.as_str() {")
-            .unwrap()
-            .1
-            .split_once("\n            auto_restore_session(")
-            .unwrap()
-            .0;
-        let names: std::collections::BTreeSet<_> = aliases
-            .lines()
-            .filter_map(|line| line.strip_prefix("                \""))
-            .filter_map(|line| line.split_once("\" => {").map(|pair| pair.0))
-            .collect();
-        let intake = include_str!("../router/intake_gate.rs")
-            .split_once("let is_skill_command =")
-            .unwrap()
-            .1
-            .split_once("if !is_skill_command {")
-            .unwrap()
-            .0;
-        let intake_aliases = intake.split_once("skill_name,\n").unwrap().1;
-        let intake_names: std::collections::BTreeSet<_> = intake_aliases
-            .split('"')
-            .enumerate()
-            .filter_map(|(i, name)| (i % 2 == 1).then_some(name))
-            .collect();
-        assert_eq!(names, intake_names);
-        assert_eq!(names.len(), 7);
-        assert!(aliases.contains("Use `!clear` instead."));
-        assert!(aliases.contains("cancel_text_stop_token_mailbox("));
-        assert!(aliases.contains("super::CommandRisk::Mutating,"));
-        for name in ["pwd", "health", "status", "inflight", "help"] {
-            assert!(aliases.contains(&format!(
-                "handle_text_command(ctx, msg, data, channel_id, \"!{name}\")"
-            )));
-        }
+        let gaps = skill_alias_gaps(TEXT_COMMANDS, INTAKE_GATE);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 }
 

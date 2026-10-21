@@ -567,18 +567,52 @@ async fn image_claim_batch_budget_and_old_consumer_barrier_pg() {
             .count(),
         1
     );
-    let row = batch.iter().find(|r| r.id == first).unwrap();
-    let error = sqlx::query(
-        "UPDATE message_outbox SET claim_owner='old-reclaim', claimed_at=NOW() WHERE id=$1",
-    )
-    .bind(row.id)
-    .execute(&pool)
-    .await
-    .unwrap_err();
-    assert_eq!(
-        error.as_database_error().unwrap().code().as_deref(),
-        Some("55000")
-    );
+    let claimed: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(mo) FROM message_outbox mo WHERE id=$1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for (case, reclaim) in [
+        (
+            "owner and claimed_at",
+            "UPDATE message_outbox SET claim_owner='old-reclaim', claimed_at=NOW() WHERE id=$1",
+        ),
+        (
+            "owner only",
+            "UPDATE message_outbox SET claim_owner='old-reclaim' WHERE id=$1",
+        ),
+        (
+            "claimed_at only",
+            "UPDATE message_outbox SET claimed_at=claimed_at-INTERVAL '1 second' WHERE id=$1",
+        ),
+    ] {
+        let error = sqlx::query(reclaim)
+            .bind(first)
+            .execute(&pool)
+            .await
+            .expect_err(case);
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("55000"),
+            "old outbox consumer reclaim ({case}) must be rejected"
+        );
+        let after: (serde_json::Value, String, Vec<u8>) = sqlx::query_as(
+            "SELECT to_jsonb(mo), claim_owner, attachment_data FROM message_outbox mo WHERE id=$1",
+        )
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            after.0, claimed,
+            "rejected reclaim ({case}) must leave the row unchanged"
+        );
+        assert_eq!(
+            (after.1.as_str(), after.2.as_slice()),
+            ("budget-new", image().data)
+        );
+    }
     pool.close().await;
     db.drop().await;
 }
@@ -625,18 +659,6 @@ async fn image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg() {
     use base64::Engine as _;
     use serde_json::json;
     let (db, pool) = image_pool().await;
-    let caps =
-        crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state(
-            &json!({}),
-        );
-    for id in ["book", "mini"] {
-        sqlx::query("INSERT INTO worker_nodes (instance_id,capabilities) VALUES ($1,$2)")
-            .bind(id)
-            .bind(&caps)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
     let config = crate::config::Config::default();
     let engine = crate::engine::PolicyEngine::new(&config).unwrap();
     let broadcast_tx = crate::eventbus::new_broadcast();

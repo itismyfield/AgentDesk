@@ -33,13 +33,60 @@ mod tests {
         claude_tui_followup_requeue_streaming_aware,
     };
 
-    fn assert_wiring_joint(source: &str, expected: &str, joint: &str) {
-        let compact_source = source.split_whitespace().collect::<String>();
-        let compact_expected = expected.split_whitespace().collect::<String>();
-        assert!(
-            compact_source.contains(&compact_expected),
-            "{joint} must preserve the Error-arm TUI classification",
-        );
+    /// One error-classification hand-off: the scope that holds it and its exact field run.
+    struct Joint {
+        source: &'static str,
+        scope: &'static str,
+        expected: &'static str,
+        name: &'static str,
+    }
+
+    const JOINTS: [Joint; 4] = [
+        Joint {
+            source: include_str!("../content_arms.rs"),
+            scope: "StreamContentArmMessage::Error { message, stderr }",
+            expected: "let error_resolution = resolve_tui_error(&provider, &message, &stderr); tui_error_classification = error_resolution.tui_error_classification; transport_error = !recovery_retry;",
+            name: "Error arm -> stream-loop state",
+        },
+        Joint {
+            source: include_str!("../../mod.rs"),
+            scope: "post_loop_finalize::PostLoopFinalizeContext {",
+            expected: "transport_error, tui_error_classification: stream_loop_output.tui_error_classification, recovery_retry,",
+            name: "StreamLoopOutput -> PostLoopFinalizeContext",
+        },
+        Joint {
+            source: include_str!("../../post_loop_finalize.rs"),
+            scope: "pub(super) async fn run_post_loop_finalize(",
+            expected: "claude_tui_followup_pre_submit_requeue_candidate, tui_error_classification, review_dispatch_warning,",
+            name: "post-loop local -> PostLoopFinalizeOutput",
+        },
+        Joint {
+            source: include_str!("../../terminal_outcome_delivery.rs"),
+            scope: "DeliveryEpilogueContext {",
+            expected: "claude_tui_followup_pre_submit_requeue_candidate, claude_tui_busy_requeue_pending, tui_error_classification, #[cfg(unix)] bridge_tui_gate_outcome_early,",
+            name: "terminal outcome -> DeliveryEpilogueContext",
+        },
+    ];
+
+    /// Classification 2: inside the joint's real arm, struct literal or fn, the field run
+    /// appears in code, comments and whitespace ignored. A lexical tripwire: no reachability.
+    fn wiring_joint_gaps(source: &str, joint: &Joint) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let tight = |text: &str| Lexed::new(text).compact().text().to_string();
+        let lexed = Lexed::new(source).compact();
+        let scope = if joint.scope.ends_with('{') || joint.scope.ends_with('(') {
+            lexed.block(&tight(joint.scope))
+        } else {
+            lexed.arm(&tight(joint.scope))
+        };
+        match scope {
+            Some(scope) if scope.contains(&tight(joint.expected)) => Vec::new(),
+            Some(_) => vec![format!(
+                "{} must preserve the Error-arm TUI classification",
+                joint.name
+            )],
+            None => vec![format!("{}: missing `{}`", joint.name, joint.scope)],
+        }
     }
 
     #[test]
@@ -108,48 +155,41 @@ mod tests {
             resolution.tui_error_classification,
         ));
 
-        // Mutation guards for the production wiring. The async finalization
-        // contexts require live gateway/shared state, so pin each handoff at
-        // its construction site while the assertions above prove the carried
-        // value drives both lifecycle decisions.
-        assert_wiring_joint(
-            include_str!("../content_arms.rs"),
-            r#"
-                let error_resolution = resolve_tui_error(&provider, &message, &stderr);
-                tui_error_classification = error_resolution.tui_error_classification;
-                transport_error = !recovery_retry;
-            "#,
-            "Error arm -> stream-loop state",
-        );
-        assert_wiring_joint(
-            include_str!("../../mod.rs"),
-            r#"
-                transport_error,
-                tui_error_classification: stream_loop_output.tui_error_classification,
-                recovery_retry,
-            "#,
-            "StreamLoopOutput -> PostLoopFinalizeContext",
-        );
-        assert_wiring_joint(
-            include_str!("../../post_loop_finalize.rs"),
-            r#"
-                claude_tui_followup_pre_submit_requeue_candidate,
-                tui_error_classification,
-                review_dispatch_warning,
-            "#,
-            "post-loop local -> PostLoopFinalizeOutput",
-        );
-        assert_wiring_joint(
-            include_str!("../../terminal_outcome_delivery.rs"),
-            r#"
-                claude_tui_followup_pre_submit_requeue_candidate,
-                claude_tui_busy_requeue_pending,
-                tui_error_classification,
-                #[cfg(unix)]
-                bridge_tui_gate_outcome_early,
-            "#,
-            "terminal outcome -> DeliveryEpilogueContext",
-        );
+        // The async finalization contexts need live gateway/shared state, so each hand-off is
+        // pinned at its construction site while the assertions above prove the carried value.
+        for joint in &JOINTS {
+            assert_eq!(wiring_joint_gaps(joint.source, joint), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn wiring_joints_reject_commented_fields_and_out_of_scope_copies() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        let fields = [
+            "error_resolution.tui_error_classification;",
+            "tui_error_classification: stream_loop_output.tui_error_classification,",
+            "tui_error_classification,\n        review_dispatch_warning,",
+            "claude_tui_busy_requeue_pending,",
+        ];
+        for (joint, field) in JOINTS.iter().zip(fields) {
+            for needle in [joint.scope, field] {
+                for forgery in CommentForgery::ALL {
+                    let forged = forge(joint.source, needle, forgery);
+                    assert!(
+                        !wiring_joint_gaps(&forged, joint).is_empty(),
+                        "{}: {forgery:?} commented `{needle}` still passes",
+                        joint.name
+                    );
+                }
+            }
+        }
+        // The field run moved out of the PostLoopFinalizeContext literal no longer counts.
+        let joint = &JOINTS[1];
+        let field = fields[1];
+        let moved = joint.source.replacen(field, "", 1)
+            + "\nfn _copy() { x(transport_error, tui_error_classification: stream_loop_output.tui_error_classification, recovery_retry,) }\n";
+        assert!(!wiring_joint_gaps(&moved, joint).is_empty());
     }
 
     /// #4640 regression: a follow-up readiness timeout where the pane is idle at

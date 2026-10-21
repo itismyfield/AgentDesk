@@ -582,7 +582,6 @@ async fn build_patch(
             content: effective_content,
             mentions: &effective_mentions,
         })?;
-        image_input::ensure_rollout(pool).await?;
     }
     validate_agent_only_fields(
         effective_kind,

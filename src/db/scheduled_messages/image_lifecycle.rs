@@ -1,18 +1,6 @@
-//! Image rollout, metadata projections and terminal byte retention.
+//! Image metadata projections and terminal byte retention.
 
 use super::*;
-
-pub async fn image_rollout_ready_pg(pool: &PgPool) -> Result<bool, sqlx::Error> {
-    // Retain offline members in the gate so stopping an old node cannot enable images.
-    sqlx::query_scalar(
-        "SELECT COUNT(*) >= 2 AND COALESCE(bool_and(
-            COALESCE(capabilities #>> '{scheduled_messages,image_consumer_v1}', 'false') = 'true'
-            AND COALESCE(capabilities #>> '{message_outbox,image_consumer_v1}', 'false') = 'true'
-        ), false) FROM worker_nodes",
-    )
-    .fetch_one(pool)
-    .await
-}
 
 pub async fn get_scheduled_message_metadata_pg(
     pool: &PgPool,

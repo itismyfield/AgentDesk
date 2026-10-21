@@ -162,7 +162,6 @@ pub(super) async fn validate_create(
             content,
             mentions: &discord_mention_user_ids,
         })?;
-        image_input::ensure_rollout(pool).await?;
     }
     let agent_id = body
         .agent_id

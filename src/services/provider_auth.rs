@@ -742,13 +742,58 @@ mod tests {
         assert!(!source.contains("/.codex/"));
     }
 
+    const CLAUDE_ACCOUNTS_API: &str = include_str!("../server/routes/claude_accounts_api.rs");
+
+    /// Classification 2: declarations are matched on the code mask and banned names on
+    /// comment-free text, so comments neither satisfy nor trip it. A lexical tripwire.
+    fn claude_account_request_gaps(source: &str) -> Vec<&'static str> {
+        use crate::test_support::{rust_code_mask, strip_rust_comments};
+        let code = strip_rust_comments(source).expect("claude_accounts_api lexes");
+        let mask = rust_code_mask(source).expect("claude_accounts_api lexes");
+        let missing = ["struct SwitchClaudeAccountRequest", "pub account: String"]
+            .into_iter()
+            .filter(|required| !mask.contains(required));
+        let banned = ["agent_id", "auth_profile", "profile_id"]
+            .into_iter()
+            .filter(|name| code.contains(name));
+        missing.chain(banned).collect()
+    }
+
     #[test]
     fn test_007_claude_accounts_handlers_have_no_agent_or_profile_param() {
-        let src = include_str!("../server/routes/claude_accounts_api.rs");
-        assert!(src.contains("struct SwitchClaudeAccountRequest"));
-        assert!(src.contains("pub account: String"));
-        assert!(!src.contains("agent_id"));
-        assert!(!src.contains("auth_profile"));
-        assert!(!src.contains("profile_id"));
+        assert_eq!(
+            claude_account_request_gaps(CLAUDE_ACCOUNTS_API),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn test_008_claude_account_request_guard_ignores_comments() {
+        use crate::test_support::{CommentForgery, comment_out_code};
+        for required in ["struct SwitchClaudeAccountRequest", "pub account: String"] {
+            for forgery in CommentForgery::ALL {
+                let forged = comment_out_code(CLAUDE_ACCOUNTS_API, required, forgery);
+                assert!(forged.contains(required));
+                assert_eq!(
+                    claude_account_request_gaps(&forged),
+                    [required],
+                    "{forgery:?}"
+                );
+            }
+        }
+        let field = "pub account: String,";
+        let commented = CLAUDE_ACCOUNTS_API.replacen(
+            field,
+            "pub account: String, // agent_id /* auth_profile profile_id */",
+            1,
+        );
+        assert!(commented.contains("agent_id") && commented.contains("profile_id"));
+        assert_eq!(claude_account_request_gaps(&commented), Vec::<&str>::new());
+        let coded = CLAUDE_ACCOUNTS_API.replacen(
+            field,
+            "pub account: String,\n    pub agent_id: String,",
+            1,
+        );
+        assert_eq!(claude_account_request_gaps(&coded), ["agent_id"]);
     }
 }

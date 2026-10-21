@@ -1,125 +1,25 @@
+mod source_guard_tests;
+
 #[test]
 fn intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites() {
-    for (name, source) in [
-        ("intake_gate", include_str!("../intake_gate.rs")),
-        ("gateway", include_str!("../../gateway.rs")),
-        ("discord_mod", include_str!("../../mod.rs")),
-        (
-            "queue_kickoff",
-            include_str!("../../queue_dispatch/kickoff.rs"),
-        ),
-        ("skill", include_str!("../../commands/skill.rs")),
-        (
-            "text_commands",
-            include_str!("../../commands/text_commands.rs"),
-        ),
-    ] {
-        assert_eq!(
-            source.matches("handle_text_message(").count(),
-            0,
-            "{name} bypasses central intake admission"
-        );
-    }
-
-    for (name, source) in [
-        ("intake_gate", include_str!("../intake_gate.rs")),
-        ("skill", include_str!("../../commands/skill.rs")),
-        (
-            "text_commands",
-            include_str!("../../commands/text_commands.rs"),
-        ),
-    ] {
-        assert_eq!(
-            source.matches("finish_admitted_local(").count(),
-            0,
-            "{name} bypasses dispatch convenience path"
-        );
-    }
-
+    use source_guard_tests::{DISPATCHERS, PRODUCERS, producer_gaps};
     assert_eq!(
-        include_str!("../intake_gate.rs")
-            .matches("dispatch_text_intake(")
-            .count(),
-        1,
-        "regular FullEvent intake lost central dispatch"
-    );
-    assert_eq!(
-        include_str!("../../commands/skill.rs")
-            .matches("dispatch_skill_intake(")
-            .count(),
-        2,
-        "unknown and registered slash skills must both use central dispatch"
-    );
-    assert_eq!(
-        include_str!("../../commands/text_commands.rs")
-            .matches("dispatch_skill_intake(")
-            .count(),
-        1,
-        "text skills must use central dispatch"
+        producer_gaps(&PRODUCERS, &DISPATCHERS),
+        Vec::<String>::new()
     );
 }
 
 #[test]
 fn intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass() {
-    // The worker boundary spans the intake body module plus its extracted
-    // worker entry seam (intake_turn/worker_entry.rs, split out in #4743).
-    let worker_body = include_str!("../message_handler/intake_turn.rs");
-    let worker_entry = include_str!("../message_handler/intake_turn/worker_entry.rs");
-    for source in [worker_body, worker_entry] {
-        assert!(!source.contains("dispatch_text_intake("));
-        assert!(!source.contains("admit_text_intake("));
-        assert!(!source.contains("try_route_intake("));
-        assert!(!source.contains("IntakeSubmission {"));
-    }
-    assert_eq!(
-        worker_body.matches("handle_text_message(").count(),
-        1,
-        "the worker body module must contain only the body definition"
-    );
-    assert_eq!(
-        worker_entry.matches("handle_text_message(").count(),
-        1,
-        "the extracted worker entry must contain only its direct post-claim call"
-    );
-    assert_eq!(
-        include_str!("../message_handler.rs")
-            .matches("handle_text_message(")
-            .count(),
-        1,
-        "the permit-consuming local adapter must be the sole parent-module body call"
-    );
+    use source_guard_tests::{MESSAGE_HANDLER, WORKER_BODY, WORKER_ENTRY, worker_gaps};
+    let gaps = worker_gaps(WORKER_BODY, WORKER_ENTRY, MESSAGE_HANDLER);
+    assert_eq!(gaps, Vec::<String>::new());
 }
 
 #[test]
 fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish() {
-    for (name, source, promotion) in [
-        (
-            "gateway",
-            include_str!("../../gateway.rs"),
-            "drain_dispatched_queue_markers(",
-        ),
-        (
-            "queue_kickoff",
-            include_str!("../../queue_dispatch/kickoff.rs"),
-            "start_and_drain_kickoff_markers(",
-        ),
-    ] {
-        let admit = source
-            .find("admit_queued_intake(")
-            .unwrap_or_else(|| panic!("{name} queue path lost central admission"));
-        let promote = source
-            .find(promotion)
-            .unwrap_or_else(|| panic!("{name} queue path lost marker promotion"));
-        let finish = source
-            .find("finish_admitted_queued_intake(")
-            .unwrap_or_else(|| panic!("{name} queue path lost admitted local finish"));
-        assert!(
-            admit < promote && promote < finish,
-            "{name} must promote persisted queue markers only after admission and before finish"
-        );
-        assert_eq!(source.matches(promotion).count(), 1);
-        assert_eq!(source.matches("finish_admitted_queued_intake(").count(), 1);
-    }
+    use source_guard_tests::{QUEUED, queued_promotion_gaps};
+    assert_eq!(queued_promotion_gaps(&QUEUED), Vec::<String>::new());
 }
 
 use std::ffi::OsString;
