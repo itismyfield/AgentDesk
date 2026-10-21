@@ -66,7 +66,11 @@ pub(crate) fn with_current_scope_nonce<T>(
 pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     let tmux = input_target(channel)?;
     let observation = crate::services::discord::codex_absence::readiness(channel, &tmux)?;
-    if !crate::services::codex::successor_hooks_ready() {
+    #[cfg(unix)]
+    let hooks_ready = crate::services::codex::successor_hooks_ready();
+    #[cfg(not(unix))]
+    let hooks_ready = false;
+    if !hooks_ready {
         return None;
     }
     let reason =
