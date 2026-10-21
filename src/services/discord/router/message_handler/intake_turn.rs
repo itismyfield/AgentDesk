@@ -155,35 +155,10 @@ mod intake_outbox_state_builder_tests {
     /// 호출 인접성·개수 검사이지 등록 성공 증명이 아님.
     #[test]
     fn bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge() {
-        let source = include_str!("intake_turn.rs");
-        // Split the marker so the intake_dispatch source contract (exactly one
-        // textual body occurrence) keeps counting only the real definition.
-        let handler_marker = ["pub(super) async fn handle_", "text_message("].concat();
-        let handler = source
-            .split_once(handler_marker.as_str())
-            .expect("intake handler exists")
-            .1
-            .split_once("#[cfg(test)]\nmod tui_busy_pre_submit_queue_reaction_tests")
-            .expect("intake handler has its next test-module boundary")
-            .0;
-        let spawn_call = ["spawn_turn_", "bridge("].concat();
-        let stamp_call = ["dispatch_stamp::stamp_before_", "bridge_handoff"].concat();
-        assert_eq!(
-            handler.matches(&spawn_call).count(),
-            1,
-            "intake_turn must retain one bridge-spawn call site"
-        );
-
-        let lines: Vec<_> = handler.lines().collect();
-        let spawn_line = lines
-            .iter()
-            .position(|line| line.contains(&spawn_call))
-            .expect("bridge-spawn call site exists");
-        let preceding = &lines[spawn_line.saturating_sub(20)..spawn_line];
-        assert!(
-            preceding.iter().any(|line| line.contains(&stamp_call)),
-            "the dispatch stamp must remain within the preceding 20 lines"
-        );
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            INTAKE_TURN, bridge_stamp_gaps,
+        };
+        assert_eq!(bridge_stamp_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 }
 
@@ -2460,180 +2435,48 @@ pub(super) async fn handle_text_message(
 mod tui_busy_pre_submit_queue_reaction_tests {
     #[test]
     fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
-        let module_src = include_str!("intake_turn.rs");
-        let busy_branch_pos = module_src
-            .find("claude_tui follow-up queued because hosted TUI is busy before prompt submission")
-            .expect("hosted-TUI busy pre-submit queue branch exists");
-        let busy_branch = &module_src[..busy_branch_pos];
-        assert!(
-            busy_branch.contains("busy_retry::finalize_enqueue("),
-            "busy pre-submit branch must route enqueue finalization through the shared helper"
-        );
-
-        let helper_src = include_str!("busy_retry.rs");
-        let accepted_guard_pos = helper_src
-            .find("if outcome.enqueued {")
-            .expect("busy pre-submit reaction must be gated on accepted enqueue");
-        let accepted_helper = "note_busy_tui_pre_submit_queue_pending(";
-        let refusal_guard =
-            "} else {\n        super::tui_followup::apply_tui_busy_enqueue_refusal(";
-        let accepted_clear = "note_intake_turn_cleared_current(";
-        let refusal_guard_pos = helper_src[accepted_guard_pos..]
-            .find(refusal_guard)
-            .map(|offset| accepted_guard_pos + offset)
-            .expect("busy pre-submit enqueue refusal branch exists");
-        let reaction_call_pos = helper_src[accepted_guard_pos..refusal_guard_pos]
-            .find(accepted_helper)
-            .map(|offset| accepted_guard_pos + offset)
-            .expect("accepted busy pre-submit enqueue must apply a queue-pending reaction");
-        let accepted_branch = &helper_src[accepted_guard_pos..refusal_guard_pos];
-        let refusal_branch = &helper_src[refusal_guard_pos..];
-
-        assert!(
-            accepted_guard_pos < reaction_call_pos,
-            "an accepted hosted-TUI busy pre-submit enqueue must reach the shared queue-pending reaction helper"
-        );
-        assert!(
-            !accepted_branch.contains(accepted_clear),
-            "accepted busy requeue must preserve the reconciler-owned queued marker"
-        );
-        assert!(
-            refusal_branch.contains(accepted_clear),
-            "refused busy enqueue must still clear the optimistic pending view"
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            BUSY_RETRY, INTAKE_TURN, busy_enqueue_view_gaps,
+        };
+        assert_eq!(
+            busy_enqueue_view_gaps(INTAKE_TURN, BUSY_RETRY),
+            Vec::<String>::new()
         );
     }
 }
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {
-    fn recovery_context_take_call() -> String {
-        format!(
-            "{}{}",
-            "let session_retry_context = ",
-            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
-        )
-    }
+    pub(super) mod source_guard_tests;
+    use source_guard_tests::{
+        BUSY_RETRY, CONTEXT_PUT_BACK_PAIR, CONTEXT_TAKE, CONTEXT_USES, INTAKE_TURN, TUI_FOLLOWUP,
+        bridge_context_gaps, refusal_put_back_gaps, stale_abort_take_gaps, take_once_gaps,
+    };
 
     #[test]
     fn discord_user_turn_keeps_user_and_streaming_placeholder_ids_separate() {
-        let module_src = include_str!("intake_turn.rs");
-        let bridge_context_pos = module_src
-            .find("TurnBridgeContext {")
-            .expect("Discord intake builds a turn-bridge context");
-        let bridge_context = &module_src[bridge_context_pos..];
-        let user_message_field = format!("{}{}", "user_msg_id: Some(", "user_msg_id),");
-        let placeholder_field = format!("{}{}", "current_msg_id: Some(", "placeholder_msg_id),");
-        let synthetic_flag = format!("{}{}", "is_external_input_tui_", "direct: false");
-
-        assert!(
-            bridge_context.contains(&user_message_field),
-            "Discord-origin user turns must retain the real user message as their request identity"
-        );
-        assert!(
-            bridge_context.contains(&placeholder_field),
-            "Discord-origin user turns must keep the posted intake placeholder as their streaming edit target"
-        );
-        assert!(
-            bridge_context.contains(&synthetic_flag),
-            "Discord-origin user turns must remain outside the synthetic TUI-direct path"
-        );
+        assert_eq!(bridge_context_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 
     #[test]
     fn recovery_context_survives_intake_stale_dispatch_abort() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let module_src = include_str!("intake_turn.rs");
-        // #4552: the stale-dispatch guard body now lives in the
-        // `stale_dispatch_guard` submodule; the caller keeps the guarded early
-        // return, so anchor on the call site (still ahead of the take below).
-        let stale_guard_pos = module_src
-            .find("abort_terminal_dispatch_at_turn_start(")
-            .expect("intake stale-dispatch guard call exists");
-        let stale_return_pos = stale_guard_pos
-            + module_src[stale_guard_pos..]
-                .find("return Ok(IntakeExecution::Executed);")
-                .expect("intake stale-dispatch abort return exists");
-        let take_call = recovery_context_take_call();
-        let take_pos = module_src
-            .find(&take_call)
-            .expect("intake recovery context take exists");
-
-        assert!(
-            stale_return_pos < take_pos,
-            "intake stale-dispatch abort must happen before the destructive recovery-context take"
-        );
+        assert_eq!(stale_abort_take_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 
     #[test]
     fn intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let module_src = include_str!("intake_turn.rs");
-        let take_call = recovery_context_take_call();
-        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
-        assert_eq!(
-            take_positions.len(),
-            1,
-            "intake turn start must have exactly one destructive recovery-context take"
-        );
-        let take_pos = take_positions[0].0;
-        let race_loss_return_pos = module_src
-            .find("return race_loss::handle_race_loss_enqueue(")
-            .expect("intake race-loss enqueue return exists");
-        let placeholder_posted_pos = module_src
-            .find("intake_latency.mark_placeholder_posted();")
-            .expect("intake placeholder-post success mark exists");
-        let prompt_use_pos = module_src
-            .find("if let Some(ref reply_ctx) = reply_context")
-            .expect("intake prompt includes reply context");
-        let manifest_use_pos = module_src
-            .find("let recovery_context_for_manifest =")
-            .expect("intake prompt manifest receives recovery context");
-
-        assert!(
-            race_loss_return_pos < take_pos,
-            "queued/race-loss intake turns must not destructively take recovery context before returning"
-        );
-        assert!(
-            take_pos < placeholder_posted_pos,
-            "active intake turn must take recovery context immediately after placeholder success"
-        );
-        assert!(
-            take_pos < prompt_use_pos,
-            "active intake turn must take recovery context before adding it to the prompt"
-        );
-        assert!(
-            take_pos < manifest_use_pos,
-            "active intake turn must take recovery context before prompt manifest capture"
-        );
+        let gaps = take_once_gaps(INTAKE_TURN, CONTEXT_TAKE, &CONTEXT_USES);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]
     fn tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn() {
-        // The refusal else-branch must route through the sibling helper, which
-        // puts the taken recovery context back BEFORE rewriting the refusal
-        // notice (put-back-then-notice ordering pinned in tui_followup.rs).
-        let finalize_src = include_str!("busy_retry.rs");
-        finalize_src
-            .find("} else {\n        super::tui_followup::apply_tui_busy_enqueue_refusal(")
-            .expect("TUI-busy enqueue refusal routes through the put-back helper");
-
-        let helper_src = include_str!("tui_followup.rs");
-        let helper_fn_pos = helper_src
-            .find("async fn apply_tui_busy_enqueue_refusal(")
-            .expect("refusal helper exists in tui_followup.rs");
-        let helper_body = &helper_src[helper_fn_pos..];
-        let put_back_pos = helper_body
-            .find("put_back_session_retry_context(")
-            .expect("refusal helper restores recovery context");
-        let notice_pos = helper_body
-            .find("claude_tui_busy_followup_refusal_notice(")
-            .expect("refusal helper renders the notice");
-        assert!(
-            put_back_pos < notice_pos,
-            "TUI-busy enqueue refusal, including dup-guard refusal, must restore recovery context before returning the notice"
-        );
+        let gaps = refusal_put_back_gaps(BUSY_RETRY, TUI_FOLLOWUP, CONTEXT_PUT_BACK_PAIR);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 }
 
@@ -2641,85 +2484,23 @@ mod recovery_context_take_order_tests {
 /// source-order invariants as the session-retry recovery context it rides.
 #[cfg(test)]
 mod feedback_reminder_take_order_tests {
-    // Assembled from fragments so this test's own source (scanned via
-    // `include_str!`) does not match the literal it is looking for — mirroring
-    // `recovery_context_take_call` above.
-    fn reminder_take_call() -> String {
-        format!(
-            "{}{}",
-            "take_and_merge_feedback_reminder(", "shared, &provider, channel_id, reply_context);"
-        )
-    }
+    use super::recovery_context_take_order_tests::source_guard_tests::{
+        BUSY_RETRY, INTAKE_TURN, REMINDER_PUT_BACK_PAIR, REMINDER_TAKE, REMINDER_USES,
+        TUI_FOLLOWUP, refusal_put_back_gaps, take_once_gaps,
+    };
 
     #[test]
     fn intake_takes_feedback_reminder_once_after_guards_and_before_prompt_use() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let module_src = include_str!("intake_turn.rs");
-
-        let take_call = reminder_take_call();
-        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
-        assert_eq!(
-            take_positions.len(),
-            1,
-            "intake turn start must have exactly one destructive feedback-reminder take"
-        );
-        let take_pos = take_positions[0].0;
-
-        let race_loss_return_pos = module_src
-            .find("return race_loss::handle_race_loss_enqueue(")
-            .expect("intake race-loss enqueue return exists");
-        let placeholder_posted_pos = module_src
-            .find("intake_latency.mark_placeholder_posted();")
-            .expect("intake placeholder-post success mark exists");
-        let prompt_use_pos = module_src
-            .find("if let Some(ref reply_ctx) = reply_context")
-            .expect("intake prompt includes reply context");
-
-        assert!(
-            race_loss_return_pos < take_pos,
-            "queued/race-loss intake turns must not destructively take the reminder before returning"
-        );
-        assert!(
-            take_pos < placeholder_posted_pos,
-            "active intake turn must take the reminder immediately after placeholder success"
-        );
-        assert!(
-            take_pos < prompt_use_pos,
-            "active intake turn must take the reminder before injecting it into the prompt"
-        );
+        let gaps = take_once_gaps(INTAKE_TURN, REMINDER_TAKE, &REMINDER_USES);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]
     fn tui_busy_enqueue_refusal_puts_back_feedback_reminder_for_next_turn() {
-        // The refusal branch forwards the taken reminder to the sibling helper,
-        // which puts it back BEFORE rewriting the refusal notice (mirroring the
-        // recovery-context put-back-then-notice ordering).
-        let finalize_src = include_str!("busy_retry.rs");
-        // The `\n` escape resolves to a real newline, which only the production
-        // call site contains — this test's own copy of the snippet stores it as
-        // the two characters `\n`, so the search does not self-match (same trick
-        // the recovery-context refusal test relies on).
-        assert!(
-            finalize_src.contains("session_retry_context,\n            feedback_reminder,"),
-            "refusal call site must forward the taken reminder for put-back, right after the recovery context"
-        );
-
-        let helper_src = include_str!("tui_followup.rs");
-        let helper_fn_pos = helper_src
-            .find("async fn apply_tui_busy_enqueue_refusal(")
-            .expect("refusal helper exists in tui_followup.rs");
-        let helper_body = &helper_src[helper_fn_pos..];
-        let put_back_pos = helper_body
-            .find("put_back_voluntary_feedback_reminder(")
-            .expect("refusal helper restores the feedback reminder");
-        let notice_pos = helper_body
-            .find("claude_tui_busy_followup_refusal_notice(")
-            .expect("refusal helper renders the notice");
-        assert!(
-            put_back_pos < notice_pos,
-            "TUI-busy enqueue refusal must restore the feedback reminder before returning the notice"
-        );
+        let gaps = refusal_put_back_gaps(BUSY_RETRY, TUI_FOLLOWUP, REMINDER_PUT_BACK_PAIR);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 }
 
@@ -2749,6 +2530,10 @@ mod queue_pending_reaction_clear_tests {
 
 #[cfg(test)]
 mod turn_start_dispatch_guard_preservation_tests {
+    use super::recovery_context_take_order_tests::source_guard_tests::{
+        INTAKE_TURN, STALE_GUARD, abort_branch_gaps, preserve_gate_gaps, preserve_param_gaps,
+    };
+
     // #4247 FIX 1: the turn-start DISPATCH-GUARD must gate its raw
     // `stale_dispatch_turn_for_text` lookup on `!preserve_on_cancel`, mirroring
     // the dequeue guard's `filter_queued_dispatch_exit(preserve, stale)` — else a
@@ -2757,23 +2542,7 @@ mod turn_start_dispatch_guard_preservation_tests {
     // `DISPATCH:<id>` prefix, silently defeating the feature end-to-end.
     #[test]
     fn turn_start_guard_is_gated_on_preserve_on_cancel() {
-        // #4552: the guard body moved to the `stale_dispatch_guard` submodule.
-        // The invariant (gate the raw stale-text lookup on `!preserve_on_cancel`)
-        // now lives entirely inside that helper, so scan it directly.
-        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
-        let stale_call_pos = guard_src
-            .find("stale_dispatch_turn_for_text(")
-            .expect("turn-start dispatch-guard raw stale-text lookup exists");
-        let gate_before_lookup = guard_src[..stale_call_pos].find("&& !preserve_on_cancel");
-
-        assert!(
-            gate_before_lookup.is_some(),
-            "turn-start DISPATCH-GUARD must gate the raw stale-text lookup on \
-             `!preserve_on_cancel` (#4247 FIX 1) — removing this gate lets a \
-             preserved (marked) genuine human instruction get dropped at turn \
-             start just because it carries a stale DISPATCH: prefix, silently \
-             defeating the fail-safe queue-preservation feature end-to-end"
-        );
+        assert_eq!(preserve_gate_gaps(STALE_GUARD), Vec::<String>::new());
     }
 
     // Companion: the gated stale lookup must still feed the SAME abort branch
@@ -2782,41 +2551,9 @@ mod turn_start_dispatch_guard_preservation_tests {
     // `stale_dispatch_turn_for_text` use.
     #[test]
     fn gated_stale_lookup_feeds_the_turn_abort_branch() {
-        // #4552: the abort branch body lives in the `stale_dispatch_guard`
-        // helper; the caller keeps the guarded early return.
-        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
-        let stale_call_pos = guard_src
-            .find("stale_dispatch_turn_for_text(")
-            .expect("turn-start dispatch-guard raw stale-text lookup exists");
-        // Anchor on the abort log, then look for the branch's finish + abort
-        // signal by RELATIVE offset — no fixed byte window (multibyte-safe, and
-        // resilient to added log lines).
-        let abort_pos = guard_src[stale_call_pos..]
-            .find("DISPATCH-GUARD: aborted terminal dispatch at turn start")
-            .map(|offset| stale_call_pos + offset)
-            .expect("gated stale lookup must still feed the turn-start abort log/branch");
-        let abort_region = &guard_src[abort_pos..];
-        let finish = abort_region.find("mailbox_finish_turn");
-        let ret = abort_region.find("return true;");
-        assert!(
-            finish.is_some_and(|f| f < 600),
-            "turn-start abort branch must still finish the mailbox turn"
-        );
-        assert!(
-            ret.is_some_and(|r| r < 1200),
-            "turn-start abort branch must still signal abort to the caller"
-        );
-
-        // The caller must honor that abort signal with an early return.
-        let module_src = include_str!("intake_turn.rs");
-        let call_pos = module_src
-            .find("abort_terminal_dispatch_at_turn_start(")
-            .expect("live intake calls the turn-start guard");
-        assert!(
-            module_src[call_pos..]
-                .find("return Ok(IntakeExecution::Executed);")
-                .is_some_and(|r| r < 400),
-            "the live-intake caller must return early when the guard aborts"
+        assert_eq!(
+            abort_branch_gaps(STALE_GUARD, INTAKE_TURN),
+            Vec::<String>::new()
         );
     }
 
@@ -2826,38 +2563,9 @@ mod turn_start_dispatch_guard_preservation_tests {
     // computation (already pinned by `intake_queue_transaction.rs`).
     #[test]
     fn preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified() {
-        let module_src = include_str!("intake_turn.rs");
-        // Needle assembled via concat! so the exact fn-call token never appears
-        // verbatim here (would trip `intake_dispatch::tests`'s occurrence-count
-        // invariant on `intake_turn.rs`).
-        let signature_pos = module_src
-            .find(concat!("pub(super) async fn handle_text_message", "("))
-            .expect("handle_text_message signature exists");
-        let param_pos = module_src[signature_pos..]
-            .find("preserve_on_cancel: bool,")
-            .map(|offset| signature_pos + offset)
-            .expect("handle_text_message receives preserve_on_cancel as a parameter");
-        // #4552: the guard body moved to the `stale_dispatch_guard` submodule.
-        // The parameter must still be forwarded into the guard call unmodified,
-        // and the extracted guard must still gate on it.
-        let call_pos = module_src[param_pos..]
-            .find("abort_terminal_dispatch_at_turn_start(")
-            .map(|offset| param_pos + offset)
-            .expect("the live-intake path must call the turn-start guard");
-        let call_end = module_src[call_pos..]
-            .find(".await")
-            .map(|offset| call_pos + offset)
-            .expect("the turn-start guard call must be awaited");
-        assert!(
-            module_src[call_pos..call_end].contains("preserve_on_cancel"),
-            "the live-intake preserve_on_cancel parameter must flow into the \
-             FIX 1 turn-start guard call; mutating the parameter plumbing breaks this"
-        );
-
-        let guard_src = include_str!("intake_turn/stale_dispatch_guard.rs");
-        assert!(
-            guard_src.contains("&& !preserve_on_cancel"),
-            "the extracted turn-start guard must still gate on `!preserve_on_cancel`"
+        assert_eq!(
+            preserve_param_gaps(INTAKE_TURN, STALE_GUARD),
+            Vec::<String>::new()
         );
     }
 }

@@ -4607,25 +4607,9 @@ mod tests {
     // check and is only meaningful alongside it.
     #[test]
     fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
-        let source = include_str!("rollout_tail.rs");
-        for entry in [
-            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux",
-            "pub fn tail_warm_followup_rollout_for_tmux",
-            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux",
-        ] {
-            let body = source
-                .split_once(entry)
-                .unwrap_or_else(|| panic!("entry point not found: {entry}"))
-                .1;
-            let body = body
-                .split_once("\n}\n")
-                .expect("entry point body must terminate")
-                .0;
-            assert!(
-                body.contains("discord_handoff_tail_options("),
-                "{entry} builds its own options instead of the shared constructor, so it \
-                 can silently miss terminal_range_eligible"
-            );
-        }
+        let gaps = source_guard_tests::handoff_options_gaps(source_guard_tests::ROLLOUT_TAIL);
+        assert_eq!(gaps, Vec::<String>::new());
     }
+
+    mod source_guard_tests;
 }

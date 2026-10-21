@@ -1,4 +1,6 @@
 use super::*;
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
+use crate::test_support::CommentForgery;
 
 #[test]
 fn episode_pin_rejects_every_handoff_consumed_authority_axis() {
@@ -129,84 +131,208 @@ fn terminal_commit_between_reservation_and_adoption_invalidates_episode_pin() {
     assert!(matches!(adoption, Err(outcome) if outcome.is_identity_mismatch_legacy()));
 }
 
+const EPISODE_HANDOFF: &str = include_str!("episode_handoff.rs");
+const PARENT: &str = include_str!("mod.rs");
+const SEAM: &str = include_str!("coordinate_adoption.rs");
+const WATCHER_CLAIM: &str = include_str!("watcher_claim.rs");
+const COMMIT_FN: &str = "pub(super) async fn commit_episode_side_effects(";
+const TERMINAL_GUARD: &str = "guard.state().terminal_delivery_committed";
+const CORE_MUTATION: &str = "let mut core = shared.core.lock().await";
+const GUARDED_MUTATIONS: [&str; 4] = [
+    "note_footer_suppressed_for_message_takeover",
+    "let session = core",
+    "reregister_active_turn_from_inflight_under_episode_guard",
+    "register_rehydrated_tmux_runtime_binding",
+];
+const RELEASE_IN_CHILD: &str = "drop(locked_episode)";
+const PARENT_FN: &str = "async fn rebind_inflight_for_channel_inner(";
+/// Adoption authority, side-effect commit, watcher claim, watcher spawn, authority release.
+const PARENT_ORDER: [&str; 5] = [
+    "coordinate_adoption::adopt_coordinates(",
+    "episode_handoff::commit_episode_side_effects",
+    "claim_rebind_watcher",
+    "spawn_observed_tmux_watcher",
+    "drop(locked_episode);",
+];
+const SEAM_ACQUIRE: &str = "adopt_and_lock_inflight_episode(";
+const CROSSED_WIRING: [&str; 6] = [
+    "Some(&existing.started_at)",
+    "Some(existing.turn_source)",
+    "let already_relayed_response = if discard_restored_render_seed",
+    "let restored_turn = if discard_restored_render_seed",
+    "claim_rebind_watcher(",
+    "discard_restored_render_seed,",
+];
+const CLAIM_FN: &str = "pub(super) fn claim_rebind_watcher(";
+const CLAIM_ORDER: [&str; 3] = [
+    "if crossed_codex_turn",
+    "claim_or_replace_watcher",
+    "claim_or_reuse_watcher",
+];
+
+// Classification 2 for both guards below: steps are matched as written inside the real
+// items, bans read comment-free text. Lexical tripwires over the current call order.
+
+/// The lock-held terminal refusal precedes core mutation, every guarded mutation stays in
+/// the child, the child keeps the guard alive, and the parent orders claim/spawn/release.
+fn handoff_authority_gaps(handoff: &str, parent: &str, seam: &str) -> Vec<String> {
+    let handoff = Lexed::new(handoff);
+    let mut gaps = Vec::new();
+    match handoff.block(COMMIT_FN) {
+        Some(body) => {
+            match (body.find(TERMINAL_GUARD), body.find(CORE_MUTATION)) {
+                (Some(guard), Some(core)) if guard < core => {}
+                found => gaps.push(format!(
+                    "terminal refusal → core mutation broken: {found:?}"
+                )),
+            }
+            for mutation in GUARDED_MUTATIONS {
+                if !body.contains(mutation) {
+                    gaps.push(format!("missing guarded mutation: {mutation}"));
+                }
+            }
+        }
+        None => gaps.push(format!("missing {COMMIT_FN}")),
+    }
+    if handoff.text().contains(RELEASE_IN_CHILD) {
+        gaps.push("child must return the live authority guard to watcher handoff".into());
+    }
+    if !Lexed::new(seam).contains(SEAM_ACQUIRE) {
+        gaps.push(format!("adoption seam lost {SEAM_ACQUIRE}"));
+    }
+    let Some(body) = Lexed::new(parent).block(PARENT_FN) else {
+        gaps.push(format!("missing {PARENT_FN}"));
+        return gaps;
+    };
+    let acquire = body.find(PARENT_ORDER[0]);
+    let mut steps = vec![acquire, body.find(PARENT_ORDER[1])];
+    for step in &PARENT_ORDER[2..] {
+        let after = steps.last().copied().flatten();
+        steps.push(after.and_then(|at| body.find_after(at, step)));
+    }
+    if steps.iter().any(Option::is_none) || !steps.is_sorted() {
+        gaps.push(format!("parent order {PARENT_ORDER:?} broken: {steps:?}"));
+    }
+    gaps
+}
+
+/// A crossed Codex turn forces watcher replacement before the ordinary reuse branch, and
+/// the parent passes the crossed-turn evidence into that claim.
+fn crossed_turn_gaps(parent: &str, helper: &str) -> Vec<String> {
+    let mut gaps: Vec<String> = match Lexed::new(parent).block(PARENT_FN) {
+        Some(body) => CROSSED_WIRING
+            .into_iter()
+            .filter(|wiring| !body.contains(wiring))
+            .map(|wiring| format!("crossed-turn production wiring lost: {wiring}"))
+            .collect(),
+        None => vec![format!("missing {PARENT_FN}")],
+    };
+    let Some(claim) = Lexed::new(helper).block(CLAIM_FN) else {
+        gaps.push(format!("missing {CLAIM_FN}"));
+        return gaps;
+    };
+    let branch = claim.find(CLAIM_ORDER[0]);
+    let forced = branch.and_then(|at| claim.find_after(at, CLAIM_ORDER[1]));
+    if forced
+        .and_then(|at| claim.find_after(at, CLAIM_ORDER[2]))
+        .is_none()
+    {
+        gaps.push(format!("claim order {CLAIM_ORDER:?} broken"));
+    }
+    gaps
+}
+
 #[test]
 fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
-    let handoff = include_str!("episode_handoff.rs");
-    let terminal_guard = handoff
-        .find("guard.state().terminal_delivery_committed")
-        .expect("lock-held terminal commit rejection");
-    let core_mutation = handoff
-        .find("let mut core = shared.core.lock().await")
-        .expect("core mutation boundary");
-    assert!(terminal_guard < core_mutation);
-    for mutation in [
-        "note_footer_suppressed_for_message_takeover",
-        "let session = core",
-        "reregister_active_turn_from_inflight_under_episode_guard",
-        "register_rehydrated_tmux_runtime_binding",
-    ] {
-        handoff
-            .find(mutation)
-            .unwrap_or_else(|| panic!("missing guarded mutation: {mutation}"));
-    }
-    assert!(
-        !handoff.contains("drop(locked_episode)"),
-        "child must return the live authority guard to watcher handoff"
+    assert_eq!(
+        handoff_authority_gaps(EPISODE_HANDOFF, PARENT, SEAM),
+        Vec::<String>::new()
     );
-
-    let parent = include_str!("mod.rs");
-    let acquire = parent
-        .find("coordinate_adoption::adopt_coordinates(")
-        .expect("atomic adoption authority acquisition");
-    assert!(include_str!("coordinate_adoption.rs").contains("adopt_and_lock_inflight_episode("));
-    let commit = parent
-        .find("episode_handoff::commit_episode_side_effects")
-        .expect("episode side-effect commit");
-    let claim = parent[commit..]
-        .find("claim_rebind_watcher")
-        .map(|relative| commit + relative)
-        .expect("guarded watcher claim");
-    let spawn = parent[claim..]
-        .find("spawn_observed_tmux_watcher")
-        .map(|relative| claim + relative)
-        .expect("guarded watcher spawn");
-    let release = parent[spawn..]
-        .find("drop(locked_episode);")
-        .map(|relative| spawn + relative)
-        .expect("authority release after watcher spawn");
-    assert!(acquire < commit && commit < claim && claim < spawn && spawn < release);
 }
 
 #[test]
 fn crossed_codex_turn_forces_watcher_replacement_before_normal_reuse() {
-    let parent = include_str!("mod.rs");
-    for required in [
-        "Some(&existing.started_at)",
-        "Some(existing.turn_source)",
-        "let already_relayed_response = if discard_restored_render_seed",
-        "let restored_turn = if discard_restored_render_seed",
-    ] {
-        assert!(
-            parent.contains(required),
-            "crossed-turn production wiring lost required guard: {required}"
-        );
-    }
-    assert!(parent.contains("claim_rebind_watcher("));
-    assert!(parent.contains("discard_restored_render_seed,"));
+    assert_eq!(
+        crossed_turn_gaps(PARENT, WATCHER_CLAIM),
+        Vec::<String>::new()
+    );
+}
 
-    let helper = include_str!("watcher_claim.rs");
-    let branch = helper
-        .find("if crossed_codex_turn")
-        .expect("crossed-turn watcher claim branch");
-    let forced = helper[branch..]
-        .find("claim_or_replace_watcher")
-        .map(|relative| branch + relative)
-        .expect("crossed Codex turn must force watcher replacement");
-    let normal = helper[forced..]
-        .find("claim_or_reuse_watcher")
-        .map(|relative| forced + relative)
-        .expect("ordinary rebind must retain healthy-watcher reuse");
-    assert!(branch < forced && forced < normal);
+#[test]
+fn post_adoption_guards_reject_commented_and_reordered_steps() {
+    let handoff_needles = [COMMIT_FN, TERMINAL_GUARD, CORE_MUTATION]
+        .into_iter()
+        .chain(GUARDED_MUTATIONS);
+    for needle in handoff_needles {
+        for forgery in CommentForgery::ALL {
+            let forged = forge(EPISODE_HANDOFF, needle, forgery);
+            let gaps = handoff_authority_gaps(&forged, PARENT, SEAM);
+            assert!(
+                !gaps.is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    for needle in [PARENT_FN].into_iter().chain(PARENT_ORDER) {
+        for forgery in CommentForgery::ALL {
+            let forged = forge(PARENT, needle, forgery);
+            let gaps = handoff_authority_gaps(EPISODE_HANDOFF, &forged, SEAM);
+            assert!(
+                !gaps.is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    for needle in [PARENT_FN].into_iter().chain(CROSSED_WIRING) {
+        for forgery in CommentForgery::ALL {
+            let forged = forge(PARENT, needle, forgery);
+            let gaps = crossed_turn_gaps(&forged, WATCHER_CLAIM);
+            assert!(
+                !gaps.is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    for needle in [CLAIM_FN].into_iter().chain(CLAIM_ORDER) {
+        for forgery in CommentForgery::ALL {
+            let forged = forge(WATCHER_CLAIM, needle, forgery);
+            let gaps = crossed_turn_gaps(PARENT, &forged);
+            assert!(
+                !gaps.is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    for forgery in CommentForgery::ALL {
+        let forged = forge(SEAM, SEAM_ACQUIRE, forgery);
+        assert!(!handoff_authority_gaps(EPISODE_HANDOFF, PARENT, &forged).is_empty());
+    }
+    let late_guard = swap(EPISODE_HANDOFF, TERMINAL_GUARD, CORE_MUTATION);
+    assert!(!handoff_authority_gaps(&late_guard, PARENT, SEAM).is_empty());
+    let late_claim = swap(
+        PARENT,
+        "claim_rebind_watcher(",
+        "spawn_observed_tmux_watcher(",
+    );
+    assert!(!handoff_authority_gaps(EPISODE_HANDOFF, &late_claim, SEAM).is_empty());
+    let reuse_first = swap(WATCHER_CLAIM, CLAIM_ORDER[1], CLAIM_ORDER[2]);
+    assert!(!crossed_turn_gaps(PARENT, &reuse_first).is_empty());
+    let prose = EPISODE_HANDOFF.replacen(
+        CORE_MUTATION,
+        &format!("// {RELEASE_IN_CHILD};\n    {CORE_MUTATION}"),
+        1,
+    );
+    assert_ne!(prose, EPISODE_HANDOFF);
+    assert_eq!(
+        handoff_authority_gaps(&prose, PARENT, SEAM),
+        Vec::<String>::new()
+    );
+    let coded = EPISODE_HANDOFF.replacen(
+        CORE_MUTATION,
+        &format!("{RELEASE_IN_CHILD};\n    {CORE_MUTATION}"),
+        1,
+    );
+    assert_eq!(handoff_authority_gaps(&coded, PARENT, SEAM).len(), 1);
 }
 
 #[cfg(unix)]

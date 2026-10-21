@@ -350,6 +350,13 @@ While Pending, the source spools both history and new output but posts neither; 
 ineligible for GC. The alarm appears in `/api/health` as `tui_o:boundary_pending:<channel>` and
 raises health to at least degraded. It reports withheld output, not proof of loss or duplication.
 
+New Codex fresh rehydration has a separate, narrow Startup classification: a current, matching
+`shadow`/`fresh` execution context must pass native rollout identity, CLI non-child metadata and
+creation-time checks; when a first-prompt digest exists, the first real input must match its raw,
+untrimmed text hash. The extractor only selects real input. Incomplete native evidence defers
+registration to a later tick. See the [fresh conditions](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary).
+This does not automatically resolve old Pending links, including the investigated sequence 122.
+
 Run the following procedure on the O home:
 
 1. Identify the channel and resumed source from the `BoundaryPending` alarm. Inspect the transcript
@@ -374,7 +381,10 @@ Run the following procedure on the O home:
 3. Wait for the command to succeed, then use the managed restart path. The command only appends
    and fsyncs `BoundaryResolved`; it sends no output and applies at the next writer start. That
    start changes Pending to `Owed { from }` and replays the retained spool. Confirm that the
-   historical range `[0, from)` is not posted and the owed output at or after `from` is delivered.
+   writer actually reopened, the historical range `[0, from)` is not posted and the owed output
+   at or after `from` is delivered. Check `/api/health` after the successful resume/capture:
+   `tui_o:boundary_pending:<channel>` clears only when no selected Pending link remains.
+   Suspended sources are excluded from that count; retired selected sources still count.
 
 Automatic resume byte boundaries and automatic re-evaluation of existing resume Pending states
 are not provided. Hook publication time, elapsed time and current EOF do not prove the resume
@@ -382,4 +392,4 @@ position. Reopening automatic boundary work requires a provider signal proving t
 byte position or a separately verified boundary contract.
 
 See the [TUI O resume contract](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary)
-for current-main code coordinates, acceptance-test assertions and the health follow-up.
+for code evidence, acceptance-test assertions and health reconciliation.

@@ -61,12 +61,8 @@ async fn a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn() {
 
 #[test]
 fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
-    let src = include_str!("../headless_turn.rs");
-    let call = "foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)\n        .await?;";
-    let (refusal, spawn) = (src.find(call), src.find("tokio::task::spawn_blocking"));
-    assert!(
-        refusal
-            .zip(spawn)
-            .is_some_and(|(refusal, spawn)| refusal < spawn)
-    );
+    use super::recovery_context_take_order_tests::source_guard_tests::{
+        HEADLESS_TURN, row_refusal_gaps,
+    };
+    assert_eq!(row_refusal_gaps(HEADLESS_TURN), Vec::<String>::new());
 }

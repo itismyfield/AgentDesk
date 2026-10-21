@@ -301,6 +301,7 @@ impl<B: BindingEvents> Sources<B> {
         if let Some(source) = self.stalled(deriver) {
             return Err(WriterAlarm::RotationStalled { source });
         }
+        self.reconcile_boundary_pending(writer);
         Ok(())
     }
 

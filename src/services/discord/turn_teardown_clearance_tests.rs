@@ -96,60 +96,120 @@ async fn a_snapshot_turn_is_judged_by_its_own_row_only_pg() {
     db.drop().await;
 }
 
+const INTAKE_TURN: &str = include_str!("router/message_handler/intake_turn.rs");
+const HEADLESS_TURN: &str = include_str!("router/message_handler/headless_turn.rs");
+const ANCESTORS: [(&str, &str, &str, &[&str]); 2] = [
+    (
+        "intake",
+        INTAKE_TURN,
+        "pub(super) async fn handle_text_message(",
+        &[
+            "post_adk_session_status_for_channel(",
+            "hosted_tui_busy_preflight",
+        ],
+    ),
+    (
+        "headless",
+        HEADLESS_TURN,
+        "async fn start_reserved_headless_turn_admitted(",
+        &["post_adk_session_status_with_canonical_identity("],
+    ),
+];
+const JUDGE: &str = "turn_teardown_clearance::for_turn(";
+const SPAWN: &str = "tokio::task::spawn_blocking(";
+const SAVE: &str = "save_inflight_state_create_new(&inflight_state)";
+const VERDICT_ARGS: [&str; 2] = ["adk_session_key.as_deref()", "tmux_session_name.as_deref()"];
+const EXECUTE: &str = "provider_dispatch::execute(";
+const SPAWNED_ARGS: [&str; 2] = [
+    "tmux_session_name: tmux_session_name.as_deref(),",
+    "teardown: teardown_clearance.as_ref(),",
+];
+
+/// Classification 2: as-written, comment-free matching inside the ancestor's entry
+/// function, so a comment between verdict and spawn is not code. A lexical tripwire.
+fn last_step_gaps(source: &str, entry: &str, earlier: &[&str]) -> Vec<String> {
+    use crate::services::discord::router::source_guard_support::Lexed;
+    let Some(src) = Lexed::new(source).block(entry) else {
+        return vec![format!("missing {entry}")];
+    };
+    let text = src.text();
+    let Some((call, end, spawn)) = src.find(JUDGE).and_then(|call| {
+        let end = call + text[call..].find(".await;")? + ".await;".len();
+        Some((call, end, src.find_after(end, SPAWN)?))
+    }) else {
+        return vec!["verdict → spawn chain missing".to_string()];
+    };
+    let mut gaps = Vec::new();
+    if src.count(JUDGE) != 1 || src.count(EXECUTE) != 1 {
+        gaps.push("one verdict and one provider execute".to_string());
+    }
+    if !text[end..spawn].trim().is_empty() {
+        gaps.push("nothing runs between the verdict and the spawn".to_string());
+    }
+    for step in earlier.iter().chain(&[SAVE]) {
+        if !src.find(step).is_some_and(|at| at < call) {
+            gaps.push(format!("{step} must precede the verdict"));
+        }
+    }
+    let (args, spawned) = (src.slice(call..end), src.slice(spawn..text.len()));
+    gaps.extend(
+        VERDICT_ARGS
+            .iter()
+            .filter(|arg| !args.contains(arg))
+            .map(|arg| format!("verdict lost {arg}")),
+    );
+    for kept in [EXECUTE].iter().chain(&SPAWNED_ARGS) {
+        if !spawned.contains(kept) {
+            gaps.push(format!("spawned turn lost {kept}"));
+        }
+    }
+    gaps
+}
+
 // Both ancestors judge after the writer post, inflight save and busy preflight, as the
 // last step before spawn, on the key and tmux name the spawned turn carries.
 #[test]
 fn both_ancestors_judge_as_the_last_step_before_spawn() {
-    let intake = include_str!("router/message_handler/intake_turn.rs");
-    let headless = include_str!("router/message_handler/headless_turn.rs");
-    for (file, source, earlier) in [
-        (
-            "intake",
-            intake,
-            &[
-                "post_adk_session_status_for_channel(",
-                "hosted_tui_busy_preflight",
-            ][..],
-        ),
-        (
-            "headless",
-            headless,
-            &["post_adk_session_status_with_canonical_identity("][..],
-        ),
-    ] {
-        let judge = "turn_teardown_clearance::for_turn(";
-        assert_eq!(source.matches(judge).count(), 1, "{file}");
-        let call = source.find(judge).unwrap();
-        let end = call + source[call..].find(".await;").unwrap() + ".await;".len();
-        let spawn = end + source[end..].find("tokio::task::spawn_blocking(").unwrap();
-        let before_spawn = source[end..spawn].trim();
+    for (file, source, entry, earlier) in ANCESTORS {
         assert_eq!(
-            before_spawn, "",
-            "{file}: nothing runs between the verdict and the spawn"
+            last_step_gaps(source, entry, earlier),
+            Vec::<String>::new(),
+            "{file}"
         );
-        for step in earlier
-            .iter()
-            .chain(&["save_inflight_state_create_new(&inflight_state)"])
-        {
-            assert!(
-                source.find(step).is_some_and(|at| at < call),
-                "{file}: {step}"
-            );
+    }
+}
+
+#[test]
+fn last_step_guard_rejects_commented_steps_and_code_before_spawn() {
+    use crate::services::discord::router::source_guard_support::{Lexed, forge};
+    use crate::test_support::CommentForgery;
+    for (file, source, entry, earlier) in ANCESTORS {
+        let mut needles = vec![entry, JUDGE, SPAWN, SAVE, EXECUTE];
+        needles.extend(
+            earlier
+                .iter()
+                .chain(&VERDICT_ARGS)
+                .chain(&SPAWNED_ARGS)
+                .copied(),
+        );
+        for needle in needles {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(source, needle, forgery);
+                assert!(forged.contains(needle));
+                let gaps = last_step_gaps(&forged, entry, earlier);
+                assert!(!gaps.is_empty(), "{file}: {forgery:?} `{needle}` passes");
+            }
         }
-        let args = &source[call..end];
-        assert!(args.contains("adk_session_key.as_deref()"), "{file}");
-        assert!(args.contains("tmux_session_name.as_deref()"), "{file}");
-        let spawned = &source[spawn..];
+        let call = Lexed::new(source).find(JUDGE).expect("verdict call");
+        let end = call + source[call..].find(".await;").expect("awaited verdict") + 7;
+        let between = |insert: &str| format!("{}{insert}{}", &source[..end], &source[end..]);
+        let prose = between("\n        // run nothing here /* outer /* x */ */");
         assert_eq!(
-            source.matches("provider_dispatch::execute(").count(),
-            1,
+            last_step_gaps(&prose, entry, earlier),
+            Vec::<String>::new(),
             "{file}"
         );
-        assert!(spawned.contains("provider_dispatch::execute("), "{file}");
-        assert!(spawned.contains("tmux_session_name: tmux_session_name.as_deref(),"));
-        assert!(
-            spawned.contains("teardown: teardown_clearance.as_ref(),"),
-            "{file}"
-        );
+        let coded = between("\n        let _between = ();");
+        assert_eq!(last_step_gaps(&coded, entry, earlier).len(), 1, "{file}");
     }
 }

@@ -1468,7 +1468,7 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
 
 ## Appendix: TUI O unseen resume boundary
 
-This is the current O writer contract, checked against main `538af4dbd`. R5-2 (`47901f438`)
+The unseen-resume baseline was checked against main `538af4dbd`. R5-2 (`47901f438`)
 allows an in-session resume into a first-seen session to be adopted at its SessionStart; it
 does not establish a resume byte boundary (`src/services/claude_tui/source_verify.rs:361–390`).
 The [operator procedure](tui-o-writer-canary-runbook.md#9-resolve-an-unseen-resume-boundary)
@@ -1482,7 +1482,22 @@ records a boundary in the existing O ledger; it adds no relay owner or delivery 
 | `BoundaryResolved` records `from` and `excluded_range: 0..from`; only the next writer start applies Pending → `Owed { from }` and replays retained records. | `src/services/tui_o/store/rotation.rs:142–157`, `:185–199`, `:242–249`; `src/services/tui_o/writer/rotation/readers.rs:31–34`, `:63–69` |
 | The historical prefix `[0, from)` is excluded; records starting at or after `from` remain owed, subject to the existing parent mask. | `src/services/tui_o/store/ledger.rs:75–82`; `src/services/tui_o/writer/rotation/owe.rs:37–42` |
 | Pending is not collectible; both the writer collector and the direct store GC path refuse it. | `src/services/tui_o/writer/rotation.rs:880–889`; `src/services/tui_o/store/rotation.rs:135–140`; `src/services/tui_o/store/spool.rs:588–596` |
-| `tui_o:boundary_pending:<channel>` makes health at least degraded: the boundary is unresolved and output withheld, without proving loss or duplication. Unresolved Pending is alarmed again on writer start. | `src/services/tui_o/alarm.rs:215`, `:260–277`; `src/services/discord/health/snapshot.rs:1080–1086`; `src/services/tui_o/writer/rotation/readers.rs:55–61` |
+| `tui_o:boundary_pending:<channel>` makes health at least degraded: the boundary is unresolved and output withheld, without proving loss or duplication. After successful resume or capture, health is reconciled from all selected Pending links: suspended sources are excluded, but retired selected sources still count. The reason clears only when that count is zero. | `Sources::{resume,capture,reconcile_boundary_pending}`; `Sources::resume_selected`; `AlarmRouter::reconcile_boundary_pending` |
+
+New Codex rehydration can record `CauseSource::Launch` only when (1) the current spawn nonce
+matches a schema-1 Codex context, tmux session, channel and runtime owner; (2) that context is
+`fresh`, uses `shadow` policy and names no expected native session; (3) the native verifier
+confirms a regular rollout under the provider root, matching UUID/path, CLI non-child metadata
+and stable file identity; and (4) its native creation timestamp is present and no earlier than
+the context. This uses `pane_registration::codex_launch_cause::cause` and
+`verify_codex_hook_source`; the existing earlier-unread-binding guard still overrides Startup.
+
+Condition (5), when `first_prompt_digest` is present, requires its SHA-256 to match the first
+real user input's original UTF-8 text. The shared extractor selects that input, excluding
+synthetic records; its trimmed return value is not hashed. Raw text parts are joined with
+newlines without trimming. An incomplete header or prompt, or an unavailable/replaced file,
+defers registration until a later tick; definitive mismatches remain observed. This first-bind
+classification does not reclassify old Pending links, including the investigated sequence 122.
 
 Unseen-resume byte boundaries and existing resume Pending states have no automatic resolution
 policy. Hook publication time, elapsed time and EOF are not exact resume-position evidence.
@@ -1500,7 +1515,9 @@ Acceptance evidence below is the existing test source, not a new test execution:
   (`src/services/tui_o/store/ledger_lock_tests.rs:44`, assertions `:74–91`) overlaps recovery
   with the operator append and verifies that a successful resolution survives the next recovery.
 
-[U] BoundaryPending has no alarm-clear hook; same-process health reconciliation remains an operational follow-up (`src/services/tui_o/alarm.rs:129–164`, `:317–333`; `src/services/tui_o/writer/mod.rs:179–188`).
+An operator resolution only appends `BoundaryResolved`. Verify the actual managed writer reopen,
+retained-output delivery and reconciled health; a successful CLI command alone does not apply
+the boundary or establish recovery.
 
 ## How to add a new invariant
 

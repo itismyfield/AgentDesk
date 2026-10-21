@@ -962,6 +962,9 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
 #[cfg(test)]
 #[path = "tmux_session_files/orphan_sweep_tests.rs"]
 mod orphan_sweep_tests;
+#[cfg(test)]
+#[path = "tmux_session_files/source_guard_tests.rs"]
+mod source_guard_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1231,28 +1234,7 @@ mod tests {
 
     #[test]
     fn every_spawn_site_uses_the_combined_marker_gate() {
-        let codex =
-            include_str!("../codex.rs").to_owned() + include_str!("../codex/absence_launch.rs");
-        let combined = "crate::services::discord::stamp_spawn_markers(tmux_session_name, None)";
-        let nonce_only = "crate::services::discord::write_spawn_nonce(tmux_session_name)";
-        let inline_generation = "session_temp_path(tmux_session_name, \"generation\")";
-        for (source, prepared) in [
-            (include_str!("../claude.rs"), 1),
-            (codex.as_str(), 1),
-            (include_str!("../qwen.rs"), 0),
-        ] {
-            assert_eq!(source.matches(combined).count(), 1);
-            assert_eq!(
-                source
-                    .split_whitespace()
-                    .collect::<String>()
-                    .matches("stamp_spawn_markers(tmux_session_name,Some(")
-                    .count(),
-                prepared
-            );
-            assert!(!source.contains(nonce_only));
-            assert!(!source.contains(inline_generation));
-        }
+        super::source_guard_tests::assert_combined_marker_gate();
     }
 
     #[test]

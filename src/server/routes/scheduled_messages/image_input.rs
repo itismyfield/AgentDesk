@@ -160,21 +160,7 @@ pub(super) fn validate_context(context: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(super) async fn ensure_rollout(pool: &sqlx::PgPool) -> Result<(), AppError> {
-    match crate::db::scheduled_messages::image_rollout_ready_pg(pool).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(app_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "imageAttachment requires upgraded scheduled and outbox consumers on every registered worker (at least two)",
-        )),
-        Err(error) => Err(app_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("image rollout check: {error}"),
-        )),
-    }
-}
-
-pub(super) fn extract<T>(
+pub(super) fn extract<T: 'static>(
     body: Result<axum::Json<T>, axum::extract::rejection::JsonRejection>,
 ) -> Result<T, AppError> {
     body.map(|axum::Json(body)| body).map_err(|error| {
@@ -183,7 +169,10 @@ pub(super) fn extract<T>(
         } else {
             error.status()
         };
-        let message = match data_error_detail(&error) {
+        // A JsonValue body has no schema, so every path segment is a client key.
+        let schemaless = std::any::TypeId::of::<T>() == std::any::TypeId::of::<JsonValue>();
+        let detail = data_error_detail(&error).filter(|_| !schemaless);
+        let message = match detail {
             Some(detail) => format!("invalid scheduled message JSON: {detail}"),
             None => "invalid scheduled message JSON".to_owned(),
         };
@@ -191,16 +180,50 @@ pub(super) fn extract<T>(
     })
 }
 
-/// Field-level serde detail, withheld whenever it touches imageAttachment so base64 never echoes.
 fn data_error_detail(error: &axum::extract::rejection::JsonRejection) -> Option<String> {
     let axum::extract::rejection::JsonRejection::JsonDataError(error) = error else {
         return None;
     };
-    let detail = std::error::Error::source(error)?.to_string();
+    redacted_detail(&std::error::Error::source(error)?.to_string())
+}
+
+/// Field-level serde detail, withheld whenever it touches imageAttachment so base64 never echoes.
+/// Client literals ("…" strings, `…` values) become `<redacted>`; `field` names, paths and types stay.
+fn redacted_detail(detail: &str) -> Option<String> {
     if detail.contains("imageAttachment") || detail.contains("dataBase64") {
         return None;
     }
-    Some(detail.chars().take(200).collect())
+    // JsonValue paths (providerTargets, any array-form field) carry client-chosen keys.
+    if detail.starts_with("providerTargets") || detail.starts_with('[') {
+        return None;
+    }
+    let mut out = String::with_capacity(detail.len());
+    let mut chars = detail.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => _ = chars.next(),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+                out.push_str("\"<redacted>\"");
+            }
+            '`' => {
+                let literal: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                let kept = if out.ends_with("field ") {
+                    literal.as_str()
+                } else {
+                    "<redacted>"
+                };
+                out.push_str(&format!("`{kept}`"));
+            }
+            _ => out.push(c),
+        }
+    }
+    Some(out.chars().take(200).collect())
 }
 
 #[cfg(test)]

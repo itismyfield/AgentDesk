@@ -1,58 +1,37 @@
 use super::*;
-use serde_json::json;
+
+async fn undeclared_claim_sqlstate(pool: &PgPool, id: &str) -> Option<String> {
+    let error = sqlx::query("UPDATE scheduled_messages SET status='firing' WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .err()?;
+    error
+        .as_database_error()?
+        .code()
+        .map(|code| code.into_owned())
+}
 
 #[tokio::test]
-async fn postgres_image_rollout_includes_offline_members_and_outbox_consumers() {
+async fn postgres_old_scheduled_image_claim_is_rejected_and_capability_is_transaction_local() {
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-        "image_rollout",
-        "image rollout safety",
+        "image_claim_guard",
+        "scheduled image claim guard",
     )
     .await;
-    let pool = db.connect_and_migrate_with_max_connections(2).await;
-    assert!(!image_rollout_ready_pg(&pool).await.unwrap());
-    let caps =
-        crate::services::cluster::intake_worker_capabilities::capabilities_with_runtime_state(
-            &json!({}),
-        );
-    assert_eq!(caps["scheduled_messages"]["image_consumer_v1"], true);
-    assert_eq!(caps["message_outbox"]["image_consumer_v1"], true);
-    sqlx::query("INSERT INTO worker_nodes (instance_id,capabilities) VALUES ('book',$1)")
-        .bind(&caps)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(
-        !image_rollout_ready_pg(&pool).await.unwrap(),
-        "one advertised node must not enable a two-node rollout"
-    );
-    sqlx::query(
-        "INSERT INTO worker_nodes (instance_id,status,capabilities) VALUES ('mini','offline','{}')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    assert!(
-        !image_rollout_ready_pg(&pool).await.unwrap(),
-        "stopping an old worker must not open the image gate"
-    );
-    sqlx::query("UPDATE worker_nodes SET capabilities=$1 WHERE instance_id='mini'")
-        .bind(&caps)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(image_rollout_ready_pg(&pool).await.unwrap());
-    sqlx::query("UPDATE worker_nodes SET capabilities=capabilities-'message_outbox' WHERE instance_id='mini'").execute(&pool).await.unwrap();
-    assert!(
-        !image_rollout_ready_pg(&pool).await.unwrap(),
-        "outbox consumer capability is mandatory"
-    );
-    sqlx::query("INSERT INTO scheduled_messages (id,content,target_channel_id,scheduled_at,image_filename,image_content_type,image_data) VALUES ('old-claim','body','7001',NOW(),'image.png','image/png',$1)").bind(&b"image"[..]).execute(&pool).await.unwrap();
-    let error = sqlx::query("UPDATE scheduled_messages SET status='firing' WHERE id='old-claim'")
-        .execute(&pool)
-        .await
-        .unwrap_err();
+    // One connection, so the supported claim and the later undeclared claim share a session.
+    let pool = db.connect_and_migrate_with_max_connections(1).await;
+    for (id, due) in [
+        ("old-claim", Utc::now()),
+        ("later", Utc::now() + chrono::Duration::days(1)),
+    ] {
+        sqlx::query("INSERT INTO scheduled_messages (id,content,target_channel_id,scheduled_at,image_filename,image_content_type,image_data) VALUES ($1,'body','7001',$2,'image.png','image/png',$3)")
+            .bind(id).bind(due).bind(&b"image"[..]).execute(&pool).await.unwrap();
+    }
     assert_eq!(
-        error.as_database_error().unwrap().code().as_deref(),
+        undeclared_claim_sqlstate(&pool, "old-claim")
+            .await
+            .as_deref(),
         Some("55000"),
         "old scheduled consumer must be rejected by the database"
     );
@@ -60,6 +39,11 @@ async fn postgres_image_rollout_includes_offline_members_and_outbox_consumers() 
         .await
         .unwrap();
     assert_eq!(fires.len(), 1);
+    assert_eq!(
+        undeclared_claim_sqlstate(&pool, "later").await.as_deref(),
+        Some("55000"),
+        "the consumer declaration must not outlive the claim transaction"
+    );
     pool.close().await;
     db.drop().await;
 }
