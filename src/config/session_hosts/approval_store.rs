@@ -60,6 +60,10 @@ impl ApprovalStore for FileApprovalStore {
         }
         let pending = root.join("pending");
         let interrupted = match std::fs::symlink_metadata(&pending) {
+            Ok(meta) if meta.is_file() => match std::fs::read(&pending) {
+                Ok(bytes) => bytes != b"committed",
+                Err(_) => return Loaded::Unavailable("approval_snapshot_unreadable"),
+            },
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(_) => return Loaded::Unavailable("approval_snapshot_unreadable"),
@@ -114,7 +118,12 @@ impl ApprovalStore for FileApprovalStore {
         )?;
         runtime_store::fsync_parent_dir(&pending).map_err(|error| error.to_string())?;
         self.write("current.json", hosts)?;
-        std::fs::remove_file(&pending).map_err(|error| error.to_string())?;
+        // Clear pending state durably without unlinking store files.
+        runtime_store::critical_atomic_write(
+            &pending,
+            "committed",
+            AtomicWriteContext::new("session_hosts_approval"),
+        )?;
         if let Err(error) = cleanup_sync(&pending) {
             runtime_store::critical_atomic_write(
                 &root.join("pending"),
