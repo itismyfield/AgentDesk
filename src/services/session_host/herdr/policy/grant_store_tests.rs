@@ -32,7 +32,10 @@ async fn durable_grant_roundtrip_survives_owner_restart_without_rechecking_curre
         "durable_grant_rehydrates_exact_authority_contract"
     );
     assert_eq!(
-        restored.load_all(&[endpoint.clone()]).await.unwrap(),
+        restored
+            .load_all(std::slice::from_ref(&endpoint))
+            .await
+            .unwrap(),
         [expected.clone()]
     );
     assert!(
