@@ -7,7 +7,9 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::inflight::{
+    GuardedClearOutcome, InflightTurnIdentity, InflightTurnState,
+};
 use crate::services::discord::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
@@ -266,6 +268,10 @@ async fn run_case(
         channel_raw,
     );
     let started_at = row.started_at.clone();
+    let (a_identity, a_nonce) = (
+        InflightTurnIdentity::from_state(&row),
+        row.turn_nonce.clone(),
+    );
     let mut bridge = bridge_context(row);
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     bridge.completion_tx = Some(completion_tx);
@@ -323,8 +329,17 @@ async fn run_case(
             successor_row.turn_nonce = next.turn_nonce().map(str::to_owned);
             successor_row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
             assert_ne!(successor_row.started_at, started_at);
-            // The successor's row replaces A's on the same message, under its own nonce.
-            crate::services::discord::inflight::save_inflight_state(&successor_row).unwrap();
+            // The claim that frees A's mailbox clears A's row; intake then creates B's row anew.
+            let cleared =
+                crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
+                    &provider,
+                    channel_raw,
+                    &a_identity,
+                    a_nonce.as_deref(),
+                );
+            assert_eq!(cleared, GuardedClearOutcome::Cleared);
+            crate::services::discord::inflight::save_inflight_state_create_new(&successor_row)
+                .unwrap();
             successor_saved = Some(std::fs::read(&row_path).unwrap());
         }
     }
@@ -361,6 +376,10 @@ async fn run_case(
     {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    assert!(
+        Arc::strong_count(&a) <= 1 + usize::from(mailbox_holds_a),
+        "the bridge task exits before the durable row is compared"
+    );
     let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel).await;
     let outcome = Outcome {
         holder: snapshot.cancel_token.clone(),
