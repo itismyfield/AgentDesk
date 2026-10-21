@@ -144,12 +144,25 @@ async fn resolve_manual_bot_http(
     options: &ManualOutboundOptions,
 ) -> Result<std::sync::Arc<serenity::Http>, (&'static str, String)> {
     if let Some(provider) = options.channel_owner_provider.as_ref() {
-        return crate::services::discord::health::resolve_direct_meeting_runtime(
-            registry, channel_id, provider,
-        )
-        .await
-        .map(|(http, _)| http)
-        .map_err(|error| ("503 Service Unavailable", error));
+        let shared = registry
+            .shared_for_provider_on_channel(provider, channel_id)
+            .await
+            .ok_or_else(|| {
+                (
+                    "503 Service Unavailable",
+                    format!(
+                        "channel provider runtime unavailable or ambiguous: {} on {}",
+                        provider.as_str(),
+                        channel_id
+                    ),
+                )
+            })?;
+        return shared.serenity_http_or_token_fallback().ok_or_else(|| {
+            (
+                "503 Service Unavailable",
+                "channel provider credentials unavailable".to_string(),
+            )
+        });
     }
     resolve_bot_http(registry, bot).await
 }

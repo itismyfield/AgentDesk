@@ -240,7 +240,7 @@ async fn resolve_channel_candidate(
     .await
 }
 
-pub(in crate::services::discord) async fn resolve_direct_meeting_runtime(
+pub(super) async fn resolve_direct_meeting_runtime(
     registry: &HealthRegistry,
     channel_id: ChannelId,
     owner_provider: &ProviderKind,
