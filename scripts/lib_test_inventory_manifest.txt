@@ -1242,6 +1242,8 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_re
 server::outbox_actionable_delivery::tests::notify_fallback_requires_a_failed_actionable_announce_delivery
 server::outbox_actionable_delivery::tests::operational_alert_delivery_adds_non_turn_provenance
 server::outbox_delivery_alert::tests::terminal_outbox_failure_records_quality_event_without_ops_card
+server::outbox_worker::attachment_pg_tests::claim_batches_are_id_prefixes_ending_before_second_image_pg
+server::outbox_worker::attachment_pg_tests::claim_text_only_and_single_image_batches_keep_existing_shape_pg
 server::outbox_worker::attachment_pg_tests::image_api_fire_outbox_authorized_wire_and_sent_cleanup_pg
 server::outbox_worker::attachment_pg_tests::image_claim_batch_budget_and_old_consumer_barrier_pg
 server::outbox_worker::attachment_pg_tests::image_outbox_paths_preserve_retry_restart_and_dedupe_pg
@@ -1250,6 +1252,7 @@ server::outbox_worker::attachment_pg_tests::image_prod_options_and_sent_cleanup_
 server::outbox_worker::attachment_pg_tests::legacy_enqueue_wrappers_keep_null_attachment_bytes_pg
 server::outbox_worker::attachment_pg_tests::outbox_image_constraints_reject_partial_and_oversized_rows_pg
 server::outbox_worker::attachment_pg_tests::partial_outbox_image_never_invokes_text_delivery_pg
+server::outbox_worker::attachment_pg_tests::stale_processing_reclaim_follows_the_same_prefix_rule_pg
 server::policy_tick_logging::tests::failures_stay_warn_and_do_not_count_as_timing_recovery
 server::policy_tick_logging::tests::successful_tick_logs_are_tiered_and_warn_only_on_slow_transitions
 server::policy_tick_schedule_tests::five_min_policy_tick_runs_on_every_tenth_nonzero_iteration
@@ -1601,6 +1604,9 @@ server::routes::routines::tests::resume_body_present_next_due_at_is_applied
 server::routes::runtime_profile_tests::worker_profile_routes_preserve_execution_auth_and_remove_admin_methods
 server::routes::scheduled_messages::discord_mentions::tests::required_discord_mentions_are_stable_and_preserve_requested_recipients
 server::routes::scheduled_messages::discord_mentions::tests::required_discord_mentions_do_not_apply_to_agent_delivery
+server::routes::scheduled_messages::image_input::json_error_tests::create_json_data_error_detail_is_capped_at_200_chars
+server::routes::scheduled_messages::image_input::json_error_tests::create_json_data_errors_name_the_offending_field
+server::routes::scheduled_messages::image_input::json_error_tests::create_json_errors_keep_image_and_non_data_rejections_generic
 server::routes::scheduled_messages::image_input::tests::image_context_rejects_mixed_targets_and_rendered_utf16_overflow
 server::routes::scheduled_messages::image_input::tests::image_upload_validates_filename_mime_magic_and_base64
 server::routes::scheduled_messages::image_input::tests::postgres_image_api_create_patch_rollout_and_redaction
@@ -8888,8 +8894,11 @@ services::discord::tmux_reaper::host_guard_tests::receipt_backstop_keeps_same_na
 services::discord::tmux_reaper::host_guard_tests::receipt_backstop_kills_only_the_admitted_exact_session_pg
 services::discord::tmux_reaper::host_guard_tests::stale_busy_heal_finalizes_only_a_turn_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::unified_thread_kill_signal_kills_only_what_the_host_guard_admits_pg
+services::discord::tmux_reaper::retirement_await_tests::host_gate_pg_tests::keyed_host_gate_heal_retires_a_drifted_same_episode_row_pg
 services::discord::tmux_reaper::retirement_await_tests::intake_finalizes_after_final_probe
+services::discord::tmux_reaper::retirement_await_tests::intake_heal_retires_a_drifted_same_episode_row
 services::discord::tmux_reaper::retirement_await_tests::periodic_finalizes_after_final_probe
+services::discord::tmux_reaper::retirement_await_tests::periodic_heal_retires_a_drifted_same_episode_row
 services::discord::tmux_reaper::tests::a_failed_presence_probe_never_reads_as_absent
 services::discord::tmux_reaper::tests::accepts_persistent_runtime_session_paths
 services::discord::tmux_reaper::tests::extracts_tmux_session_name_from_legacy_output_path
@@ -10665,6 +10674,15 @@ services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
 services::discord::turn_finalizer::episode::host_terminated_tests::m1_host_terminated_enqueues_no_abandoned_card
 services::discord::turn_finalizer::episode::host_terminated_tests::m1_natural_terminal_wins_preserves_successor
+services::discord::turn_finalizer::episode::row_retirement_tests::a_cleanup_less_finalize_releases_without_retiring_the_drifted_row
+services::discord::turn_finalizer::episode::row_retirement_tests::a_same_episode_save_after_the_read_keeps_the_row_and_names_its_version
+services::discord::turn_finalizer::episode::row_retirement_tests::an_already_finalized_compensation_retires_with_its_own_release
+services::discord::turn_finalizer::episode::row_retirement_tests::an_unreadable_row_is_named_and_kept_while_the_shared_clear_keeps_its_answer
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_refuses_a_row_of_another_provider_or_channel
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_requires_every_proof_axis
+services::discord::turn_finalizer::episode::row_retirement_tests::drift_retirement_requires_the_released_token_to_be_the_observed_actor
+services::discord::turn_finalizer::episode::row_retirement_tests::the_pre_panel_release_never_retires_a_drifted_row
+services::discord::turn_finalizer::episode::row_retirement_tests::turns_admitted_around_the_retirement_keep_their_input_and_row
 services::discord::turn_finalizer::episode::tests::a_retained_cleanup_row_names_the_gate_that_kept_it
 services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
 services::discord::turn_finalizer::episode::tests::normal_successor_keeps_admission_and_cleanup_for_modern_and_legacy_episode

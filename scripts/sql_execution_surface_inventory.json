@@ -21222,6 +21222,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:04c76279c57d59edfa9fe89eb3eb90022ff1916ac17ad586461c263b28241fa7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:267fa5b4cb3b895e3d1fea9de5cb039d16911fe9ece75b17f55f29161cccdd91"
     },
     {
@@ -21309,6 +21318,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/server/outbox_worker/attachment_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d683cb00045fbfc677bc2dedbbf7da621c8214866a84c84ddb5998a7c3d19a24"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/outbox_worker/attachment_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
@@ -21384,7 +21402,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:b20cd4dc8eb228a55b5bd0b5ce471c2a50dfaaef4736f60e7727bf0ff9ea70a1"
+      "fingerprint": "sha256:fe887e03c22e3a67664a434d3106e994ef54d0c2445f758b08d85ecc6d0bcf02"
     },
     {
       "root": "src",
