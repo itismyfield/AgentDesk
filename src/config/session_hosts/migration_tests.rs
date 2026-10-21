@@ -378,6 +378,23 @@ async fn migration_hold_blocks_even_without_rows_and_hold_failure_is_unverified(
         assert_eq!(holds.calls.get(), 1);
         assert!(store.saved.borrow().is_empty());
     }
+    let old = fixture();
+    let candidate = remap(old.clone(), "/fixture/new.sock");
+    let store = Store::new(Some(old));
+    let holds = Holds::<true>::new(Ok(Vec::new()));
+    let selected = select(
+        candidate.clone(),
+        &store,
+        &Rows::new(Vec::new()),
+        &holds,
+        false,
+    )
+    .await
+    .into_hosts();
+    assert_eq!(Projection::of(&selected), Projection::of(&candidate));
+    assert_eq!(reason(&selected), None);
+    assert_eq!(holds.calls.get(), 1);
+    assert_eq!(store.saved.borrow().len(), 1);
 }
 
 #[tokio::test]
@@ -531,6 +548,16 @@ fn migration_file_store_old_schema_decodes_same_hosts_and_new_schema_is_not_corr
         decoded.config().herdr.endpoints["one"].mode,
         EndpointMode::LegacyDedicated
     );
+    let before = crate::services::session_host::HerdrRegistry::build(&candidate);
+    let after = crate::services::session_host::HerdrRegistry::build(&decoded);
+    assert!(!before.is_empty());
+    assert_eq!(before.is_empty(), after.is_empty());
+    assert_eq!(before.sole_host().is_some(), after.sole_host().is_some());
+    let HostedRecord::Known(row) = located(HostedState::Bound) else {
+        panic!("fixture must contain a located Bound record");
+    };
+    assert!(before.view(&row).is_some());
+    assert!(after.view(&row).is_some());
     std::fs::write(
         &path,
         br#"{"schema": 999, "projection": "unknown newer layout"}"#,
