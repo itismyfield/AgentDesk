@@ -1044,24 +1044,8 @@ mod tests {
     #[cfg(unix)]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
         // Fault injection proves error handling; this source oracle separately pins the syscalls.
-        let source = include_str!("ordered_queue.rs");
-        let publish = source
-            .split("fn publish_atomic_file(")
-            .nth(1)
-            .unwrap()
-            .split("fn queue_request_paths(")
-            .next()
-            .unwrap();
-        for call in [
-            "|| temp.sync_all()",
-            "runtime_store::fsync_parent_dir(path)",
-            "    sync().map_err(",
-        ] {
-            assert!(
-                publish.contains(call),
-                "atomic publication must invoke {call}"
-            );
-        }
+        let gaps = source_guard_tests::atomic_sync_gaps(source_guard_tests::ORDERED_QUEUE);
+        assert_eq!(gaps, Vec::<String>::new());
         for label in [
             "hook relay quarantine evidence",
             "hook relay queue sequence",
@@ -2523,6 +2507,8 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    mod source_guard_tests;
     #[cfg(unix)]
     mod tq_tests;
 }

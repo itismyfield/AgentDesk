@@ -22,6 +22,10 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{
+        CommentForgery, braced_item_span, comment_out_code, rust_code_mask, strip_rust_comments,
+    };
+
     /// The fixture sources under contract, paired with the module path a
     /// reviewer would grep for.
     const FIXTURE_SOURCES: &[(&str, &str)] = &[
@@ -162,23 +166,63 @@ mod tests {
     /// The shared helper the four fixtures now depend on.
     const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
 
+    /// Classification 2: comment-free text (literals kept, so a quoted address still counts);
+    /// required calls use the code mask. Lexical tripwire: no aliases, macros or reachability.
+    fn code_text(source: &str) -> String {
+        strip_rust_comments(source).unwrap_or_else(|error| panic!("fixture source: {error}"))
+    }
+
+    fn code_mask(source: &str) -> String {
+        rust_code_mask(source).unwrap_or_else(|error| panic!("fixture source: {error}"))
+    }
+
     /// The contract has to be read inside the helper's own body. The identical
     /// `AGENTDESK_REQUIRE_PG` comparison also appears in `require_pg_guard`
     /// further down the same file, so a whole-file search reports the contract
     /// as intact even after the helper's copy is gutted — a mutation that
     /// replaced the helper's condition survived a whole-file assertion here
     /// before this narrowing was added.
-    fn shared_helper_body() -> &'static str {
-        const SIGNATURE: &str =
-            "pub(crate) fn postgres_test_database_url_base() -> Option<String> {";
-        let start = SHARED_HELPER_SOURCE
-            .find(SIGNATURE)
+    const HELPER_SIGNATURE: &str =
+        "pub(crate) fn postgres_test_database_url_base() -> Option<String>";
+
+    fn shared_helper_body(source: &str) -> String {
+        let span = braced_item_span(&code_mask(source), HELPER_SIGNATURE)
             .expect("db::postgres no longer defines postgres_test_database_url_base (#5218)");
-        let rest = &SHARED_HELPER_SOURCE[start..];
-        let end = rest
-            .find("\n}\n")
-            .expect("cannot find the end of postgres_test_database_url_base (#5218)");
-        &rest[..end]
+        code_text(source)[span].to_string()
+    }
+
+    const HELPER_REQUIREMENTS: [&str; 3] = [
+        "std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some(\"1\")",
+        "base.is_none()",
+        "panic!(\"PG required but POSTGRES_TEST_DATABASE_URL_BASE unset\")",
+    ];
+
+    /// Required fragments missing from the helper body, plus any host/port key it reads.
+    fn shared_helper_gaps(source: &str) -> Vec<&'static str> {
+        let body = shared_helper_body(source);
+        let missing = HELPER_REQUIREMENTS
+            .into_iter()
+            .filter(|f| !body.contains(f));
+        let read = HOST_PORT_KEYS.into_iter().filter(|key| body.contains(key));
+        missing.chain(read).collect()
+    }
+
+    const HOST_PORT_KEYS: [&str; 2] = ["PGHOST", "PGPORT"];
+
+    fn names_forbidden_address(source: &str) -> bool {
+        code_text(source).contains(&forbidden_address())
+    }
+
+    fn host_port_keys_read(source: &str) -> Vec<&'static str> {
+        let code = code_text(source);
+        HOST_PORT_KEYS
+            .into_iter()
+            .filter(|key| code.contains(key))
+            .collect()
+    }
+
+    fn calls_shared_base(source: &str) -> bool {
+        code_mask(source).contains("postgres_test_database_url_base()")
     }
 
     /// The fixtures answer "no base configured" with a skip, which is only
@@ -190,14 +234,10 @@ mod tests {
     /// which this module must not do while other tests run beside it.
     #[test]
     fn a_missing_fixture_base_stays_fatal_for_lanes_that_require_a_database() {
-        let body = shared_helper_body();
-        for fragment in [
-            "std::env::var(AGENTDESK_REQUIRE_PG_ENV).ok().as_deref() == Some(\"1\")",
-            "base.is_none()",
-            "panic!(\"PG required but POSTGRES_TEST_DATABASE_URL_BASE unset\")",
-        ] {
+        let gaps = shared_helper_gaps(SHARED_HELPER_SOURCE);
+        for fragment in HELPER_REQUIREMENTS {
             assert!(
-                body.contains(fragment),
+                !gaps.contains(&fragment),
                 "the body of postgres_test_database_url_base no longer contains \
                  `{fragment}`; without it a missing fixture base stops being \
                  fatal under AGENTDESK_REQUIRE_PG=1 and the fixtures' skip \
@@ -211,7 +251,7 @@ mod tests {
         let needle = forbidden_address();
         for (module, source) in FIXTURE_SOURCES {
             assert!(
-                !source.contains(&needle),
+                !names_forbidden_address(source),
                 "{module} hardcodes {needle}; a fixture must never name a server \
                  the lane did not configure (#5218)"
             );
@@ -223,7 +263,7 @@ mod tests {
         let needle = forbidden_address();
         for (module, source) in address_checked_sources() {
             assert!(
-                !source.contains(&needle),
+                !names_forbidden_address(source),
                 "{module} hardcodes {needle}; fixture addresses must come from the lane (#5510)"
             );
         }
@@ -404,7 +444,7 @@ mod tests {
         }
     }
 
-    /// The guard is deliberately lexical. It rejects every literal
+    /// The guard is deliberately lexical. It rejects every non-comment
     /// `PGHOST`/`PGPORT` token in the enumerated fixture sources and in the
     /// shared helper body, so changing `var` to `var_os`, hiding the read
     /// behind a constant, or reformatting the fallback cannot evade it. It
@@ -416,22 +456,21 @@ mod tests {
     /// assertion.
     #[test]
     fn fixture_sources_never_read_process_host_or_port() {
-        let helper = shared_helper_body();
-        for variable in ["PGHOST", "PGPORT"] {
+        let helper = shared_helper_gaps(SHARED_HELPER_SOURCE);
+        for variable in HOST_PORT_KEYS {
             assert!(
-                !helper.contains(variable),
+                !helper.contains(&variable),
                 "db::postgres::postgres_test_database_url_base contains `{variable}`; \
                  the canonical authority must not read process host/port defaults (#5229)"
             );
         }
         for (module, source) in address_checked_sources() {
-            for variable in ["PGHOST", "PGPORT"] {
-                assert!(
-                    !source.contains(variable),
-                    "{module} contains `{variable}`; fixture URLs must come only from \
-                     db::postgres::postgres_test_database_url_base() (#5229)"
-                );
-            }
+            let read = host_port_keys_read(source);
+            assert!(
+                read.is_empty(),
+                "{module} contains {read:?}; fixture URLs must come only from \
+                 db::postgres::postgres_test_database_url_base() (#5229)"
+            );
         }
     }
 
@@ -439,7 +478,7 @@ mod tests {
     fn fixture_sources_use_the_shared_base_authority() {
         for (module, source) in PG_FIXTURE_SOURCES {
             assert!(
-                source.contains("postgres_test_database_url_base()"),
+                calls_shared_base(source),
                 "{module} no longer calls the shared fixture-base authority (#5229)"
             );
         }
@@ -449,7 +488,7 @@ mod tests {
     fn cluster_fixtures_have_no_private_base_url_builder() {
         for (module, source) in FIXTURE_SOURCES {
             assert!(
-                !source.contains("fn postgres_base_database_url"),
+                !code_text(source).contains("fn postgres_base_database_url"),
                 "{module} reintroduced a private base-URL builder; the shared \
                  helper is the only sanctioned source and it is the one that \
                  honours AGENTDESK_REQUIRE_PG (#5218)"
@@ -461,7 +500,7 @@ mod tests {
     fn cluster_fixtures_read_the_shared_base_url_helper() {
         for (module, source) in FIXTURE_SOURCES {
             assert!(
-                source.contains("postgres_test_database_url_base()"),
+                calls_shared_base(source),
                 "{module} no longer reads the shared fixture base; without it a \
                  missing base cannot be turned into a hard failure under \
                  AGENTDESK_REQUIRE_PG=1 (#5218)"
@@ -475,23 +514,134 @@ mod tests {
     #[test]
     fn cluster_fixtures_do_not_substitute_a_value_for_a_missing_base() {
         for (module, source) in FIXTURE_SOURCES {
-            // Match against whitespace-stripped source: rustfmt puts a method
-            // chain on its own line as soon as it grows, and an assertion that
-            // only sees the single-line spelling would miss the reformatted one.
-            let dense: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-            for banned in [
-                "postgres_test_database_url_base().unwrap",
-                "postgres_test_database_url_base().unwrap_or",
-                "postgres_test_database_url_base().unwrap_or_else",
-                "postgres_test_database_url_base().unwrap_or_default",
-                "PGUSER",
-            ] {
+            let found = base_substitutions(source);
+            assert!(
+                found.is_empty(),
+                "{module} contains {found:?}; a missing fixture base must \
+                 stay missing, not be substituted for (#5218)"
+            );
+        }
+    }
+
+    fn base_substitutions(source: &str) -> Vec<&'static str> {
+        // Match against whitespace-stripped source: rustfmt puts a method
+        // chain on its own line as soon as it grows, and an assertion that
+        // only sees the single-line spelling would miss the reformatted one.
+        let dense: String = code_text(source)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        [
+            "postgres_test_database_url_base().unwrap",
+            "postgres_test_database_url_base().unwrap_or",
+            "postgres_test_database_url_base().unwrap_or_else",
+            "postgres_test_database_url_base().unwrap_or_default",
+            "PGUSER",
+        ]
+        .into_iter()
+        .filter(|banned| dense.contains(banned))
+        .collect()
+    }
+
+    /// Each real shared-base call becomes a `//` or nested `/* */` comment that
+    /// still holds the call text: a raw `contains` keeps passing, the guard must not.
+    #[test]
+    fn commented_shared_base_calls_fail_the_fixture_contract() {
+        const CALL: &str = "postgres_test_database_url_base()";
+        for (module, source) in FIXTURE_SOURCES.iter().chain(PG_FIXTURE_SOURCES) {
+            assert!(calls_shared_base(source), "{module}");
+            for forgery in CommentForgery::ALL {
+                let forged = comment_out_code(source, CALL, forgery);
+                assert!(forged.contains(CALL), "{module} {forgery:?}");
+                assert!(!calls_shared_base(&forged), "{module} {forgery:?} accepted");
+            }
+        }
+        for (module, source) in FIXTURE_SOURCES {
+            let declaration = format!("mod {}_pg_tests {{", module.trim_start_matches("server::"));
+            assert!(code_mask(source).contains(&declaration), "{module}");
+            for forgery in CommentForgery::ALL {
+                let forged = comment_out_code(source, &declaration, forgery);
                 assert!(
-                    !dense.contains(banned),
-                    "{module} contains `{banned}`; a missing fixture base must \
-                     stay missing, not be substituted for (#5218)"
+                    !code_mask(&forged).contains(&declaration),
+                    "{module} {forgery:?}"
                 );
             }
+        }
+    }
+
+    /// Commenting out any required helper fragment, or hiding a complete copy of
+    /// the helper in a comment or raw string before a gutted one, must be refused.
+    #[test]
+    fn commented_or_decoy_helper_requirements_fail_the_helper_contract() {
+        assert!(shared_helper_gaps(SHARED_HELPER_SOURCE).is_empty());
+        for fragment in HELPER_REQUIREMENTS {
+            for forgery in CommentForgery::ALL {
+                let forged = comment_out_code(SHARED_HELPER_SOURCE, fragment, forgery);
+                assert!(forged.contains(fragment), "{fragment} {forgery:?}");
+                assert!(
+                    shared_helper_gaps(&forged).contains(&fragment),
+                    "{fragment} {forgery:?} accepted"
+                );
+            }
+        }
+        let span = braced_item_span(&code_mask(SHARED_HELPER_SOURCE), HELPER_SIGNATURE)
+            .expect("helper span");
+        let helper = &SHARED_HELPER_SOURCE[span];
+        let gutted = comment_out_code(SHARED_HELPER_SOURCE, "base.is_none()", CommentForgery::Line);
+        for decoy in [
+            format!("/* {helper} */\n"),
+            format!("const DECOY: &str = r####\"{helper}\"####;\n"),
+        ] {
+            let forged = format!("{decoy}{gutted}");
+            assert!(forged.contains(HELPER_SIGNATURE) && forged.contains(helper));
+            assert_eq!(shared_helper_gaps(&forged), ["base.is_none()"]);
+        }
+    }
+
+    /// Negative guards: forbidden text in comments is not a violation, the same
+    /// text in real code still is.
+    #[test]
+    fn forbidden_fixture_text_counts_in_code_but_not_in_comments() {
+        let address = forbidden_address();
+        let commented = format!(
+            "// {address} PGHOST PGPORT PGUSER fn postgres_base_database_url\n\
+             /* outer /* {address} postgres_test_database_url_base().unwrap() */ */\n"
+        );
+        let coded = format!(
+            "\nfn postgres_base_database_url() -> String {{\n    \
+             let _ = postgres_test_database_url_base().unwrap();\n    \
+             std::env::var(\"PGHOST\").unwrap_or(\"{address}\".into())\n}}\n"
+        );
+        for (module, source) in FIXTURE_SOURCES.iter().chain(address_checked_sources()) {
+            let quiet = format!("{commented}{source}");
+            assert!(quiet.contains(&address) && quiet.contains("PGHOST"));
+            assert!(!names_forbidden_address(&quiet), "{module}");
+            assert!(host_port_keys_read(&quiet).is_empty(), "{module}");
+            let loud = format!("{source}{coded}");
+            assert!(names_forbidden_address(&loud), "{module}");
+            assert_eq!(host_port_keys_read(&loud), ["PGHOST"], "{module}");
+        }
+        for (module, source) in FIXTURE_SOURCES {
+            let quiet = format!("{commented}{source}");
+            assert!(base_substitutions(&quiet).is_empty(), "{module}");
+            assert!(!code_text(&quiet).contains("fn postgres_base_database_url"));
+            let loud = format!("{source}{coded}");
+            assert!(!base_substitutions(&loud).is_empty(), "{module}");
+            assert!(code_text(&loud).contains("fn postgres_base_database_url"));
+        }
+        let span = braced_item_span(&code_mask(SHARED_HELPER_SOURCE), HELPER_SIGNATURE)
+            .expect("helper span");
+        let open = span.start + SHARED_HELPER_SOURCE[span].find('{').expect("helper body") + 1;
+        for (insert, gaps) in [
+            ("\n    // PGHOST PGPORT\n", &[][..]),
+            (
+                "\n    let _ = std::env::var(\"PGPORT\");\n",
+                &["PGPORT"][..],
+            ),
+        ] {
+            let mut forged = SHARED_HELPER_SOURCE.to_string();
+            forged.insert_str(open, insert);
+            assert_eq!(shared_helper_gaps(&forged), gaps, "{insert:?}");
         }
     }
 
@@ -526,7 +676,7 @@ mod tests {
                  describe the same module (#5218)"
             );
             assert!(
-                source.contains(&format!("mod {module_name} {{")),
+                code_mask(source).contains(&format!("mod {module_name} {{")),
                 "{module} no longer declares `mod {module_name}`; renaming it \
                  back puts its database-backed tests into every PG-less lane \
                  (#5218)"

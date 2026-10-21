@@ -11,10 +11,8 @@ use crate::services::discord::turn_bridge::intake_settlement::{
 };
 use crate::services::provider::ProviderKind;
 
-// The #10 bridge-handoff source contract in intake_turn.rs is intentionally a
-// lexical adjacency/count guard. As with the S-W3 wiring precedent, a matching
-// token in a comment or string could satisfy it; the PostgreSQL tests below
-// cover writer behavior separately, not bridge registration success.
+// The bridge-handoff source contract in intake_turn.rs is a lexical adjacency/count guard
+// on comment-free code; the PostgreSQL tests below cover writer behavior, not registration.
 const READY: SettlementCapabilities = SettlementCapabilities {
     stamp_dispatched: true,
     settle_and_sweep: true,
@@ -51,34 +49,101 @@ fn shared_with(pool: &sqlx::PgPool, capabilities: SettlementCapabilities) -> Arc
     )
 }
 
-fn assert_path_returns_before_handoff(
+const INTAKE_TURN: &str = include_str!("../../intake_turn.rs");
+const HANDLER: &str = "pub(super) async fn handle_text_message(";
+const STAMP: &str = "dispatch_stamp::stamp_before_bridge_handoff";
+const EXECUTED: &str = "return Ok(IntakeExecution::Executed);";
+const DEFERRED: &str = "return Ok(IntakeExecution::deferred(channel_id));";
+/// (start anchor, end anchor, the path's own return, its count): three inline
+/// completions, the race-loss requeue and the hosted-TUI busy requeue.
+const PATHS: [(&str, &str, &str, usize); 5] = [
+    (
+        "let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =",
+        "let add_turn_pending =",
+        EXECUTED,
+        2,
+    ),
+    (
+        "let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =",
+        "let force_fresh_provider_session =",
+        EXECUTED,
+        1,
+    ),
+    (
+        "if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(",
+        "claim_bootstrap::bootstrap_claimed_turn(",
+        EXECUTED,
+        1,
+    ),
+    (
+        "let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(",
+        "let (mut session_id, mut memento_context_loaded, current_path) =",
+        DEFERRED,
+        1,
+    ),
+    (
+        "if let Some(diagnostic) = tui_busy_diagnostic {",
+        "if recapture_offset_after_busy_wait {",
+        DEFERRED,
+        1,
+    ),
+];
+
+/// Classification 2: the path runs between as-written anchors inside the intake
+/// handler, comments excluded; returns are counted, not proven reachable.
+fn handoff_path_gaps(
     source: &str,
-    start_anchor: &str,
-    end_anchor: &str,
-    expected_return: &str,
-    expected_returns: usize,
-) {
-    let path = source
-        .split_once(start_anchor)
-        .unwrap_or_else(|| panic!("path start anchor exists: {start_anchor}"))
-        .1
-        .split_once(end_anchor)
-        .unwrap_or_else(|| panic!("path end anchor exists after start: {end_anchor}"))
-        .0;
-    assert_eq!(
-        path.matches("return Ok(").count(),
-        expected_returns,
-        "the anchored path must not gain other successful returns: {start_anchor}"
-    );
-    assert_eq!(
-        path.matches(expected_return).count(),
-        expected_returns,
-        "the anchored path must retain its own inline return(s): {start_anchor}"
-    );
-    assert!(
-        !path.contains("dispatch_stamp::stamp_before_bridge_handoff"),
-        "the anchored path must end before dispatched stamping: {start_anchor}"
-    );
+    (start, end, expected, count): (&str, &str, &str, usize),
+) -> Vec<String> {
+    use crate::services::discord::router::source_guard_support::Lexed;
+    let Some(handler) = Lexed::new(source).block(HANDLER) else {
+        return vec![format!("missing {HANDLER}")];
+    };
+    let Some(path) = handler.find(start).and_then(|from| {
+        let to = handler.find_after(from, end)?;
+        Some(handler.slice(from..to))
+    }) else {
+        return vec![format!("missing path {start} … {end}")];
+    };
+    let mut gaps = Vec::new();
+    if path.count("return Ok(") != count || path.count(expected) != count {
+        gaps.push(format!(
+            "the anchored path must keep {count} × {expected}: {start}"
+        ));
+    }
+    if path.text().contains(STAMP) {
+        gaps.push(format!(
+            "the anchored path must end before dispatched stamping: {start}"
+        ));
+    }
+    gaps
+}
+
+fn assert_path_returns_before_handoff(source: &str, path: (&str, &str, &str, usize)) {
+    assert_eq!(handoff_path_gaps(source, path), Vec::<String>::new());
+}
+
+#[test]
+fn handoff_path_guard_rejects_commented_anchors_and_coded_stamps() {
+    use crate::services::discord::router::source_guard_support::forge;
+    use crate::test_support::CommentForgery;
+    for path in PATHS {
+        assert_path_returns_before_handoff(INTAKE_TURN, path);
+        for needle in [path.0, path.1, path.2] {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(INTAKE_TURN, needle, forgery);
+                assert!(forged.contains(needle));
+                let gaps = handoff_path_gaps(&forged, path);
+                assert!(!gaps.is_empty(), "{forgery:?} `{needle}` passes");
+            }
+        }
+        let after_start =
+            |insert: &str| INTAKE_TURN.replacen(path.0, &format!("{}{insert}", path.0), 1);
+        let prose = after_start(&format!(" /* {STAMP} */ // {STAMP}\n"));
+        assert_eq!(handoff_path_gaps(&prose, path), Vec::<String>::new());
+        let coded = after_start(&format!("\n{STAMP}();\n"));
+        assert_eq!(handoff_path_gaps(&coded, path).len(), 1, "{}", path.0);
+    }
 }
 
 async fn assert_worker_closes_spawned(pool: &sqlx::PgPool, key: &str) {
@@ -120,28 +185,9 @@ async fn wait_for_generation(cache: &SettlementCapabilityCache, generation: u64)
 async fn inline_completed_paths_never_reach_dispatched_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    let source = include_str!("../../intake_turn.rs");
-    assert_path_returns_before_handoff(
-        source,
-        "let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =",
-        "let add_turn_pending =",
-        "return Ok(IntakeExecution::Executed);",
-        2,
-    );
-    assert_path_returns_before_handoff(
-        source,
-        "let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =",
-        "let force_fresh_provider_session =",
-        "return Ok(IntakeExecution::Executed);",
-        1,
-    );
-    assert_path_returns_before_handoff(
-        source,
-        "if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(",
-        "claim_bootstrap::bootstrap_claimed_turn(",
-        "return Ok(IntakeExecution::Executed);",
-        1,
-    );
+    for path in &PATHS[..3] {
+        assert_path_returns_before_handoff(INTAKE_TURN, *path);
+    }
     // The Discord/session fixtures needed to drive these handler branches do
     // not carry a worker-owned PostgreSQL intake row. The source assertions
     // above therefore pin each marker-to-return segment, while the three
@@ -161,13 +207,7 @@ async fn race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg() {
     // transition state but has no PostgreSQL intake-row parameter. This test
     // therefore combines a bounded source-order check with an independent
     // worker mark_done row; it is not an end-to-end requeue invocation.
-    assert_path_returns_before_handoff(
-        include_str!("../../intake_turn.rs"),
-        "let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(",
-        "let (mut session_id, mut memento_context_loaded, current_path) =",
-        "return Ok(IntakeExecution::deferred(channel_id));",
-        1,
-    );
+    assert_path_returns_before_handoff(INTAKE_TURN, PATHS[3]);
     assert_worker_closes_spawned(&pool, "race-loss-requeue").await;
     pool.close().await;
     database.drop().await;
@@ -180,13 +220,7 @@ async fn hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg() {
     // As above, the live TUI/Discord queue path cannot be coupled to the test
     // database row through the repository's current interfaces. The bounded
     // source check and independent worker close are the declared substitute.
-    assert_path_returns_before_handoff(
-        include_str!("../../intake_turn.rs"),
-        "if let Some(diagnostic) = tui_busy_diagnostic {",
-        "if recapture_offset_after_busy_wait {",
-        "return Ok(IntakeExecution::deferred(channel_id));",
-        1,
-    );
+    assert_path_returns_before_handoff(INTAKE_TURN, PATHS[4]);
     assert_worker_closes_spawned(&pool, "hosted-tui-busy").await;
     pool.close().await;
     database.drop().await;

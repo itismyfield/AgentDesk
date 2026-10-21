@@ -164,6 +164,7 @@ impl FromStr for IntakeOutboxStatus {
 mod tests {
     use super::{IntakeOutboxStatus, OperatorRetryClass, UnknownIntakeStatus};
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
+    use crate::test_support::{braced_item_span, rust_code_mask};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
@@ -182,28 +183,22 @@ mod tests {
             .collect()
     }
 
-    fn declared_variant_names(source: &str) -> BTreeSet<&str> {
-        let body = source
-            .split_once("enum IntakeOutboxStatus {")
-            .expect("source must declare IntakeOutboxStatus")
-            .1
-            .split_once("\n}")
-            .expect("IntakeOutboxStatus must have a closing brace")
-            .0;
-
-        body.lines()
+    // Classification 2: variants are read from the code mask of the real enum item, so a
+    // variant inside any comment, including a nested multi-line block, never counts.
+    fn declared_variant_names(source: &str) -> BTreeSet<String> {
+        let mask = rust_code_mask(source).expect("status source lexes");
+        let span = braced_item_span(&mask, "enum IntakeOutboxStatus {")
+            .expect("source must declare IntakeOutboxStatus with a closing brace");
+        mask[span]
+            .lines()
             .filter_map(|line| {
                 let line = line.trim();
-                if line.is_empty()
-                    || line.starts_with("//")
-                    || line.starts_with("/*")
-                    || line.starts_with('*')
-                    || line.starts_with("#[")
-                {
+                if line.is_empty() || line.starts_with("#[") {
                     return None;
                 }
                 line.strip_suffix(',')
                     .filter(|name| name.chars().all(|ch| ch == '_' || ch.is_alphanumeric()))
+                    .map(str::to_string)
             })
             .collect()
     }
@@ -212,7 +207,7 @@ mod tests {
     fn all_exactly_matches_declared_variants() {
         let declared = declared_variant_names(MODULE_SOURCE);
         let all: BTreeSet<_> = IntakeOutboxStatus::ALL
-            .map(IntakeOutboxStatus::variant_name)
+            .map(|status| status.variant_name().to_string())
             .into_iter()
             .collect();
         assert_eq!(all, declared);
@@ -223,6 +218,33 @@ mod tests {
             1,
         );
         assert_eq!(declared_variant_names(&decorated), declared);
+    }
+
+    #[test]
+    fn variant_census_ignores_commented_variants_at_any_nesting() {
+        let declared = declared_variant_names(MODULE_SOURCE);
+        // A line filter keeps both of these because no line starts with a comment marker.
+        let hidden = "    /* outer /* inner */\n    Pending,\n    */";
+        let ghost = "    Pending,\n    /*\n    Ghost,\n    */";
+        for (forged, gone, added) in [
+            (
+                MODULE_SOURCE.replacen("    Pending,", hidden, 1),
+                "Pending",
+                false,
+            ),
+            (
+                MODULE_SOURCE.replacen("    Pending,", ghost, 1),
+                "Ghost",
+                true,
+            ),
+        ] {
+            assert!(forged.lines().any(|line| line == format!("    {gone},")));
+            let census = declared_variant_names(&forged);
+            assert!(!census.contains(gone), "{gone} counted from a comment");
+            assert_eq!(census.len() + usize::from(!added), declared.len());
+        }
+        let line = MODULE_SOURCE.replacen("    Pending,", "    // Pending,", 1);
+        assert!(!declared_variant_names(&line).contains("Pending"));
     }
 
     #[test]

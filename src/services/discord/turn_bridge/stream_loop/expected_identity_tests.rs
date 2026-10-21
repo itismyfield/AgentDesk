@@ -9,9 +9,11 @@ use crate::services::discord::inflight::{
     GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, load_inflight_state,
     save_inflight_state, stamp_runtime_handoff_if_matches_identity,
 };
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::services::discord::turn_bridge::detached_current_msg_id_from_durable;
 use crate::services::discord::turn_bridge::stream_tick::guarded_persist::persist_stream_tick_state;
 use crate::services::provider::ProviderKind;
+use crate::test_support::CommentForgery;
 use serenity::model::id::ChannelId;
 
 fn owner_state(channel_id: u64, user_msg_id: u64, tmux_session: Option<&str>) -> InflightTurnState {
@@ -224,57 +226,111 @@ fn disconnected_runtime_ready_retry_ahead_of_done_is_backed_off_before_done() {
     );
 }
 
+const STREAM_LOOP: &str = include_str!("../stream_loop.rs");
+const CANCEL_EXIT: &str = "if should_exit_completed_turn_on_cancel(";
+const RETRY: &str = "if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending";
+const BACKOFF: &str = "tokio::time::sleep(retained_stream_retry_backoff(";
+const REPLAY: &str = "continue 'outer";
+const INVALIDATE: &str = "*state.entry_watcher_epoch_current = false;";
+const HANDLER: &str = "let outcome = handle_runtime_handoff_loop_message(";
+const HANDOFF_ARMS: [&str; 3] = [
+    "StreamMessage::TmuxReady {",
+    "StreamMessage::RuntimeReady {",
+    "StreamMessage::ProcessReady {",
+];
+
+/// Classification 2, comments excluded: two cancel boundaries defer retained replay, and the real
+/// retry block backs off before the outer replay. A lexical tripwire: counts prove no reachability.
+fn retained_retry_gaps(source: &str) -> Vec<String> {
+    let lexed = Lexed::new(source);
+    let mut gaps = Vec::new();
+    if lexed.count(CANCEL_EXIT) != 2 {
+        gaps.push(format!(
+            "{CANCEL_EXIT} appears {} times; want 2",
+            lexed.count(CANCEL_EXIT)
+        ));
+    }
+    let order = lexed
+        .block(RETRY)
+        .map(|block| (block.find(BACKOFF), block.find(REPLAY)));
+    if !matches!(order, Some((Some(backoff), Some(replay))) if backoff < replay) {
+        gaps.push(format!(
+            "the retry block must back off before replaying: {order:?}"
+        ));
+    }
+    gaps
+}
+
+/// Classification 2, comments excluded: three invalidations, one inside each real handoff arm
+/// ahead of its handler call.
+fn handoff_invalidation_gaps(source: &str) -> Vec<String> {
+    let lexed = Lexed::new(source);
+    let mut gaps = Vec::new();
+    if lexed.count(INVALIDATE) != 3 {
+        gaps.push(format!(
+            "{INVALIDATE} appears {} times; want 3",
+            lexed.count(INVALIDATE)
+        ));
+    }
+    for head in HANDOFF_ARMS {
+        let order = lexed
+            .arm(head)
+            .map(|arm| (arm.find(INVALIDATE), arm.find(HANDLER)));
+        if !matches!(order, Some((Some(invalidate), Some(handler))) if invalidate < handler) {
+            gaps.push(format!(
+                "{head} must invalidate the entry epoch before its handler: {order:?}"
+            ));
+        }
+    }
+    gaps
+}
+
 #[test]
 fn retained_retry_policies_are_wired_to_both_cancel_boundaries_and_backoff() {
-    let source = include_str!("../stream_loop.rs")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert_eq!(
-        source
-            .matches("if should_exit_completed_turn_on_cancel(")
-            .count(),
-        2,
-        "both post-Done cancel boundaries must defer retained ToolResult replay",
-    );
-    let retry_block = source
-        .find("if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending")
-        .map(|start| &source[start..])
-        .expect("retained retry block");
-    let sleep = retry_block
-        .find("tokio::time::sleep(retained_stream_retry_backoff(")
-        .expect("retained retry block applies bounded backoff");
-    let replay = sleep
-        + retry_block[sleep..]
-            .find("continue 'outer")
-            .expect("exact retained frame is replayed on the next outer iteration");
-    assert!(sleep < replay);
+    assert_eq!(retained_retry_gaps(STREAM_LOOP), Vec::<String>::new());
 }
 
 #[test]
 fn every_later_authority_handoff_invalidates_the_bridge_entry_watcher_epoch() {
-    let source = include_str!("../stream_loop.rs")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let invalidation = "*state.entry_watcher_epoch_current = false;";
-    assert_eq!(source.matches(invalidation).count(), 3);
+    assert_eq!(handoff_invalidation_gaps(STREAM_LOOP), Vec::<String>::new());
+}
 
-    for arm in [
-        "StreamMessage::TmuxReady {",
-        "StreamMessage::RuntimeReady { handoff } => {",
-        "StreamMessage::ProcessReady {",
-    ] {
-        let arm_start = source.find(arm).expect("authority handoff arm");
-        let handler = source[arm_start..]
-            .find("let outcome = handle_runtime_handoff_loop_message(")
-            .map(|offset| arm_start + offset)
-            .expect("handoff handler");
-        assert!(
-            source[arm_start..handler].contains(invalidation),
-            "{arm} must invalidate the bridge-entry owner epoch before mutation/retry",
-        );
+#[test]
+fn stream_loop_retry_and_handoff_guards_reject_commented_and_reordered_steps() {
+    for forgery in CommentForgery::ALL {
+        for needle in [CANCEL_EXIT, RETRY, BACKOFF, REPLAY] {
+            let forged = forge(STREAM_LOOP, needle, forgery);
+            assert!(
+                !retained_retry_gaps(&forged).is_empty(),
+                "{forgery:?} `{needle}`"
+            );
+        }
+        for needle in HANDOFF_ARMS.into_iter().chain([INVALIDATE, HANDLER]) {
+            let forged = forge(STREAM_LOOP, needle, forgery);
+            assert!(
+                !handoff_invalidation_gaps(&forged).is_empty(),
+                "{forgery:?} `{needle}`"
+            );
+        }
     }
+    assert!(!retained_retry_gaps(&swap(STREAM_LOOP, BACKOFF, REPLAY)).is_empty());
+    assert!(!handoff_invalidation_gaps(&swap(STREAM_LOOP, INVALIDATE, HANDLER)).is_empty());
+    // A third cancel boundary or a fourth invalidation counts only in code.
+    let at = STREAM_LOOP
+        .find(CANCEL_EXIT)
+        .expect("first cancel boundary");
+    let with = |line: &str| [&STREAM_LOOP[..at], line, "\n        ", &STREAM_LOOP[at..]].concat();
+    let extra = format!("{CANCEL_EXIT}a) {{}} {INVALIDATE}");
+    assert_eq!(
+        retained_retry_gaps(&with(&format!("// {extra}"))),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        handoff_invalidation_gaps(&with(&format!("// {extra}"))),
+        Vec::<String>::new()
+    );
+    assert_eq!(retained_retry_gaps(&with(&extra)).len(), 1);
+    assert_eq!(handoff_invalidation_gaps(&with(&extra)).len(), 1);
 }
 
 #[test]

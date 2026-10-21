@@ -1272,30 +1272,12 @@ mod tests {
         assert!(server.await.expect("validation server task").is_err());
     }
 
+    mod source_guard_tests;
+
     #[test]
     fn every_session_forwarder_uses_the_shared_trusted_request_builder() {
-        let source = include_str!("session_forwarding.rs");
-        for name in [
-            "forward_tmux_output",
-            "forward_force_kill",
-            "forward_kill_tmux",
-            "forward_resume_candidates",
-            "forward_resume_previous",
-            "forward_cancel_turn",
-        ] {
-            let start = source
-                .find(&format!("fn {name}("))
-                .expect("forwarder exists");
-            let rest = &source[start..];
-            let end = rest.find("\n}\n").expect("forwarder closes") + 3;
-            let body = &rest[..end];
-            assert!(
-                body.contains("trusted_request("),
-                "{name} bypassed shared trusted_request"
-            );
-            assert!(!body.contains("reqwest::Client::builder"));
-            assert!(!body.contains("format!(\"http"));
-        }
+        let gaps = source_guard_tests::trusted_request_gaps(source_guard_tests::SESSION_FORWARDING);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]

@@ -3,7 +3,9 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::mark_done;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::services::provider::ProviderKind;
+use crate::test_support::CommentForgery;
 use chrono::{DateTime, Utc};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -441,88 +443,86 @@ async fn cancel_prompt_replace_commit_closes_row_pg() {
     database.drop().await;
 }
 
-/// Strips comments and string literals so occurrence counts below can only
-/// match executable source. Rust block comments nest; strings use a
-/// double-quote scan with escape handling (raw strings in the scanned file
-/// would need hash-aware handling, which this contract does not require).
-fn executable_source_only(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let bytes = source.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        } else if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            let mut depth = 1usize;
-            i += 2;
-            while i < bytes.len() && depth > 0 {
-                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if bytes[i] == b'"' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            i += 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
+const BRIDGE: &str = include_str!("../mod.rs");
+const DELIVERY: &str = include_str!("../terminal_outcome_delivery.rs");
+const SPAWN_FN: &str = "pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(";
+const BIND: &str = "intake_settlement::bind_bridge_turn_snapshot";
+const TASK: &str = "task_supervisor::spawn_observed";
+const SETTLE: &str = "intake_settlement::settle_intake_row_at_bridge_exit";
+const SETTLE_CALL: &str = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), inflight_state.intake_delivery_capabilities(), ) .await;";
+
+/// Classification 2, comments excluded: one snapshot bind before the task spawn in the spawn item,
+/// one awaited settlement with every flag. A lexical tripwire: counts do not prove one run.
+fn settlement_wiring_gaps(bridge: &str, delivery: &str) -> Vec<String> {
+    let mut gaps = Vec::new();
+    let bridge = Lexed::new(bridge);
+    if bridge.count(BIND) != 1 {
+        gaps.push(format!(
+            "{BIND} appears {} times; want 1",
+            bridge.count(BIND)
+        ));
     }
-    out
+    let order = bridge
+        .block(SPAWN_FN)
+        .map(|item| (item.find(BIND), item.find(TASK)));
+    if !matches!(order, Some((Some(bind), Some(task))) if bind < task) {
+        gaps.push(format!(
+            "the snapshot must bind before the task spawn: {order:?}"
+        ));
+    }
+    let delivery = Lexed::new(delivery);
+    if delivery.count(SETTLE) != 1 {
+        gaps.push(format!(
+            "{SETTLE} appears {} times; want 1",
+            delivery.count(SETTLE)
+        ));
+    }
+    let call = Lexed::new(SETTLE_CALL).compact();
+    if !delivery.compact().contains(call.text()) {
+        gaps.push("terminal delivery must await settlement with every disposition flag".into());
+    }
+    gaps
 }
 
 #[test]
 fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
-    let bridge_source = executable_source_only(include_str!("../mod.rs"));
     assert_eq!(
-        bridge_source
-            .matches("intake_settlement::bind_bridge_turn_snapshot")
-            .count(),
-        1,
-        "the bridge must bind exactly one turn-start snapshot"
+        settlement_wiring_gaps(BRIDGE, DELIVERY),
+        Vec::<String>::new()
     );
-    let spawn = bridge_source
-        .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
-        .expect("bridge spawn remains present");
-    let bind = bridge_source
-        .find("intake_settlement::bind_bridge_turn_snapshot")
-        .expect("bridge spawn binds the turn snapshot");
-    let task = bridge_source
-        .find("task_supervisor::spawn_observed")
-        .expect("bridge task spawn remains present");
-    assert!(
-        spawn < bind && bind < task,
-        "snapshot binds before task spawn"
-    );
+}
 
-    let source = executable_source_only(include_str!("../terminal_outcome_delivery.rs"));
+#[test]
+fn settlement_wiring_guard_rejects_commented_calls_and_counts_coded_copies() {
+    for forgery in CommentForgery::ALL {
+        for needle in [SPAWN_FN, BIND, TASK] {
+            let forged = forge(BRIDGE, needle, forgery);
+            assert!(
+                !settlement_wiring_gaps(&forged, DELIVERY).is_empty(),
+                "{forgery:?} `{needle}`"
+            );
+        }
+        for needle in [
+            SETTLE,
+            "bridge_output_owner.is_some(),",
+            "inflight_state.intake_delivery_capabilities(),",
+        ] {
+            let forged = forge(DELIVERY, needle, forgery);
+            assert!(
+                !settlement_wiring_gaps(BRIDGE, &forged).is_empty(),
+                "{forgery:?} `{needle}`"
+            );
+        }
+    }
+    assert!(!settlement_wiring_gaps(&swap(BRIDGE, BIND, TASK), DELIVERY).is_empty());
+    // A raw-string copy (with an inner quote) is not a second call; a coded copy is.
+    let quoted = format!("{DELIVERY}\nconst _COPY: &str = r#\"a\"b {SETTLE}( \"#;\n");
     assert_eq!(
-        source
-            .matches("intake_settlement::settle_intake_row_at_bridge_exit")
-            .count(),
-        1,
-        "terminal delivery must have exactly one settlement call outside comments and strings"
+        settlement_wiring_gaps(BRIDGE, &quoted),
+        Vec::<String>::new()
     );
-    let compact = source.split_whitespace().collect::<Vec<_>>().join(" ");
-    let expected = "intake_settlement::settle_intake_row_at_bridge_exit( &shared_owned, &inflight_state, intake_settlement::classify( terminal_delivery_committed, status_panel_terminal_committed, preserve_inflight_for_cleanup_retry, bridge_skip_holder_owns_inflight, bridge_output_owner.is_some(), ), inflight_state.intake_delivery_capabilities(), ) .await;";
-    assert!(
-        compact.contains(expected),
-        "terminal delivery must await settlement with every disposition flag"
-    );
+    let coded = format!("{DELIVERY}\nfn _copy() {{ {SETTLE}(); }}\n");
+    assert_eq!(settlement_wiring_gaps(BRIDGE, &coded).len(), 1);
 }
 
 #[tokio::test]

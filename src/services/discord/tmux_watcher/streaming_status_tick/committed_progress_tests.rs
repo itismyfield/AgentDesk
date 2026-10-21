@@ -17,6 +17,9 @@ mod native_collector_tests;
 #[path = "retired_transport_tests.rs"]
 mod retired_transport_tests;
 
+#[path = "source_guard_tests.rs"]
+mod source_guard_tests;
+
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
@@ -604,22 +607,7 @@ fn terminal_outcome_logged_at_wrapper() {
 #[test]
 fn progress_caller_uses_actual_terminal_outcome() {
     // The runtime tick tests are authoritative; this only pins the wiring.
-    assert!(include_str!("../turn_stream_collector.rs").contains("update_streaming_status_tick("));
-    let tick = include_str!("../streaming_status_tick.rs");
-    let at = |needle: &str| {
-        tick.find(needle)
-            .unwrap_or_else(|| panic!("missing {needle}"))
-    };
-    let persist = at("let progress_outcome = ctx.legacy_mode.is_legacy()");
-    assert!(
-        persist < at("if ctx.legacy_mode.is_legacy() && !terminal_progress_rejected {"),
-        "gate the panel helper"
-    );
-    let cleanup = at("watcher_streaming_recent_stop_cleanup");
-    assert!(
-        cleanup < at("if terminal_progress_rejected {"),
-        "cleanup precedes the stop"
-    );
+    source_guard_tests::assert_progress_wiring();
 }
 
 /// Two expired ticks on a terminal-committed row: no republication at all.
