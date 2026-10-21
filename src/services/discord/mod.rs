@@ -160,7 +160,9 @@ mod turn_end_summary;
 
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
-pub(crate) use tmux::{stamp_spawn_markers, write_spawn_nonce};
+pub(crate) use tmux::stamp_spawn_markers;
+#[cfg(all(test, unix))]
+pub(crate) use tmux::write_spawn_nonce;
 mod tmux_error_detect;
 pub(crate) use tmux_error_detect::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 mod live_bridge;
@@ -295,10 +297,12 @@ pub(in crate::services) use compact_turn_authority::{
     ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
 };
 use formatting::{format_for_discord, format_tool_input, send_long_message_raw, truncate_str};
+use inflight::InflightTurnState;
+#[cfg(test)]
+pub(crate) use inflight::lock_inflight_state_path;
 #[cfg(test)]
 use inflight::save_inflight_state;
-use inflight::{InflightTurnState, load_inflight_states};
-pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
+pub(crate) use inflight::{clear_inflight_state, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
 use poise::serenity_prelude as serenity;
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
@@ -343,11 +347,12 @@ pub(crate) use prompt_builder::{DispatchProfile, PromptProfiles};
 pub(crate) use runtime_bootstrap::RunBotContext;
 pub(crate) use runtime_bootstrap::run_bot;
 
+#[cfg(test)]
+use crate::services::turn_orchestrator::QueuePersistenceContext;
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
     FinishTurnResult, HydratePendingQueueResult, PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER,
-    QueueExitEvent, QueueExitKind, QueuePersistenceContext, RecoveryKickoffResult,
-    RequeueInterventionResult, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
+    QueueExitEvent, QueueExitKind, RecoveryKickoffResult, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
     warn_legacy_pending_queue_files,
 };
@@ -361,9 +366,8 @@ pub use discord_io::{
 };
 pub(in crate::services::discord) use dispatch_policy::{
     is_allowed_turn_sender, prepend_monitor_auto_turn_origin, resolve_announce_bot_user_id,
-    resolve_notify_bot_user_id, should_phase2_recover_message,
-    stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
-    strip_monitor_auto_turn_origin,
+    should_phase2_recover_message, stale_dispatch_turn_for_queued_intervention,
+    stale_dispatch_turn_for_text, strip_monitor_auto_turn_origin,
 };
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -375,9 +379,9 @@ pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 
-pub(in crate::services::discord) use synthetic_headless_message_id::{
-    SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR, is_synthetic_headless_message_id_raw,
-};
+#[cfg(test)]
+pub(in crate::services::discord) use synthetic_headless_message_id::SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR;
+pub(in crate::services::discord) use synthetic_headless_message_id::is_synthetic_headless_message_id_raw;
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
@@ -625,6 +629,7 @@ pub(crate) async fn should_defer_thread_archive_pg(
 /// sessions survive process restart, so this helper no longer waits for
 /// `global_active` / `global_finalizing` to drain. Callers must persist cheap
 /// queue/checkpoint state before invoking it.
+#[cfg(test)]
 pub(super) fn check_deferred_restart(shared: &SharedData) {
     if !shared
         .restart
@@ -1383,79 +1388,9 @@ async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> Channel
     }
 }
 
-async fn mailbox_cancel_active_turn(
-    shared: &SharedData,
-    channel_id: ChannelId,
-) -> CancelActiveTurnResult {
-    mailbox_cancel_active_turn_with_reason(shared, channel_id, "mailbox_cancel_active_turn").await
-}
-
-async fn mailbox_cancel_active_turn_with_reason(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    reason: &str,
-) -> CancelActiveTurnResult {
-    let tmux_session_name = shared
-        .tmux_watchers
-        .channel_binding(&channel_id)
-        .map(|binding| binding.tmux_session_name)
-        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
-    // Issue #2374 — the reason-write and the `cancelled` flip are now
-    // performed atomically by the mailbox actor (see
-    // `ChannelMailboxMsg::CancelActiveTurnWithReason`). The previous
-    // design (introduced by PR #2373 for issue #2335) read the active
-    // token from the actor, wrote `cancel_source` on it from the caller
-    // task, then sent the actor a `CancelActiveTurn`. That kept the
-    // ordering correct for a single canceller but allowed two concurrent
-    // cancellers to both fetch the same token, race on
-    // `set_cancel_source`, and lose one of the reasons. Owning the write
-    // inside the actor serializes both transitions per channel and
-    // removes the small ordering window.
-    let result = shared
-        .mailbox(channel_id)
-        .cancel_active_turn_with_reason(reason.to_string())
-        .await;
-    #[cfg(unix)]
-    if result.token.is_some() {
-        // #2549: in-memory publish remains immediate, while the matching PG
-        // mirror is awaited before the cancel path returns so a quick
-        // dcserver restart cannot drop the durable tombstone.
-        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
-    }
-    result
-}
-
-/// #2374 Codex round-1 fix (HIGH-1) — identity-guarded variant for the
-/// voice handoff cancel path. Cancels the active turn on `channel_id`
-/// ONLY when its `user_message_id` matches `handoff_message_id`. An
-/// unguarded cancel from the tombstone retry path could otherwise kill
-/// an unrelated turn that happened to start on the same target channel
-/// after the original handoff turn finalized.
-///
-/// Recording the tombstone is the caller's responsibility (see
-/// [`record_voice_handoff_cancel_tombstone`]) so a tombstone can be
-/// written even when no active turn is present (HIGH-2 fix).
-pub(crate) async fn mailbox_cancel_active_turn_if_handoff_user_message_with_reason(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    handoff_message_id: MessageId,
-    reason: &str,
-) -> CancelActiveTurnResult {
-    let tmux_session_name = shared
-        .tmux_watchers
-        .channel_binding(&channel_id)
-        .map(|binding| binding.tmux_session_name)
-        .or_else(|| infer_inflight_tmux_session_for_channel(channel_id));
-    let result = shared
-        .mailbox(channel_id)
-        .cancel_active_turn_if_user_message_with_reason(handoff_message_id, reason.to_string())
-        .await;
-    #[cfg(unix)]
-    if result.token.is_some() {
-        tmux::record_recent_turn_stop(channel_id, tmux_session_name.as_deref(), reason).await;
-    }
-    result
-}
+mod mailbox_stop;
+pub(crate) use mailbox_stop::mailbox_cancel_active_turn_if_handoff_user_message_with_reason;
+use mailbox_stop::{mailbox_cancel_active_turn, mailbox_cancel_active_turn_with_reason};
 
 /// #2374 Codex round-1 fix (HIGH-2) — record the voice handoff
 /// cancel-tombstone unconditionally when a cancel is observed for a
