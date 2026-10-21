@@ -29,9 +29,8 @@ fn rig_e08(
     Some((rig, runtime))
 }
 
-/// Everything a force-kill may change: the session row with its provider session id, the two
-/// dispatches, every retry made of them, the auto-queue run, the queue, the hosted row, the
-/// input hold and every write Herdr received.
+/// What a force-kill may change: session row and provider session id, both dispatches, their
+/// retries, the auto-queue run, the queue, the hosted row, the input hold and Herdr's writes.
 #[derive(Debug, Clone, PartialEq)]
 struct Killed {
     session: (String, Option<String>, Option<String>),
@@ -184,10 +183,8 @@ async fn run_after_activation(node: &Node) -> String {
         .unwrap()
 }
 
-// The positive control, retry off then on: on a row the turn-start writer marked active, the
-// force-kill retires the execution, then under the exclusion disconnects it (provider session
-// kept) and fails its dispatch or makes one retry; the kept queue drains and the agent's
-// auto-queue wakes only once the exclusion is gone, and the reply keeps the legacy keys.
+// Positive control, retry off then on: on a writer-marked active row the force-kill retires, then
+// under the exclusion disconnects and fails or retries once; drain and wake follow its release.
 #[test]
 fn e08_force_kill_retires_then_applies_effects_once_pg() {
     let Some((rig, runtime)) =
@@ -532,9 +529,8 @@ fn e08_force_kill_duplicate_abort_restart_pg() {
     });
 }
 
-// Force-kills the Herdr arm does not take answer as with the switch off and close nothing: the
-// switch off itself (today's refusal, byte for byte), Qwen, another channel's thread, a record
-// its row does not own, an unreadable record, and the direct CLI with the switch on.
+// Force-kills the Herdr arm does not take (switch off, Qwen, another thread, an unowned or unread
+// record, the direct CLI) answer as with the switch off, byte for byte, and close nothing.
 #[test]
 fn e08_force_kill_non_target_equivalence_pg() {
     let Some((rig, runtime)) = rig_e08("e08_force_kill_non_target_equivalence_pg", false) else {

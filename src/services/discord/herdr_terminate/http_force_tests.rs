@@ -1189,9 +1189,8 @@ fn e07_selection_change_refuses_before_close_pg() {
     });
 }
 
-// Capture, purge and loss record address the exclusion's actor even when another registry
-// publishes its own actor for the channel while the purge waits: the record and the reported
-// depth are the exclusion actor's, and the other actor's queue is left as it was.
+// Another registry publishing its actor while the purge waits changes nothing: record and depth
+// are the exclusion actor's, and the other actor's queue is left as it was.
 #[test]
 fn e07_purge_records_on_the_exclusion_actor_pg() {
     let Some((rig, runtime)) = rig_child("e07_purge_records_on_the_exclusion_actor_pg") else {
