@@ -253,3 +253,72 @@ fn herdr_claude_stop_shares_the_tmux_pane_evidence() {
         assert_eq!(observed, expected);
     });
 }
+
+// A Claude stop refused as idle logs once what it read and judged, after the same reply and no
+// Escape; a sent stop logs none.
+#[test]
+fn herdr_claude_idle_refusal_logs_its_judged_inputs_once() {
+    use sha2::Digest;
+    with_pool(|pool, root, runtime| {
+        let rows = [
+            ("thinking", claude_capture!("thinking"), sent(), 1, 0),
+            (
+                "tool-running",
+                claude_capture!("tool-running"),
+                sent(),
+                1,
+                0,
+            ),
+            ("busy-draft", claude_capture!("busy-draft"), idle(), 0, 1),
+            ("done", claude_capture!("done"), idle(), 0, 1),
+            ("interrupted", claude_capture!("interrupted"), idle(), 0, 1),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (n, (name, screen, reply, escapes, lines)) in rows.into_iter().enumerate() {
+            let (logs, _capture) = capture_stop_events();
+            let n = 720 + n as u64;
+            let (text, sent_escapes, _) =
+                stop_on(pool, root, runtime, ProviderKind::Claude, n, screen);
+            let evidence: Vec<String> = logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.contains("herdr_stop_idle_evidence"))
+                .cloned()
+                .collect();
+            observed.push((name, text, sent_escapes, evidence.len()));
+            expected.push((name, reply, escapes, lines));
+            let read = crate::services::codex_tui::input::strip_ansi_escape_sequences(screen);
+            let sha = format!("{:x}", sha2::Sha256::digest(read.as_bytes()));
+            for line in &evidence {
+                for field in [
+                    "structured=Some(Streaming)".to_owned(),
+                    format!("draft={}", name == "busy-draft"),
+                    format!("screen_sha=\"{}\"", &sha[..12]),
+                    "phase=\"ambiguous\"".to_owned(),
+                    "runtime_kind=\"claude_tui\"".to_owned(),
+                    "sources_same=true".to_owned(),
+                    "truncated=false".to_owned(),
+                ] {
+                    // The collector lists each field as one Debug-quoted element.
+                    let element = format!("{field:?}");
+                    assert!(line.contains(&element), "{name}: {field} missing in {line}");
+                }
+                for field in [
+                    "ready=",
+                    "active=",
+                    "modal=",
+                    "veto=",
+                    "legacy_active=",
+                    "foreground_tool_running=",
+                    "exact_empty_composer=",
+                    "tail=[",
+                    "turn_nonce=",
+                ] {
+                    assert!(line.contains(field), "{name}: {field} missing in {line}");
+                }
+            }
+        }
+        assert_eq!(observed, expected);
+    });
+}

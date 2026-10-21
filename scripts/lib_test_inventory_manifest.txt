@@ -10629,6 +10629,10 @@ services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::turn_identity_without_uuid_still_detects_replaced_turn
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_interrupt_is_fenced_but_can_cancel_submitted_generation
 services::discord::turn_bridge::tmux_runtime::claude_stop_delivery::tests::wrapper_submit_pending_overrides_prior_idle_state
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::idle_evidence::tests::idle_evidence_survives_the_shipped_filter_as_one_line
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::idle_evidence::tests::idle_evidence_tail_is_bounded_in_rows_width_and_bytes
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::idle_evidence::tests::idle_evidence_tail_masks_user_input_and_strips_controls
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::idle_evidence::tests::idle_evidence_tail_redacts_known_secrets
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_codex_stop_never_takes_a_later_native_turn_for_its_own
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_rollout_rewritten_in_place_never_retargets_a_late_stop
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
@@ -10648,6 +10652,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_idle_refusal_logs_its_judged_inputs_once
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_shares_the_tmux_pane_evidence
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
