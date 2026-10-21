@@ -32,6 +32,8 @@ pub(crate) struct SocketHerdrLaunchHost {
     sources: Vec<Arc<dyn PeerSource>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
     grants: Mutex<HashMap<(HerdrLaunchEndpoint, String), LaunchAdmissionGrant>>,
+    grant_store: super::policy::grant_store::FileGrantStore,
+    grant_error: bool,
     next_id: AtomicU64,
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     os: Box<dyn ProcessOs>,
@@ -90,12 +92,21 @@ impl SocketHerdrLaunchHost {
                 )) as Arc<dyn PeerSource>
             })
             .collect();
+        let prepared = super::policy::boot_grants::prepared();
+        let grant_error = prepared.is_err();
+        let grants = prepared
+            .unwrap_or_default()
+            .into_iter()
+            .map(|grant| ((grant.endpoint().clone(), grant.nonce().into()), grant))
+            .collect();
         Self {
             endpoints,
             policy: ProofCache::default(),
             sources,
             witnessed: Mutex::default(),
-            grants: Mutex::default(),
+            grants: Mutex::new(grants),
+            grant_store: super::policy::boot_grants::store(),
+            grant_error,
             next_id: AtomicU64::new(1),
             read_restore: observe::read_restore_resume,
             os: Box::new(HostOs),
@@ -139,6 +150,9 @@ impl SocketHerdrLaunchHost {
         endpoint: &HerdrEndpoint,
         nonce: &str,
     ) -> Result<ExistingMutationEvidence, Unverified> {
+        if self.grant_error {
+            return Err(Unverified::Cache);
+        }
         let key = HerdrLaunchEndpoint {
             execution_node: endpoint.execution_node().into(),
             config_key: endpoint.config_key().into(),
@@ -170,6 +184,47 @@ impl SocketHerdrLaunchHost {
             let _guard = self.grants.lock().unwrap();
             panic!("injected grant cache failure");
         }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
+        self.witnessed.lock().unwrap().insert(
+            HerdrLaunchEndpoint {
+                execution_node: endpoint.execution_node().into(),
+                config_key: endpoint.config_key().into(),
+                socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
+                herdr_session: endpoint.herdr_session().into(),
+            },
+            witness,
+        );
+    }
+    #[cfg(test)]
+    pub(crate) fn poison_witnessed_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.witnessed.lock().unwrap();
+            panic!("injected witnessed cache failure");
+        }));
+    }
+    #[cfg(test)]
+    pub(crate) fn poison_proof_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.policy.poison_for_test()
+        }));
+    }
+    #[cfg(test)]
+    pub(crate) fn with_prepared_for_test(
+        mut self,
+        prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
+    ) -> Self {
+        self.grant_error = prepared.is_err();
+        self.grants = Mutex::new(
+            prepared
+                .unwrap_or_default()
+                .into_iter()
+                .map(|grant| ((grant.endpoint().clone(), grant.nonce().into()), grant))
+                .collect(),
+        );
+        self
     }
 
     fn call(&self, request: HerdrRequest) -> HerdrCall {
@@ -272,6 +327,10 @@ impl SocketHerdrLaunchHost {
 }
 
 impl HerdrLaunchHost for SocketHerdrLaunchHost {
+    fn grants(&self) -> &dyn crate::services::herdr_launch::policy::LaunchGrantStore {
+        &self.grant_store
+    }
+
     fn remember_grant(&self, grant: LaunchAdmissionGrant) {
         if let Ok(mut grants) = self.grants.lock() {
             grants.insert((grant.endpoint().clone(), grant.nonce().into()), grant);

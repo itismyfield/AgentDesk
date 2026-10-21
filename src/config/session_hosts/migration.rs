@@ -26,6 +26,10 @@ pub(crate) struct HostsBootSelection {
 }
 
 impl HostsBootSelection {
+    pub(crate) fn hosts(&self) -> &BootSessionHosts {
+        &self.hosts
+    }
+
     fn new(hosts: BootSessionHosts, candidate: &BootSessionHosts) -> Self {
         Self {
             hosts,

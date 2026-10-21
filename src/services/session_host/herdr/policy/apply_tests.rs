@@ -252,6 +252,7 @@ fn apply_faults_distinguish_prepublication_from_published_unverified() {
         Stage::CandidateSync,
         Stage::Revalidate,
         Stage::Rename,
+        Stage::Publish,
         Stage::ParentSync,
         Stage::PostCheck,
     ] {
@@ -482,4 +483,147 @@ fn apply_postcheck_parent_replacement_with_the_same_inode_is_unverified() {
         matches!(&result, Err(error) if error.stage == Stage::PostCheck && error.published && error.detail.contains("parent changed")),
         "postcheck_parent_identity_fence_contract: {result:?}"
     );
+}
+
+fn replacement_at_checkpoint(fixture: &Fixture, stage: Stage) -> PathBuf {
+    let current = fixture.target.parent().unwrap().to_owned();
+    let old = fixture.root.path().join("held-parent");
+    let old_result = old.clone();
+    HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(CheckpointHook {
+            stage,
+            run: Box::new(move || {
+                std::fs::rename(&current, &old).unwrap();
+                std::fs::create_dir(&current).unwrap();
+                std::fs::write(current.join("config.toml"), ORIGINAL).unwrap();
+                // A same-named decoy makes a path-based rename overwrite the replacement.
+                for entry in std::fs::read_dir(&old).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".agentdesk-candidate-")
+                    {
+                        std::fs::copy(entry.path(), current.join(entry.file_name())).unwrap();
+                    }
+                }
+            }),
+        });
+    });
+    old_result
+}
+
+#[test]
+fn apply_rename_checkpoint_parent_swap_is_refused_before_publication() {
+    let fixture = Fixture::new();
+    let plan = preview(&fixture.logical).unwrap();
+    let held = replacement_at_checkpoint(&fixture, Stage::Rename);
+    let result = apply(&plan, &check);
+    assert!(
+        matches!(&result, Err(error) if error.stage == Stage::Rename && !error.published),
+        "rename_checkpoint_parent_swap_prevents_publication_contract: {result:?}"
+    );
+    assert_eq!(
+        std::fs::read(&fixture.target).unwrap(),
+        ORIGINAL,
+        "replacement_parent_config_unchanged_contract"
+    );
+    assert!(
+        !held.read_dir().unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".agentdesk-candidate-")),
+        "scratch_cleanup_stays_in_held_parent_contract"
+    );
+}
+
+#[test]
+fn apply_publish_remains_anchored_after_the_last_parent_check() {
+    let fixture = Fixture::new();
+    let plan = preview(&fixture.logical).unwrap();
+    let held = replacement_at_checkpoint(&fixture, Stage::Publish);
+    let result = apply(&plan, &check);
+    assert_eq!(
+        std::fs::read(&fixture.target).unwrap(),
+        ORIGINAL,
+        "descriptor_anchored_publish_never_overwrites_replacement_contract"
+    );
+    assert_eq!(
+        std::fs::read(held.join("config.toml")).unwrap(),
+        plan.candidate().as_bytes(),
+        "publication_uses_held_directory_contract"
+    );
+    assert!(
+        matches!(&result, Err(error) if error.stage == Stage::PostCheck && error.published),
+        "detached_parent_publication_is_unverified_contract: {result:?}"
+    );
+}
+
+#[test]
+fn apply_unchanged_second_run_creates_no_backup_and_retains_manual_artifacts() {
+    let fixture = Fixture::new();
+    let first = apply(&preview(&fixture.logical).unwrap(), &check).unwrap();
+    let parent = fixture.target.parent().unwrap();
+    let names = || {
+        let mut names: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = names();
+    let plan = preview(&fixture.logical).unwrap();
+    assert!(!plan.requires_write());
+    let second = apply(&plan, &check);
+    assert!(
+        second.is_ok(),
+        "unchanged_apply_requires_no_new_backup_contract: {second:?}"
+    );
+    assert!(
+        second.unwrap().backup.is_none(),
+        "unchanged_apply_requires_no_new_backup_contract"
+    );
+    assert_eq!(
+        names(),
+        before,
+        "unchanged_apply_leaves_existing_artifacts_contract"
+    );
+    assert!(
+        first.backup.unwrap().exists(),
+        "backups_retained_for_manual_cleanup_contract"
+    );
+    assert!(
+        parent.join(".config.toml.agentdesk-apply.lock").exists(),
+        "sidecar_retained_for_manual_cleanup_contract"
+    );
+}
+
+#[test]
+fn apply_backup_and_scratch_creation_stay_in_the_held_parent() {
+    let fixture = Fixture::new();
+    let plan = preview(&fixture.logical).unwrap();
+    let held = replacement_at_checkpoint(&fixture, Stage::Backup);
+    let result = apply(&plan, &check);
+    assert!(
+        matches!(&result, Err(error) if !error.published),
+        "parent_swap_before_backup_refuses_contract: {result:?}"
+    );
+    let replacement_names: Vec<_> = std::fs::read_dir(fixture.target.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        replacement_names,
+        vec![std::ffi::OsString::from("config.toml")],
+        "relative_openat_never_creates_in_replacement_contract"
+    );
+    assert!(held.read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".agentdesk-original-")
+    }));
 }

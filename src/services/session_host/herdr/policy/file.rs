@@ -50,7 +50,6 @@ pub(crate) struct FileSnapshot {
 }
 
 impl FileToken {
-    #[cfg(all(test, unix))]
     pub(crate) fn digest(&self) -> [u8; 32] {
         self.hash
     }

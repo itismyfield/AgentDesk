@@ -2,14 +2,20 @@
 
 #[cfg(all(test, unix))]
 pub(crate) mod apply;
+pub(crate) mod boot_grants;
 mod cache;
 pub(crate) mod checker;
 #[cfg(all(test, unix))]
+pub(crate) mod consent;
+mod durable;
+#[cfg(all(test, unix))]
 pub(crate) mod editor;
 pub(crate) mod file;
+pub(crate) mod grant_store;
 pub(crate) mod peer;
 pub(crate) mod permit;
 mod types;
+mod witness_codec;
 #[cfg(all(test, unix))]
 pub(crate) mod writer_compat;
 

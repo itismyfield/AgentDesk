@@ -86,7 +86,7 @@ fn writer_accepts(channel: u64) -> bool {
 }
 
 /// A configured Herdr endpoint; no field falls back to a default socket, session or pane.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HerdrLaunchEndpoint {
     pub execution_node: String,
     pub config_key: String,

@@ -298,27 +298,104 @@ fn policy_legacy_admission_and_terminate_version_refusals_stay_exact() {
 
 #[test]
 fn policy_grant_cache_failure_is_distinct_and_probes_nothing() {
-    let rig = rig();
-    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
-    let host = crate::services::session_host::SocketHerdrLaunchHost::new(
-        vec![configured.clone()],
-        Default::default(),
-    );
-    host.poison_grants_for_test();
-    let registry = HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
-        .with_launch_host(host)
-        .with_reads((counted_off, launched_os(&rig)));
-    let target = registry
-        .target(&stored(&rig.server, HostedState::Bound))
-        .unwrap();
-    assert_eq!(
-        target.pin(Mutation::Cancel),
-        Err(HerdrGateRefusal::PolicyUnverified(Unverified::Cache)),
-        "grant_cache_failure_is_not_absent_authority_contract"
-    );
-    assert!(
-        rig.server.conns().is_empty(),
-        "cache failure probes zero peers"
-    );
-    assert!(rig.server.mutations().is_empty());
+    for cache in ["grants", "witnessed", "proof"] {
+        RESTORE_READS.with(|reads| reads.set(0));
+        let rig = rig();
+        let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+        let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+            vec![configured.clone()],
+            Default::default(),
+        );
+        host.seed_witness_for_test(&configured, witness(&rig, SERVER));
+        let contract = match cache {
+            "grants" => {
+                host.poison_grants_for_test();
+                "grant_cache_failure_is_not_absent_authority_contract"
+            }
+            "witnessed" => {
+                host.poison_witnessed_for_test();
+                "witnessed_cache_failure_is_not_absent_authority_contract"
+            }
+            _ => {
+                host.poison_proof_for_test();
+                "proof_cache_failure_is_not_absent_authority_contract"
+            }
+        };
+        let registry =
+            HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
+                .with_launch_host(host)
+                .with_reads((counted_off, launched_os(&rig)));
+        let target = registry
+            .target(&stored(&rig.server, HostedState::Bound))
+            .unwrap();
+        assert_eq!(
+            target.pin(Mutation::Cancel),
+            Err(HerdrGateRefusal::PolicyUnverified(Unverified::Cache)),
+            "{contract}"
+        );
+        assert!(
+            rig.server.conns().is_empty(),
+            "{cache}_cache_failure_probes_zero_contract"
+        );
+        assert!(
+            rig.server.mutations().is_empty(),
+            "{cache}_cache_failure_mutates_zero_contract"
+        );
+        assert_eq!(
+            RESTORE_READS.with(Cell::get),
+            0,
+            "{cache}_cache_failure_reads_e7_zero_contract"
+        );
+    }
+}
+
+#[test]
+fn policy_prepared_store_failure_is_distinct_from_absent_authority() {
+    for (prepared, refusal, contract) in [
+        (
+            Ok(Vec::new()),
+            Unverified::Identity,
+            "prepared_store_absence_is_identity_contract",
+        ),
+        (
+            Err(Unverified::File),
+            Unverified::Cache,
+            "prepared_store_read_failure_is_cache_contract",
+        ),
+    ] {
+        RESTORE_READS.with(|reads| reads.set(0));
+        let rig = rig();
+        let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+        let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+            vec![configured.clone()],
+            Default::default(),
+        )
+        .with_prepared_for_test(prepared);
+        host.seed_witness_for_test(&configured, witness(&rig, SERVER));
+        let registry =
+            HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
+                .with_launch_host(host)
+                .with_reads((counted_off, launched_os(&rig)));
+        let target = registry
+            .target(&stored(&rig.server, HostedState::Bound))
+            .unwrap();
+        assert_eq!(
+            target.pin(Mutation::Cancel),
+            Err(HerdrGateRefusal::PolicyUnverified(refusal)),
+            "{contract}"
+        );
+        assert!(
+            rig.server.conns().is_empty(),
+            "prepared_store_refusal_probes_zero_contract"
+        );
+        assert!(
+            rig.server.mutations().is_empty(),
+            "prepared_store_refusal_mutates_zero_contract"
+        );
+        assert_eq!(
+            RESTORE_READS.with(Cell::get),
+            0,
+            "prepared_store_refusal_reads_e7_zero_contract"
+        );
+    }
 }

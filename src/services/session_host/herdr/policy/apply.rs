@@ -1,10 +1,13 @@
 //! A preview is a compare-and-swap token; publishing never renames the logical symlink.
 
 use super::{editor, file};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, fchown};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
+
+#[path = "apply_fs.rs"]
+mod apply_fs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
@@ -17,6 +20,7 @@ pub(crate) enum Stage {
     CandidateSync,
     Revalidate,
     Rename,
+    Publish,
     ParentSync,
     PostCheck,
 }
@@ -40,6 +44,7 @@ pub(crate) struct ApplyPlan {
     original: Original,
     candidate: String,
 }
+/// Backups and the stable lock sidecar remain for explicit manual cleanup.
 #[derive(Debug)]
 pub(crate) struct Applied {
     pub logical: PathBuf,
@@ -151,45 +156,48 @@ pub(crate) fn apply(
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or("target name")?;
+        let directory = apply_fs::Directory::open(parent)?;
+        let held = directory.file().metadata().map_err(|e| e.to_string())?;
+        if (held.dev(), held.ino()) != plan.parent {
+            return Err("target parent changed".into());
+        }
         // A stable sidecar survives target replacement and serializes every alias of this target.
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(parent.join(format!(".{name}.agentdesk-apply.lock")))
-            .map_err(|e| e.to_string())?;
+        let lock = directory.lock(name)?;
         let metadata = lock.metadata().map_err(|e| e.to_string())?;
         if !metadata.is_file() || metadata.mode() & 0o777 != 0o600 {
             return Err("unsafe apply lock".into());
         }
         lock.lock().map_err(|e| e.to_string())?;
         plan.unchanged()?;
-        let directory = File::open(parent).map_err(|e| e.to_string())?;
-        let held = directory.metadata().map_err(|e| e.to_string())?;
-        if (held.dev(), held.ino()) != plan.parent {
-            return Err("target parent changed".into());
+        if !plan.requires_write() {
+            stage = Stage::Checker;
+            checkpoint(stage)?;
+            checker.check(&plan.logical)?;
+            plan.unchanged()?;
+            let Original::Existing(original) = &plan.original else {
+                return Err("missing unchanged source".into());
+            };
+            return Ok(Applied {
+                logical: plan.logical.clone(),
+                target: plan.target.clone(),
+                before_hash: Some(original.token.digest()),
+                after_hash: original.token.digest(),
+                backup: None,
+                original_absent: false,
+            });
         }
         if let Original::Existing(original) = &plan.original {
             stage = Stage::Backup;
             checkpoint(stage)?;
-            let mut file = tempfile::Builder::new()
-                .prefix(".agentdesk-original-")
-                .tempfile_in(parent)
-                .map_err(|e| e.to_string())?;
+            let mut file = directory.unique(".agentdesk-original-")?;
             file.write_all(&original.bytes).map_err(|e| e.to_string())?;
             stage = Stage::BackupSync;
             sync(file.as_file(), stage)?;
-            let (_, path) = file.keep().map_err(|e| e.to_string())?;
+            let path = file.keep();
             backup = Some(path);
-            sync_parent(&plan.target, stage)?;
+            sync_parent(&directory.sync_anchor(), stage)?;
         }
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".agentdesk-candidate-")
-            .tempfile_in(parent)
-            .map_err(|e| e.to_string())?;
+        let mut temporary = directory.unique(".agentdesk-candidate-")?;
         temporary
             .write_all(plan.candidate.as_bytes())
             .map_err(|e| e.to_string())?;
@@ -212,6 +220,9 @@ pub(crate) fn apply(
         let token = file::read(temporary.path())
             .map_err(|e| format!("{e:?}"))?
             .token;
+        if token.dev_ino() != (metadata.dev(), metadata.ino()) {
+            return Err("candidate path left held parent".into());
+        }
         stage = Stage::Checker;
         checkpoint(stage)?;
         checker.check(temporary.path())?;
@@ -225,10 +236,13 @@ pub(crate) fn apply(
         plan.unchanged()?;
         stage = Stage::Rename;
         checkpoint(stage)?;
-        temporary.persist(&plan.target).map_err(|e| e.to_string())?;
+        plan.unchanged()?;
+        stage = Stage::Publish;
+        checkpoint(stage)?;
+        temporary.persist(name)?;
         published = true;
         stage = Stage::ParentSync;
-        sync_parent(&plan.target, stage)?;
+        sync_parent(&directory.sync_anchor(), stage)?;
         stage = Stage::PostCheck;
         checkpoint(stage)?;
         let final_read = file::read(&plan.logical).map_err(|e| format!("{e:?}"))?;

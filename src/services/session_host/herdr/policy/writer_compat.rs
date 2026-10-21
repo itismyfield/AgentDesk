@@ -4,6 +4,7 @@ use super::editor::{EditError, is_false};
 
 // Pinned upstream config/io.rs upsert_section_raw; its line-oriented behavior is intentional.
 pub(super) fn upsert(content: &str, section: &str, key: &str, value: &str) -> String {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let header = format!("[{section}]");
     let assignment = format!("{key} = {value}");
     let lines: Vec<&str> = content.lines().collect();
@@ -52,6 +53,7 @@ pub(super) fn upsert(content: &str, section: &str, key: &str, value: &str) -> St
 }
 
 pub(super) fn remove_key(content: &str, section: &str, key: &str) -> String {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let header = format!("[{section}]");
     let mut in_section = false;
     let mut result = Vec::new();
@@ -73,6 +75,7 @@ pub(super) fn remove_key(content: &str, section: &str, key: &str) -> String {
 }
 
 pub(super) fn top_bool(content: &str, key: &str, value: bool) -> String {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let replacement = format!("{key} = {value}");
     let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
     let mut in_section = false;
