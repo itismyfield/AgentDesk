@@ -80,6 +80,11 @@ fn footer_only_marker_is_one_bounded_sanitized_status_summary() {
         ),
         ("stopped", "", "-# 🛑 Task stopped"),
         ("completed", "", "-# ✅ Task completed"),
+        (
+            "completed",
+            "&lt;tool-use-id&gt; private",
+            "-# ✅ Task completed",
+        ),
         ("", "", "-# 📋 Task notification"),
         (
             "completed",

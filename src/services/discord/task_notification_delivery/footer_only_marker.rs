@@ -13,10 +13,8 @@ impl TaskCardEvent {
             return "-# 📋 Task notification".to_string();
         };
         let status = super::clean_line(note.status.as_deref().unwrap_or(""));
-        let summary = note
-            .summary
-            .as_deref()
-            .unwrap_or("")
+        let summary = card::decode_entities_once(note.summary.as_deref().unwrap_or(""));
+        let summary = summary
             .lines()
             .filter(|line| {
                 ![
@@ -30,7 +28,7 @@ impl TaskCardEvent {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let summary = super::clean_line(&card::decode_entities_once(&summary));
+        let summary = super::clean_line(&summary);
         let detail = if summary.is_empty() {
             if status.is_empty() {
                 "Task notification".to_string()
