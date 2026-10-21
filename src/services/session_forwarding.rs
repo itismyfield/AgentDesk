@@ -15,7 +15,9 @@ mod trusted_target;
 
 #[cfg(test)]
 use cancel_lookup::legacy_session_key_matches_channel;
-pub(crate) use cancel_lookup::{load_cancel_turn_hosted, load_cancel_turn_session};
+#[cfg(unix)]
+pub(crate) use cancel_lookup::load_cancel_turn_hosted;
+pub(crate) use cancel_lookup::load_cancel_turn_session;
 use trusted_target::{TrustedForwardTarget, TrustedTargetError, build_trusted_target};
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";

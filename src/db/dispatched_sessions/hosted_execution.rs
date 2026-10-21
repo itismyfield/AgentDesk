@@ -16,6 +16,7 @@ use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_host::HostKind;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
+#[cfg(unix)]
 #[path = "hosted_execution/http_force.rs"]
 pub(crate) mod http_force;
 #[path = "hosted_execution/legacy_return.rs"]

@@ -1,6 +1,7 @@
 //! The session an HTTP turn cancel targets: the one active turn row the channel names.
 
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
+use sqlx::postgres::PgRow;
 
 use super::CancelTurnSessionInfo;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
@@ -9,11 +10,13 @@ pub(crate) async fn load_cancel_turn_session(
     pool: &PgPool,
     channel_id: &str,
 ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
-    Ok(select(pool, channel_id).await?.map(|(info, _)| info))
+    let selected = select(pool, channel_id, |_| Ok(())).await?;
+    Ok(selected.map(|(info, ())| info))
 }
 
 /// The selected row's identity columns (provider, identity kind, token hash, channel) and hosted
 /// execution record, as the same read returned them.
+#[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct SelectedRow {
     pub(crate) identity: [Option<String>; 4],
@@ -21,17 +24,31 @@ pub(crate) struct SelectedRow {
 }
 
 /// [`load_cancel_turn_session`]'s selection with the chosen row as it was read.
+#[cfg(unix)]
 pub(crate) async fn load_cancel_turn_hosted(
     pool: &PgPool,
     channel_id: &str,
 ) -> ServiceResult<Option<(CancelTurnSessionInfo, SelectedRow)>> {
-    select(pool, channel_id).await
+    use sqlx::Row;
+    select(pool, channel_id, |row| {
+        Ok(SelectedRow {
+            identity: [
+                row.try_get("provider")?,
+                row.try_get("identity_kind")?,
+                row.try_get("discord_token_hash")?,
+                row.try_get("channel_id")?,
+            ],
+            hosted: row.try_get("hosted_execution")?,
+        })
+    })
+    .await
 }
 
-async fn select(
+async fn select<R>(
     pool: &PgPool,
     channel_id: &str,
-) -> ServiceResult<Option<(CancelTurnSessionInfo, SelectedRow)>> {
+    read: impl Fn(&PgRow) -> Result<R, sqlx::Error>,
+) -> ServiceResult<Option<(CancelTurnSessionInfo, R)>> {
     if channel_id.is_empty() || !channel_id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(
             ServiceError::bad_request("channel_id must contain only decimal digits")
@@ -86,7 +103,7 @@ async fn select(
         i64,
         Option<chrono::DateTime<chrono::Utc>>,
         CancelTurnSessionInfo,
-        SelectedRow,
+        R,
     )> = None;
     for row in rows {
         let (
@@ -101,18 +118,7 @@ async fn select(
             last_heartbeat,
         ): Columns =
             sqlx::FromRow::from_row(&row).map_err(|error| active_turn_error(error, channel_id))?;
-        let read = (|| {
-            Ok::<_, sqlx::Error>(SelectedRow {
-                identity: [
-                    provider_name.clone(),
-                    row.try_get("identity_kind")?,
-                    row.try_get("discord_token_hash")?,
-                    runtime_channel_id.clone(),
-                ],
-                hosted: row.try_get("hosted_execution")?,
-            })
-        })()
-        .map_err(|error| active_turn_error(error, channel_id))?;
+        let read = read(&row).map_err(|error| active_turn_error(error, channel_id))?;
         let match_rank = if thread_channel_id.as_deref() == Some(channel_id)
             || runtime_channel_id.as_deref() == Some(channel_id)
         {

@@ -17,6 +17,7 @@ use poise::serenity_prelude::ChannelId;
 
 mod cancel_effects;
 mod herdr_stop;
+#[cfg(unix)]
 mod http_force;
 
 pub(super) use cancel_effects::force_purge_channel_mailbox;
@@ -461,11 +462,14 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
-        let pool = self.pg_pool.as_ref();
-        let key = session_key.as_deref();
-        let forced = http_force::herdr_force(force, health_registry, pool, channel_id, key);
-        if let Some(answer) = forced.await {
-            return answer;
+        #[cfg(unix)]
+        {
+            let pool = self.pg_pool.as_ref();
+            let key = session_key.as_deref();
+            let forced = http_force::herdr_force(force, health_registry, pool, channel_id, key);
+            if let Some(answer) = forced.await {
+                return answer;
+            }
         }
         let herdr = herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
         if let Some(stopped) = herdr.await {
