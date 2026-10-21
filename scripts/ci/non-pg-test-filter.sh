@@ -969,6 +969,7 @@ NON_PG_FILTER_REPLAY=(
   services::session_host::herdr_gate::tests::m2_settlement_mailbox_unreadable_is_indeterminate_pg
   services::session_host::herdr_gate::tests::m2_turn_changed_before_close_has_zero_effect_pg
   services::session_host::herdr_gate::tests::only_a_registered_local_endpoint_makes_a_herdr_target
+  services::session_host::herdr_gate::tests::policy::policy_grant_cache_failure_is_distinct_and_probes_nothing
   services::session_host::herdr_gate::tests::policy::policy_grant_does_not_adopt_replaced_root_or_provider
   services::session_host::herdr_gate::tests::policy::policy_legacy_admission_and_terminate_version_refusals_stay_exact
   services::session_host::herdr_gate::tests::policy::policy_legacy_mutations_keep_e7_and_need_no_new_evidence
