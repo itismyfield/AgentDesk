@@ -223,7 +223,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "PATCH",
             "/api/scheduled-messages/{id}",
             "messages",
-            "Edit a scheduled reservation; omit imageAttachment to preserve it, null to clear, or supply a replacement object. Invalid images return 400; rollout unavailability returns 503.",
+            "Edit a scheduled reservation; omit imageAttachment to preserve it, null to clear, or supply a replacement object. Invalid images return 400.",
         )
         .with_params([("id", path_param("Scheduled message id")), ("imageAttachment", body_param("object", false, "Replacement filename/contentType/dataBase64 object, or null to clear"))]),
         ep(
