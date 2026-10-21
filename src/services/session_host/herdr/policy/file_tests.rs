@@ -56,6 +56,10 @@ fn policy_file_token_detects_changed_bytes_with_preserved_mtime() {
         .set_times(std::fs::FileTimes::new().set_modified(token.identity.modified))
         .unwrap();
     assert!(matches!(token.unchanged(), Err(Unverified::Changed)));
+    assert!(
+        matches!(token.fast_unchanged(), Err(Unverified::Changed)),
+        "fast_metadata_ctime_contract"
+    );
 }
 
 #[cfg(unix)]
@@ -182,5 +186,35 @@ fn policy_file_same_target_symlink_replacement_invalidates_token_and_read() {
     assert!(
         matches!(result, Err(Unverified::Changed)),
         "symlink chain read contract"
+    );
+}
+
+#[test]
+fn policy_file_fast_checks_skip_bytes_but_keep_all_chain_fences() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    std::fs::write(&target, b"policy").unwrap();
+    let logical = root.path().join("logical");
+    symlink("target", &logical).unwrap();
+    let mut token = read(&logical).unwrap().token;
+    assert_eq!(
+        token.parent_identity().unwrap(),
+        directory_identity(root.path()).unwrap()
+    );
+    token.hash = [0; 32];
+    assert_eq!(
+        token.fast_unchanged(),
+        Ok(()),
+        "fast_metadata_does_not_hash_contract"
+    );
+    assert_eq!(token.unchanged(), Err(Unverified::Changed));
+    let replacement = root.path().join("replacement");
+    symlink("./target", &replacement).unwrap();
+    std::fs::rename(replacement, &logical).unwrap();
+    assert_eq!(
+        token.fast_unchanged(),
+        Err(Unverified::Changed),
+        "fast_chain_contract"
     );
 }

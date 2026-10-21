@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, SystemTime};
@@ -38,21 +38,22 @@ impl ConfigChecker for CountChecker {
     }
 }
 
-fn fixture() -> (tempfile::TempDir, Source) {
+fn fixture() -> (tempfile::TempDir, Arc<Source>) {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     fs::write(&config, FALSE).unwrap();
     let checker = dir.path().join("checker");
     fs::write(&checker, "#!/bin/sh\nprintf 'config: ok\\n'\n").unwrap();
     fs::set_permissions(&checker, fs::Permissions::from_mode(0o700)).unwrap();
-    let source = Source(Mutex::new(peer::PeerSnapshot {
+    let source = Arc::new(Source(Mutex::new(peer::PeerSnapshot {
         witness: ServerWitness::for_test(1),
         started: SystemTime::now() + Duration::from_secs(60),
         home: dir.path().into(),
+        socket_dir: file::directory_identity(config.parent().unwrap()).unwrap(),
         config,
         image: file::image(&checker).unwrap(),
         checker,
-    }));
+    })));
     (dir, source)
 }
 
@@ -68,7 +69,7 @@ async fn semantic_false_and_whole_checker_are_both_required() {
         let checker = CountChecker::default();
         assert!(
             ProofCache::default()
-                .next_restart(&source, &checker)
+                .next_restart(source.clone(), &checker)
                 .await
                 .is_ok(),
             "semantic boolean false must pass: {text}"
@@ -102,7 +103,7 @@ async fn semantic_false_and_whole_checker_are_both_required() {
         fs::write(&source.snapshot().unwrap().config, text).unwrap();
         assert_eq!(
             ProofCache::default()
-                .next_restart(&source, &CountChecker::default())
+                .next_restart(source.clone(), &CountChecker::default())
                 .await,
             Err(reason),
             "semantic policy refusal: {text}"
@@ -119,7 +120,9 @@ async fn semantic_false_and_whole_checker_are_both_required() {
         ..CountChecker::default()
     };
     assert_eq!(
-        ProofCache::default().next_restart(&source, &checker).await,
+        ProofCache::default()
+            .next_restart(source.clone(), &checker)
+            .await,
         Err(Unverified::Diagnostics),
         "whole-config diagnostics must refuse even with false key"
     );
@@ -130,11 +133,11 @@ async fn current_cache_rechecks_edits_but_preserves_historical_startup() {
     let (_dir, source) = fixture();
     let checker = CountChecker::default();
     let cache = ProofCache::default();
-    let first = cache.next_restart(&source, &checker).await.unwrap();
+    let first = cache.next_restart(source.clone(), &checker).await.unwrap();
     let witness = first.witness().clone();
     let startup = cache.startup_for(&witness).unwrap().unwrap();
     assert_eq!(startup.witness(), &witness);
-    cache.next_restart(&source, &checker).await.unwrap();
+    cache.next_restart(source.clone(), &checker).await.unwrap();
     assert_eq!(
         checker.calls.load(Ordering::SeqCst),
         1,
@@ -142,7 +145,7 @@ async fn current_cache_rechecks_edits_but_preserves_historical_startup() {
     );
     let config = source.snapshot().unwrap().config;
     fs::write(&config, format!("{FALSE}[theme]\nname='blue'\n")).unwrap();
-    cache.next_restart(&source, &checker).await.unwrap();
+    cache.next_restart(source.clone(), &checker).await.unwrap();
     assert_eq!(
         checker.calls.load(Ordering::SeqCst),
         2,
@@ -155,13 +158,13 @@ async fn current_cache_rechecks_edits_but_preserves_historical_startup() {
     );
     fs::write(&config, "[session]\nresume_agents_on_restore=true\n").unwrap();
     assert_eq!(
-        cache.next_restart(&source, &checker).await,
+        cache.next_restart(source.clone(), &checker).await,
         Err(Unverified::ResumeEnabled),
         "current true cannot reuse cached false"
     );
     fs::write(&config, "invalid[").unwrap();
     assert_eq!(
-        cache.next_restart(&source, &checker).await,
+        cache.next_restart(source.clone(), &checker).await,
         Err(Unverified::ConfigInvalid)
     );
     assert_eq!(
@@ -170,7 +173,7 @@ async fn current_cache_rechecks_edits_but_preserves_historical_startup() {
         "invalid current config retains past proof"
     );
     assert_eq!(
-        first.revalidate(&source),
+        first.revalidate(source.as_ref()),
         Err(Unverified::Changed),
         "old create token fences edits"
     );
@@ -181,7 +184,7 @@ async fn cache_keys_include_checker_and_exact_server_witness() {
     let (_dir, source) = fixture();
     let checker = CountChecker::default();
     let cache = ProofCache::default();
-    let old = cache.next_restart(&source, &checker).await.unwrap();
+    let old = cache.next_restart(source.clone(), &checker).await.unwrap();
     {
         let mut peer = source.0.lock().unwrap();
         let replacement = peer.checker.with_extension("new");
@@ -193,14 +196,14 @@ async fn cache_keys_include_checker_and_exact_server_witness() {
         fs::rename(replacement, &peer.checker).unwrap();
         peer.image = file::image(&peer.checker).unwrap();
     }
-    cache.next_restart(&source, &checker).await.unwrap();
+    cache.next_restart(source.clone(), &checker).await.unwrap();
     assert_eq!(
         checker.calls.load(Ordering::SeqCst),
         2,
         "new checker image needs full recheck"
     );
     source.0.lock().unwrap().witness.pid += 1;
-    let new = cache.next_restart(&source, &checker).await.unwrap();
+    let new = cache.next_restart(source.clone(), &checker).await.unwrap();
     assert_eq!(
         checker.calls.load(Ordering::SeqCst),
         3,
@@ -208,7 +211,7 @@ async fn cache_keys_include_checker_and_exact_server_witness() {
     );
     assert_ne!(old.witness(), new.witness());
     assert_eq!(
-        old.revalidate(&source),
+        old.revalidate(source.as_ref()),
         Err(Unverified::Changed),
         "old server token must not authorize replacement"
     );
@@ -226,14 +229,14 @@ async fn fresh_false_can_have_no_startup_proof() {
     source.0.lock().unwrap().started = SystemTime::UNIX_EPOCH;
     let cache = ProofCache::default();
     let next = cache
-        .next_restart(&source, &CountChecker::default())
+        .next_restart(source.clone(), &CountChecker::default())
         .await
         .unwrap();
     assert!(
         cache.startup_for(next.witness()).unwrap().is_none(),
         "next restart evidence does not invent historical startup"
     );
-    next.revalidate(&source).unwrap();
+    next.revalidate(source.as_ref()).unwrap();
 }
 
 struct ChangedDuringCheck<'a>(&'a Source);
@@ -251,7 +254,7 @@ async fn checker_cannot_span_two_server_witnesses() {
     let cache = ProofCache::default();
     assert_eq!(
         cache
-            .next_restart(&source, &ChangedDuringCheck(&source))
+            .next_restart(source.clone(), &ChangedDuringCheck(&source))
             .await,
         Err(Unverified::Changed),
         "peer change during checker must refuse"
@@ -270,7 +273,9 @@ async fn corrupt_cache_and_checker_failure_return_refusals() {
     let cache = ProofCache::default();
     assert!(std::panic::catch_unwind(|| cache.poison_for_test()).is_err());
     assert_eq!(
-        cache.next_restart(&source, &CountChecker::default()).await,
+        cache
+            .next_restart(source.clone(), &CountChecker::default())
+            .await,
         Err(Unverified::Cache),
         "cache failure must return typed refusal"
     );
@@ -284,7 +289,9 @@ async fn corrupt_cache_and_checker_failure_return_refusals() {
             ..CountChecker::default()
         };
         assert_eq!(
-            ProofCache::default().next_restart(&source, &checker).await,
+            ProofCache::default()
+                .next_restart(source.clone(), &checker)
+                .await,
             Err(reason)
         );
     }
@@ -295,9 +302,41 @@ async fn local_checker_is_usable_by_proof_builder() {
     let (_dir, source) = fixture();
     assert!(
         ProofCache::default()
-            .next_restart(&source, &LocalChecker)
+            .next_restart(source.clone(), &LocalChecker)
             .await
             .is_ok(),
         "bounded local checker supplies the full-config proof"
+    );
+}
+
+#[tokio::test]
+async fn startup_requires_config_and_live_socket_to_share_directory() {
+    let (_dir, source) = fixture();
+    source.0.lock().unwrap().socket_dir = (0, 0);
+    let cache = ProofCache::default();
+    let next = cache
+        .next_restart(source, &CountChecker::default())
+        .await
+        .unwrap();
+    assert!(
+        cache.startup_for(next.witness()).unwrap().is_none(),
+        "startup_socket_directory_contract"
+    );
+}
+
+#[tokio::test]
+async fn current_cache_keeps_two_endpoints_without_checker_thrash() {
+    let (_one, first) = fixture();
+    let (_two, second) = fixture();
+    second.0.lock().unwrap().witness.socket = "/another/herdr.sock".into();
+    let cache = ProofCache::default();
+    let checker = CountChecker::default();
+    for source in [first.clone(), second.clone(), first, second] {
+        assert!(cache.next_restart(source, &checker).await.is_ok());
+    }
+    assert_eq!(
+        checker.calls.load(Ordering::SeqCst),
+        2,
+        "multi_endpoint_cache_contract"
     );
 }

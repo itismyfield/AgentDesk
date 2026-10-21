@@ -23,6 +23,7 @@ impl Fixture {
         let token = file::image(&self.checker).unwrap();
         PeerObservation {
             expected_socket: witness.socket.clone(),
+            socket_dir: file::directory_identity(self.root.path()).unwrap(),
             hello: ServerHello {
                 witness: witness.clone(),
                 started,
@@ -42,7 +43,7 @@ impl Fixture {
             executable: ExecutableImage {
                 checker: self.checker.clone(),
                 checker_token: token.clone(),
-                loaded: Some(LoadedImage { witness, token }),
+                loaded: Some(loaded_image::fixture(token.dev_ino())),
             },
         }
     }
@@ -161,7 +162,7 @@ fn policy_peer_checks_version_protocol_start_and_current_witness() {
             Unverified::Peer,
         ),
         (
-            |peer| peer.executable.loaded.as_mut().unwrap().witness.pid += 1,
+            |peer| peer.executable.loaded = Some(loaded_image::fixture((0, 0))),
             Unverified::Identity,
         ),
     ];
@@ -184,10 +185,7 @@ fn policy_peer_path_stat_alone_or_another_loaded_image_never_passes() {
     std::fs::write(&other, b"fixture executable image").unwrap();
     for loaded in [None, Some(file::image(&other).unwrap())] {
         let mut observed = fixture.observation();
-        observed.executable.loaded = loaded.map(|token| LoadedImage {
-            witness: observed.hello.witness.clone(),
-            token,
-        });
+        observed.executable.loaded = loaded.map(|token| loaded_image::fixture(token.dev_ino()));
         assert!(
             matches!(validate(observed), Err(Unverified::Identity)),
             "loaded-image identity contract"
@@ -219,4 +217,49 @@ fn policy_peer_same_loaded_image_may_have_a_different_logical_path() {
     observed.executable.checker = alias.clone();
     observed.executable.checker_token = file::image(&alias).unwrap();
     assert_eq!(validate(observed).unwrap().checker, alias);
+}
+
+#[test]
+fn policy_peer_mapped_inode_cannot_be_replaced_with_path_stat() {
+    let fixture = Fixture::new();
+    let mut observed = fixture.observation();
+    let running = observed.executable.loaded.clone();
+    let replacement = fixture.root.path().join("new-image");
+    std::fs::write(&replacement, b"replacement executable image").unwrap();
+    std::fs::rename(replacement, &fixture.checker).unwrap();
+    observed.executable.checker_token = file::image(&fixture.checker).unwrap();
+    observed.executable.loaded = running;
+    assert_eq!(
+        validate(observed),
+        Err(Unverified::Identity),
+        "loaded_image_vnode_identity_contract"
+    );
+}
+
+#[test]
+fn policy_loaded_image_construction_is_os_adapter_only() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/services/session_host/herdr/policy");
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if path.extension().is_none_or(|ext| ext != "rs")
+            || name.ends_with("_tests.rs")
+            || name == "tests.rs"
+            || name == "loaded_image.rs"
+        {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("LoadedImage {"),
+            "loaded_image_adapter_constructor_contract: {}",
+            path.display()
+        );
+    }
+    let adapter = include_str!("loaded_image.rs");
+    assert!(
+        !adapter.contains("file::image("),
+        "loaded_image_adapter_never_path_stats_contract"
+    );
 }

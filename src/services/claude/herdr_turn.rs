@@ -57,6 +57,39 @@ const SESSION_START_WAIT: Duration = Duration::from_secs(30);
 pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
     struct Boot(&'static SocketHerdrLaunchHost);
     impl HerdrLaunchHost for Boot {
+        fn mode(
+            &self,
+            endpoint: &HerdrLaunchEndpoint,
+        ) -> crate::config::session_hosts::EndpointMode {
+            self.0.mode(endpoint)
+        }
+        fn create_permit<'a>(
+            &'a self,
+            endpoint: &'a HerdrLaunchEndpoint,
+        ) -> crate::services::herdr_launch::policy::PermitFuture<'a> {
+            self.0.create_permit(endpoint)
+        }
+        fn remember_grant(
+            &self,
+            grant: crate::services::session_host::policy::permit::LaunchAdmissionGrant,
+        ) {
+            self.0.remember_grant(grant);
+        }
+        fn grants(&self) -> &dyn crate::services::herdr_launch::policy::LaunchGrantStore {
+            self.0.grants()
+        }
+        fn current_witness(
+            &self,
+            endpoint: &HerdrLaunchEndpoint,
+        ) -> Result<crate::services::session_host::ServerWitness, String> {
+            self.0.current_witness(endpoint)
+        }
+        fn create_user_default(
+            &self,
+            request: &crate::services::herdr_launch::policy::UserDefaultCreateRequest,
+        ) -> HerdrCreateOutcome {
+            self.0.create_user_default(request)
+        }
         fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
             self.0.restore_resume(endpoint)
         }

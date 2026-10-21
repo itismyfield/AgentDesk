@@ -2475,3 +2475,6 @@ pub(crate) mod p11 {
 
 #[path = "herdr_gate/root_replaced_tests.rs"]
 mod root_replaced_tests;
+
+#[path = "herdr_gate/policy_tests.rs"]
+mod policy;

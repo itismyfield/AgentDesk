@@ -2774,6 +2774,8 @@ src/
 │   ├── herdr_launch/
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
+│   │   ├── policy.rs
+│   │   ├── policy_tests.rs
 │   │   └── retired_hold.rs
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
@@ -3001,15 +3003,18 @@ src/
 │   │   │   │   ├── checker_tests.rs
 │   │   │   │   ├── file.rs
 │   │   │   │   ├── file_tests.rs
+│   │   │   │   ├── loaded_image.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── peer.rs
 │   │   │   │   ├── peer_tests.rs
-│   │   │   │   ├── tests.rs
+│   │   │   │   ├── permit.rs
+│   │   │   │   ├── proof_tests.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
+│   │   │   ├── launch_policy_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
@@ -3022,6 +3027,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
 │   │   ├── herdr_host_tests/

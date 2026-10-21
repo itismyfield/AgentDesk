@@ -2,9 +2,6 @@
 //! that one observation never spans two servers, and the E7 restore-resume reading.
 #![cfg_attr(not(test), allow(dead_code))]
 
-#[path = "policy/mod.rs"]
-pub(crate) mod policy;
-
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};

@@ -568,6 +568,7 @@ jobs:
               - 'src/services/dispatches/outbox_queue_replay_tests.rs'
               - 'src/services/dispatches/wait_queue.rs'
               - 'src/services/health_diagnostics/request_batch_pg_tests.rs'
+              - 'src/services/herdr_launch/policy_tests.rs'
               - 'src/services/herdr_launch_tests.rs'
               - 'src/services/herdr_launch_tests/retired_hold_tests.rs'
               - 'src/services/maintenance/jobs/db_retention.rs'

@@ -51,8 +51,28 @@ impl FileToken {
         &self.logical_path
     }
 
+    #[cfg(test)]
     pub(crate) fn same_image(&self, other: &Self) -> bool {
         self.identity == other.identity && self.hash == other.hash
+    }
+
+    pub(crate) fn dev_ino(&self) -> (u64, u64) {
+        (self.identity.dev, self.identity.ino)
+    }
+
+    pub(crate) fn parent_identity(&self) -> Result<(u64, u64), Unverified> {
+        directory_identity(self.resolved_path.parent().ok_or(Unverified::File)?)
+    }
+
+    /// Metadata and every symlink fence cache reuse; only mutation fences hash bytes.
+    pub(crate) fn fast_unchanged(&self) -> Result<(), Unverified> {
+        let (resolved, links) = resolve(&self.logical_path)?;
+        let now = identity(&std::fs::metadata(&resolved).map_err(|_| Unverified::File)?)?;
+        if resolved == self.resolved_path && links == self.symlink_chain && now == self.identity {
+            Ok(())
+        } else {
+            Err(Unverified::Changed)
+        }
     }
 
     pub(crate) fn unchanged(&self) -> Result<(), Unverified> {
@@ -73,6 +93,15 @@ impl FileToken {
             .chain(self.symlink_chain.iter().map(|link| &link.identity))
             .all(|identity| older(identity.modified) && older(identity.changed))
     }
+}
+
+pub(crate) fn directory_identity(path: &Path) -> Result<(u64, u64), Unverified> {
+    let metadata = std::fs::metadata(path).map_err(|_| Unverified::File)?;
+    if !metadata.is_dir() {
+        return Err(Unverified::File);
+    }
+    let identity = identity(&metadata)?;
+    Ok((identity.dev, identity.ino))
 }
 
 pub(crate) fn read(path: &Path) -> Result<FileSnapshot, Unverified> {

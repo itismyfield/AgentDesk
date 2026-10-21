@@ -220,13 +220,16 @@ fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     };
     let mut host = SocketHerdrLaunchHost::new(vec![endpoint], config);
     host.read_restore = scripted_e7;
+    host.sources.clear();
     let (endpoint, transport) = host.endpoints.pop().unwrap();
     let serving = server.serving.clone();
-    let transport = transport.with_peer_reader(Box::new(move |_stream| {
-        let pid = serving.load(Ordering::SeqCst);
-        Ok((pid, start_of(pid)))
-    }));
-    host.endpoints.push((endpoint, transport));
+    let transport = Arc::try_unwrap(transport)
+        .unwrap_or_else(|_| panic!("unshared test transport"))
+        .with_peer_reader(Box::new(move |_stream| {
+            let pid = serving.load(Ordering::SeqCst);
+            Ok((pid, start_of(pid)))
+        }));
+    host.endpoints.push((endpoint, Arc::new(transport)));
     host
 }
 
@@ -525,3 +528,6 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
         Err(EvidenceGap::UnknownEndpoint)
     );
 }
+
+#[path = "launch_policy_tests.rs"]
+mod policy;

@@ -1,13 +1,14 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use super::super::super::contract::ServerWitness;
+use super::super::contract::ServerWitness;
 use super::{ConfigChecker, NextRestartProof, PeerSource, StartupProof, Unverified, file};
 
 #[derive(Default)]
 struct State {
     startup: HashMap<ServerWitness, StartupProof>,
-    current: Option<NextRestartProof>,
+    current: HashMap<PathBuf, NextRestartProof>,
 }
 
 /// Historical startup evidence and reusable current validation have different lifetimes.
@@ -27,51 +28,76 @@ impl ProofCache {
 
     pub(crate) async fn next_restart(
         &self,
-        source: &dyn PeerSource,
+        source: Arc<dyn PeerSource>,
         checker: &dyn ConfigChecker,
     ) -> Result<NextRestartProof, Unverified> {
-        let result = self.verify(source, checker).await;
-        if result.is_err() {
-            self.state.lock().map_err(|_| Unverified::Cache)?.current = None;
-        }
-        result
-    }
-
-    async fn verify(
-        &self,
-        source: &dyn PeerSource,
-        checker: &dyn ConfigChecker,
-    ) -> Result<NextRestartProof, Unverified> {
-        let peer = source.snapshot()?;
-        peer.image.unchanged()?;
-        let read = file::read(&peer.config)?;
-        let proof = NextRestartProof {
-            peer,
-            file: read.token,
-        };
+        let observed = source.clone();
+        let peer = tokio::task::spawn_blocking(move || observed.snapshot())
+            .await
+            .map_err(|_| Unverified::Peer)??;
+        let key = peer.witness.socket.clone();
         let cached = self
             .state
             .lock()
             .map_err(|_| Unverified::Cache)?
             .current
-            .as_ref()
-            == Some(&proof);
-        if !cached {
+            .get(&key)
+            .cloned();
+        let prepared = tokio::task::spawn_blocking(move || {
+            if let Some(proof) = cached {
+                if proof.fast_revalidate(&peer).is_ok() {
+                    return Ok((proof, false));
+                }
+            }
+            peer.image.fast_unchanged()?;
+            let read = file::read(&peer.config)?;
             explicit_false(&read.bytes)?;
-            checker.check(&proof.peer).await?;
+            Ok((
+                NextRestartProof {
+                    peer,
+                    file: read.token,
+                },
+                true,
+            ))
+        })
+        .await
+        .map_err(|_| Unverified::File)?;
+        let result = async {
+            let (proof, check) = prepared?;
+            if check {
+                checker.check(&proof.peer).await?;
+            }
+            let validated = proof.clone();
+            let startup = tokio::task::spawn_blocking(move || {
+                validated.fast_revalidate(&source.snapshot()?)?;
+                Ok::<_, Unverified>(
+                    validated.file.predates(validated.peer.started)
+                        && validated.file.parent_identity()? == validated.peer.socket_dir,
+                )
+            })
+            .await
+            .map_err(|_| Unverified::Peer)??;
+            let mut state = self.state.lock().map_err(|_| Unverified::Cache)?;
+            if startup {
+                state
+                    .startup
+                    .entry(proof.witness().clone())
+                    .or_insert_with(|| StartupProof {
+                        evidence: proof.clone(),
+                    });
+            }
+            state.current.insert(key.clone(), proof.clone());
+            Ok(proof)
         }
-        proof.revalidate(source)?;
-        let mut state = self.state.lock().map_err(|_| Unverified::Cache)?;
-        if proof.file.predates(proof.peer.started) {
-            state
-                .startup
-                .entry(proof.witness().clone())
-                .or_insert_with(|| StartupProof {
-                    evidence: proof.clone(),
-                });
+        .await;
+        if result.is_err() {
+            self.state
+                .lock()
+                .map_err(|_| Unverified::Cache)?
+                .current
+                .remove(&key);
         }
-        state.current = Some(proof.clone());
-        Ok(proof)
+        result
     }
 
     #[cfg(test)]

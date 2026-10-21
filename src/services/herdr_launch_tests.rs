@@ -917,3 +917,7 @@ mod retired_hold_tests;
 #[cfg(unix)]
 #[path = "herdr_launch/retired_hold/tests.rs"]
 pub(crate) mod retired_durability_tests;
+
+#[cfg(unix)]
+#[path = "herdr_launch/policy_tests.rs"]
+mod policy_tests;

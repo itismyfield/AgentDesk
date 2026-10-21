@@ -197,7 +197,7 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
 ) -> HostsBootSelection {
     let mut selected = select_projection(candidate, store, rows, holds, read_only).await;
     if let Some(diagnostic) = &mut selected.diagnostic {
-        diagnostic.action = store.recovery_action(diagnostic.reason);
+        diagnostic.action = store.recovery_action(diagnostic.reason, selected.admission_stopped);
     }
     selected
 }

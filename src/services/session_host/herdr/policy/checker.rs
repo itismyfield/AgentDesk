@@ -7,7 +7,6 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use super::Unverified;
-use super::file;
 use super::peer::PeerSnapshot;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -39,13 +38,16 @@ async fn run_with_limits(
     if !peer.checker.is_absolute() || !peer.home.is_absolute() || !peer.config.is_absolute() {
         return Err(Unverified::Ambiguous);
     }
-    let executable = file::image(&peer.checker)?;
-    if !executable.same_image(&peer.image) {
+    if peer.image.logical_path() != peer.checker {
         return Err(Unverified::Identity);
     }
-    peer.image.unchanged()?;
+    let image = peer.image.clone();
+    tokio::task::spawn_blocking(move || image.fast_unchanged().map_err(|_| Unverified::Identity))
+        .await
+        .map_err(|_| Unverified::Cache)??;
     let mut child = Command::new(&peer.checker)
         .args(["config", "check"])
+        .current_dir(&peer.home)
         .env_clear()
         .env("HOME", &peer.home)
         .env("HERDR_CONFIG_PATH", &peer.config)
@@ -80,8 +82,10 @@ async fn run_with_limits(
         let _ = child.wait().await;
         return Err(reason);
     }
-    executable.unchanged()?;
-    peer.image.unchanged()?;
+    let image = peer.image.clone();
+    tokio::task::spawn_blocking(move || image.fast_unchanged())
+        .await
+        .map_err(|_| Unverified::Cache)??;
     Ok(())
 }
 

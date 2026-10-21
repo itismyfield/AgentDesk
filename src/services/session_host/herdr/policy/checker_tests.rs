@@ -4,6 +4,7 @@ use std::time::{Instant, SystemTime};
 
 use tempfile::TempDir;
 
+use super::super::file;
 use super::*;
 use crate::services::session_host::herdr::contract::ServerWitness;
 
@@ -26,6 +27,7 @@ fn fixture(body: &str) -> Fixture {
         _dir: dir,
         peer: PeerSnapshot {
             witness: ServerWitness::for_test(71),
+            socket_dir: file::directory_identity(config.parent().unwrap()).unwrap(),
             started: SystemTime::now(),
             home,
             config,
@@ -47,6 +49,8 @@ async fn checker_isolates_environment_and_uses_exact_local_arguments() {
          [ \"${{PATH-}}\" != {} ] || exit 18\n\
          [ \"$HERDR_CONFIG_PATH\" = \"$HOME/.config/herdr/config.toml\" ] || exit 19\n\
          [ -f \"$HERDR_CONFIG_PATH\" ] || exit 20\n\
+         /usr/bin/env > \"$HOME/checker.env\"\n\
+         pwd > \"$HOME/checker.cwd\"\n\
          printf 'config: ok\\n'",
         shell_literal(&inherited_path),
     ));
@@ -54,6 +58,25 @@ async fn checker_isolates_environment_and_uses_exact_local_arguments() {
     let checker_before = fs::read(&fixture.peer.checker).unwrap();
     let result = run(&fixture.peer).await;
     assert_eq!(result, Ok(()), "checker_environment_isolation_contract");
+    let environment = fs::read_to_string(fixture.peer.home.join("checker.env")).unwrap();
+    let names: std::collections::BTreeSet<_> = environment
+        .lines()
+        .map(|line| line.split_once('=').unwrap().0)
+        .collect();
+    let allowed = ["HOME", "HERDR_CONFIG_PATH", "PWD", "SHLVL", "_", "OLDPWD"]
+        .into_iter()
+        .collect();
+    assert!(
+        names.is_subset(&allowed),
+        "checker_minimal_environment_contract: {names:?}"
+    );
+    assert!(names.contains("HOME") && names.contains("HERDR_CONFIG_PATH"));
+    let cwd = fs::read_to_string(fixture.peer.home.join("checker.cwd")).unwrap();
+    assert_eq!(
+        std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+        fixture.peer.home.canonicalize().unwrap(),
+        "checker_fixed_current_directory_contract"
+    );
     assert_eq!(fs::read(&fixture.peer.config).unwrap(), config_before);
     assert_eq!(fs::read(&fixture.peer.checker).unwrap(), checker_before);
 }

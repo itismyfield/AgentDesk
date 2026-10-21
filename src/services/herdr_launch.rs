@@ -1,9 +1,12 @@
-//! Herdr launch preparation for one channel's canonical session row. No launch selects
-//! Herdr yet. The order is fixed: Pending commit, `.host_kind` and nonce markers, then one create.
-//! A Pending pane left without evidence is only probed again, never recreated.
+//! Herdr launch preparation for one channel's canonical row.
+//! Durable Pending and user-default grants precede create; retries only probe.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod policy;
 pub(crate) mod retired_hold;
+
+use crate::config::session_hosts::EndpointMode;
+use policy::{LaunchGrantStore, PermitFuture, UserDefaultCreateRequest};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,6 +135,27 @@ pub(crate) struct EvidenceProbe {
 
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
 pub(crate) trait HerdrLaunchHost: Send + Sync {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> EndpointMode {
+        EndpointMode::LegacyDedicated
+    }
+    fn create_permit<'a>(&'a self, _: &'a HerdrLaunchEndpoint) -> PermitFuture<'a> {
+        Box::pin(async { Err("user-default policy source unavailable".into()) })
+    }
+    fn remember_grant(
+        &self,
+        _: crate::services::session_host::policy::permit::LaunchAdmissionGrant,
+    ) {
+    }
+    fn grants(&self) -> &dyn LaunchGrantStore {
+        &policy::UNINTRODUCED
+    }
+    fn current_witness(&self, _: &HerdrLaunchEndpoint) -> Result<ServerWitness, String> {
+        Err("peer unavailable".into())
+    }
+    fn create_user_default(&self, _: &UserDefaultCreateRequest) -> HerdrCreateOutcome {
+        policy::unsupported_create()
+    }
+
     /// A fresh read of the endpoint server's effective resume-on-restore; never cached.
     fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume;
     fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome;
@@ -305,15 +329,46 @@ pub(crate) async fn launch_herdr_session(
     host: Arc<dyn HerdrLaunchHost>,
 ) -> Result<HerdrLaunchOutcome, HerdrLaunchError> {
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
-    let Some(admitted) = restore_off_witness(&host, &endpoint).await else {
-        return Err(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF));
+    let mode = host.mode(&endpoint);
+    let admitted = if mode == EndpointMode::LegacyDedicated {
+        Some(
+            restore_off_witness(&host, &endpoint)
+                .await
+                .ok_or(HerdrLaunchError::Unsupported(RESTORE_RESUME_NOT_OFF))?,
+        )
+    } else {
+        None
     };
     let owner = launch.owner;
     let observed = load_row(pool, &owner).await?;
     if let HostedRecord::Known(record) = &observed.record
         && let Some(location) = awaiting_evidence(record, &endpoint)
     {
-        return probe_again(pool, &owner, record, location, admitted, &host).await;
+        let witness = match admitted {
+            Some(witness) => witness,
+            None => {
+                let grant = host
+                    .grants()
+                    .load(&endpoint, &record.execution_nonce)
+                    .await
+                    .map_err(HerdrLaunchError::Prepare)?;
+                let granted = grant
+                    .witness_for(&endpoint, &record.execution_nonce)
+                    .map_err(|why| HerdrLaunchError::Prepare(format!("{why:?}")))?
+                    .clone();
+                let endpoint = endpoint.clone();
+                let current =
+                    on_blocking_thread(&host, move |host| host.current_witness(&endpoint)).await;
+                if current != Some(Ok(granted.clone())) {
+                    return Err(HerdrLaunchError::Prepare(
+                        "pending grant witness changed".into(),
+                    ));
+                }
+                host.remember_grant(grant);
+                granted
+            }
+        };
+        return probe_again(pool, &owner, record, location, witness, &host).await;
     }
     match &observed.record {
         HostedRecord::Legacy => {}
@@ -330,6 +385,15 @@ pub(crate) async fn launch_herdr_session(
         HostedRecord::Known(record) => return Err(HerdrLaunchError::Occupied(Some(record.state))),
         HostedRecord::Unknown(_) => return Err(HerdrLaunchError::Occupied(None)),
     }
+    let create_permit = if mode == EndpointMode::UserDefault {
+        Some(
+            host.create_permit(&endpoint)
+                .await
+                .map_err(HerdrLaunchError::Prepare)?,
+        )
+    } else {
+        None
+    };
     let expected_native = launch.expected_native_session_id.as_deref();
     let incarnation = herdr_incarnation(
         &owner,
@@ -367,21 +431,44 @@ pub(crate) async fn launch_herdr_session(
         return Err(retire_unsent(pool, &owner, &nonce, error).await);
     }
 
-    // Read again right before create: the first reading may predate a reconnect or reload.
-    let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
-        let error = HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into());
-        return Err(retire_unsent(pool, &owner, &nonce, error).await);
+    let (witness, created, sent_at) = if let Some(permit) = create_permit {
+        let grant = permit.grant(&nonce);
+        if let Err(detail) = host.grants().save(grant.clone()).await {
+            return Err(
+                retire_unsent(pool, &owner, &nonce, HerdrLaunchError::NotSent(detail)).await,
+            );
+        }
+        host.remember_grant(grant);
+        let witness = permit.witness().clone();
+        let request = UserDefaultCreateRequest {
+            endpoint: endpoint.clone(),
+            label: owner.logical_key.clone(),
+            cwd: command.cwd,
+            command: command.command,
+            permit,
+        };
+        let sent_at = SystemTime::now();
+        let created =
+            on_blocking_thread(&host, move |host| host.create_user_default(&request)).await;
+        (witness, created, sent_at)
+    } else {
+        // Repeat E7 immediately before the legacy create, preserving its original ordering.
+        let Some(restore_off_witness) = restore_off_witness(&host, &endpoint).await else {
+            let error = HerdrLaunchError::NotSent(RESTORE_RESUME_NOT_OFF.into());
+            return Err(retire_unsent(pool, &owner, &nonce, error).await);
+        };
+        let witness = restore_off_witness.clone();
+        let request = HerdrCreateRequest {
+            endpoint: endpoint.clone(),
+            label: owner.logical_key.clone(),
+            cwd: command.cwd,
+            command: command.command,
+            restore_off_witness,
+        };
+        let sent_at = SystemTime::now();
+        let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
+        (witness, created, sent_at)
     };
-    let witness = restore_off_witness.clone();
-    let request = HerdrCreateRequest {
-        endpoint: endpoint.clone(),
-        label: owner.logical_key.clone(),
-        cwd: command.cwd,
-        command: command.command,
-        restore_off_witness,
-    };
-    let sent_at = SystemTime::now();
-    let created = on_blocking_thread(&host, move |host| host.create(&request)).await;
     let indeterminate = |detail: String| HerdrLaunchOutcome::Indeterminate {
         execution_nonce: nonce.clone(),
         detail,

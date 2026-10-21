@@ -4,6 +4,7 @@ mod cache;
 pub(crate) mod checker;
 pub(crate) mod file;
 pub(crate) mod peer;
+pub(crate) mod permit;
 mod types;
 
 pub(crate) use cache::ProofCache;
@@ -26,7 +27,7 @@ pub(crate) enum Unverified {
 }
 
 /// Supplies a fresh, validated peer observation for the consented endpoint.
-pub(crate) trait PeerSource {
+pub(crate) trait PeerSource: Send + Sync {
     fn snapshot(&self) -> Result<peer::PeerSnapshot, Unverified>;
 }
 
@@ -45,4 +46,5 @@ impl ConfigChecker for LocalChecker {
 }
 
 #[cfg(all(test, unix))]
+#[path = "proof_tests.rs"]
 mod tests;

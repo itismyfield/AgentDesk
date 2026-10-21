@@ -12,6 +12,7 @@ use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWi
 use super::herdr::launch_host::SocketHerdrLaunchHost;
 use super::herdr::model::{HerdrCall, HerdrEndpoint};
 use super::herdr::observe::RestoreUnverified;
+use super::herdr::policy::permit::ExistingMutationEvidence;
 use super::herdr_gate::{HerdrPaneView, HerdrTarget};
 use super::herdr_host::HerdrHost;
 use super::model::{
@@ -158,7 +159,13 @@ impl HerdrRegistry {
                     &configured.socket_path,
                     &configured.herdr_session,
                 )
-                .and_then(|endpoint| endpoint.with_herdr_home(&configured.herdr_home))
+                .and_then(|endpoint| match configured.mode {
+                    crate::config::session_hosts::EndpointMode::LegacyDedicated => {
+                        endpoint.with_herdr_home(&configured.herdr_home)
+                    }
+                    crate::config::session_hosts::EndpointMode::UserDefault => Ok(endpoint),
+                })
+                .map(|endpoint| endpoint.with_mode(configured.mode))
                 .ok()
             })
             .collect();
@@ -234,9 +241,45 @@ impl HerdrRegistry {
 
     /// The gated input target of a stored execution located on a registered endpoint.
     pub(crate) fn target(&self, stored: &HostedExecution) -> Option<HerdrTarget> {
+        #[cfg(unix)]
+        let evidence = if let Some(location) = &stored.location {
+            self.endpoints
+                .iter()
+                .find(|r| {
+                    r.endpoint.config_key() == location.endpoint_config_key
+                        && r.endpoint.execution_node() == location.execution_node
+                })
+                .filter(|r| {
+                    r.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault
+                })
+                .and_then(|r| {
+                    self.launch.as_ref().map(|launch| {
+                        launch.mutation_evidence(&r.endpoint, &stored.execution_nonce)
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            ExistingMutationEvidence::default()
+        };
+        #[cfg(not(unix))]
+        let evidence = ExistingMutationEvidence::default();
+        self.target_with_evidence(stored, evidence)
+    }
+
+    /// Preloaded evidence only; constructing or judging a target performs no store lookup.
+    pub(crate) fn target_with_evidence(
+        &self,
+        stored: &HostedExecution,
+        evidence: ExistingMutationEvidence,
+    ) -> Option<HerdrTarget> {
         let target = self.endpoints.iter().find_map(|registered| {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
-            HerdrTarget::new(registered.endpoint.clone(), transport, stored)
+            HerdrTarget::new_with_evidence(
+                registered.endpoint.clone(),
+                transport,
+                stored,
+                evidence.clone(),
+            )
         });
         #[cfg(test)]
         let target = match &self.reads {

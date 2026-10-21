@@ -355,6 +355,7 @@ src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/outbox_queue_replay_tests.rs
 src/services/dispatches/wait_queue.rs
 src/services/health_diagnostics/request_batch_pg_tests.rs
+src/services/herdr_launch/policy_tests.rs
 src/services/herdr_launch_tests.rs
 src/services/herdr_launch_tests/retired_hold_tests.rs
 src/services/maintenance/jobs/db_retention.rs
@@ -783,6 +784,7 @@ services::dispatches::outbox_queue::replay_hold_tests
 services::dispatches::wait_queue::tests
 services::health_diagnostics::request_batch::pg_tests
 services::herdr_launch::tests
+services::herdr_launch::tests::policy_tests
 services::herdr_launch::tests::retired_hold_tests
 services::maintenance::jobs::db_retention::tests
 services::maintenance::jobs::worktree_orphan_sweep::active_dispatch_worktree_keep_set_pg_tests
@@ -2779,6 +2781,13 @@ services::herdr_launch::tests::herdr_launch_probes_a_pending_pane_without_eviden
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
 services::herdr_launch::tests::herdr_launch_refuses_ineligible_commands_before_pending_and_keeps_unconfirmed_panes_pg
 services::herdr_launch::tests::herdr_launch_writes_the_pane_only_to_its_pending_and_keeps_stored_evidence_pg
+services::herdr_launch::tests::policy_tests::legacy_launch_fresh_and_pending_keep_e7_order_and_never_require_policy_pg
+services::herdr_launch::tests::policy_tests::legacy_launch_keeps_restore_errors_without_proof_or_grant_reads_pg
+services::herdr_launch::tests::policy_tests::user_default_failed_or_unintroduced_grant_storage_never_mutates_pg
+services::herdr_launch::tests::policy_tests::user_default_failed_pending_commit_never_records_a_grant_or_mutates_pg
+services::herdr_launch::tests::policy_tests::user_default_fresh_launch_commits_pending_and_grant_before_create_and_probe_pg
+services::herdr_launch::tests::policy_tests::user_default_occupied_rows_refuse_before_checker_grant_or_prepare_pg
+services::herdr_launch::tests::policy_tests::user_default_pending_retry_reads_grant_and_current_witness_without_recreating_pg
 services::herdr_launch::tests::retired_hold_tests::retired_launch_normal_fresh_once_and_live_rows_untouched_pg
 services::herdr_launch::tests::retired_hold_tests::retired_launch_owner_mismatch_keeps_n1_hold_and_row_pg
 services::herdr_launch::tests::retired_hold_tests::retired_launch_requires_absent_n1_hold_durability_before_n2_create_pg

@@ -52,8 +52,8 @@ impl ApprovalStore for CountWrites<'_> {
         self.inner.save(hosts)
     }
 
-    fn recovery_action(&self, reason: &str) -> String {
-        self.inner.recovery_action(reason)
+    fn recovery_action(&self, reason: &str, stopped: bool) -> String {
+        self.inner.recovery_action(reason, stopped)
     }
 }
 
@@ -738,8 +738,14 @@ fn migration_user_default_validator_reports_key_and_supported_action() {
         .get_mut("one")
         .unwrap()
         .mode = EndpointMode::UserDefault;
+    let before = crate::services::herdr_launch::admissions_on_this_thread();
     let result = crate::config::validate_config(&config);
     assert!(result.is_err(), "user_default unsupported guard contract");
+    assert_eq!(
+        crate::services::herdr_launch::admissions_on_this_thread() - before,
+        0,
+        "validator_refusal_reaches_no_launch_admission_contract"
+    );
     let error = result.unwrap_err().to_string();
     for required in [
         "session_hosts.herdr.endpoints.one.mode",
@@ -881,7 +887,7 @@ async fn migration_interrupted_first_seed_reseeds_without_stopping_admission() {
     let (loaded, warning) = known(store.load());
     assert_eq!(Projection::of(&loaded), Projection::of(&candidate));
     assert_eq!(warning, None);
-    let action = store.recovery_action("approval_snapshot_not_durable");
+    let action = store.recovery_action("approval_snapshot_not_durable", false);
     assert!(action.contains(&temp.path().join("pending").display().to_string()));
     assert!(
         action.contains("Restart") && action.contains("permissions") && action.contains("storage")
@@ -1135,4 +1141,39 @@ async fn migration_recovery_actions_describe_the_actual_reason_and_store_paths()
             "non-interrupted recovery action contract: {expected}"
         );
     }
+}
+
+#[tokio::test]
+async fn migration_unavailable_pending_marker_requires_snapshot_and_marker_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileApprovalStore(Some(temp.path().to_owned()));
+    let candidate = fixture();
+    std::fs::write(temp.path().join("current.json"), snapshot(1, &candidate)).unwrap();
+    std::fs::write(
+        temp.path().join("pending"),
+        br#"{"state":"pending","had_previous":true}"#,
+    )
+    .unwrap();
+    let counted = CountWrites {
+        inner: &store,
+        writes: Cell::new(0),
+    };
+    let rows = Rows::new(Vec::new());
+    let selected = select(candidate, &counted, &rows, &NoHoldStore, false)
+        .await
+        .into_hosts();
+    assert!(selected.admission_stopped());
+    assert_eq!(reason(&selected), Some("approval_snapshot_not_durable"));
+    assert_eq!(counted.writes.get(), 0);
+    assert!(rows.requested.borrow().is_empty());
+    let action = &selected.migration().unwrap().action;
+    assert!(
+        !action.contains("Restart to retry"),
+        "unavailable_pending_recovery_requires_repair_contract: {action}"
+    );
+    for name in ["previous.json", "current.json", "pending"] {
+        assert!(action.contains(&temp.path().join(name).display().to_string()));
+    }
+    assert!(action.contains("Restore") && action.contains("repair or remove"));
+    assert!(action.contains("restart"));
 }
