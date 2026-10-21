@@ -355,7 +355,7 @@ fn delete_locked(record: &TuiDirectPendingStart) {
     mark_absent(&record.key());
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
-        let _ = runtime_store::remove_file_synced(&path);
+        let _ = unlink_record_file(&path).map(|()| runtime_store::sync_removed(&path));
     }
 }
 

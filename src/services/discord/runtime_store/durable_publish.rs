@@ -169,10 +169,9 @@ pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
     }
 }
 
-/// `fs::remove_file`, then a parent flush so a crash cannot bring the removed file back. A flush
-/// failure is logged and the removal, which already happened, is still reported.
-pub(crate) fn remove_file_synced(path: &Path) -> io::Result<()> {
-    fs::remove_file(path)?;
+/// Flushes the parent after a successful removal so a crash cannot bring the file back; a
+/// failure is only logged, because the removal already happened.
+pub(crate) fn sync_removed(path: &Path) {
     if PARENT_DIR_FSYNC_FLUSHES && let Err((stage, error)) = flush_parent(path) {
         tracing::warn!(
             path = %path.display(),
@@ -182,7 +181,6 @@ pub(crate) fn remove_file_synced(path: &Path) -> io::Result<()> {
             "recovery-critical file removed; directory sync failed (removal durability unconfirmed)"
         );
     }
-    Ok(())
 }
 
 /// Trusted root of a context: the one it names, else the runtime root every store hangs from.

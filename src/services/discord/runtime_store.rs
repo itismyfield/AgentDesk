@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 mod durable_ancestors;
 mod durable_publish;
 pub(crate) use durable_publish::{
-    best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, remove_file_synced,
+    best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
 #[cfg(test)]
 pub(crate) use durable_publish::{critical_atomic_write, probe as durable_probe};
@@ -1034,6 +1034,19 @@ pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
+#[cfg(unix)]
+fn dir_identity(dir: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(dir).map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Never consulted without a directory flush, which this platform lacks.
+#[cfg(not(unix))]
+fn dir_identity(dir: &Path) -> std::io::Result<(u64, u64)> {
+    fs::metadata(dir).map(|_| (0, 0))
 }
 
 /// Whether an `Ok` from `fsync_parent_dir` flushed the parent directory. Callers

@@ -2,7 +2,6 @@
 //! each flushed chain with its directory identities so steady publications skip it.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -36,7 +35,7 @@ fn fsync_ancestors_with(witness: &Mutex<Witness>, root: &Path, path: &Path) -> i
     let identities = parent
         .ancestors()
         .take(depth + 1)
-        .map(identity)
+        .map(super::dir_identity)
         .collect::<io::Result<Vec<_>>>()?;
     let key = (root.to_path_buf(), parent.to_path_buf());
     if lock(witness).matches(&key, &identities) {
@@ -79,19 +78,6 @@ fn chain_depth(root: &Path, parent: &Path) -> io::Result<usize> {
         }
     }
     Ok(depth)
-}
-
-#[cfg(unix)]
-fn identity(dir: &Path) -> io::Result<DirIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(dir)?;
-    Ok((meta.dev(), meta.ino()))
-}
-
-/// Unreachable in practice: platforms without a directory flush return before any identity.
-#[cfg(not(unix))]
-fn identity(dir: &Path) -> io::Result<DirIdentity> {
-    fs::metadata(dir).map(|_| (0, 0))
 }
 
 /// Chains this process flushed, keyed by (root, parent) with the identities seen before flushing.

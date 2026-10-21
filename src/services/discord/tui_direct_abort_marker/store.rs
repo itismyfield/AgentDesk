@@ -76,9 +76,9 @@ pub(in crate::services::discord) fn record(marker: &AbortedAnchorMarker) -> Resu
 pub(in crate::services::discord) fn delete(marker: &AbortedAnchorMarker) {
     if let Some(root) = root() {
         let stem = marker.file_stem();
-        let _ = crate::services::discord::runtime_store::remove_file_synced(
-            &root.join(format!("{stem}.json")),
-        );
+        let marker = root.join(format!("{stem}.json"));
+        let _ = std::fs::remove_file(&marker)
+            .map(|()| crate::services::discord::runtime_store::sync_removed(&marker));
         let _ = std::fs::remove_file(root.join(format!("{stem}.json.lock")));
     }
 }

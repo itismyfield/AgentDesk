@@ -137,9 +137,11 @@ impl std::io::Write for Capture {
 
 /// A pre-rename failure is an `Err` leaving the old bytes; a later flush failure is a published
 /// `SyncFailed` holding the whole new bytes. The target is never removed.
-#[cfg(unix)]
 #[test]
 fn publication_failures_at_each_stage() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
     let path = root.join("store").join("1.json");
@@ -218,9 +220,11 @@ fn publication_failures_at_each_stage() {
 
 /// The six recovery-critical writers flush the parent only after their rename made the new bytes
 /// visible; a real rename failure flushes nothing and stays the write failure it was.
-#[cfg(unix)]
 #[test]
 fn b6_sync_only_after_successful_rename() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let watch = Watch::new(env.root(), Plan::default());
     let channel = ChannelId::new(7_190_001);
@@ -318,9 +322,11 @@ fn b6_sync_only_after_successful_rename() {
 
 /// A parent flush failure after the rename keeps the enqueue accepted: no memory rollback, no
 /// second publication, no refusal.
-#[cfg(unix)]
 #[test]
 fn b6_parent_failure_keeps_published_outcome() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let plan = Plan {
         fail: vec![Step::ParentSync],
@@ -356,9 +362,11 @@ fn b6_parent_failure_keeps_published_outcome() {
 
 /// Removing a queue file, a dispatch marker, a pending-start record or an abort marker flushes
 /// the parent afterwards; a failed flush neither restores the file nor the in-memory state.
-#[cfg(unix)]
 #[test]
 fn retirement_syncs_without_resurrecting_memory() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let plan = Plan {
         fail: vec![Step::ParentSync],
@@ -447,9 +455,11 @@ fn retirement_syncs_without_resurrecting_memory() {
 
 /// One channel's directory flush stuck in the kernel holds no lock other channels need: their
 /// enqueue replies, and the output-side ledger append completes.
-#[cfg(unix)]
 #[test]
 fn blocked_sync_other_channel_keeps_progress() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let _all = Watch::new(env.root(), Plan::default());
     let (a, b) = (ChannelId::new(7_190_004), ChannelId::new(7_190_005));
@@ -499,9 +509,11 @@ impl Drop for Release {
 }
 
 /// The last-message checkpoint flushes its chain and stays best-effort when a flush fails.
-#[cfg(unix)]
 #[test]
 fn checkpoint_publication_flushes_and_stays_best_effort() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let watch = Watch::new(env.root(), Plan::default());
     super::super::save_last_message_id("codex", 7_190_006, 41);
@@ -525,9 +537,11 @@ fn checkpoint_publication_flushes_and_stays_best_effort() {
 
 /// The completed-turn ledger keeps its own single parent sync and adds only the directories
 /// above it, so no directory is flushed twice.
-#[cfg(unix)]
 #[test]
 fn existing_durable_writers_do_not_double_flush() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let env = RootEnv::new();
     let watch = Watch::new(env.root(), Plan::default());
     let append = |user_msg_id| {

@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
 
@@ -12,9 +14,11 @@ fn chain(root: &Path, parent: &Path) -> Vec<PathBuf> {
 
 /// A pre-created chain is still flushed on first use and reused after; a new process, a replaced
 /// directory and racing first publications all end with the whole chain flushed.
-#[cfg(unix)]
 #[test]
 fn ancestors_precreated_raced_and_restarted() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
     let parent = root.join("store").join("codex").join("token");
@@ -62,9 +66,11 @@ fn ancestors_precreated_raced_and_restarted() {
 }
 
 /// A failed ancestor flush is reported and remembers nothing, so the next publication retries.
-#[cfg(unix)]
 #[test]
 fn failed_ancestor_flush_is_not_remembered() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
     let parent = root.join("store").join("codex");
@@ -89,6 +95,9 @@ fn failed_ancestor_flush_is_not_remembered() {
 /// refused before any directory is opened.
 #[test]
 fn walk_refuses_paths_outside_the_trusted_root() {
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("runtime");
     fs::create_dir_all(root.join("store")).unwrap();
