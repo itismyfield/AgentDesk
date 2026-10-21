@@ -14,9 +14,6 @@ use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, PurgeQueueResult, QueuePersistenceContext,
 };
 
-#[cfg(unix)]
-pub(super) use herdr::{HERDR_TERMINATE, HerdrForceEffects, herdr_force_effects};
-
 #[cfg(test)]
 use crate::services::turn_orchestrator::Intervention;
 #[cfg(test)]
@@ -170,7 +167,7 @@ async fn purge_on(
 
 /// The forced Herdr cancel's effects; the terminate service they run under is unix-only.
 #[cfg(unix)]
-mod herdr {
+pub(super) mod herdr {
     use sqlx::PgPool;
 
     use super::{PurgeCounts, TurnLifecycleTarget, purge_on};

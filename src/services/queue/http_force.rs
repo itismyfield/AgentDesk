@@ -7,7 +7,7 @@ use futures::FutureExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use super::cancel_effects::{HERDR_TERMINATE, HerdrForceEffects, herdr_force_effects};
+use super::cancel_effects::herdr::{HERDR_TERMINATE, HerdrForceEffects, herdr_force_effects};
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
 use crate::services::cluster::channel_home::current_command;
 use crate::services::discord::health::HealthRegistry;
