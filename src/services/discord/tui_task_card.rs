@@ -311,7 +311,7 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     clamp_discord_message_content(&lines.join("\n"))
 }
 
-fn status_icon(status: &str) -> &'static str {
+pub(super) fn status_icon(status: &str) -> &'static str {
     match status.trim().to_ascii_lowercase().as_str() {
         "completed" | "complete" | "done" | "success" | "succeeded" => "✅",
         "failed" | "error" | "errored" => "❌",
@@ -650,7 +650,7 @@ fn extract_pr_urls(result: &str) -> Vec<String> {
 /// NOTE: does NOT decode entities — that is a per-field concern applied once at
 /// the point each prose field enters the card (#4338). This helper runs per
 /// preview LINE, so decoding here would double-decode an already-decoded result.
-fn sanitize_oneline(value: &str) -> String {
+pub(super) fn sanitize_oneline(value: &str) -> String {
     value
         .replace('\r', " ")
         .replace('\n', " ")

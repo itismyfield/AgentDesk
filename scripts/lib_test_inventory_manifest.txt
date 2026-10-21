@@ -1243,6 +1243,7 @@ server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_
 server::multinode_regression::multinode_regression_pg_tests::multinode_dispatch_claims_route_mixed_required_and_preferred_to_best_online_node
 server::multinode_regression::multinode_regression_pg_tests::multinode_single_leader_lock_allows_one_holder
 server::multinode_regression::multinode_regression_pg_tests::multinode_unreal_resource_lock_is_exclusive
+server::outbox_actionable_delivery::tests::background_notice_selects_provider_owner_and_defers_without_notify_fallback
 server::outbox_actionable_delivery::tests::notify_fallback_requires_a_failed_actionable_announce_delivery
 server::outbox_actionable_delivery::tests::operational_alert_delivery_adds_non_turn_provenance
 server::outbox_delivery_alert::tests::terminal_outbox_failure_records_quality_event_without_ops_card
@@ -1964,6 +1965,9 @@ services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cl
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
+services::claude::herdr_turn::start_offset::test_hooks::a_missing_file_and_metadata_or_whole_json_without_newline_commit_no_start
+services::claude::herdr_turn::start_offset::test_hooks::an_ended_or_cancelled_wait_returns_no_start_and_unstamped_fixtures_keep_their_offset
+services::claude::herdr_turn::start_offset::test_hooks::timestamp_eligibility_is_inclusive_and_rejects_metadata_or_earlier_stamps
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
 services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
@@ -3596,7 +3600,6 @@ services::discord::catch_up::classification_order_tests::aged_empty_message_is_e
 services::discord::catch_up::classification_order_tests::aged_marker_authorized_bot_settles_without_warning_but_fresh_trigger_recovers
 services::discord::catch_up::classification_order_tests::aged_message_absent_from_the_ledger_is_too_old
 services::discord::catch_up::classification_order_tests::aged_message_on_the_ledger_is_settled_not_too_old
-services::discord::catch_up::classification_order_tests::aged_task_notify_and_system_messages_never_become_actionable_too_old
 services::discord::catch_up::classification_order_tests::aged_unauthorized_human_classifies_not_allowed_across_identity_states
 services::discord::catch_up::classification_order_tests::an_active_turn_still_advances_the_phase2_checkpoint
 services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected
@@ -3712,6 +3715,7 @@ services::discord::catch_up::classification_order_tests::production_sweep_checkp
 services::discord::catch_up::classification_order_tests::production_sweep_uses_semantic_utility_identity_when_bot_flag_is_false
 services::discord::catch_up::classification_order_tests::production_two_scan_retries_unavailable_announce_then_recovers
 services::discord::catch_up::classification_order_tests::production_two_scan_retries_unavailable_notify_then_settles_silently
+services::discord::catch_up::classification_order_tests::provider_background_subtext_never_recovers_or_becomes_actionable_too_old
 services::discord::catch_up::classification_order_tests::queue_membership_alone_does_not_advance_the_phase2_checkpoint
 services::discord::catch_up::classification_order_tests::recent_initial_fetch_failure_blocks_phase2_then_recovers_whole_gap
 services::discord::catch_up::classification_order_tests::recent_partial_page_failure_preserves_gap_then_recovers_older_human
@@ -5616,6 +5620,7 @@ services::discord::outbound::send_gate::send_source_tests::dm_default_agent_rest
 services::discord::outbound::send_gate::send_source_tests::from_header_parses_known_caller_classes
 services::discord::outbound::send_gate::send_source_tests::headless_turn_is_allowed_internal_send_source
 services::discord::outbound::send_gate::send_source_tests::loopback_internal_keeps_existing_internal_label_acceptance
+services::discord::outbound::send_gate::send_source_tests::provider_notice_uses_channel_owner_tool_card_credentials
 services::discord::outbound::send_gate::send_source_tests::reserved_gate_requires_explicit_outbox_authority_and_preserves_voice_delivery
 services::discord::outbound::send_gate::send_source_tests::unknown_caller_class_only_allows_known_agents
 services::discord::outbound::send_target::send_target_parse_tests::agent_target_with_empty_id_is_bad_request
@@ -7320,6 +7325,10 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_bound_warm_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_clear_replacement_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_db_restored_selector_fresh_launch_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_fresh_metadata_window_admits_the_reader_and_second_provider_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
@@ -8208,6 +8217,7 @@ services::discord::task_notification_delivery::tests::expired_claim_rebinds_duri
 services::discord::task_notification_delivery::tests::expiring_nonce_takeover_reconciles_history_instead_of_reposting_pg
 services::discord::task_notification_delivery::tests::footer_background_marker_key_is_stable_across_delivery_paths
 services::discord::task_notification_delivery::tests::footer_observation_promotion_and_exact_replay_post_one_card_pg
+services::discord::task_notification_delivery::tests::footer_only_marker_is_one_bounded_sanitized_status_summary
 services::discord::task_notification_delivery::tests::footer_only_marker_omits_private_task_anchors_from_rendered_preview
 services::discord::task_notification_delivery::tests::footer_only_marker_renders_background_summary_and_result_preview
 services::discord::task_notification_delivery::tests::footer_only_observation_keeps_full_card_for_later_promotion
@@ -8486,6 +8496,7 @@ services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_ga
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests::watcher_terminal_resend_partial_overlap_sends_full_not_suffix
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests::watcher_terminal_resend_sends_full_when_nothing_committed
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests::watcher_terminal_resend_skips_when_range_already_committed
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_includes_summary_and_preserves_event_identity
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::background_marker_omits_missing_summary
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::subagent_marker_remains_suppressed

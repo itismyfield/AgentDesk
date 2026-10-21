@@ -391,7 +391,7 @@ fn kill(fx: &super::Fixture) {
 
 /// The bound execution's SessionStart record of its transcript in the pane's log, as its launch
 /// left it; admission takes the turn's source from it.
-fn log_source(fx: &super::Fixture) {
+pub(super) fn log_source(fx: &super::Fixture) {
     use crate::services::tui_prompt_dedupe::binding_events as events;
     use std::os::unix::fs::MetadataExt;
     let binding =

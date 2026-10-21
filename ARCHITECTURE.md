@@ -662,8 +662,11 @@ src/
 │   ├── claude/
 │   │   ├── herdr_turn/
 │   │   │   ├── coldstop_input_tests.rs
+│   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
+│   │   │   ├── start_offset.rs
+│   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
@@ -1720,6 +1723,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_live_end_tests.rs

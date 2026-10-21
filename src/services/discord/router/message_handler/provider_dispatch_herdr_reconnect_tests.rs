@@ -11,7 +11,7 @@ mod root_replaced_recovery_tests;
 
 /// A first turn launches the pane and binds it, as T-E1 does; returns the launched nonce and
 /// session.
-fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
+pub(super) fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
     let started = Mutex::new(None);
     let (result, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(launcher), || {
         if let Some(launched) = fx.start_provider(launcher, true) {
@@ -46,7 +46,7 @@ fn second_turn(fx: &Fixture, launcher: &Arc<Launcher>, started: &Started) -> Res
     let (result, _) = fx.turn(&row, &fx.ports(launcher), || {
         if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 4) {
             let session = &started.session;
-            let user = json!({"type": "user", "sessionId": session,
+            let user = json!({"type": "user", "sessionId": session, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "message": {"role": "user", "content": "질문"}});
             let answer = json!({"type": "assistant", "sessionId": session, "message": {
                 "role": "assistant", "stop_reason": "end_turn",
@@ -122,7 +122,7 @@ fn t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg() {
 
 /// The launched execution's own SessionStart(clear) Pending of `cleared`, as its hook logs it
 /// before the cleared session's transcript exists; returns where that transcript goes.
-fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
+pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     use crate::services::tui_prompt_dedupe::binding_events::{
         self, BindingCause, CauseSource, HookSignal, Proposal,
     };
@@ -162,7 +162,7 @@ fn cleared_turn(
     let row = fx.record();
     let (result, _) = fx.turn(&row, &fx.ports(launcher), || {
         if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 4) {
-            let user = json!({"type": "user", "sessionId": cleared,
+            let user = json!({"type": "user", "sessionId": cleared, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "message": {"role": "user", "content": "질문"}});
             let answer = json!({"type": "assistant", "sessionId": cleared, "message": {
                 "role": "assistant", "stop_reason": "end_turn",

@@ -2,7 +2,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use super::{HerdrTurnLines, SourceFileIdentity, is_turn_output, is_turn_prompt};
+use super::{HerdrTurnLines, SourceFileIdentity, is_turn_output, is_turn_prompt, start_offset};
 use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 use crate::services::provider::herdr_before_start::mutant;
 
@@ -88,15 +88,9 @@ fn turn_in(
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,
 ) -> Result<Option<Terminal>, Unobserved> {
-    let stamped = |line: &str| {
-        let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        let stamp = json.get("timestamp")?.as_str()?;
-        chrono::DateTime::parse_from_rfc3339(stamp).ok()
-    };
     let Some((start, at)) = records.iter().enumerate().find_map(|(at, (start, line))| {
-        stamped(line)
-            .filter(|stamp| *stamp >= submitted_at)
-            .map(|_| (*start, at))
+        (start_offset::eligible(line, &submitted_at) || mutant("start_offset_reader_only"))
+            .then_some((*start, at))
     }) else {
         return Ok(None);
     };
