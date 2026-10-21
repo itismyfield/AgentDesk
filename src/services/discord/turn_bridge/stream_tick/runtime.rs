@@ -1,5 +1,37 @@
 use super::*;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Deref};
+
+pub(super) struct ProviderRef<'a>(pub(super) &'a ProviderKind);
+
+impl Deref for ProviderRef<'_> {
+    type Target = ProviderKind;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl ProviderRef<'_> {
+    pub(super) fn clone(&self) -> ProviderKind {
+        self.0.clone()
+    }
+}
+
+pub(super) struct TurnIdRef<'a>(pub(super) &'a str);
+
+impl Deref for TurnIdRef<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl TurnIdRef<'_> {
+    pub(super) fn as_str(&self) -> &str {
+        self.0
+    }
+}
 
 pub(super) struct TickContext<'a> {
     pub(super) shared_owned: &'a Arc<SharedData>,

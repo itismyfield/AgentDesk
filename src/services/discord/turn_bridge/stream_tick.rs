@@ -1,6 +1,5 @@
 //! #4230 S1 stream/status tick helper for the turn bridge.
 
-use std::ops::Deref;
 use std::sync::Arc;
 
 use super::*;
@@ -25,6 +24,7 @@ mod reclaim;
 #[path = "stream_tick/runtime.rs"]
 mod runtime;
 use rollover_guard::{GuardedRolloverEditOutcome, guarded_bridge_rollover_edit};
+use runtime::{ProviderRef, TurnIdRef};
 
 pub(super) type LongRunningPlaceholderActive = Option<(
     super::super::placeholder_controller::PlaceholderKey,
@@ -45,38 +45,6 @@ pub(super) type PendingLongRunningRetargetAfterStateSave = Option<(
 pub(super) enum StreamTickOutcome {
     Continue,
     AuthorityLost,
-}
-
-struct ProviderRef<'a>(&'a ProviderKind);
-
-impl Deref for ProviderRef<'_> {
-    type Target = ProviderKind;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl ProviderRef<'_> {
-    fn clone(&self) -> ProviderKind {
-        self.0.clone()
-    }
-}
-
-struct TurnIdRef<'a>(&'a str);
-
-impl Deref for TurnIdRef<'_> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl TurnIdRef<'_> {
-    fn as_str(&self) -> &str {
-        self.0
-    }
 }
 
 pub(super) struct BridgeStreamTickContext<'a> {

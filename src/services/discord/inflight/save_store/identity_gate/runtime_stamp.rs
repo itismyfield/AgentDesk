@@ -527,44 +527,10 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         Ok(on_disk) => on_disk,
         Err(outcome) => return outcome,
     };
-    let durable = InflightTurnIdentity::from_state(&on_disk);
-    if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_identity = ?expected,
-            durable_identity = ?durable,
-            "runtime-handoff stamp skipped because offsetless id-0 snapshot cannot safely match a durable row"
-        );
-        return GuardedSaveOutcome::Unnameable;
-    }
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
+    if let Some(refusal) =
+        stamp_guard::stamp_identity_refusal(&provider, &requested, expected, &on_disk, caller)
     {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_identity = ?expected,
-            durable_identity = ?durable,
-            durable_restart_mode = ?on_disk.restart_mode,
-            durable_rebind_origin = on_disk.rebind_origin,
-            "runtime-handoff stamp skipped because durable row authority changed"
-        );
-        return GuardedSaveOutcome::from_durable_authority(&on_disk);
-    }
-    if expected.tmux_session_name.is_some()
-        && requested.tmux_session_name != expected.tmux_session_name
-    {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_tmux_session_name = ?expected.tmux_session_name,
-            requested_tmux_session_name = ?requested.tmux_session_name,
-            "runtime-handoff stamp skipped because an established runtime session changed"
-        );
-        return GuardedSaveOutcome::AuthorityPinned;
+        return refusal;
     }
 
     if !hosted_binding_write_admitted(&on_disk, &requested) {
@@ -1439,6 +1405,9 @@ impl InflightTurnState {
 #[cfg(all(test, unix))]
 #[path = "runtime_stamp/claude_terminal_tests.rs"]
 mod claude_terminal_tests;
+
+#[path = "runtime_stamp/stamp_guard.rs"]
+mod stamp_guard;
 
 #[path = "runtime_stamp/captured_terminal_admission.rs"]
 mod captured_terminal_admission;

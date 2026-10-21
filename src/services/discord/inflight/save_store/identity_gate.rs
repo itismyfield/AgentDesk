@@ -1,6 +1,8 @@
 use super::*;
 #[path = "identity_gate/bridge_entry.rs"]
 mod bridge_entry;
+#[path = "identity_gate/captured_nonce.rs"]
+mod captured_nonce;
 #[path = "identity_gate/completion_preserve.rs"]
 mod completion_preserve;
 #[path = "identity_gate/guarded_read.rs"]
@@ -21,6 +23,7 @@ pub(in crate::services::discord) use bridge_entry::{
     patch_bridge_entry_state_if_identity_unchanged,
     patch_bridge_entry_state_tracking_placeholder_clear,
 };
+use captured_nonce::identity_matches_with_offset_guard;
 pub(in crate::services::discord) use completion_preserve::save_inflight_state_if_matches_identity;
 #[cfg(test)]
 pub(in crate::services::discord::inflight) use completion_preserve::save_inflight_state_if_matches_identity_in_root;
@@ -369,31 +372,6 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             );
             GuardedSaveOutcome::IoError
         }
-    }
-}
-
-fn identity_matches_with_offset_guard(
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-    state: &InflightTurnState,
-) -> bool {
-    if !expected.matches_state(state) {
-        return false;
-    }
-    // Anchor bind/reuse reads or rewrites another persisted row. For synthetic
-    // id-0 rows, fail closed unless BOTH sides carry the birth offset and it
-    // matches. This is stricter than the delivery-lease id-0 degenerate fallback,
-    // which is transport-level dedup only and never authorizes row mutation.
-    if expected.user_msg_id == 0 {
-        return matches!(
-            (expected_turn_start_offset, state.turn_start_offset),
-            (Some(expected_offset), Some(actual_offset)) if expected_offset == actual_offset
-        );
-    }
-    if let Some(expected_offset) = expected_turn_start_offset {
-        state.turn_start_offset == Some(expected_offset)
-    } else {
-        true
     }
 }
 

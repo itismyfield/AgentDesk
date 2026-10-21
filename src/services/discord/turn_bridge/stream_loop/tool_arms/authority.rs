@@ -109,7 +109,7 @@ pub(super) fn reconcile_tool_arm_locals_after_guarded_save(
     // Leaving one behind after a `Saved` leaves the loop holding the pre-save
     // value while `persisted_baseline` holds the merged one, and the next tick's
     // `local != before && durable == before => durable = local` branch
-    // (`stream_loop_patch.rs:9` for the flags, `:24` inside
+    // (`stamp_merge::apply_local_change_if_durable_unchanged` for the flags,
     // `merge_stream_response_progress` for the offset) then REWINDS the durable
     // row to the pre-save value.
     // * `response_sent_offset` — rewinding it resends already-delivered text.
