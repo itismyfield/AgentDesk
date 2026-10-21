@@ -104,8 +104,9 @@ fn pinned_upstream_unit_outputs_match_the_replica() {
             operation => panic!("unknown pinned upstream operation: {operation}"),
         };
         let name = case["upstream_test"].as_str().unwrap();
+        let marker = format!("fn {name}() {{");
         let body = UNIT_TESTS
-            .split(&format!("fn {name}() {{"))
+            .split(marker.as_str())
             .nth(1)
             .unwrap()
             .split("    }")
