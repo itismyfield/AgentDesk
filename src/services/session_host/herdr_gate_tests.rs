@@ -887,7 +887,7 @@ fn m0_close_effect_positive() {
     let mutations = rig.server.mutations();
     assert_eq!(mutations.len(), 1);
     assert_eq!(result, HerdrTerminateResult::Acknowledged);
-    assert_eq!(mutations[0]["method"], "pane.close");
+    assert_closed_method(&mutations[0]["method"]);
     assert_eq!(mutations[0]["params"], json!({"pane_id": PANE}));
     assert!(rig.server.conns().iter().all(|seen| seen.after_reply == 0));
     assert!(matches!(
@@ -962,6 +962,10 @@ fn m0_close_witness_mismatch_zero_bytes() {
         write.request.is_none() && write.after_reply == 0,
         "{write:?}"
     );
+}
+
+fn assert_closed_method(method: &Value) {
+    assert_eq!(method.as_str(), Some("pane.close"));
 }
 
 #[test]

@@ -96,14 +96,16 @@ fn policy_legacy_mutations_keep_e7_and_need_no_new_evidence() {
         3,
         "Legacy E7 call order/count unchanged"
     );
+    let mutations = rig.server.mutations();
+    assert_eq!(mutations.len(), 3);
     assert_eq!(
-        rig.server
-            .mutations()
+        mutations[..2]
             .iter()
             .map(|call| call["method"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["pane.send_text", "pane.send_keys", "pane.close"]
+        ["pane.send_text", "pane.send_keys"]
     );
+    assert_closed_method(&mutations[2]["method"]);
 }
 
 #[test]
