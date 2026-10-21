@@ -5,9 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 fn a2_missing_owner_nonce_probe_creates_no_runtime_storage_or_permission_changes() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().unwrap();
-    let tmp = root.join("private-tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    let _tmp = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &tmp);
+    let tmp = std::env::temp_dir();
     let name = format!("a2-missing-nonce-{}", uuid::Uuid::new_v4());
     let canonical = marker_path(&name, "spawn_nonce");
     let legacy =
@@ -24,8 +22,18 @@ fn a2_missing_owner_nonce_probe_creates_no_runtime_storage_or_permission_changes
         !canonical.parent().unwrap().exists(),
         "read-only nonce probe created the sessions directory"
     );
-    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
-    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    assert!(
+        !legacy.exists(),
+        "read-only nonce probe created the legacy marker"
+    );
+    assert!(
+        !std::fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(&name)),
+        "read-only nonce probe created a file named after the session"
+    );
     assert_eq!(
         (
             std::fs::metadata(&root).unwrap().permissions().mode(),
@@ -39,9 +47,7 @@ fn a2_missing_owner_nonce_probe_creates_no_runtime_storage_or_permission_changes
 fn a2_owner_nonce_uses_legacy_only_for_missing_canonical_and_keeps_opaque_bytes() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().unwrap();
-    let tmp = root.join("private-tmp");
-    std::fs::create_dir(&tmp).unwrap();
-    let _tmp = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &tmp);
+    let tmp = std::env::temp_dir();
     let name = format!("a2-present-nonce-{}", uuid::Uuid::new_v4());
     let canonical = marker_path(&name, "spawn_nonce");
     let legacy =
@@ -49,6 +55,7 @@ fn a2_owner_nonce_uses_legacy_only_for_missing_canonical_and_keeps_opaque_bytes(
     assert!(canonical.starts_with(&root));
     assert!(legacy.starts_with(&tmp));
     std::fs::write(&legacy, b"legacy-opaque").unwrap();
+    let _legacy = RemoveOnDrop(legacy.clone());
     assert_eq!(nonce(&name), Ok(Some(b"legacy-opaque".to_vec())));
     std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
     std::fs::set_permissions(
@@ -83,4 +90,13 @@ fn a2_owner_nonce_uses_legacy_only_for_missing_canonical_and_keeps_opaque_bytes(
         0o750
     );
     assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy-opaque");
+}
+
+/// The legacy marker lives in the shared temp dir, so the test removes it itself.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }

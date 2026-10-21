@@ -36,10 +36,11 @@ impl RecoveryFixture {
         );
         let root = tempfile::tempdir().unwrap();
         let config_path = crate::runtime_layout::config_file_path(root.path());
+        let tmpdir = crate::config::test_env::kept_test_tmpdir("stale-binding");
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let env = vec![
             set("AGENTDESK_ROOT_DIR", root.path()),
-            set("TMPDIR", root.path()),
+            set("TMPDIR", &tmpdir),
             set("AGENTDESK_CONFIG", &config_path),
             set("CODEX_HOME", &root.path().join("codex-home")),
             set("CLAUDE_CONFIG_DIR", &root.path().join("claude-home")),

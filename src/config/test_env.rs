@@ -68,6 +68,16 @@ pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarG
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
 
+/// A fresh TMPDIR for a fixture that moves it. Never removed: tests on other threads create
+/// their temp dirs inside it meanwhile, and removing it would delete those under them.
+pub(crate) fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
+    tempfile::Builder::new()
+        .prefix(&format!("adk-{label}-"))
+        .tempdir()
+        .expect("fixture TMPDIR")
+        .keep()
+}
+
 pub(crate) struct TestRuntimeRootGuard {
     _env: TestEnvVarGuard,
     _root: tempfile::TempDir,

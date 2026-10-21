@@ -264,10 +264,11 @@ impl Fixture {
         let claude_home = root.join("claude-home");
         std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
         std::fs::create_dir_all(claude_home.join("projects")).unwrap();
+        let tmpdir = crate::config::test_env::kept_test_tmpdir("cross-runtime-owner");
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let env = vec![
             set("AGENTDESK_CONFIG", &config_path),
-            set("TMPDIR", root),
+            set("TMPDIR", &tmpdir),
             set("CODEX_HOME", &codex_home),
             set("CLAUDE_CONFIG_DIR", &claude_home),
             set("AGENTDESK_CLAUDE_PATH", &root.join("provider-must-not-run")),
