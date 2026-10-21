@@ -603,6 +603,17 @@ async fn migration_file_store_recovers_previous_generation_without_applying_cand
             bytes
         );
     }
+    use std::os::unix::fs::PermissionsExt;
+    let pending = temp.path().join("pending");
+    let candidate = remap(old.clone(), "/fixture/new.sock");
+    std::fs::write(temp.path().join("current.json"), snapshot(1, &candidate)).unwrap();
+    std::fs::write(&pending, b"committed").unwrap();
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0)).unwrap();
+    assert!(std::fs::read(&pending).is_err());
+    let (loaded, warning) = known(store.load());
+    assert_eq!(Projection::of(&loaded), Projection::of(&old));
+    assert_eq!(warning, Some("approval_snapshot_not_durable"));
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 #[test]

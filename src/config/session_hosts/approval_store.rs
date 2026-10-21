@@ -62,7 +62,7 @@ impl ApprovalStore for FileApprovalStore {
         let interrupted = match std::fs::symlink_metadata(&pending) {
             Ok(meta) if meta.is_file() => match std::fs::read(&pending) {
                 Ok(bytes) => bytes != b"committed",
-                Err(_) => return Loaded::Unavailable("approval_snapshot_unreadable"),
+                Err(_) => true,
             },
             Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
