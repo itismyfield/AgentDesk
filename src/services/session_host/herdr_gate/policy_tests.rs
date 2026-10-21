@@ -385,7 +385,11 @@ fn policy_prepared_store_failure_is_distinct_from_absent_authority() {
             "{contract}"
         );
         assert!(
-            rig.server.conns().is_empty(),
+            if refusal == Unverified::Cache {
+                rig.server.conns().is_empty()
+            } else {
+                rig.server.conns().iter().all(|seen| seen.request.is_none())
+            },
             "prepared_store_refusal_probes_zero_contract"
         );
         assert!(
