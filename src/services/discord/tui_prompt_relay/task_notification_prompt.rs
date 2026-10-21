@@ -105,7 +105,13 @@ pub(super) async fn resolve_gate(
             );
             return None;
         }
-        enqueue_footer_only_background_marker(shared, channel_id, event);
+        if let Err(error) = event
+            .enqueue_footer_only_marker(shared.pg_pool.as_ref())
+            .await
+        {
+            tracing::warn!(channel_id = channel_id.get(), %error, "background completion outbox handoff failed");
+            return None;
+        }
         clear_observed_external_turn_lease_if_current(prompt, channel_id, lease);
         return None;
     }
@@ -188,30 +194,6 @@ pub(super) async fn resolve_gate(
         notify_http: http,
         card_anchor: Some(MessageId::new(outcome.message_id)),
     })
-}
-
-/// Prompt observation remains a producer when the watcher cannot reach the
-/// terminal frame. It shares the watcher key, so observing the same semantic
-/// event through both paths still produces one outbox lifecycle notice.
-fn enqueue_footer_only_background_marker(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    event: &super::super::task_notification_delivery::TaskCardEvent,
-) {
-    let target = format!("channel:{}", channel_id.get());
-    let session_key =
-        super::super::task_notification_delivery::footer_background_marker_session_key(
-            channel_id,
-            event.event_key(),
-        );
-    let content = event.footer_only_marker_content();
-    let _ = crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-        shared.pg_pool.as_ref(),
-        target.as_str(),
-        Some(session_key.as_str()),
-        "lifecycle.background_task_complete",
-        content.as_str(),
-    );
 }
 
 async fn legacy_notify_gate(

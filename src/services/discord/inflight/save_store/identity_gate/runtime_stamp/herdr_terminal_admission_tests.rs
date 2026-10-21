@@ -358,10 +358,11 @@ async fn a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt() 
     let result =
         |text: &str| serde_json::json!({"type": "result", "subtype": "success", "result": text});
     let previous = claude(prompt("old"), before) + &claude(result("old answer"), before);
+    let metadata = "{\"type\":\"file-history-snapshot\",\"snapshot\":{}}\n";
     let own = claude(prompt("question"), after) + &claude(result("answer"), after);
     let next = claude(prompt("next"), after) + &claude(result("next answer"), after);
-    let body = previous.clone() + &own + &next;
-    let start = previous.len() as u64;
+    let body = previous.clone() + metadata + &own + &next;
+    let start = (previous.len() + metadata.len()) as u64;
     let mut case = Case::new(
         temp.path(),
         11,
@@ -372,6 +373,15 @@ async fn a_herdr_claude_terminal_is_admitted_only_from_this_tokens_own_prompt() 
     )
     .await;
     let frame = case.read(start);
+    for (name, claimed_start) in [("previous prompt", 0), ("metadata", previous.len() as u64)] {
+        let forged = claim(frame.clone(), Some(claimed_start), None, None);
+        assert_eq!(
+            case.admit(forged).await,
+            None,
+            "a start at {name} with the correct terminal end and kind"
+        );
+        assert_eq!(case.durable_kind(), None, "a start at {name}");
+    }
     let past = claim(frame.clone(), None, Some(body.len() as u64), None);
     assert_eq!(case.admit(past).await, None, "a range into the next turn");
     let earlier = claim(case.read(0), Some(0), Some(previous.len() as u64), None);
