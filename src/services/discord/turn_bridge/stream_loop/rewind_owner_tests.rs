@@ -273,3 +273,60 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     assert!(captured.edits.lock().unwrap().is_empty());
     assert!(captured.deletes.lock().unwrap().is_empty());
 }
+
+/// A successor saved in this turn's start second shares every identity field with it; the
+/// error arm's rejected rewind keeps this turn's own local instead of reloading the successor's
+/// row and handing it this turn's settlement authority.
+#[test]
+fn rejected_error_rewind_keeps_a_successor_episode_out_of_the_local_7219() {
+    let temp = tempfile::TempDir::new().expect("isolated inflight root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_497_219);
+    let provider = ProviderKind::Codex;
+    let mut inflight = InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        Some("rewind-owner-7219".into()),
+        343_742_347_365_974_026,
+        77_219,
+        18,
+        "prompt".into(),
+        Some("session".into()),
+        Some("rewind-owner-7219-session".into()),
+        Some("/tmp/rewind-owner-7219.jsonl".into()),
+        None,
+        512,
+    );
+    inflight.turn_nonce = Some("episode-a".into());
+    inflight.full_response = "this turn's delivered answer".into();
+    inflight.response_sent_offset = inflight.full_response.len();
+    let mut successor = inflight.clone();
+    successor.turn_nonce = Some("episode-b".into());
+    successor.full_response = "the successor's own answer".into();
+    successor.response_sent_offset = successor.full_response.len();
+    save_inflight_state(&successor).expect("seed the successor row");
+    assert_eq!(
+        InflightTurnIdentity::from_state(&successor),
+        InflightTurnIdentity::from_state(&inflight)
+    );
+    let path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel.get(),
+    );
+    let successor_bytes = std::fs::read(&path).unwrap();
+    let (mut sent, mut confirmed) = (inflight.response_sent_offset, 0usize);
+
+    sync_terminal_error_delivery_state_for_bridge_owner(
+        "provider failed",
+        &mut sent,
+        &mut confirmed,
+        &mut inflight,
+        channel,
+        false,
+    );
+
+    assert_eq!(inflight.turn_nonce.as_deref(), Some("episode-a"));
+    assert_ne!(inflight.full_response, successor.full_response);
+    assert_eq!(std::fs::read(&path).unwrap(), successor_bytes);
+}
