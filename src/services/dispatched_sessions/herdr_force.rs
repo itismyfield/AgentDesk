@@ -20,9 +20,8 @@ use effects::{HERDR_TERMINATE, HerdrKillEffects, KillInput, herdr_force_kill_eff
 /// The home command a force-kill is admitted under while it terminates the channel's execution.
 const COMMAND: &str = "force_kill_session";
 
-/// The force-kill's answer when the session it read is a Claude or Codex Herdr execution its row
-/// owns, under the requested key and channel; `None` leaves the force-kill to its legacy path.
-/// The run is bound to the execution and the dispatch that read picked.
+/// The answer when the force-kill's read picked a Claude/Codex Herdr execution its row owns, under
+/// the requested key and channel, bound to that read's dispatch; `None` keeps the legacy path.
 pub(super) async fn herdr_force_kill(
     state: &AppState,
     prepared: &Prepared<'_>,

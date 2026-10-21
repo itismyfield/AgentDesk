@@ -22,9 +22,8 @@ use crate::services::session_forwarding::{CancelTurnSessionInfo, load_cancel_tur
 
 const REASON: &str = "queue-api cancel_turn (force)";
 
-/// The forced cancel's answer when `selected`, the cancel's own pick of session and dispatch, is a
-/// Herdr execution of this channel; `None` leaves the cancel to its existing path. The switch is
-/// read before any IO. A re-read naming another dispatch is refused: the pick binds the run.
+/// The forced cancel's answer when `selected`, its own pick of session and dispatch, is a Herdr
+/// execution of this channel, bound to that dispatch; `None`, decided before any IO, keeps the rest.
 pub(super) async fn herdr_force(
     force: bool,
     health_registry: Option<&Arc<HealthRegistry>>,

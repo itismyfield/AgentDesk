@@ -29,9 +29,8 @@ pub(crate) async fn active_dispatch_pg(
         .map_err(|error| format!("load active dispatch: {error}"))
 }
 
-/// Disconnects the row only while it still records `record` retired, field by field, with
-/// `dispatch` or, once that dispatch's cancel cleared it, none active; successors stay untouched.
-/// `keep_provider_session` leaves the provider session id for a later resume.
+/// Disconnects the row only while it records `record` retired, field by field, with `dispatch` or,
+/// once its cancel cleared it, none active; `keep_provider_session` keeps the session id to resume.
 pub(crate) async fn disconnect_retired_pg(
     pool: &PgPool,
     session_id: i64,

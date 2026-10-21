@@ -1,6 +1,5 @@
-//! What an HTTP session force-kill of a Herdr execution applies once the terminate retired it:
-//! the disconnect and the dispatch failure or retry while the exclusion is held, then the drain
-//! of the queue it kept and the auto-queue wake once the exclusion is gone.
+//! A forced Herdr session kill's effects: disconnect and dispatch failure or retry under the
+//! terminate's exclusion, then the kept queue's drain and the auto-queue wake once it is gone.
 
 use futures::FutureExt;
 use futures::future::BoxFuture;

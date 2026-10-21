@@ -18,9 +18,8 @@ pub(crate) trait Released: Send + Sized + 'static {
     fn released(self) -> BoxFuture<'static, Self>;
 }
 
-/// Runs the scoped terminate bound to `dispatch` and, only on a retire, `postlude` while the
-/// exclusion is held, then its released step; `permit` keeps the channel's home command open
-/// until the result is logged.
+/// Runs the scoped terminate bound to `dispatch`, on a retire `postlude` under the held exclusion
+/// and then its released step; `permit` keeps the home command open until the result is logged.
 pub(crate) async fn terminate_for_http<T, P>(
     registry: &HealthRegistry,
     pool: PgPool,
