@@ -288,7 +288,8 @@ async fn migration_compares_recorded_location_to_proposed_mapping_not_old_locato
 
 #[tokio::test]
 async fn migration_endpoint_identity_changes_and_channel_removal_refuse_live_rows() {
-    let edits: [(&str, fn(&mut BootSessionHosts)); 8] = [
+    type Edit = (&'static str, fn(&mut BootSessionHosts));
+    let edits: [Edit; 8] = [
         ("socket", |h| {
             h.config.herdr.endpoints.get_mut("one").unwrap().socket_path =
                 "/fixture/new.sock".into();
