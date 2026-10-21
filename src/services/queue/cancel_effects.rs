@@ -1,21 +1,31 @@
-//! Queue effects a turn cancel applies after its lifecycle stop: the preserved-queue drain and
-//! the forced purge.
+//! Queue effects a turn cancel applies after its lifecycle stop: the preserved-queue drain, the
+//! forced purge and, for a Herdr execution, the effects that run under the terminate's exclusion.
 
 use std::sync::Arc;
 
-use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::session_identity::SessionIdentity;
-#[cfg(test)]
-use crate::services::provider::ProviderKind;
-use crate::services::turn_cancel_queue_guard::PurgeCounts;
-use crate::services::turn_lifecycle::TurnLifecycleTarget;
-#[cfg(test)]
 use poise::serenity_prelude::ChannelId;
+use sqlx::PgPool;
+
+use crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg;
+use crate::services::discord::TmuxCleanupPolicy;
+use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::herdr_terminate::RetiredExclusion;
+use crate::services::discord::session_identity::SessionIdentity;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_cancel_finalizer::{
+    FinalizeTurnCancelRequest, FinalizedTurnCancel, TurnCancelCorrelation, finalize_turn_cancel,
+};
+use crate::services::turn_cancel_queue_guard::{
+    CancelQueueLoss, CancelRemovalWitness, PurgeCounts, capture_queue_before_cancel,
+    record_queue_loss_after_cancel,
+};
+use crate::services::turn_lifecycle::{TurnLifecycleTarget, cleanup_policy_observability_surface};
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, ChannelMailboxRegistry, PurgeQueueResult, QueuePersistenceContext,
+};
 
 #[cfg(test)]
-use crate::services::turn_orchestrator::{
-    ChannelMailboxHandle, Intervention, QueuePersistenceContext,
-};
+use crate::services::turn_orchestrator::Intervention;
 #[cfg(test)]
 use std::{
     collections::HashMap,
@@ -100,41 +110,12 @@ pub(crate) async fn force_purge_channel_mailbox(
             queue_len_after: None,
         });
     };
-    let token_hash = session_key
-        .and_then(SessionIdentity::parse)
-        .and_then(|identity| identity.token_hash)
-        .unwrap_or_default();
-    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
-        provider,
-        &token_hash,
-        None,
-    );
     // #3029(D): force purge must also release the active-turn anchor so the
     // next dispatch is not blocked by a stale `cancel_token` /
     // `active_user_message_id`. The handler only clears an anchor whose token
     // is already `cancelled` (the force-kill above flipped it), so a fresh
     // turn that raced in after the kill keeps its anchor (#2706).
-    #[cfg(test)]
-    run_pre_purge_hook_for_test(provider, channel_id, &handle).await;
-    let purge = handle.try_purge_queue(persistence, true).await.ok()?;
-    if purge.queued_head_refused {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            "force purge refused; mailbox preserved"
-        );
-        return None;
-    }
-    let purged = purge.drained;
-    tracing::info!(
-        provider = provider.as_str(),
-        channel_id = channel_id.get(),
-        purged,
-        disk_files_removed = purge.disk_files_removed,
-        cleared_active_anchor = purge.cleared_active_anchor,
-        session_key,
-        "force purged channel mailbox queue"
-    );
+    let purge = purge_on(&handle, provider, channel_id, session_key, true).await?;
     let finish = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
         health_registry.map(Arc::as_ref),
         Some(provider.as_str()),
@@ -153,4 +134,133 @@ pub(crate) async fn force_purge_channel_mailbox(
         );
     }
     Some(purge.into())
+}
+
+/// Purges `handle`'s queue; `None` when the actor did not answer or refused for a queued head.
+async fn purge_on(
+    handle: &ChannelMailboxHandle,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    session_key: Option<&str>,
+    clear_cancelled_active_anchor: bool,
+) -> Option<PurgeQueueResult> {
+    let token_hash = session_key
+        .and_then(SessionIdentity::parse)
+        .and_then(|identity| identity.token_hash)
+        .unwrap_or_default();
+    let persistence = QueuePersistenceContext::new(provider, &token_hash, None);
+    #[cfg(test)]
+    run_pre_purge_hook_for_test(provider, channel_id, handle).await;
+    let purge = handle
+        .try_purge_queue(persistence, clear_cancelled_active_anchor)
+        .await
+        .ok()?;
+    if purge.queued_head_refused {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            "force purge refused; mailbox preserved"
+        );
+        return None;
+    }
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        purged = purge.drained,
+        disk_files_removed = purge.disk_files_removed,
+        cleared_active_anchor = purge.cleared_active_anchor,
+        session_key,
+        "force purged channel mailbox queue"
+    );
+    Some(purge)
+}
+
+pub(super) const HERDR_TERMINATE: &str = "herdr-terminate";
+
+/// What a forced Herdr cancel applied under the terminate's exclusion. `failed` names the first
+/// step that did not apply; nothing after it ran. `loss` is `None` when the channel had no actor.
+pub(super) struct HerdrForceEffects {
+    pub(super) failed: Option<String>,
+    pub(super) purge: Option<PurgeCounts>,
+    pub(super) loss: Option<CancelQueueLoss>,
+    pub(super) cancelled: FinalizedTurnCancel,
+}
+
+/// Cancels the bound dispatch, disconnects the retired row, then captures, purges and records
+/// the queue of the exclusion's own actor; the exclusion is held throughout.
+pub(super) async fn herdr_force_effects(
+    exclusion: &RetiredExclusion,
+    pool: PgPool,
+    session_key: String,
+) -> HerdrForceEffects {
+    let (failed, purge, loss) = herdr_force_steps(exclusion, &pool, &session_key).await;
+    let turn_id = exclusion
+        .settled_turn()
+        .and_then(|token| token.turn_nonce());
+    let request = FinalizeTurnCancelRequest {
+        correlation: TurnCancelCorrelation {
+            provider: Some(exclusion.provider().clone()),
+            channel_id: Some(exclusion.channel()),
+            dispatch_id: exclusion.dispatch().map(str::to_string),
+            session_key: Some(session_key),
+            turn_id: turn_id.map(str::to_string),
+        },
+        reason: "queue-api cancel_turn (force)".into(),
+        surface: cleanup_policy_observability_surface(TmuxCleanupPolicy::CleanupSession {
+            termination_reason_code: Some("queue_api_cancel_turn"),
+        })
+        .into(),
+        lifecycle_path: HERDR_TERMINATE.into(),
+        tmux_killed: false,
+        inflight_cleared: exclusion.settled_turn().is_some(),
+        queue_depth: loss.as_ref().and_then(|loss| loss.queue_depth_after),
+        queue_preserved: purge.map(|_| false),
+        termination_recorded: true,
+        completed_at: chrono::Utc::now(),
+    };
+    HerdrForceEffects {
+        failed,
+        purge,
+        loss,
+        cancelled: finalize_turn_cancel(request),
+    }
+}
+
+async fn herdr_force_steps(
+    exclusion: &RetiredExclusion,
+    pool: &PgPool,
+    session_key: &str,
+) -> (Option<String>, Option<PurgeCounts>, Option<CancelQueueLoss>) {
+    if let Some(dispatch) = exclusion.dispatch()
+        && let Err(error) = cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch, None).await
+    {
+        return (Some(format!("dispatch cancel: {error}")), None, None);
+    }
+    match exclusion.disconnect_session(pool).await {
+        Ok(true) => {}
+        Ok(false) => return (Some("session row moved on".into()), None, None),
+        Err(error) => return (Some(error), None, None),
+    }
+    let Some(actor) = exclusion.actor() else {
+        return (None, None, None);
+    };
+    let (provider, channel) = (exclusion.provider(), exclusion.channel());
+    // The loss record reads the channel's registered actor, so that must be this one.
+    let registered = ChannelMailboxRegistry::global_handle(channel);
+    if !registered.is_some_and(|registered| registered.same_actor(actor)) {
+        return (Some("channel actor replaced".into()), None, None);
+    }
+    let target = TurnLifecycleTarget {
+        provider: Some(provider.clone()),
+        channel_id: Some(channel),
+        tmux_name: String::new(),
+    };
+    let capture = capture_queue_before_cancel(&target).await;
+    let purge = purge_on(actor, provider, channel, Some(session_key), false).await;
+    let purge = purge.map(PurgeCounts::from);
+    let witness = CancelRemovalWitness::Purge(purge);
+    let reason = "queue_api_cancel_turn_force";
+    let loss = record_queue_loss_after_cancel(&target, &capture, Some(pool), witness, reason).await;
+    let failed = purge.is_none().then(|| "queue purge refused".to_string());
+    (failed, purge, Some(loss))
 }

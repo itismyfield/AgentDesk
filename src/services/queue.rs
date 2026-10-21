@@ -17,6 +17,7 @@ use poise::serenity_prelude::ChannelId;
 
 mod cancel_effects;
 mod herdr_stop;
+mod http_force;
 
 pub(super) use cancel_effects::force_purge_channel_mailbox;
 use cancel_effects::schedule_post_cancel_queue_drain;
@@ -338,8 +339,8 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
-    /// Cancels `channel_id`'s turn: `force` hard-kills it; otherwise its session and queue stay,
-    /// and a live Herdr turn this process started takes its holder `/stop` instead.
+    /// Cancels `channel_id`'s turn: `force` hard-kills it or, with terminate on, retires its Herdr
+    /// execution; otherwise session and queue stay, and a live Herdr turn takes `/stop`.
     pub async fn cancel_turn(
         &self,
         health_registry: Option<&Arc<HealthRegistry>>,
@@ -460,6 +461,12 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
+        let pool = self.pg_pool.as_ref();
+        let key = session_key.as_deref();
+        let forced = http_force::herdr_force(force, health_registry, pool, channel_id, key);
+        if let Some(answer) = forced.await {
+            return answer;
+        }
         let herdr = herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
         if let Some(stopped) = herdr.await {
             return Ok(stopped);

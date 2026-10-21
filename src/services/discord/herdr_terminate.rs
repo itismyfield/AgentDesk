@@ -1,5 +1,10 @@
-//! Explicit termination of one Herdr execution, by the operator route or a user clear.
+//! Explicit termination of one Herdr execution, by the operator route, a user clear or an HTTP
+//! force cancel.
+pub(crate) mod http_force;
+mod retired_exclusion;
 pub(crate) mod root_replaced;
+
+pub(crate) use retired_exclusion::RetiredExclusion;
 
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
@@ -68,7 +73,8 @@ impl TerminationResult {
     }
 }
 
-/// The one live-switch read the operator route, its adapter and the service share.
+/// The one live-switch read the operator route, its adapter, a forced HTTP cancel and the
+/// service share.
 pub(crate) fn terminate_enabled() -> bool {
     crate::config_live_reload::current()
         .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
@@ -95,6 +101,7 @@ pub(super) struct CapturedTurn {
     /// The actor seen holding `token`; settlement is confirmed on it, never on a re-resolved one.
     mailbox: ChannelMailboxHandle,
     snapshot: SyntheticClaimSnapshot,
+    dispatch_id: Option<String>,
 }
 pub(super) async fn capture_turn(
     shared: &Arc<SharedData>,
@@ -126,12 +133,14 @@ pub(super) async fn capture_turn(
         .ok_or("active turn has no matching captured inflight evidence")?;
     let mut snapshot = SyntheticClaimSnapshot::from_row(&row);
     snapshot.recovery_actor = Some(Arc::downgrade(&token));
+    let dispatch_id = row.dispatch_id.clone();
     Ok(Some(CapturedTurn {
         key: TurnKey::new(channel, id, shared.restart.current_generation)
             .with_episode_nonce(Some(&nonce)),
         token,
         mailbox,
         snapshot,
+        dispatch_id,
     }))
 }
 async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), TerminationResult> {
@@ -200,6 +209,7 @@ thread_local! {
     static AFTER_CAPTURE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_FENCE: ProbeSlot = const { std::cell::RefCell::new(None) };
     static AFTER_CLOSE: ProbeSlot = const { std::cell::RefCell::new(None) };
+    static BEFORE_POSTLUDE: ProbeSlot = const { std::cell::RefCell::new(None) };
 }
 /// Runs once between the hold release and the captured-turn settlement on this thread.
 #[cfg(test)]
@@ -226,6 +236,11 @@ pub(crate) fn probe_after_fence(probe: SettlementWindowProbe) {
 pub(crate) fn probe_after_close(probe: SettlementWindowProbe) {
     AFTER_CLOSE.with(|slot| *slot.borrow_mut() = Some(probe));
 }
+/// Runs once when a scoped run hands its exclusion to an HTTP postlude, before the postlude.
+#[cfg(test)]
+pub(crate) fn probe_before_postlude(probe: SettlementWindowProbe) {
+    BEFORE_POSTLUDE.with(|slot| *slot.borrow_mut() = Some(probe));
+}
 #[cfg(test)]
 async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
     if let Some(probe) = slot.with(|slot| slot.borrow_mut().take()) {
@@ -233,25 +248,30 @@ async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
     }
 }
 
-/// `exclusion` (channel transition guard and execution fence) drops only after settlement, so
-/// input arriving once the hold is gone waits in the queue instead of reaching the pane.
-async fn settle_and_release(
+/// `exclusion` (channel transition guard and execution fence) is handed back only once the turn
+/// settled, and dropped before any other answer, so input arriving once the hold is gone waits
+/// in the queue instead of reaching the pane.
+async fn settle_and_release<E>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     nonce: &str,
     turn: Option<CapturedTurn>,
-    exclusion: impl Sized,
-) -> TerminationResult {
+    exclusion: E,
+) -> Result<E, TerminationResult> {
     if release_hold(nonce) != HoldRelease::Released {
-        return TerminationResult::Indeterminate("retired but hold release incomplete".into());
+        return Err(TerminationResult::Indeterminate(
+            "retired but hold release incomplete".into(),
+        ));
     }
     #[cfg(test)]
     run_probe(&SETTLEMENT_WINDOW).await;
     let result = settle_captured(shared, provider, turn).await;
     #[cfg(test)]
     run_probe(&AFTER_SETTLEMENT).await;
-    drop(exclusion);
-    result
+    match result {
+        TerminationResult::Retired => Ok(exclusion),
+        other => Err(other),
+    }
 }
 
 pub(super) async fn settle_captured(
@@ -264,6 +284,7 @@ pub(super) async fn settle_captured(
         token,
         mailbox,
         snapshot,
+        ..
     }) = turn
     else {
         return TerminationResult::Retired;
@@ -322,16 +343,30 @@ pub(crate) async fn terminate_explicit_herdr(
     shared: Arc<SharedData>,
     pool: &PgPool,
 ) -> TerminationResult {
-    if !terminate_enabled() {
-        return TerminationResult::Disabled;
+    match terminate_scoped(request, shared, pool, None).await {
+        Ok(exclusion) => {
+            drop(exclusion);
+            TerminationResult::Retired
+        }
+        Err(result) => result,
     }
-    let lookup = load(pool, &request.session_key).await;
-    let row = match lookup {
-        Ok(row) => row,
-        Err(result) => return result,
-    };
+}
+
+/// The service up to its settlement. A `dispatch` expectation binds the run to the dispatch the
+/// caller selected: the captured turn's and the row's active one must both be it.
+async fn terminate_scoped(
+    request: OperatorTerminate,
+    shared: Arc<SharedData>,
+    pool: &PgPool,
+    dispatch: Option<Option<String>>,
+) -> Result<RetiredExclusion, TerminationResult> {
+    use TerminationResult::{Indeterminate, Refused};
+    if !terminate_enabled() {
+        return Err(TerminationResult::Disabled);
+    }
+    let row = load(pool, &request.session_key).await?;
     let HostedRecord::Known(record) = &row.record else {
-        return TerminationResult::Refused("unknown execution".into());
+        return Err(Refused("unknown execution".into()));
     };
     if record.execution_nonce != request.execution_nonce
         || record.state == HostedState::Retired
@@ -342,29 +377,31 @@ pub(crate) async fn terminate_explicit_herdr(
             .as_ref()
             .is_none_or(|l| l.execution_node != record.owner.owner_node)
     {
-        return TerminationResult::Refused("execution identity differs".into());
+        return Err(Refused("execution identity differs".into()));
     }
     let Some(provider) = ProviderKind::from_str(&record.owner.provider) else {
-        return TerminationResult::Refused("unknown provider".into());
+        return Err(Refused("unknown provider".into()));
     };
-    let Ok(channel) = record.owner.channel_id.parse::<u64>() else {
-        return TerminationResult::Refused("unknown channel".into());
+    let channel = record
+        .owner
+        .channel_id
+        .parse::<u64>()
+        .ok()
+        .filter(|c| *c != 0);
+    let Some(channel) = channel.map(ChannelId::new) else {
+        return Err(Refused("unknown channel".into()));
     };
-    if channel == 0 {
-        return TerminationResult::Refused("unknown channel".into());
-    }
-    let channel = ChannelId::new(channel);
-    let turn = match capture_turn(&shared, &provider, channel).await {
-        Ok(turn) => turn,
-        Err(e) => return TerminationResult::Refused(e),
-    };
+    let turn = capture_turn(&shared, &provider, channel)
+        .await
+        .map_err(Refused)?;
     #[cfg(test)]
     run_probe(&AFTER_CAPTURE).await;
     let Ok(transition) = shared.acquire_session_transition(channel).await else {
-        return TerminationResult::Refused("transition busy".into());
+        return Err(Refused("transition busy".into()));
     };
     // An unreadable or replaced actor is a changed turn, never an idle channel.
-    let same_turn = match (&turn, shared.mailbox_peek(channel)) {
+    let actor = shared.mailbox_peek(channel);
+    let same_turn = match (&turn, &actor) {
         (None, None) => true,
         (None, Some(now)) => matches!(now.cancel_token().await, Ok(None)),
         (Some(turn), Some(now)) => {
@@ -374,33 +411,39 @@ pub(crate) async fn terminate_explicit_herdr(
         (Some(_), None) => false,
     };
     if !same_turn {
-        return TerminationResult::Refused("turn changed under transition".into());
+        return Err(Refused("turn changed under transition".into()));
+    }
+    let captured = turn.as_ref().and_then(|turn| turn.dispatch_id.as_ref());
+    if dispatch.as_ref().is_some_and(|d| d.as_ref() != captured) {
+        return Err(Refused("captured turn runs another dispatch".into()));
     }
     let Some(target) = herdr_endpoints().target(record) else {
-        return TerminationResult::Refused("missing launch evidence".into());
+        return Err(Refused("missing launch evidence".into()));
     };
     let fence = match target.termination_fence() {
         Ok(fence) => Arc::new(fence),
-        Err(e) => return TerminationResult::Refused(format!("{e:?}")),
+        Err(e) => return Err(Refused(format!("{e:?}"))),
     };
     let unsent = UnsentClose(Some(fence.clone()));
     #[cfg(test)]
     run_probe(&AFTER_FENCE).await;
-    if load(pool, &request.session_key).await.as_ref() != Ok(&row) {
+    if load(pool, &request.session_key).await.as_ref() != Ok(&row)
+        || !http_force::dispatch_holds(pool, &row, dispatch.as_ref()).await
+    {
         fence.reopen();
-        return TerminationResult::Refused("row changed under fence".into());
+        return Err(Refused("row changed under fence".into()));
     }
     let read_target = target.clone();
     match tokio::task::spawn_blocking(move || read_target.revalidate_termination_reads()).await {
         Ok(Ok(_)) => {}
         other => {
             fence.reopen();
-            return TerminationResult::Refused(format!("termination provenance: {other:?}"));
+            return Err(Refused(format!("termination provenance: {other:?}")));
         }
     }
     let Some(view) = herdr_endpoints().view(record) else {
         fence.reopen();
-        return TerminationResult::Refused("no local endpoint".into());
+        return Err(Refused("no local endpoint".into()));
     };
     let read = record.clone();
     let ended = match tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()))
@@ -409,7 +452,7 @@ pub(crate) async fn terminate_explicit_herdr(
         Ok(ended) => ended,
         Err(e) => {
             fence.reopen();
-            return TerminationResult::Indeterminate(e.to_string());
+            return Err(Indeterminate(e.to_string()));
         }
     };
     unsent.disarm();
@@ -417,41 +460,39 @@ pub(crate) async fn terminate_explicit_herdr(
         // Blocking socket work remains outside the async executor; the fence stays owned here.
         let close_target = target.clone();
         let close_fence = fence.clone();
-        let result = match tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             terminate_herdr_once(OperatorTerminateWarrant::issue_fenced(
                 close_target,
                 &close_fence,
             ))
         })
         .await
-        {
-            Ok(result) => result,
-            Err(e) => return TerminationResult::Indeterminate(e.to_string()),
-        };
+        .map_err(|e| Indeterminate(e.to_string()))?;
         if !matches!(
             result,
             HerdrTerminateResult::Acknowledged | HerdrTerminateResult::Indeterminate(_)
         ) {
             fence.reopen();
-            return TerminationResult::Close(result);
+            return Err(TerminationResult::Close(result));
         }
     }
     #[cfg(test)]
     run_probe(&AFTER_CLOSE).await;
-    if let Err(result) = read_end(target, record.clone()).await {
-        return result;
-    }
-    if let Err(result) = retire_confirmed(pool, &row, record).await {
-        return result;
-    }
-    settle_and_release(
-        &shared,
-        &provider,
-        &record.execution_nonce,
-        turn,
-        (transition, fence),
-    )
-    .await
+    read_end(target, record.clone()).await?;
+    retire_confirmed(pool, &row, record).await?;
+    let token = turn.as_ref().map(|turn| turn.token.clone());
+    let nonce = record.execution_nonce.clone();
+    let exclusion = (transition, fence);
+    let (transition, fence) =
+        settle_and_release(&shared, &provider, &nonce, turn, exclusion).await?;
+    let parts = (transition, fence, actor, token);
+    Ok(RetiredExclusion::new(
+        parts,
+        row,
+        dispatch.flatten(),
+        provider,
+        channel,
+    ))
 }
 async fn load(pool: &PgPool, key: &str) -> Result<HostedObservation, TerminationResult> {
     match hosted_execution::load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(key)).await {

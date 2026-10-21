@@ -110,8 +110,9 @@ fn m1_hold_release_window_preserves_input_until_settlement() {
                     None,
                     transition
                 )
-                .await,
-                TerminationResult::Retired
+                .await
+                .map(drop),
+                Ok(())
             );
             assert!(opened.load(Ordering::Relaxed));
             assert_eq!(
@@ -151,7 +152,7 @@ fn m1_host_terminated_settles_exact_turn_and_publishes_queue_once() {
             assert!(probe_shared.session_transition_lock(channel).try_lock_owned().is_err(), "transition stays owned until settlement");
             assert_eq!(test_queue::take_queued(&probe_shared, channel).await, None);
         })));
-        assert_eq!(settle_and_release(&shared, &ProviderKind::Claude, "execution-a", captured, transition).await, TerminationResult::Retired);
+        assert_eq!(settle_and_release(&shared, &ProviderKind::Claude, "execution-a", captured, transition).await.map(drop), Ok(()));
         assert!(crate::services::claude::herdr_turn::input_holds().unwrap().is_empty());
         let mut eligible = 0;
         while let Ok(event) = events.try_recv() { if event.queue_is_eligible() { eligible += 1; } }
@@ -203,8 +204,9 @@ fn m2_natural_a_then_b_late_settlement_preserves_b() {
                     captured,
                     transition
                 )
-                .await,
-                TerminationResult::Retired
+                .await
+                .map(drop),
+                Ok(())
             );
             let token_b = token_b
                 .lock()
