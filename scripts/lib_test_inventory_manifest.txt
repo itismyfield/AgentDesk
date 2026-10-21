@@ -3386,6 +3386,7 @@ services::codex_tui::session::source_observation::source_observation_tests::addi
 services::codex_tui::session::source_observation::source_observation_tests::captured_cli_advertising_the_bypass_has_hooks_only_through_it
 services::codex_tui::session::source_observation::source_observation_tests::captured_exec_tui_and_clear_hooks_verify_by_payload_path
 services::codex_tui::session::source_observation::source_observation_tests::cli_without_the_bypass_has_no_hooks_whatever_its_trust_hashes
+services::codex_tui::session::source_observation::source_observation_tests::codex_launch_cause::a_replaced_rollout_defers_production_rehydration_without_consuming_startup
 services::codex_tui::session::source_observation::source_observation_tests::first_prompt_digest_requires_exact_utf8_and_a_string
 services::codex_tui::session::source_observation::source_observation_tests::first_proof_candidate_requires_canonical_current_fresh_launch_and_strict_parent
 services::codex_tui::session::source_observation::source_observation_tests::header_is_read_from_the_open_descriptor_not_by_reopening_the_path
@@ -13789,6 +13790,15 @@ services::tui_o::writer::tests::actor::verified_permission_hold_preserves_an_att
 services::tui_o::writer::tests::actor::without_ownership_the_actor_keeps_spooling_and_posts_once_ownership_returns
 services::tui_o::writer::tests::an_unclear_post_is_settled_from_history_and_retried_only_once_if_absent
 services::tui_o::writer::tests::an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous
+services::tui_o::writer::tests::boundary_pending_health_tests::c07_capture_excludes_suspended_pending_but_counts_retired_pending_across_resume
+services::tui_o::writer::tests::boundary_pending_health_tests::c07_reopen_clears_only_the_last_pending_and_preserves_binding_log_health
+services::tui_o::writer::tests::codex_launch_cause::a_stale_rollout_with_the_same_prompt_cannot_become_a_fresh_startup
+services::tui_o::writer::tests::codex_launch_cause::an_unread_prior_binding_still_holds_a_fresh_startup_source
+services::tui_o::writer::tests::codex_launch_cause::discovery_first_fresh_codex_posts_once_through_production_registration
+services::tui_o::writer::tests::codex_launch_cause::incomplete_native_header_and_prompt_retry_without_poisoning_history
+services::tui_o::writer::tests::codex_launch_cause::launch_and_discovery_orders_keep_one_startup_and_one_post
+services::tui_o::writer::tests::codex_launch_cause::mismatched_native_rollouts_never_promote_discovery_to_startup
+services::tui_o::writer::tests::codex_launch_cause::unproven_contexts_never_promote_discovery_to_startup
 services::tui_o::writer::tests::deliver_home::a_channel_held_by_unavailable_delegation_posts_nothing
 services::tui_o::writer::tests::deliver_home::a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close
 services::tui_o::writer::tests::deliver_home::the_final_close_waits_for_an_admission_in_progress

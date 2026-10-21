@@ -418,6 +418,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         self.alarms.reconcile_reader_count(self.channel, count);
     }
 
+    pub fn reconcile_boundary_pending(&self, count: usize) {
+        self.alarms.reconcile_boundary_pending(self.channel, count);
+    }
+
     /// Stops the channel once; only the first stop raises its alarm.
     pub fn stop(&mut self, alarm: WriterAlarm) -> Step {
         self.stop_with(alarm, None)

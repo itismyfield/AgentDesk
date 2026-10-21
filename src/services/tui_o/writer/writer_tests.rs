@@ -939,6 +939,10 @@ mod tool_result_tests;
 #[path = "turn_summary_replay_tests.rs"]
 mod turn_summary_replay;
 
+#[path = "boundary_pending_health_tests.rs"]
+mod boundary_pending_health_tests;
+#[path = "codex_launch_cause_tests.rs"]
+mod codex_launch_cause;
 #[path = "deliver_home_tests.rs"]
 mod deliver_home;
 

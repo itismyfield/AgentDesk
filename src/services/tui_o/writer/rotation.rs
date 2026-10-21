@@ -784,6 +784,22 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
+    fn reconcile_boundary_pending<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &self,
+        writer: &ChannelWriter<P, L, A>,
+    ) {
+        let count = self
+            .rotation
+            .links
+            .values()
+            .filter(|link| {
+                matches!(link.boundary, Boundary::Pending { .. })
+                    && self.resume_selected(&link.source)
+            })
+            .count();
+        writer.reconcile_boundary_pending(count);
+    }
+
     /// Sources whose segments may be collected, with how many to keep; undecided and pending
     /// boundaries keep their spool.
     pub fn collectable(&self) -> Vec<(SourceId, usize)> {

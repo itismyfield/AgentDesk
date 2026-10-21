@@ -200,6 +200,8 @@ pub trait AlarmSink: Send + Sync {
     /// No overdue work remains; a later overdue wait is a new incident.
     fn waiting_cleared(&self, _channel: u64) {}
     fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
+    /// Pending boundaries of selected sources after a successful restore or capture.
+    fn reconcile_boundary_pending(&self, _channel: u64, _count: usize) {}
     /// Whether the host will start the halted writer again after a wait.
     fn resume_pending(&self, _channel: u64, _pending: bool) {}
     /// The halt ended: a recovered writer is about to start in its place.
