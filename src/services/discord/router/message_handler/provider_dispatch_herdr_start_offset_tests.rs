@@ -174,13 +174,31 @@ fn run(source: Source) {
     let restored_selector = matches!(source, Source::RestoredSelector).then(uuid);
     if let Some(restored) = restored_selector.as_ref() {
         fx.rt.block_on(async {
-            sqlx::query("UPDATE sessions SET claude_session_id=$1, raw_provider_session_id=$1 WHERE channel_id=$2")
-                .bind(restored).bind(CHANNEL.to_string()).execute(&fx.pool).await.unwrap();
+            let updated = crate::db::dispatched_sessions::rebind_session_provider_pg(
+                &fx.pool,
+                &session_key(&fx.owner),
+                fx.cwd.path().to_str().unwrap(),
+                restored,
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated, 1, "the stored session selector was restored");
             let ids = crate::db::dispatched_sessions::load_provider_session_ids_pg(
-                &fx.pool, &session_key(&fx.owner), Some("claude"),
-            ).await.unwrap().unwrap();
-            assert_eq!(ids.raw_provider_session_id.as_deref(), Some(restored.as_str()));
-            assert!(ids.claude_session_id.is_some(), "the DB-restored selector is resumed");
+                &fx.pool,
+                &session_key(&fx.owner),
+                Some("claude"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                ids.raw_provider_session_id.as_deref(),
+                Some(restored.as_str())
+            );
+            assert!(
+                ids.claude_session_id.is_some(),
+                "the DB-restored selector is resumed"
+            );
         });
     }
     let (messages, live, token, session, path, expected_start) = first_turn(&fx, &launcher, source);
