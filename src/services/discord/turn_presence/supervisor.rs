@@ -1,5 +1,5 @@
 //! One supervisor per provider runtime over its confirmed turn-mode channels: typing while a direct
-//! turn reads busy, one notice when it stays unknown, and queue wakeups while it reads idle.
+//! turn reads busy, notices when unknown affects a token or waiting input, and idle queue wakeups.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -468,7 +468,10 @@ fn apply(
         Activity::Busy => {}
         Activity::Unknown => {
             let since = presence.unknown_since.unwrap_or(now);
-            if now.duration_since(since) >= UNKNOWN_NOTICE_AFTER && presence.may_notice(now) {
+            if (token || head.is_some())
+                && now.duration_since(since) >= UNKNOWN_NOTICE_AFTER
+                && presence.may_notice(now)
+            {
                 presence.last_notice_at = Some(now);
                 presence.notice_posted_at = Some(Utc::now());
                 actions.push(Action::Notice(unknown_notice(observed.reason)));

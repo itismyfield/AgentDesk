@@ -222,6 +222,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests
   --skip services::discord::turn_presence::activity::unbound::dormancy_tests
   --skip services::discord::turn_presence::activity::unbound::herdr_bound::tests
+  --skip services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests
   --skip services::discord::turn_presence::activity::unbound::live::owner_tests
   --skip services::discord::turn_presence::activity::unbound::live::review_tests
   --skip services::discord::turn_presence::activity::unbound::live::stale_binding_tests

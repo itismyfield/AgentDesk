@@ -331,6 +331,8 @@ src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.r
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
+src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs
+src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
@@ -760,6 +762,8 @@ services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests
 services::discord::turn_presence::activity::unbound::dormancy_tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::entry_tests
 services::discord::turn_presence::activity::unbound::live::owner_tests
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests
@@ -2689,6 +2693,11 @@ services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::cleared_local_legacy_rows_become_idle_pg
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::divergent_row_absence_revalidates_successor_and_canonical_trace_pg
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::divergent_rows_keep_live_inflight_remote_and_active_turns_held_pg
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::entry_tests::legacy_divergence_discord_input_behind_backlog_reaches_provider_pg
+services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::entry_tests::legacy_divergence_human_input_starts_instead_of_queueing_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::a2_actual_reading_rejects_owner_aba_and_new_runtime_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::a2_codex_two_token_producer_agreement_and_second_only_are_idle_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::a2_final_publication_rejects_unrelated_owner_epoch_change_pg
