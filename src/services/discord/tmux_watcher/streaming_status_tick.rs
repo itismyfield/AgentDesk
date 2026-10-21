@@ -104,8 +104,7 @@ pub(super) async fn update_streaming_status_tick(
             !full_response.trim().is_empty(),
             &last_edit_text,
         );
-        if ctx.legacy_mode.is_legacy()
-            && turn_is_external_input_for_session
+        if turn_is_external_input_for_session
             && (status_panel_msg_id.is_some() || tick_placeholder_reclaim)
             && watcher_external_input_turn_abandoned(
                 &watcher_provider,
@@ -147,7 +146,7 @@ pub(super) async fn update_streaming_status_tick(
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
         // complete turn identity under the sidecar lock to block stale overwrites.
-        let progress_outcome = ctx.legacy_mode.is_legacy().then(|| {
+        let progress_outcome = {
             #[cfg(test)]
             crate::services::discord::inflight::o_seed_observation::record_event(
                 watcher_provider,
@@ -169,12 +168,12 @@ pub(super) async fn update_streaming_status_tick(
                 tool_state.has_post_tool_text,
                 &watcher_streaming_rollover_frozen_msg_ids,
             )
-        });
+        };
         // #5191: the locked writer rejected this frame because the pinned owner's
         // row is already terminal-committed. Suppress this tick's preview/status
         // writes, but only AFTER the pre-existing cleanup paths below have run.
         let terminal_progress_rejected = progress_outcome
-            == Some(crate::services::discord::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted);
+            == crate::services::discord::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted;
 
         // Headless silent trigger (metadata.silent=true): skip both
         // status-panel and streaming-chunk edits to keep the channel
@@ -185,7 +184,7 @@ pub(super) async fn update_streaming_status_tick(
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
 
-        if ctx.legacy_mode.is_legacy() && !terminal_progress_rejected {
+        if !terminal_progress_rejected {
             last_status_panel_text = existing_panel_update::update_existing_panel(
                 ctx,
                 &turn,
@@ -312,13 +311,11 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
-        if ctx.legacy_mode.is_legacy()
-            && should_suppress_streaming_placeholder_after_recent_stop(
-                has_assistant_response_for_streaming,
-                inflight_missing_for_streaming,
-                recent_stop_for_streaming.is_some(),
-            )
-        {
+        if should_suppress_streaming_placeholder_after_recent_stop(
+            has_assistant_response_for_streaming,
+            inflight_missing_for_streaming,
+            recent_stop_for_streaming.is_some(),
+        ) {
             if let Some(msg_id) = placeholder_msg_id {
                 if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
                 {
@@ -385,8 +382,7 @@ pub(super) async fn update_streaming_status_tick(
                 tool_state.current_tool_line.as_deref(),
                 task_notification_kind,
             );
-        if ctx.legacy_mode.is_legacy()
-            && watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
+        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
             && status_panel_msg_id.is_none()
             && has_visible_streaming_work
             // #3805 P2 (PR-C): under the two-message flag, defer panel
@@ -701,12 +697,11 @@ pub(super) async fn update_streaming_status_tick(
 
         // Withhold Legacy body writes for O ownership or unresolved selected identities. Only a
         // write that shows unsent assistant text claims the channel, as it is sent.
-        if !ctx.legacy_mode.is_legacy()
-            || crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
-                channel_id.get(),
-                Some(&tmux_session_name),
-            )
-            .unwrap_or(true)
+        if crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+            channel_id.get(),
+            Some(&tmux_session_name),
+        )
+        .unwrap_or(true)
         {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::Fallthrough;
@@ -793,23 +788,21 @@ pub(super) async fn update_streaming_status_tick(
                             watcher_did_rollover_this_interval = true;
                             response_sent_offset += raw_split_at;
                             last_edit_text = visible_status.to_string();
-                            if ctx.legacy_mode.is_legacy() {
-                                persist_watcher_stream_progress(
-                                    &watcher_provider,
-                                    channel_id,
-                                    &tmux_session_name,
-                                    turn_identity_for_panel.as_ref(),
-                                    placeholder_msg_id,
-                                    &full_response,
-                                    response_sent_offset,
-                                    tool_state.current_tool_line.as_deref(),
-                                    tool_state.prev_tool_status.as_deref(),
-                                    task_notification_kind,
-                                    tool_state.any_tool_used,
-                                    tool_state.has_post_tool_text,
-                                    &watcher_streaming_rollover_frozen_msg_ids,
-                                );
-                            }
+                            persist_watcher_stream_progress(
+                                &watcher_provider,
+                                channel_id,
+                                &tmux_session_name,
+                                turn_identity_for_panel.as_ref(),
+                                placeholder_msg_id,
+                                &full_response,
+                                response_sent_offset,
+                                tool_state.current_tool_line.as_deref(),
+                                tool_state.prev_tool_status.as_deref(),
+                                task_notification_kind,
+                                tool_state.any_tool_used,
+                                tool_state.has_post_tool_text,
+                                &watcher_streaming_rollover_frozen_msg_ids,
+                            );
                         }
                         Err(error) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -854,8 +847,7 @@ pub(super) async fn update_streaming_status_tick(
             two_message_panel_enabled,
             watcher_did_rollover_this_interval,
         );
-        if ctx.legacy_mode.is_legacy()
-            && watcher_did_rollover_this_interval
+        if watcher_did_rollover_this_interval
             && watcher_two_message_should_reanchor_panel_on_rollover(
                 two_message_panel_enabled,
                 status_panel_msg_id.is_some(),
@@ -949,23 +941,21 @@ pub(super) async fn update_streaming_status_tick(
             let edit_committed = written.is_some();
             if edit_committed {
                 last_edit_text = display_text;
-                if ctx.legacy_mode.is_legacy() {
-                    persist_watcher_stream_progress(
-                        &watcher_provider,
-                        channel_id,
-                        &tmux_session_name,
-                        turn_identity_for_panel.as_ref(),
-                        placeholder_msg_id,
-                        &full_response,
-                        response_sent_offset,
-                        tool_state.current_tool_line.as_deref(),
-                        tool_state.prev_tool_status.as_deref(),
-                        task_notification_kind,
-                        tool_state.any_tool_used,
-                        tool_state.has_post_tool_text,
-                        &watcher_streaming_rollover_frozen_msg_ids,
-                    );
-                }
+                persist_watcher_stream_progress(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    turn_identity_for_panel.as_ref(),
+                    placeholder_msg_id,
+                    &full_response,
+                    response_sent_offset,
+                    tool_state.current_tool_line.as_deref(),
+                    tool_state.prev_tool_status.as_deref(),
+                    task_notification_kind,
+                    tool_state.any_tool_used,
+                    tool_state.has_post_tool_text,
+                    &watcher_streaming_rollover_frozen_msg_ids,
+                );
             }
         }
         commit_streaming_status_tick_state!();

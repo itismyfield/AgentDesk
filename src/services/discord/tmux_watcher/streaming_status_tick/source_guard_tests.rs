@@ -9,15 +9,15 @@ const TICK: &str = include_str!("../streaming_status_tick.rs");
 
 const TICK_CALL: &str = "update_streaming_status_tick(";
 const TICK_FN: &str = "pub(super) async fn update_streaming_status_tick(";
-const PROGRESS: &str = "let progress_outcome = ctx.legacy_mode.is_legacy()";
+const PROGRESS: &str = "let progress_outcome = {";
 const PERSIST: &str = "persist_watcher_stream_progress(";
-const PANEL: &str = "if ctx.legacy_mode.is_legacy() && !terminal_progress_rejected {";
+const PANEL: &str = "if !terminal_progress_rejected {";
 const PANEL_UPDATE: &str = "existing_panel_update::update_existing_panel(";
 const CLEANUP: &str = "\"watcher_streaming_recent_stop_cleanup\",";
 const STOP: &str = "if terminal_progress_rejected {";
 
 /// Collector calls the tick; inside the tick, progress persistence and the panel update
-/// run only in their Legacy blocks, progress first, and the cleanup precedes the stop.
+/// run only in their own blocks, progress first, and the cleanup precedes the stop.
 fn tick_wiring_gaps(collector: &str, tick: &str) -> Vec<String> {
     let mut gaps = Vec::new();
     if !Lexed::new(collector).contains(TICK_CALL) {
@@ -29,7 +29,7 @@ fn tick_wiring_gaps(collector: &str, tick: &str) -> Vec<String> {
     };
     let before = |first: &str, second: &str| matches!((body.find(first), body.find(second)), (Some(a), Some(b)) if a < b);
     if !before(PROGRESS, PANEL) {
-        gaps.push("Legacy progress must precede the panel gate".to_string());
+        gaps.push("progress must precede the panel gate".to_string());
     }
     for (gate, call) in [(PROGRESS, PERSIST), (PANEL, PANEL_UPDATE)] {
         if !body.block(gate).is_some_and(|block| block.contains(call)) {
@@ -90,12 +90,7 @@ fn tick_wiring_guard_rejects_commented_and_reordered_steps() {
 
 #[test]
 fn tick_wiring_guard_requires_the_calls_inside_their_legacy_blocks() {
-    let progress = "ctx.legacy_mode.is_legacy().then(|| {";
-    let hoisted = TICK.replacen(
-        progress,
-        &format!("{progress}\n        }});\n        (|| {{"),
-        1,
-    );
+    let hoisted = TICK.replacen(PROGRESS, &format!("{PROGRESS}\n        }};\n        {{"), 1);
     assert_ne!(hoisted, TICK);
     assert_eq!(tick_wiring_gaps(COLLECTOR, &hoisted).len(), 1);
     let unguarded = TICK.replacen(PANEL, &format!("{PANEL}\n        }}\n        {{"), 1);

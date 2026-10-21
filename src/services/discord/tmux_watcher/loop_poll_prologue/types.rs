@@ -38,9 +38,6 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct PollWatcherContext<'
     pub(in crate::services::discord::tmux::tmux_watcher) watcher_thread_channel_id: Option<u64>,
     pub(in crate::services::discord::tmux::tmux_watcher) watcher_instance_id: u64,
     pub(in crate::services::discord::tmux::tmux_watcher) host: &'a Arc<HostSnapshot>,
-    pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
-    pub(in crate::services::discord::tmux::tmux_watcher) retired_binding:
-        Option<Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>>,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct PollWatcherControls<'a> {

@@ -137,15 +137,8 @@ async fn prepare_watcher_task_response(
                 .to_string(),
         ));
     }
-    let (card, clients) = ensure_watcher_task_card(
-        http,
-        shared,
-        provider,
-        channel_id,
-        &event,
-        WatcherLegacyMode::Legacy,
-    )
-    .await?;
+    let (card, clients) =
+        ensure_watcher_task_card(http, shared, provider, channel_id, &event).await?;
     let claim = task_delivery::claim_task_response_delivery_with_recovery_key_and_started_at(
         shared.pg_pool.as_ref(),
         channel_id.get(),
@@ -179,7 +172,6 @@ async fn ensure_watcher_task_card(
     provider: &ProviderKind,
     channel_id: ChannelId,
     event: &task_delivery::TaskCardEvent,
-    legacy_mode: WatcherLegacyMode,
 ) -> Result<
     (
         task_delivery::CardEnsureOutcome,
@@ -189,25 +181,14 @@ async fn ensure_watcher_task_card(
 > {
     let clients = watcher_card_clients(http, shared, provider, None).await?;
     let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let card = if legacy_mode.is_legacy() {
-        task_delivery::ensure_card_with_shared(
-            shared.as_ref(),
-            &clients,
-            &transport,
-            event,
-            task_delivery::EnsureIntent::Promotion,
-        )
-        .await
-    } else {
-        task_delivery::ensure_card(
-            shared.pg_pool.as_ref(),
-            &clients,
-            &transport,
-            event,
-            task_delivery::EnsureIntent::Promotion,
-        )
-        .await
-    }
+    let card = task_delivery::ensure_card_with_shared(
+        shared.as_ref(),
+        &clients,
+        &transport,
+        event,
+        task_delivery::EnsureIntent::Promotion,
+    )
+    .await
     .map_err(|error| match error {
         task_delivery::CardEnsureError::Permanent(error) => {
             PrepareWatcherTaskResponseError::Permanent(format!(
@@ -235,15 +216,7 @@ pub(super) async fn promote_delegated_task_card(
     context: &task_delivery::TaskNotificationContext,
 ) -> Result<(), PrepareWatcherTaskResponseError> {
     let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
-    let result = ensure_watcher_task_card(
-        http,
-        shared,
-        provider,
-        channel_id,
-        &event,
-        WatcherLegacyMode::Legacy,
-    )
-    .await;
+    let result = ensure_watcher_task_card(http, shared, provider, channel_id, &event).await;
     if let Err(error) = &result {
         tracing::warn!(
             provider = provider.as_str(),
@@ -254,27 +227,6 @@ pub(super) async fn promote_delegated_task_card(
         );
     }
     result.map(|_| ())
-}
-
-pub(super) async fn promote_retired_task_card(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    context: &task_delivery::TaskNotificationContext,
-) -> Result<(), PrepareWatcherTaskResponseError> {
-    let event = context.to_event(channel_id.get(), provider.as_str(), tmux_session_name);
-    ensure_watcher_task_card(
-        http,
-        shared,
-        provider,
-        channel_id,
-        &event,
-        WatcherLegacyMode::RetiredO,
-    )
-    .await
-    .map(|_| ())
 }
 
 async fn watcher_card_clients(
