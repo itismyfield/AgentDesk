@@ -53,51 +53,51 @@ struct CuratedAlias {
 const CURATED_ALIASES: &[CuratedAlias] = &[
     CuratedAlias {
         selector: "fable",
-        label: "Fable 5",
-        metadata_fallback_id: "claude-fable-5",
+        label: "Fable 5.1",
+        metadata_fallback_id: "claude-fable-5-1",
     },
     CuratedAlias {
         selector: "opus",
-        label: "Opus 5",
-        metadata_fallback_id: "claude-opus-5",
+        label: "Opus 5.5",
+        metadata_fallback_id: "claude-opus-5-5",
     },
     CuratedAlias {
         selector: "sonnet",
-        label: "Sonnet 5",
-        metadata_fallback_id: "claude-sonnet-5",
+        label: "Sonnet 5.5",
+        metadata_fallback_id: "claude-sonnet-5-5",
     },
     CuratedAlias {
         selector: "haiku",
-        label: "Haiku 4.5",
-        metadata_fallback_id: "claude-haiku-4-5-20251001",
+        label: "Haiku 5.5",
+        metadata_fallback_id: "claude-haiku-5-5",
     },
     CuratedAlias {
         selector: "fable[1m]",
         label: "Fable 1M",
-        metadata_fallback_id: "claude-fable-5",
+        metadata_fallback_id: "claude-fable-5-1",
     },
     CuratedAlias {
         selector: "sonnet[1m]",
         label: "Sonnet 1M",
-        metadata_fallback_id: "claude-sonnet-5",
+        metadata_fallback_id: "claude-sonnet-5-5",
     },
     CuratedAlias {
         selector: "opus[1m]",
         label: "Opus 1M",
-        metadata_fallback_id: "claude-opus-5",
+        metadata_fallback_id: "claude-opus-5-5",
     },
     CuratedAlias {
         selector: "opusplan",
         label: "Opus Plan",
-        metadata_fallback_id: "claude-sonnet-5",
+        metadata_fallback_id: "claude-sonnet-5-5",
     },
 ];
 
 const STATIC_FALLBACK_IDS: &[&str] = &[
-    "claude-fable-5",
-    "claude-opus-5",
-    "claude-sonnet-5",
-    "claude-haiku-4-5-20251001",
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -917,7 +917,7 @@ mod tests {
 
         assert!(!entries.iter().any(|entry| entry.value == "gateway-only"));
         assert!(entries.iter().any(|entry| entry.value == "fable"));
-        assert!(entries.iter().any(|entry| entry.value == "claude-fable-5"));
+        assert!(entries.iter().any(|entry| entry.value == "claude-fable-5-1"));
     }
 
     #[test]
@@ -936,7 +936,7 @@ mod tests {
             serde_json::json!([
                 {"id": "claude-shared", "display_name": "API loser"},
                 {"id": "claude-api-only", "display_name": "API only"},
-                {"id": "claude-fable-5", "display_name": "API fallback winner"}
+                {"id": "claude-fable-5-1", "display_name": "API fallback winner"}
             ]),
         );
         let entries = catalog_from_raw_sources(Some(gateway.as_bytes()), Some(&api), current_ms);
@@ -957,7 +957,7 @@ mod tests {
         assert_eq!(
             entries
                 .iter()
-                .filter(|entry| entry.value == "claude-fable-5")
+                .filter(|entry| entry.value == "claude-fable-5-1")
                 .count(),
             1
         );
