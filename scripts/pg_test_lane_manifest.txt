@@ -234,6 +234,7 @@ src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_c
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_live_end_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
+src/services/discord/router/message_handler/provider_dispatch_herdr_start_offset_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
@@ -274,6 +275,7 @@ src/services/discord/terminal_ui_obligation.rs
 src/services/discord/terminal_ui_obligation/sweep_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs
+src/services/discord/tmux_watcher/discrete_trigger_marker.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs
 src/services/discord/tmux_watcher/path_b_record_tests.rs
@@ -661,6 +663,7 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::clear_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::legacy_clear_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests::recheck_tests
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests
@@ -696,6 +699,7 @@ services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::sweep_tests
 services::discord::terminal_ui_obligation::tests
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -2294,6 +2298,10 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_bound_warm_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_clear_replacement_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_db_restored_selector_fresh_launch_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_fresh_metadata_window_admits_the_reader_and_second_provider_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
@@ -2447,6 +2455,7 @@ services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody
 services::discord::terminal_ui_obligation::sweep_tests::sweep_reconciles_every_obligation_shape_pg
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg

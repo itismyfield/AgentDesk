@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "3103ec44e0288b3f9a8792a2236f5be02741047a",
+  "measured_at_sha": "6e908fba7a75119d63ae0be5855ec1acf3333a61",
   "records": [
     {
       "root": "migrations/postgres",
@@ -34772,6 +34772,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/footer_only_marker.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8b133365724e50a5aa3af27fd1cf8604f830630917f42a57bdcf1a2c80cbbcdb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -35884,6 +35893,33 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:8137ee71edb2bf0bb55ad8bb27dbe4082a3681bc9a19766402cb473953afe6f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0ee04e558158fed5becb86ebf068cab0d6f3ef35e501da70b80002e4234bbe23"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3304c7182d1fdb957a452cec62dc94455b639bb65026ff5ccce8c6afc4028ea1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tmux_watcher/discrete_trigger_marker.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:80099b3932b71e16c45e904d61966a593784bd5037944a00e54b3a142a2c3b8c"
     },
     {
       "root": "src",
