@@ -227,6 +227,8 @@ shared_prompt: "~/.adk/release/config/agents/_shared.prompt.md"
 
 agents:
   - id: ch-td
+    # Optional shared Memento workspace; missing/blank preserves legacy cwd scope.
+    memory_group: cookingheart
     name: "TD"
     name_ko: "테크니컬 디렉터"
     provider: claude

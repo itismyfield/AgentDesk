@@ -34,7 +34,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/server/routes/tests/preflight_harness/validation.rs",
         "src/services/discord/delivery_lease_cell/exact_lease.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/token.rs",
-        "src/services/discord/inflight/read_only_owner_snapshot.rs",
         "src/services/discord/inflight/invariant_test_capture.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",

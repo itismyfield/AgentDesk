@@ -91,29 +91,7 @@ pub(crate) struct TurnLifecycleStopResult {
     pub queue_dropped_message_ids: Vec<u64>,
 }
 
-impl TurnLifecycleStopResult {
-    /// The host guard kept the session: nothing was stopped, cleared or killed, and the caller
-    /// must change nothing more.
-    pub(crate) fn host_guard_kept(&self) -> bool {
-        matches!(
-            self.lifecycle_path,
-            HOST_GUARD_KEPT_PATH | "stop-unobserved-kept" | "actor-unreachable-kept"
-        )
-    }
-
-    pub(crate) fn refusal_reason(&self) -> &'static str {
-        match self.lifecycle_path {
-            "actor-unreachable-kept" => "actor_unreachable",
-            "stop-unobserved-kept" => "stop_unobserved",
-            _ => "session host is not legacy tmux",
-        }
-    }
-
-    pub(crate) fn queue_depth_if_observed(&self) -> Option<usize> {
-        self.queue_depth
-            .filter(|_| self.queue_depth_after.is_some())
-    }
-}
+mod stop_result;
 
 pub(crate) async fn stop_turn_preserving_queue(
     health_registry: Option<&HealthRegistry>,
@@ -401,11 +379,6 @@ async fn stop_turn_with_policy(
     if let (true, Some(provider), Some(channel)) = (backfill, &target.provider, target.channel_id) {
         backfill_inflight_after_guard(provider, channel);
     }
-    if let Some(channel_id) = target.channel_id {
-        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
-        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
-            .await;
-    }
     let pre_snapshot = pending_queue_pre_snapshot(health_registry, target).await;
 
     let mut lifecycle_path = DIRECT_FALLBACK_PATH;
@@ -448,6 +421,9 @@ async fn stop_turn_with_policy(
         };
         if let Some(runtime) = runtime {
             use crate::services::discord::health::InflightDisposition;
+            if runtime.inflight == InflightDisposition::PreservedByNativeStop {
+                return stop_result::native_preserved(runtime, tmux_session_observed);
+            }
             // A stop that was not a legacy one leaves the turn's row and session to its owner.
             if runtime.inflight == InflightDisposition::PreservedByHostGuard {
                 return kept_by_host_guard(tmux_session_observed);
@@ -487,6 +463,11 @@ async fn stop_turn_with_policy(
         _ => {}
     }
 
+    if let Some(channel_id) = target.channel_id {
+        let tmux_session_name = (!target.tmux_name.is_empty()).then_some(target.tmux_name.as_str());
+        crate::services::discord::record_turn_stop_tombstone(channel_id, tmux_session_name, reason)
+            .await;
+    }
     let tmux_killed = if cleanup_tmux {
         let kill_target = if !probe_session_owned.is_empty() {
             probe_session_owned.as_str()

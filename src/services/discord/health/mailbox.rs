@@ -84,24 +84,26 @@ pub(super) struct QueueParkObservationFailureSnapshot {
 #[derive(Default)]
 pub(super) struct QueueParkHealthObservations<'a> {
     runtime: Option<(&'a SharedData, ProviderKind)>,
-    snapshots: HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>>,
+    snapshots:
+        Option<&'a HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>>>,
 }
 
 impl<'a> QueueParkHealthObservations<'a> {
-    pub(super) async fn observe(
+    /// Projects park state from the snapshot's own mailbox reads, so park adds no actor read.
+    pub(super) fn from_observations(
         entry: &'a ProviderEntry,
         include_details: bool,
+        snapshots: &'a HashMap<
+            ChannelId,
+            Result<ChannelMailboxSnapshot, MailboxObservationFailure>,
+        >,
         failures: &mut Vec<QueueParkObservationFailureSnapshot>,
     ) -> Self {
         let Some(provider) = ProviderKind::from_str(&entry.name).filter(|_| include_details) else {
             return Self::default();
         };
         let shared = entry.shared.as_ref();
-        let snapshots = shared
-            .mailboxes
-            .try_snapshot_all_observed(shared.queue_park_ledger.tracked_channels())
-            .await;
-        for (channel, observation) in &snapshots {
+        for (channel, observation) in snapshots {
             if let Err(failure) = observation {
                 let queue_park = shared.queue_park_ledger.project_observed(
                     shared,
@@ -121,7 +123,7 @@ impl<'a> QueueParkHealthObservations<'a> {
         }
         Self {
             runtime: Some((shared, provider)),
-            snapshots,
+            snapshots: Some(snapshots),
         }
     }
 
@@ -134,7 +136,7 @@ impl<'a> QueueParkHealthObservations<'a> {
         };
         let snapshot = self
             .snapshots
-            .get(&channel)
+            .and_then(|snapshots| snapshots.get(&channel))
             .map(|snapshot| snapshot.as_ref().map_err(|failure| *failure))
             .unwrap_or(Err(MailboxObservationFailure::Missing));
         queue_park_projection(shared, Some(provider), channel, snapshot)

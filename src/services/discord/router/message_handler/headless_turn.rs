@@ -1,4 +1,5 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
+use super::provider_dispatch::producer_panic;
 use super::*;
 use crate::services::discord::adk_session::build_namespaced_session_key;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
@@ -1007,6 +1008,15 @@ async fn start_reserved_headless_turn_admitted(
     let execution_pool = shared.pg_pool.clone();
     let producer_registration = original_registration.clone();
     let producer = {
+        let codex_observation = super::provider_dispatch::observe_codex_turn(
+            &provider,
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+            remote_profile.is_some(),
+            &turn_host,
+            &cancel_token,
+        )
+        .await;
         let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
             shared.pg_pool.as_ref(),
             &provider,
@@ -1032,6 +1042,7 @@ async fn start_reserved_headless_turn_admitted(
                                 system_prompt: Some(&system_prompt_owned),
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
+                                codex_observation: codex_observation.as_ref(),
                                 remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
@@ -1068,22 +1079,7 @@ async fn start_reserved_headless_turn_admitted(
                         let _ = tx.send(message);
                     }
                 }
-                Err(panic_info) => {
-                    let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
-                        value.clone()
-                    } else if let Some(value) = panic_info.downcast_ref::<&str>() {
-                        value.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!("  [headless streaming] PANIC: {}", msg);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: format!("Internal error (panic): {}", msg),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
-                }
+                Err(info) => drop(tx.send(producer_panic("headless streaming", info))),
             }
         })
     };
@@ -1135,79 +1131,7 @@ async fn start_reserved_headless_turn_admitted(
 }
 
 #[cfg(test)]
-mod foreign_row_refusal_tests {
-    use super::*;
-    use crate::services::discord::{inflight, mailbox_snapshot, mailbox_try_start_turn};
-    use poise::serenity_prelude::{MessageId, UserId};
-
-    fn row(provider: &ProviderKind, channel: ChannelId, user_msg_id: u64) -> InflightTurnState {
-        let prompt = "status?".to_string();
-        InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            None,
-            7,
-            user_msg_id,
-            0,
-            prompt,
-            None,
-            None,
-            None,
-            None,
-            0,
-        )
-    }
-
-    #[tokio::test]
-    async fn a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = shared.provider.clone();
-        let (free, held) = (ChannelId::new(6_245_201), ChannelId::new(6_245_202));
-        let mut external = row(&provider, held, 0);
-        external.turn_source = inflight::TurnSource::ExternalInput;
-        inflight::save_inflight_state_create_new(&external).expect("external row");
-        for (channel, refused) in [(free, false), (held, true)] {
-            let token = Arc::new(CancelToken::new());
-            let owner = (UserId::new(7), MessageId::new(11));
-            assert!(
-                mailbox_try_start_turn(&shared, channel, token.clone(), owner.0, owner.1).await
-            );
-            let mut mine = row(&provider, channel, 11);
-            mine.turn_nonce = token.turn_nonce().map(str::to_owned);
-            let created = inflight::save_inflight_state_create_new(&mine);
-            let result = super::super::foreign_row::admit_headless(
-                &shared, &provider, &mine, &token, created,
-            )
-            .await;
-            let observed = (
-                matches!(result, Err(HeadlessTurnStartError::Conflict(_))),
-                mailbox_snapshot(&shared, channel)
-                    .await
-                    .cancel_token
-                    .is_none(),
-                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
-                inflight::load_inflight_state_read_only(&provider, channel.get())
-                    .map(|r| r.user_msg_id),
-            );
-            // Refused: Conflict, mailbox released, token cancelled, the other turn's row kept.
-            let expected = if refused {
-                (true, true, true, Some(0))
-            } else {
-                (false, false, false, Some(11))
-            };
-            assert_eq!(observed, expected, "channel {channel}");
-        }
-    }
-
-    #[test]
-    fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
-        use super::recovery_context_take_order_tests::source_guard_tests::{
-            HEADLESS_TURN, row_refusal_gaps,
-        };
-        assert_eq!(row_refusal_gaps(HEADLESS_TURN), Vec::<String>::new());
-    }
-}
+mod foreign_row_refusal_tests;
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {

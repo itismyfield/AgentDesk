@@ -171,6 +171,11 @@ impl Observation {
             && self.process == other.process
     }
     pub(crate) fn current(&self) -> bool {
+        #[cfg(test)]
+        assert!(
+            !crate::services::discord::health::owner_publication_fence_held_for_tests(),
+            "namespace I/O ran under the watcher registry publication fence"
+        );
         if self.ambient != ambient() || self.process != process_context() {
             return false;
         }

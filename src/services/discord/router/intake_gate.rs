@@ -8,6 +8,7 @@ use super::intake_queue_transaction::{
 
 mod busy_duplicate_notice;
 pub(super) mod busy_inject;
+mod busy_queue;
 mod component_events;
 mod gate;
 #[cfg(all(test, unix))]
@@ -1250,9 +1251,9 @@ pub(in crate::services::discord) async fn handle_event(
                 text,
                 reply_context: reply_context.as_deref(),
                 has_reply_boundary,
-                carries_more_than_text: !upload_records.is_empty()
-                    || !new_message.attachments.is_empty()
-                    || resolved_voice_announcement.is_some(),
+                uploads: &upload_records,
+                voice_announcement: resolved_voice_announcement.as_ref(),
+                merge_consecutive,
             };
             if busy_inject::offered(ctx, data, &live).await {
                 return Ok(());
@@ -1281,24 +1282,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 new_message.author.bot,
                                 is_allowed_bot,
                             ),
-                            intervention: SoftInterventionSpec {
-                                channel_id,
-                                author_id: user_id,
-                                author_is_bot: new_message.author.bot,
-                                author_is_allowed_automation:
-                                    author_excluded_from_cancel_preservation,
-                                message_id: new_message.id,
-                                text: text.to_string(),
-                                reply_context: reply_context.clone(),
-                                has_reply_boundary,
-                                merge_consecutive,
-                                pending_uploads: upload_records.clone(),
-                                // #2266: main busy-active-turn queue path — voice transcripts that
-                                // arrive while a previous turn is running flow through here. Embed the
-                                // announcement so the queued dispatch reinserts it into the store even
-                                // if the >30s in-memory TTL expires first.
-                                voice_announcement: resolved_voice_announcement.clone(),
-                            },
+                            intervention: busy_queue::spec(&live),
                             options: IntakeQueueCommitOptions::default(),
                         },
                     )

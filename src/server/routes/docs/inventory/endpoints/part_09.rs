@@ -195,6 +195,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("content", body_param("string", true, "Message body to deliver")),
             ("scheduledAt", body_param("string", true, "RFC3339 fire time; past values require a schedule and are advanced to the next occurrence")),
             ("targetChannelId", body_param("string", false, "Discord channel id; push requires this or providerTargets")),
+            ("imageAttachment", body_param("object", false, "Discord push image: filename, contentType, dataBase64; max 8 MiB decoded, matching PNG/JPEG/GIF/WebP; excludes providerTargets; 12 MiB request limit")),
             ("providerTargets", body_param("object", false, "Confirmed Kakao target: accountId, up to five friendUuids, sendToSelf, and optional public HTTPS imageUrl")),
             ("deliveryKind", body_param("string", false, "push (default) or agent")),
             ("agentId", body_param("string", false, "Delivering agent id (required for agent kind)")),
@@ -215,16 +216,16 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/scheduled-messages/{id}",
             "messages",
-            "Fetch one scheduled-message reservation with its five most recent deliveries.",
+            "Fetch one reservation with five recent deliveries; image attachments contain metadata only.",
         )
         .with_params([("id", path_param("Scheduled message id"))]),
         ep(
             "PATCH",
             "/api/scheduled-messages/{id}",
             "messages",
-            "Edit a reservation that is still in scheduled status; null clears nullable fields.",
+            "Edit a scheduled reservation; omit imageAttachment to preserve it, null to clear, or supply a replacement object. Invalid images return 400; rollout unavailability returns 503.",
         )
-        .with_params([("id", path_param("Scheduled message id"))]),
+        .with_params([("id", path_param("Scheduled message id")), ("imageAttachment", body_param("object", false, "Replacement filename/contentType/dataBase64 object, or null to clear"))]),
         ep(
             "DELETE",
             "/api/scheduled-messages/{id}",

@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import check_durable_frontier_writer_call_sites as durable
+from scripts import skip_pin_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_intake_outbox_done_writer_call_sites.py"
@@ -487,14 +488,8 @@ class SharedSkipRuleTests(unittest.TestCase):
     def test_repository_skips_match_data_resolver_pin_and_basename_rule(self):
         data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
         self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
-        # New pins live in `.d/` fragments; the gate reads them with the legacy set.
-        fragments = {
-            line.split("|", 1)[1].strip()
-            for path in (ROOT / "scripts/test_only_module_skip_pin.d").glob("*.txt")
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.startswith("resolver |")
-        }
-        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"] | fragments
+        resolver = skip_pin_registry.load(ROOT).frozensets()[1]
+        self.assertLessEqual(data["PINNED_RESOLVER_TEST_ONLY_FILES"], resolver)
         self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
         basename = {
             path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")

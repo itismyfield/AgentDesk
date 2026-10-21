@@ -227,12 +227,13 @@ fn plan_for(capture: &str, text: &str, size: (usize, usize)) -> Result<Option<Ve
 #[test]
 fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits() {
     let source = "discord:1479671298497183835:1561196979327869080";
+    let name = "0hbujang ".repeat(10);
     let frame = super::frame(
         source,
         "343742347365974026",
-        "0hbujang",
+        &name,
         "abcdef12",
-        "status?",
+        "status?\nfollow up",
     );
     let Some(Drawn::Rows(rows)) = drawn(&frame, PANE) else {
         panic!("an unpredictable header vetoes every direct paste: {frame}");
@@ -244,6 +245,36 @@ fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits
     assert_eq!(plan_for(&draft, &frame, (46, 37)), Err(Veto::Draft));
     let fits = plan_for(&draft, &frame, (160, 37));
     assert_eq!(fits, Ok(Some(vec!["js".to_string()])));
+}
+
+#[test]
+fn an_attachment_arrow_wraps_one_cell_without_admitting_other_unmeasured_symbols() {
+    assert_eq!(unicode_width::UnicodeWidthChar::width('→'), Some(1));
+    assert_eq!(
+        rows(&format!("{}→x", x(75)), PANE),
+        Some(vec![format!("{}→", x(75)), "x".into()])
+    );
+    assert_eq!(rows(&format!("{}↔x", x(75)), PANE), None);
+    let frame = super::frame(
+        "discord:7196:7201",
+        "200",
+        "lane-user",
+        "abcdef12",
+        "[File uploaded] one.txt → /tmp/i7196-one.txt (3 bytes)",
+    );
+    let expected = vec![
+        "[User: lane-user (ID: 200)] [File uploaded] one.txt → /tmp/i7196-one.txt (3".to_string(),
+        "bytes)".to_string(),
+    ];
+    assert_eq!(drawn(&frame, PANE), Some(Drawn::Rows(expected.clone())));
+    let border = "─".repeat(80);
+    let capture = format!("{border}\n❯ {}\n  {}\n{border}\n", expected[0], expected[1]);
+    assert!(own_wrapped_draft(&capture, &expected));
+    assert!(!own_wrapped_draft(
+        &capture.replace("  bytes)", "  bytes)X"),
+        &expected
+    ));
+    assert!(!own_wrapped_draft(&capture.replace('→', "↔"), &expected));
 }
 
 #[test]

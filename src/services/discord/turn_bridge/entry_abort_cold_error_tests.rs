@@ -12,7 +12,9 @@ use std::sync::atomic::Ordering;
 
 /// Every body the bridge showed on Discord, in order; a send never awaited shows nothing.
 #[derive(Default)]
-struct Shown(Mutex<Vec<String>>);
+pub(in crate::services::discord::turn_bridge) struct Shown(
+    pub(in crate::services::discord::turn_bridge) Mutex<Vec<String>>,
+);
 
 impl Shown {
     fn bodies(&self) -> Vec<String> {

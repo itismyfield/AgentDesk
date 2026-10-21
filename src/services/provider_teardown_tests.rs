@@ -75,7 +75,7 @@ pub(crate) mod test_support {
                  [ \"$1\" = -N ] && shift\n\
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
                  has-session) [ -f \"$d/probe_fails\" ] && {{ echo \"error connecting to $d/socket (Permission denied)\" >&2; exit 1; }}\n\
-                 [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
+                 [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) if [ -f \"$d/pane_dead\" ]; then echo 1; else echo 0; fi; exit 0 ;;\n\
                  display-message) [ -f \"$d/pane_pid\" ] && {{ cat \"$d/pane_pid\"; exit 0; }} ;;\n\
                  -V) [ -f \"$d/launch_enabled\" ] && {{ echo tmux 3.5a; exit 0; }} ;;\n\
                  capture-pane) if [ -f \"$d/launch_enabled\" ]; then cat \"$d/ready\"; else echo pane; fi; exit 0 ;;\n\
@@ -123,6 +123,12 @@ pub(crate) mod test_support {
 
         pub(crate) fn mark_present(&self) {
             let _ = std::fs::remove_file(self.dir.path().join("missing"));
+        }
+
+        /// A remain-on-exit pane keeps its session present after its process has ended.
+        pub(crate) fn mark_dead_pane(&self) {
+            self.mark_present();
+            std::fs::write(self.dir.path().join("pane_dead"), "").unwrap();
         }
 
         /// Successful kills remove this session from later presence and inventory reads.

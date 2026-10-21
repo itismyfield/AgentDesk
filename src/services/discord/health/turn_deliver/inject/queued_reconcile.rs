@@ -10,7 +10,9 @@ use super::{HumanInputRequest, InjectAttempt, SharedData, channel_name, live_tui
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject;
 use crate::services::tui_input::human_frame::{self, Mode};
-use crate::services::turn_orchestrator::{PendingQueueItem, QueueIdentity};
+use crate::services::turn_orchestrator::{
+    PendingQueueItem, QueueIdentity, SourceMessageQueuedGeneration,
+};
 use poise::serenity_prelude::ChannelId;
 
 type FileId = (u64, u64);
@@ -62,12 +64,25 @@ pub(super) async fn mend(
     }
     let (primary, generation) = (head.identity.primary, head.identity.queued_generation);
     let recorded_attempt = head.attempt.is_some();
+    let sources: Vec<_> = head
+        .identity
+        .sources
+        .iter()
+        .map(|source| {
+            SourceMessageQueuedGeneration::new(
+                poise::serenity_prelude::MessageId::new(source.message_id),
+                source.queued_generation,
+            )
+        })
+        .collect();
     let admission = (channel, parent, gate);
     if let Err(error) = mailbox.mend_queued_head(head, persistence, admission).await {
         let channel_id = channel.get();
         tracing::warn!(channel_id, primary, %error, "queued head proof was not applied");
         return None;
     }
+    drop(_transition);
+    super::catch_up_race::confirmed(shared, &request.provider, channel, &sources).await;
     tracing::info!(
         channel_id = channel.get(),
         head_message_id = primary,
@@ -241,7 +256,7 @@ impl Want {
         // A line without its newline may still be mid-write, so the search stops before it.
         while reader.read_until(b'\n', &mut line).ok()? > 0 && line.ends_with(b"\n") {
             let text = std::str::from_utf8(&line).unwrap_or_default();
-            if text.contains(&self.source) {
+            if self.nonce.is_some() || text.contains(&self.source) {
                 first.get_or_insert(offset);
                 seen.extend(self.record(text, offset));
             }
@@ -303,7 +318,18 @@ impl Want {
             .and_then(|at| human_frame::parse(&body[at..]));
         if let Some((header, _)) = header.filter(|(header, _)| header.mode == Mode::Inject) {
             let (name, nonce) = (header.name, header.nonce);
-            let frame = busy_inject::frame(&self.source, &self.author, name, nonce, &self.text);
+            if nonce.is_empty() {
+                let id = self.nonce.as_deref()?;
+                let frame = human_frame::idle(name, &self.author, &self.text);
+                if human_frame::history::registered(id, &self.key.0, &frame)
+                    && human_frame::history::unique_attempt(id, &self.key.0, &frame)
+                    && busy_inject::exact_receipt(body, &frame)
+                {
+                    return Some(id.to_string());
+                }
+                return None;
+            }
+            let frame = human_frame::inject(&self.source, &self.author, name, nonce, &self.text);
             if header.author == self.author && busy_inject::exact_receipt(body, &frame) {
                 return Some(nonce.to_string());
             }

@@ -24,6 +24,8 @@ impl std::error::Error for QueuedTransitionBusyHandoff {}
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
+#[cfg(test)]
+mod initial_fresh_tests;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -122,6 +124,13 @@ pub(crate) enum IntakeAdmission {
     DeferredTurnMode(
         Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, String>,
     ),
+}
+
+#[cfg(all(test, unix))]
+impl IntakeAdmission {
+    pub(in crate::services::discord) fn is_local_for_tests(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
 }
 
 /// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
@@ -288,7 +297,7 @@ pub(crate) async fn admit_text_intake(
     };
     if !home_first
         && let IntakeRoute::Hold(detail) =
-            intake_route::route_for_placement(provider, destination.get())
+            intake_route::for_input_placement(provider, destination.get()).await
     {
         if crate::services::tui_o::cutover::codex_turn_awaited(destination.get()).is_some() {
             return IntakeAdmission::DeferredTurnMode(

@@ -1747,7 +1747,6 @@ fn write_agentdesk_channel_bindings(
 ) -> Result<(), String> {
     let config_path = onboarding_config_path(runtime_root);
     let mut config = load_onboarding_config(runtime_root)?;
-
     for mapping in resolved_channels {
         let workspace = tilde_display_path(&runtime_root.join("workspaces").join(&mapping.role_id));
         let agent_index = if let Some(index) = config
@@ -1772,6 +1771,7 @@ fn write_agentdesk_channel_bindings(
                 department: None,
                 avatar_emoji: None,
                 preferred_intake_node_labels: None,
+                memory_group: None,
             });
             config.agents.len() - 1
         };

@@ -6,7 +6,7 @@ use super::{DeliveryRow, ScheduledMessageRow};
 
 impl ScheduledMessageRow {
     pub fn to_api_json(&self) -> JsonValue {
-        json!({
+        let mut value = json!({
             "id": self.id,
             "content": self.content,
             "discordMentionUserIds": self.discord_mention_user_ids,
@@ -35,7 +35,15 @@ impl ScheduledMessageRow {
             "onContextFailure": self.on_context_failure,
             "createdAt": self.created_at.to_rfc3339(),
             "updatedAt": self.updated_at.to_rfc3339(),
-        })
+        });
+        if let Some(image) = &self.image_attachment {
+            value["imageAttachment"] = json!({
+                "filename": image.filename,
+                "contentType": image.content_type,
+                "sizeBytes": image.size_bytes,
+            });
+        }
+        value
     }
 }
 

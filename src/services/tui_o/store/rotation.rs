@@ -20,6 +20,61 @@ use crate::services::tui_o::writer::binding::{
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
+pub(crate) const FRESH_SELECTION_FILE: &str = "fresh_selection";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FreshSelection {
+    schema: u32,
+    channel: u64,
+    pub(crate) nonce: String,
+    pub(crate) keys: Vec<String>,
+}
+
+impl ChannelStore {
+    pub(crate) fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
+        let read: Option<FreshSelection> =
+            durable::read_json(&self.dir.join(FRESH_SELECTION_FILE))?;
+        if let Some(record) = &read {
+            let valid = record.schema == 1
+                && record.channel == self.init.channel
+                && !record.nonce.trim().is_empty()
+                && record.keys.iter().all(|key| {
+                    key.len() == 32
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                && record.keys.windows(2).all(|keys| keys[0] < keys[1]);
+            if !valid {
+                return Err(damage("fresh selection identity or keys are invalid"));
+            }
+        }
+        Ok(read)
+    }
+
+    pub(crate) fn write_fresh_selection(
+        &mut self,
+        nonce: String,
+        mut keys: Vec<String>,
+    ) -> Result<(), StoreError> {
+        keys.sort();
+        keys.dedup();
+        let record = FreshSelection {
+            schema: 1,
+            channel: self.init.channel,
+            nonce,
+            keys,
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        self.mutate(|store| {
+            Ok(durable::replace(
+                &store.dir.join(FRESH_SELECTION_FILE),
+                &bytes,
+            )?)
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -241,9 +296,19 @@ impl ChannelStore {
 
     /// Moves each pending boundary to the start its durable `BoundaryResolved` names.
     pub fn apply_resolved_boundaries(&mut self) -> Result<Vec<SourceId>, StoreError> {
+        self.apply_resolved_boundaries_filtered(|_| true)
+    }
+
+    pub(crate) fn apply_resolved_boundaries_filtered(
+        &mut self,
+        mut selected: impl FnMut(&SourceId) -> bool,
+    ) -> Result<Vec<SourceId>, StoreError> {
         let mut rotation = self.rotation()?;
         let mut applied = Vec::new();
         for link in rotation.links.values_mut() {
+            if !selected(&link.source) {
+                continue;
+            }
             let from = self.ledger.boundary_resolved(&link.source);
             if let (Boundary::Pending { .. }, Some(from)) = (&link.boundary, from) {
                 if let Some(evidence) = self.ledger.boundary_evidence(&link.source) {
@@ -254,6 +319,9 @@ impl ChannelStore {
                         || from >= evidence.through
                     {
                         return Err(damage("automatic boundary evidence does not match link"));
+                    }
+                    if !selected(&evidence.candidate.parent) {
+                        return Err(StoreError::Rejected("boundary parent is suspended".into()));
                     }
                     link.parent = Some(evidence.candidate.parent.clone());
                 } else {

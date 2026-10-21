@@ -1,5 +1,6 @@
 use super::super::super::queue_marker;
 use super::super::super::turn_view_reconciler::note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt;
+use super::provider_dispatch::producer_panic;
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
@@ -31,17 +32,7 @@ mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
-mod input_effect_tests {
-    use super::recovery_context_take_order_tests::source_guard_tests::{
-        INTAKE_TURN, RUNTIME_TRANSITION, transition_provider_gaps,
-    };
-
-    #[test]
-    fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
-        let gaps = transition_provider_gaps(INTAKE_TURN, RUNTIME_TRANSITION);
-        assert_eq!(gaps, Vec::<String>::new());
-    }
-}
+mod input_effect_tests;
 
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
@@ -2299,6 +2290,15 @@ pub(super) async fn handle_text_message(
         let provider_for_blocking = provider.clone();
         let execution_pool = shared.pg_pool.clone();
         let producer_registration = original_registration.clone();
+        let codex_observation = super::provider_dispatch::observe_codex_turn(
+            &provider,
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+            remote_profile.is_some(),
+            &turn_host,
+            &cancel_token,
+        )
+        .await;
         let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
             shared.pg_pool.as_ref(),
             &provider,
@@ -2324,6 +2324,7 @@ pub(super) async fn handle_text_message(
                                 system_prompt: Some(&system_prompt_owned),
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
+                                codex_observation: codex_observation.as_ref(),
                                 remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
@@ -2355,22 +2356,7 @@ pub(super) async fn handle_text_message(
                         let _ = tx.send(message);
                     }
                 }
-                Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!("  [streaming] PANIC: {}", msg);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: format!("Internal error (panic): {}", msg),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
-                }
+                Err(info) => drop(tx.send(producer_panic("streaming", info))),
             }
         });
 

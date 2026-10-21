@@ -4,6 +4,11 @@ use crate::services::cluster::attachment_transfer::{
     uploads::{PendingUploads, Upload},
 };
 
+mod busy_inject;
+pub(in crate::services::discord::router) use busy_inject::prepare_busy_inject_uploads;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::router) use busy_inject::retain_busy_uploads;
+
 const FILE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const BUNDLE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const MAX_CONCURRENT_BUNDLE_DOWNLOADS: usize = 4;

@@ -484,6 +484,8 @@ pub(super) mod test_host {
 #[cfg(test)]
 mod fence_tests {
     use super::*;
+    #[cfg(unix)]
+    mod b1b_fresh_launch_tests;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::tui_o::shadow::ShadowProvider::Claude;
 

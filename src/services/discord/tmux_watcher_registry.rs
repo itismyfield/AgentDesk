@@ -7,7 +7,15 @@ use super::*;
 // `let _guard = set_...(..)` and never names the type, so re-exporting them
 // would only add an import nothing uses.
 mod fences;
+mod owner_observation;
 mod session_binding;
+
+use owner_observation::bump_owner_observation_epoch;
+#[cfg(test)]
+pub(crate) use owner_observation::owner_publication_fence_held_for_tests;
+pub(in crate::services::discord) use owner_observation::{
+    owner_observation_epoch, with_owner_publication,
+};
 
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use session_binding::owner_stop_mutant;
@@ -326,7 +334,7 @@ impl TmuxWatcherRegistry {
 
     fn unpair_locked(
         &self,
-        _guard: &TmuxWatcherRegistryGuard,
+        guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
     ) -> Option<UnpairedWatcher> {
         // Preflight the full row before the first mutation. An inconsistent row
@@ -350,6 +358,7 @@ impl TmuxWatcherRegistry {
         let (_, reservation) = self.reservation_by_tmux_session.remove(tmux_session_name)?;
         self.owner_channel_by_tmux_session.remove(tmux_session_name);
         self.tmux_session_by_channel.remove(&owner_channel_id);
+        bump_owner_observation_epoch(guard);
         Some(UnpairedWatcher {
             owner_channel_id,
             handle,
@@ -436,6 +445,7 @@ impl TmuxWatcherRegistry {
         self.reservation_by_tmux_session
             .insert(reservation_session_key, new_record);
         cell.install_watcher_reservation(guard, cancel);
+        bump_owner_observation_epoch(guard);
         session_displaced
             .or(channel_displaced)
             .map(|old| old.handle)
@@ -655,14 +665,13 @@ impl TmuxWatcherRegistry {
         tmux_session_name: &str,
         channel_id: ChannelId,
     ) -> bool {
-        let _guard = lock_tmux_watcher_registry();
+        let guard = lock_tmux_watcher_registry();
         if self
             .owner_channel_by_tmux_session
             .contains_key(tmux_session_name)
         {
             // A live watcher handle already owns this session authoritatively.
-            self.restored_owner_by_tmux_session
-                .remove(tmux_session_name);
+            self.clear_restored_owner_locked(&guard, tmux_session_name);
             return false;
         }
         let changed = self
@@ -672,14 +681,27 @@ impl TmuxWatcherRegistry {
             != Some(channel_id);
         self.restored_owner_by_tmux_session
             .insert(tmux_session_name.to_string(), channel_id);
+        if changed {
+            bump_owner_observation_epoch(&guard);
+        }
         changed
     }
 
     /// #3105: drop a restored owner-only binding (e.g. once the session is no
     /// longer live). Idempotent.
     pub(in crate::services::discord) fn clear_restored_owner_for_tmux_session(&self, tmux_session_name: &str) {
-        self.restored_owner_by_tmux_session
-            .remove(tmux_session_name);
+        let guard = lock_tmux_watcher_registry();
+        self.clear_restored_owner_locked(&guard, tmux_session_name);
+    }
+
+    pub(in crate::services::discord) fn clear_restored_owner_locked(
+        &self,
+        guard: &TmuxWatcherRegistryGuard,
+        tmux_session_name: &str,
+    ) {
+        if self.restored_owner_by_tmux_session.remove(tmux_session_name).is_some() {
+            bump_owner_observation_epoch(guard);
+        }
     }
 
     /// Preserve authoritative routing for a live tmux pane after the channel's
@@ -690,7 +712,7 @@ impl TmuxWatcherRegistry {
         tmux_session_name: &str,
         channel_id: ChannelId,
     ) -> bool {
-        let _guard = lock_tmux_watcher_registry();
+        let guard = lock_tmux_watcher_registry();
         let tmux_session_name = tmux_session_name.trim();
         if tmux_session_name.is_empty() {
             return false;
@@ -700,8 +722,11 @@ impl TmuxWatcherRegistry {
         {
             return false;
         }
-        self.restored_owner_by_tmux_session
+        let previous = self.restored_owner_by_tmux_session
             .insert(tmux_session_name.to_string(), channel_id);
+        if previous != Some(channel_id) {
+            bump_owner_observation_epoch(&guard);
+        }
         true
     }
 

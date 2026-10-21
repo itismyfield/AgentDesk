@@ -57,4 +57,35 @@ impl ChannelMailboxRegistry {
         }
         snapshots
     }
+
+    /// `/api/health`'s read: every existing actor at once, each cut at `deadline`, without
+    /// creating actors or defaulting failures.
+    pub(crate) async fn try_snapshot_all_for_health(
+        &self,
+        required_channels: impl IntoIterator<Item = ChannelId>,
+        deadline: tokio::time::Instant,
+    ) -> HashMap<ChannelId, Result<ChannelMailboxSnapshot, MailboxObservationFailure>> {
+        let handles: HashMap<_, _> = self
+            .handles
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
+        let mut snapshots: HashMap<_, _> = required_channels
+            .into_iter()
+            .filter(|channel| !handles.contains_key(channel))
+            .map(|channel| (channel, Err(MailboxObservationFailure::Missing)))
+            .collect();
+        let observed =
+            futures::future::join_all(handles.into_iter().map(|(channel, handle)| async move {
+                let result = tokio::time::timeout_at(deadline, handle.try_snapshot())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .ok_or(MailboxObservationFailure::Unreachable);
+                (channel, result)
+            }))
+            .await;
+        snapshots.extend(observed);
+        snapshots
+    }
 }

@@ -77,6 +77,19 @@ fn inflight_row(provider: &ProviderKind, channel: ChannelId, name: &str, compat:
     path
 }
 
+fn native_inflight_row(channel: ChannelId, token: &Arc<CancelToken>, session: &str) -> PathBuf {
+    let path = inflight_row(&ProviderKind::Claude, channel, session, false);
+    let mut row =
+        inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get()).unwrap();
+    row.turn_nonce = token.turn_nonce().map(str::to_owned);
+    assert!(
+        row.output_path.is_none(),
+        "native prelaunch has no transcript path"
+    );
+    inflight::save_inflight_state(&row).unwrap();
+    path
+}
+
 /// The row's bytes and modification time, which any save changes.
 fn file_state(path: &PathBuf) -> Option<(Vec<u8>, std::time::SystemTime)> {
     let bytes = std::fs::read(path).ok()?;
@@ -781,6 +794,8 @@ async fn stop_meets_prepare(shared: &Arc<SharedData>, channel: ChannelId, order:
         CommandStop::NoActiveTurn => "NoActiveTurn".into(),
         CommandStop::HostRefused => "HostRefused".into(),
         CommandStop::Session(_) => "Session".into(),
+        CommandStop::Native(_) => "Native".into(),
+        CommandStop::Observed(_) => "Observed".into(),
     };
     if let Order::StopFirst = order {
         prepare();
@@ -842,3 +857,74 @@ fn a_stop_judged_before_its_herdr_turn_prepared_never_cancels_it() {
         HERDR_CANCEL_OVERRIDE.set(None);
     });
 }
+
+#[test]
+fn preserve_stop_foreground_bash_keeps_live_turn_until_native_exit() {
+    let fx = Fixture::new();
+    let running =
+        include_str!("../../../../../tests/fixtures/tui_input/claude-2.1.293-tool-running.txt")
+            .lines()
+            .filter(|line| !line.contains("Tomfoolering"))
+            .collect::<Vec<_>>()
+            .join("\n");
+    fx.pane(&running);
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_001);
+        let session = "claude-preserve-foreground";
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        let row = native_inflight_row(channel, &token, session);
+        let before = file_state(&row);
+        let _reply = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+        let escapes = fx
+            .take_calls()
+            .iter()
+            .filter(|call| call.starts_with("send-keys") && call.ends_with("Escape"))
+            .count();
+        assert_eq!(
+            escapes, 1,
+            "a current foreground Bash block needs one Escape"
+        );
+        assert!(
+            !token.cancelled.load(Ordering::Acquire),
+            "delivery alone must not publish cancellation"
+        );
+        assert!(mailbox_holds(&shared, channel, &token).await);
+        assert_eq!(file_state(&row), before);
+        assert_eq!(tombstone(channel), None);
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[test]
+fn preserve_stop_unconfirmed_keeps_token_and_inflight() {
+    let fx = Fixture::new();
+    fx.pane("Allow this tool?\n1. Allow\n2. Deny\nEnter to confirm · Esc to cancel\n❯ draft");
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_002);
+        let session = "claude-preserve-unconfirmed";
+        let (token, _) = generating_turn(&fx, session);
+        start(&shared, channel, &token).await;
+        let row = native_inflight_row(channel, &token, session);
+        let before = file_state(&row);
+        let _reply = begin_user_stop(&shared, &ProviderKind::Claude, channel, true, "!stop").await;
+        assert!(
+            !token.cancelled.load(Ordering::Acquire),
+            "an unconfirmed stop must not publish cancellation"
+        );
+        assert!(mailbox_holds(&shared, channel, &token).await);
+        assert_eq!(file_state(&row), before);
+        assert_eq!(tombstone(channel), None);
+        assert!(
+            !fx.take_calls()
+                .iter()
+                .any(|call| call.starts_with("send-keys"))
+        );
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    });
+}
+
+#[path = "native_stop_contract_tests.rs"]
+mod native_contract;
