@@ -24,6 +24,7 @@ pub(crate) trait LaunchGrantStore: Send + Sync {
         endpoint: &HerdrLaunchEndpoint,
         nonce: &str,
     ) -> Result<LaunchAdmissionGrant, String>;
+    /// Success acknowledges durable recording of this exact grant; failures grant no authority.
     async fn save(&self, grant: LaunchAdmissionGrant) -> Result<(), String>;
 }
 

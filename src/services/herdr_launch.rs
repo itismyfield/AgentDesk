@@ -114,7 +114,7 @@ pub(crate) enum HerdrCreateOutcome {
     NotSent(String),
     /// The server may have acted without a usable reply: lost ACK, wrong id, remote error.
     Indeterminate(String),
-    /// The pane exists but its command was not confirmed to start (cwd mismatch, E7 lost,
+    /// The pane exists but its command was not confirmed to start (cwd mismatch, policy lost,
     /// unclear input reply). The pane is recorded; nothing is resent or killed.
     CreatedUnconfirmed {
         pane_id: String,
@@ -580,7 +580,7 @@ fn awaiting_evidence<'a>(
     (record.state == HostedState::Pending && record.expected.is_none() && here).then_some(location)
 }
 
-/// Probes the recorded pane again under the server E7 admitted now. No process that started
+/// Probes the recorded pane under the selected policy's exact witness. No process that started
 /// before the execution's binding context existed can carry its nonce.
 async fn probe_again(
     pool: &PgPool,

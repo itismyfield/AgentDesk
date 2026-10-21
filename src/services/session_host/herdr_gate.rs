@@ -43,7 +43,7 @@ pub(crate) enum HerdrGateRefusal {
     MarkerOtherHost,
     /// The marker is absent, unrecognized or unreadable.
     MarkerUnverified,
-    /// A pane reading came from another server than the one E7 named.
+    /// A pane reading came from another server than the permitted witness.
     ServerChanged,
     /// The pane did not read as one root shell running one provider.
     PaneUnverified,
@@ -696,8 +696,8 @@ impl PaneGate {
         next_call(&self.next_id, request)
     }
 
-    /// Admission first (no I/O), the `.host_kind` marker, then E7, then the pane on the server
-    /// E7 named.
+    /// Admission first (no I/O), the `.host_kind` marker, then endpoint policy and the exact
+    /// pane execution on its permitted server.
     fn judge(&self, mutation: Mutation) -> Result<Judged, HerdrGateRefusal> {
         if mutation == Mutation::Input {
             herdr_admission::check().map_err(HerdrGateRefusal::AdmissionStopped)?;
@@ -711,7 +711,7 @@ impl PaneGate {
         })
     }
 
-    /// The `.host_kind` marker, then E7: the server every later read and write must reach.
+    /// The host marker and endpoint policy select the server every later read and write must reach.
     fn restore_witness(&self, mutation: Mutation) -> Result<ServerWitness, HerdrGateRefusal> {
         match read_host_kind_marker(&self.logical_key) {
             HostKindMarker::Known(HostKind::Herdr) => {}
