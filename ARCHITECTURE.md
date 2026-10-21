@@ -1193,7 +1193,8 @@ src/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── operator_disposition.rs
-│   │   │   │   └── reconcile_gate.rs
+│   │   │   │   ├── reconcile_gate.rs
+│   │   │   │   └── snapshot.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1860,6 +1861,8 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_reaper/
+│   │   │   ├── retirement_await_tests/
+│   │   │   │   └── host_gate_pg_tests.rs
 │   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
@@ -2319,6 +2322,9 @@ src/
 │   │   ├── turn_finalizer/
 │   │   │   ├── cleanup/
 │   │   │   │   └── terminal_release.rs
+│   │   │   ├── episode/
+│   │   │   │   ├── row_retirement.rs
+│   │   │   │   └── row_retirement_tests.rs
 │   │   │   ├── finalize/
 │   │   │   │   └── tests/
 │   │   │   │       └── residue_tests.rs

@@ -52,6 +52,7 @@ pub(super) async fn handle_terminal(
         return FinalizeOutcome::Deferred;
     }
     let claim_snapshot = evidence.claim_snapshot;
+    let probed_tmux = evidence.probed_tmux_session;
     // #3866: test-only injection point — lets a test drive a real finalize
     // side-effect panic through the live actor loop to prove the catch_unwind
     // guard keeps the loop alive. No effect in production builds.
@@ -181,15 +182,18 @@ pub(super) async fn handle_terminal(
     // channel+generation. Resetting it to `Finalized` (the normal post-finalize
     // flip) lets GC reap it and frees the channel for the next turn.
     let exact_normal = released.is_none() && finalize_key.episode.is_some();
-    let outcome = match AssertUnwindSafe(super::finalize::do_finalize_with_release(
+    let witness = super::episode::RuntimeWitness {
+        probed_tmux: probed_tmux.as_deref(),
+        claim_snapshot: claim_snapshot.as_ref(),
+    };
+    let outcome = match AssertUnwindSafe(super::finalize::do_finalize_with_probe(
         finalize_key,
         provider,
         &event,
         effective_ctx,
-        claim_snapshot.as_ref(),
+        witness,
         shared,
-        released,
-        false,
+        (released, false),
     ))
     .catch_unwind()
     .await
