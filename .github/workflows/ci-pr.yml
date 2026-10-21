@@ -466,6 +466,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/delegated_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/boot_gate_alarm_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_process_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_scope_restart_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_joint_owner_tests.rs'

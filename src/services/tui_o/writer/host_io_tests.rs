@@ -6,6 +6,14 @@ use crate::services::tui_o::writer::binding::{
 };
 use crate::services::tui_o::writer::{PostOutcome, SeenMessage};
 
+pub(crate) async fn wait_metadata(
+    store: &ChannelStore,
+    alarms: &impl AlarmSink,
+    stopping: &watch::Receiver<bool>,
+) -> bool {
+    super::fresh_input::wait_metadata(store, alarms, stopping).await
+}
+
 #[derive(Default)]
 pub(crate) struct Posts {
     records: Mutex<Vec<(u64, SeenMessage)>>,

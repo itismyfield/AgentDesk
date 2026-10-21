@@ -93,43 +93,91 @@ fn boot_reason(channel_ready: bool, terminal: &'static str) -> &'static str {
     }
 }
 
+// Allow relay discovery and rehydration before reserving the channel's halt notification.
+const BOOT_GATE_GRACE: Duration = Duration::from_secs(10);
+
 pub(super) async fn wait_metadata(
     store: &ChannelStore,
     alarms: &impl AlarmSink,
     stopping: &watch::Receiver<bool>,
 ) -> bool {
+    let channel = store.init().channel;
+    let started = tokio::time::Instant::now();
+    let grace = BOOT_GATE_GRACE;
+    #[cfg(test)]
+    let grace = if crate::services::claude_tui::source_verify::n2b_mutant("p2fu-grace-zero") {
+        Duration::ZERO
+    } else {
+        grace
+    };
     let mut wait = Duration::from_millis(250);
-    let mut retried = false;
+    let mut pending = false;
     let mut warned = false;
     loop {
         match hold_metadata(store) {
             None => {
+                if pending {
+                    alarms.resume_pending(channel, false);
+                    tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "boot gate opened"
+                    );
+                }
                 if warned {
-                    alarms.halt_cleared(store.init().channel);
+                    alarms.halt_cleared(channel);
                 }
                 return true;
             }
             Some("channel_gate_unready") => {
-                // Give concurrent rehydration one short retry before notifying the operator.
-                if retried && !warned {
-                    hold(alarms, store.init().channel, "channel_gate_unready");
+                if !pending {
+                    alarms.resume_pending(channel, true);
+                    pending = true;
+                }
+                if !warned && started.elapsed() >= grace {
+                    let reason = crate::services::tui_prompt_dedupe::codex_verified_hold_reason(
+                        crate::services::codex_tui::canary::CANARY_TMUX,
+                    );
+                    hold(alarms, channel, &format!("channel_gate_unready:{reason}"));
                     warned = true;
                 }
             }
             Some(reason) => {
-                if !warned {
-                    hold(alarms, store.init().channel, reason);
+                if pending {
+                    alarms.resume_pending(channel, false);
                 }
+                #[cfg(test)]
+                if warned
+                    && crate::services::claude_tui::source_verify::n2b_mutant(
+                        "p2fu-terminal-reason",
+                    )
+                {
+                    return false;
+                }
+                hold(alarms, channel, reason);
                 return false;
             }
         }
-        if unless_stopped(stopping, tokio::time::sleep(wait))
+        let delay = if warned {
+            wait
+        } else {
+            wait.min(grace.saturating_sub(started.elapsed()))
+        };
+        if unless_stopped(stopping, tokio::time::sleep(delay))
             .await
             .is_none()
         {
+            if pending {
+                alarms.resume_pending(channel, false);
+            }
+            let clear = warned;
+            #[cfg(test)]
+            let clear =
+                clear && !crate::services::claude_tui::source_verify::n2b_mutant("p2fu-stop-clear");
+            if clear {
+                alarms.halt_cleared(channel);
+            }
             return false;
         }
-        retried = true;
         wait = (wait * 2).min(resume::FIRST_WAIT);
     }
 }
