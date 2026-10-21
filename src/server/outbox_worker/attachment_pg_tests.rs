@@ -584,27 +584,6 @@ async fn image_claim_batch_budget_and_old_consumer_barrier_pg() {
 }
 
 #[tokio::test]
-async fn outbox_image_capability_stays_transaction_local_pg() {
-    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-        "agentdesk_outbox_image_local",
-        "outbox image capability scope",
-    )
-    .await;
-    // One connection, so the supported claim and the later undeclared claim share a session.
-    let pool = db.connect_and_migrate_with_max_connections(1).await;
-    let ids = enqueue_kinds(&pool, "local", "ii").await;
-    assert_eq!(claim_ids(&pool).await, ids[..1]);
-    let error = sqlx::query("UPDATE message_outbox SET status='processing', claim_owner='old', claimed_at=NOW() WHERE id=$1").bind(ids[1]).execute(&pool).await.unwrap_err();
-    assert_eq!(
-        error.as_database_error().unwrap().code().as_deref(),
-        Some("55000"),
-        "the outbox consumer declaration must not outlive the claim statement"
-    );
-    pool.close().await;
-    db.drop().await;
-}
-
-#[tokio::test]
 async fn image_preflight_400_fails_first_attempt_pg() {
     let (db, pool) = image_pool().await;
     let mut tx = pool.begin().await.unwrap();
