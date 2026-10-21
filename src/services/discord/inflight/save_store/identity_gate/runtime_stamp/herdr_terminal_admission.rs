@@ -26,6 +26,25 @@ struct Replayed {
 }
 
 impl HerdrFrame {
+    fn refuse(
+        &self,
+        axis: &str,
+        replayed: Option<&Replayed>,
+        outcome: GuardedSaveOutcome,
+    ) -> GuardedSaveOutcome {
+        tracing::warn!(
+            provider = self.provider.as_str(),
+            logical = %self.logical,
+            axis,
+            source_start = self.source_start,
+            source_end = self.end,
+            replay_start = ?replayed.map(|turn| turn.start),
+            replay_end = ?replayed.map(|turn| turn.end),
+            "herdr terminal admission refused"
+        );
+        outcome
+    }
+
     /// Commits the kind only when this token's own turn replays to exactly this end; it reads the
     /// marker, binding log and transcript, so it runs off the scheduler. Failure never yields a Done.
     pub(super) fn admit(
@@ -36,8 +55,14 @@ impl HerdrFrame {
         actor: &std::sync::Arc<CancelToken>,
     ) -> Result<NativeTerminalKind, GuardedSaveOutcome> {
         let refused = GuardedSaveOutcome::AuthorityPinned;
-        let state = actor.herdr_interrupt_state().ok_or(refused)?;
-        let start = state.turn_start.get().ok_or(refused)?.clone();
+        let state = actor
+            .herdr_interrupt_state()
+            .ok_or_else(|| self.refuse("actor", None, refused))?;
+        let start = state
+            .turn_start
+            .get()
+            .ok_or_else(|| self.refuse("turn_start", None, refused))?
+            .clone();
         let owner = &state.owner;
         if !can_deliver_directly
             || owner.provider != self.provider.as_str()
@@ -46,18 +71,21 @@ impl HerdrFrame {
             || actor.tmux_session_name().as_deref() != Some(self.logical.as_str())
             || actor.turn_nonce() != Some(self.turn_nonce.as_str())
         {
-            return Err(refused);
+            return Err(self.refuse("actor", None, refused));
         }
-        let root = inflight_runtime_root().ok_or(refused)?;
+        let root =
+            inflight_runtime_root().ok_or_else(|| self.refuse("authority", None, refused))?;
         let path = inflight_state_path(&root, &self.provider, local.channel_id);
-        let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
+        let _lock = lock_inflight_state_path(&path)
+            .map_err(|_| self.refuse("authority", None, GuardedSaveOutcome::IoError))?;
         let mut fresh = read_inflight_state_for_guarded_write(
             &path,
             &self.provider,
             local.channel_id,
             expected,
             "turn_bridge::herdr_terminal_admission",
-        )?;
+        )
+        .map_err(|outcome| self.refuse("authority", None, outcome))?;
         let channel = local.channel_id;
         // The Source is judged and the kind committed under one source authority, so no clear or
         // rebind lands between them.
@@ -68,14 +96,17 @@ impl HerdrFrame {
             #[cfg(not(unix))]
             let herdr = false;
             if !herdr {
-                return Err(refused);
+                return Err(self.refuse("source", None, refused));
             }
-            let source =
-                canonical_source(channel, &self.logical, &self.provider, &start).ok_or(refused)?;
+            let source = canonical_source(channel, &self.logical, &self.provider, &start)
+                .ok_or_else(|| self.refuse("source", None, refused))?;
             #[cfg(test)]
             test_hooks::after_source_check(channel);
-            let mut file = std::fs::File::open(&source.path).map_err(|_| refused)?;
-            let meta = file.metadata().map_err(|_| refused)?;
+            let mut file = std::fs::File::open(&source.path)
+                .map_err(|_| self.refuse("source", None, refused))?;
+            let meta = file
+                .metadata()
+                .map_err(|_| self.refuse("file_identity", None, refused))?;
             let opened = opened_identity(&meta);
             let named = std::fs::canonicalize(&self.path).ok();
             if opened != Some((source.dev, source.ino))
@@ -83,15 +114,22 @@ impl HerdrFrame {
                 || start.file.is_some_and(|file| Some(file) != opened)
                 || named != std::fs::canonicalize(&source.path).ok()
             {
-                return Err(refused);
+                return Err(self.refuse("file_identity", None, refused));
             }
             let replayed = replay(&self.provider, &mut file, &start, meta.len(), actor);
-            let replayed = replayed.ok_or(refused)?;
+            let replayed = replayed.ok_or_else(|| self.refuse("replay_missing", None, refused))?;
             if replayed.start != self.source_start
-                || replayed.end != self.end
-                || replayed.kind != self.kind
+                && !crate::services::provider::herdr_before_start::mutant(
+                    "start_offset_no_strict_start",
+                )
             {
-                return Err(refused);
+                return Err(self.refuse("source_start", Some(&replayed), refused));
+            }
+            if replayed.end != self.end {
+                return Err(self.refuse("end", Some(&replayed), refused));
+            }
+            if replayed.kind != self.kind {
+                return Err(self.refuse("kind", Some(&replayed), refused));
             }
             if fresh.turn_nonce.as_deref() != Some(self.turn_nonce.as_str())
                 || fresh.rebind_origin
@@ -100,7 +138,11 @@ impl HerdrFrame {
                 || fresh.tui_terminal_kind.is_some()
                 || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
             {
-                return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
+                return Err(self.refuse(
+                    "authority",
+                    Some(&replayed),
+                    GuardedSaveOutcome::from_durable_authority(&fresh),
+                ));
             }
             fresh.tui_terminal_kind = Some(self.kind);
             // The bridge ends on this kind before any runtime handoff, so the row names its TUI
@@ -116,8 +158,8 @@ impl HerdrFrame {
                 &fresh,
                 "inflight::runtime_stamp::admit_herdr_terminal",
             )
-            .map_err(|_| GuardedSaveOutcome::IoError)?
-            .ok_or(refused)?;
+            .map_err(|_| self.refuse("authority", Some(&replayed), GuardedSaveOutcome::IoError))?
+            .ok_or_else(|| self.refuse("authority", Some(&replayed), refused))?;
             #[cfg(all(test, unix))]
             {
                 use crate::services::discord::recovery_engine::herdr_admitted_restart::test_hooks;

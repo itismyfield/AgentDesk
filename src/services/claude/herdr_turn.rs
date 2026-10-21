@@ -636,7 +636,7 @@ fn prompt_and_read(
         tracing::warn!(logical = %turn.owner.logical_key, %error, "herdr turn: input hold kept");
     }
     run.into_legacy()?;
-    let start = super::claude_tui_turn_start_offset_after_timestamp(path, started_at, before);
+    let start = before;
     let logical = turn.owner.logical_key.as_str();
     let unread = || PromptReadinessSnapshot {
         prompt_marker_detected: false,
@@ -667,7 +667,7 @@ fn prompt_and_read(
             let ended =
                 |at| terminal_replay::ended_tail(&transcript, at, started_at, &attached.target);
             let read = read_to_provider_terminal(&transcript, start, &sender, token, ended);
-            terminal = read?.map(|terminal| (terminal, token.clone(), start));
+            terminal = read?.map(|terminal| (terminal, token.clone()));
             unconfirmed = terminal.is_none();
         } else {
             read_output_file_until_result_with_harvest(
@@ -706,8 +706,8 @@ fn prompt_and_read(
     if !attached.bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
-    if let Some((read, token, start)) = terminal.take() {
-        let _ = sender.send(read.frame(&transcript, logical, start, &token));
+    if let Some((read, token)) = terminal.take() {
+        let _ = sender.send(read.frame(&transcript, logical, &token));
     }
     // A read that ended without this turn's terminal hands no runtime to a watcher to finish.
     if unconfirmed {
@@ -726,6 +726,7 @@ fn prompt_and_read(
 /// A Herdr Claude turn's provider terminal and the record end the read stopped at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeTurnTerminal {
+    pub(crate) start: u64,
     pub(crate) kind: NativeTerminalKind,
     pub(crate) end: u64,
     pub(crate) result: String,
@@ -736,20 +737,14 @@ pub(crate) struct ClaudeTurnTerminal {
 
 impl ClaudeTurnTerminal {
     /// The typed frame only bridge admission turns into a terminal; no tmux generation names it.
-    fn frame(
-        self,
-        transcript: &str,
-        logical: &str,
-        start: u64,
-        token: &Arc<CancelToken>,
-    ) -> StreamMessage {
+    fn frame(self, transcript: &str, logical: &str, token: &Arc<CancelToken>) -> StreamMessage {
         StreamMessage::ClaudeTuiTerminalDone {
             result: self.result,
             session_id: self.session_id,
             transcript_path: transcript.to_owned(),
             tmux_session_name: logical.to_owned(),
             turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
-            source_start: start,
+            source_start: self.start,
             complete_record_end: self.end,
             generation_mtime_ns: 0,
             source_file_dev: self.file.0,
@@ -818,7 +813,7 @@ pub(crate) fn herdr_terminal_frame(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let alive = move |_| (std::time::Instant::now() >= deadline).then(String::new);
     let read = read_to_provider_terminal(transcript, start, &tx, token, alive).ok()??;
-    Some(read.frame(transcript, logical, start, token))
+    Some(read.frame(transcript, logical, token))
 }
 
 /// An assistant or result record: a turn's own output, never metadata.
@@ -857,92 +852,6 @@ fn is_turn_prompt(line: &str) -> bool {
     }
 }
 
-/// Under settlement the transcript is read to this turn's own turn-end record, returned unsent;
-/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn, but a
-/// terminal its gone writer left without a newline (`ended`) is read and ends where the file does.
-fn read_to_provider_terminal(
-    transcript: &str,
-    start: u64,
-    sender: &Sender<StreamMessage>,
-    token: &Arc<CancelToken>,
-    ended: impl Fn((u64, SourceFileIdentity)) -> Option<String>,
-) -> Result<Option<ClaudeTurnTerminal>, String> {
-    let mut lines = HerdrTurnLines::default();
-    let opened = std::cell::Cell::new(SourceFileIdentity::Unavailable);
-    let tail = std::cell::RefCell::new(None);
-    // A buffer's raw end is sent only once a later read shows all its records were processed.
-    let pending = std::cell::Cell::new(None::<u64>);
-    let (offsets, relay) = (sender.clone(), sender.clone());
-    let (local, local_rx) = std::sync::mpsc::channel();
-    let mut process = |line: &str, lines: &mut HerdrTurnLines| {
-        let processed = lines.process(line, &local);
-        // The turn's Done is the typed frame sent after the read, never the stream's own.
-        for message in local_rx.try_iter() {
-            if !matches!(message, StreamMessage::Done { .. }) {
-                let _ = relay.send(message);
-            }
-        }
-        processed
-    };
-    let mut read = poll_output_file_until_result(
-        transcript,
-        start,
-        Some(token.clone()),
-        &mut lines,
-        || {
-            let at = (pending.get().unwrap_or(start), opened.get());
-            let mut tail = tail.borrow_mut();
-            *tail = ended(at).map(|found| (at.0, found));
-            tail.is_none()
-        },
-        || false,
-        |raw_end| {
-            if let Some(processed) = pending.replace(Some(raw_end)) {
-                let _ = offsets.send(StreamMessage::OutputOffset { offset: processed });
-            }
-        },
-        &mut process,
-        |lines| lines.terminal().is_some(),
-        |_| false,
-        |_| {},
-        |file| opened.set(SourceFileIdentity::from_open_file(file)),
-    )
-    .map_err(|failure| failure.error)?;
-    if let ReadOutputResult::SessionDied { offset } = read
-        && let Some((from, tail)) = tail.take()
-        && offset == from
-    {
-        process(&tail, &mut lines);
-        read = ReadOutputResult::Completed {
-            offset: offset + tail.len() as u64,
-        };
-    }
-    let end = match read {
-        ReadOutputResult::Completed { offset }
-        | ReadOutputResult::Cancelled { offset }
-        | ReadOutputResult::SessionDied { offset } => offset,
-    };
-    if let Some(raw_end) = pending.get() {
-        let _ = sender.send(StreamMessage::OutputOffset {
-            offset: raw_end.min(end),
-        });
-    }
-    let (ReadOutputResult::Completed { .. }, Some(kind)) = (read, lines.terminal()) else {
-        return Ok(None);
-    };
-    let (result, session_id) = lines.result();
-    let file = crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
-        Some(&opened.get()),
-    );
-    Ok(Some(ClaudeTurnTerminal {
-        kind,
-        end,
-        result,
-        session_id,
-        file,
-    }))
-}
-
 /// The row turns Bound once the pane's latest logged source is this execution's; until then it
 /// stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
@@ -965,7 +874,10 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
     }
 }
 
+mod live_reader;
 mod never_attached;
+use live_reader::read_to_provider_terminal;
+pub(crate) mod start_offset;
 mod terminal_replay;
 pub(crate) use terminal_replay::{
     EndedTurn, Terminal, TurnOutput, closed_turn, ended_turn, replay_herdr_turn,

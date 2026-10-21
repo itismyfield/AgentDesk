@@ -1964,6 +1964,9 @@ services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cl
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
+services::claude::herdr_turn::start_offset::test_hooks::a_missing_file_and_metadata_or_whole_json_without_newline_commit_no_start
+services::claude::herdr_turn::start_offset::test_hooks::an_ended_or_cancelled_wait_returns_no_start_and_unstamped_fixtures_keep_their_offset
+services::claude::herdr_turn::start_offset::test_hooks::timestamp_eligibility_is_inclusive_and_rejects_metadata_or_earlier_stamps
 services::claude::host_gate::tests::a_failed_pane_probe_never_reads_as_a_stale_session
 services::claude::host_gate::tests::a_failed_presence_probe_never_prepares_a_fresh_session
 services::claude::host_gate::tests::a_session_marked_for_another_host_is_never_probed_killed_or_relaunched
@@ -7320,6 +7323,10 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::reco
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::t_r2_a_replaced_root_shell_reconnects_nothing_and_takes_no_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_a_pending_clear_prompts_the_cleared_session_once_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::the_turn_after_two_pending_clears_prompts_the_latest_cleared_session_once_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_bound_warm_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_clear_replacement_metadata_window_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_db_restored_selector_fresh_launch_admits_the_reader_and_second_input_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::start_offset_tests::a_fresh_metadata_window_admits_the_reader_and_second_provider_input_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e1_a_legacy_row_launches_once_attaches_after_session_start_prompts_once_then_binds_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2_a_bound_mismatch_writes_nothing_and_relaunches_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
