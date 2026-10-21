@@ -17,28 +17,21 @@ pub(in crate::services::discord) fn save_inflight_delivery_rewind_if_matches_ide
     let Some(root) = inflight_runtime_root() else {
         return Err("Home directory not found".to_string());
     };
-    save_inflight_delivery_rewind_if_matches_identity_in_root(
-        &root,
-        state,
-        captured_nonce,
-        expected_owner,
-        reason,
-    )
+    if !state.owned_by_turn_nonce(captured_nonce) {
+        return Ok(false);
+    }
+    save_inflight_delivery_rewind_if_matches_identity_in_root(&root, state, expected_owner, reason)
 }
 
 pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
-    captured_nonce: Option<&str>,
     expected_owner: StreamRelayAuthority,
     reason: InflightDeliveryRewindReason,
 ) -> Result<bool, String> {
     let Some(provider) = state.provider_kind() else {
         return Err(format!("Unknown provider '{}'", state.provider));
     };
-    if !state.owned_by_turn_nonce(captured_nonce) {
-        return Ok(false);
-    }
     let path = inflight_state_path(root, &provider, state.channel_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -48,7 +41,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
         return Ok(false);
     };
     let expected = InflightTurnIdentity::from_state(state);
-    if !expected.matches_state(&on_disk) || !on_disk.owned_by_turn_nonce(captured_nonce) {
+    if !expected.matches_state(&on_disk) || on_disk.turn_nonce != state.turn_nonce {
         return Ok(false);
     }
     if on_disk.terminal_delivery_committed {
