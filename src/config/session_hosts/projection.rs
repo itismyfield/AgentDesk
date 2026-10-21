@@ -41,7 +41,7 @@ impl Projection {
         Ok(BootSessionHosts {
             config: self.hosts,
             channels,
-            local_node: self.local_node,
+            local_node: self.local_node.map(|node| node.trim().to_owned()),
             ..BootSessionHosts::default()
         })
     }

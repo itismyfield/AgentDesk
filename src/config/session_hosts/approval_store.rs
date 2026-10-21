@@ -115,9 +115,19 @@ impl ApprovalStore for FileApprovalStore {
         runtime_store::fsync_parent_dir(&pending).map_err(|error| error.to_string())?;
         self.write("current.json", hosts)?;
         std::fs::remove_file(&pending).map_err(|error| error.to_string())?;
-        // The approved file is already durable; a stale pending marker only selects the older generation.
-        if let Err(error) = runtime_store::fsync_parent_dir(&pending) {
-            tracing::warn!(%error, "approval snapshot durable; pending-marker cleanup may replay");
+        if let Err(error) = cleanup_sync(&pending) {
+            runtime_store::critical_atomic_write(
+                &root.join("pending"),
+                "pending",
+                AtomicWriteContext::new("session_hosts_approval"),
+            )
+            .map_err(|restore| {
+                format!("approval marker sync: {error}; restore pending: {restore}")
+            })?;
+            runtime_store::fsync_parent_dir(&pending).map_err(|restore| {
+                format!("approval marker sync: {error}; restore sync: {restore}")
+            })?;
+            return Err(format!("approval marker sync: {error}"));
         }
         Ok(())
     }
@@ -125,5 +135,16 @@ impl ApprovalStore for FileApprovalStore {
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static FAIL_CLEANUP_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn cleanup_sync(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_CLEANUP_SYNC.with(|fault| fault.replace(false)) {
+        return Err(std::io::Error::other(
+            "injected marker cleanup sync failure",
+        ));
+    }
+    runtime_store::fsync_parent_dir(path)
 }

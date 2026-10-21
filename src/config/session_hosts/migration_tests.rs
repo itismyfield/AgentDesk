@@ -521,7 +521,9 @@ fn migration_file_store_old_schema_decodes_same_hosts_and_new_schema_is_not_corr
     let store = FileApprovalStore(Some(temp.path().to_owned()));
     let candidate = fixture();
     let path = temp.path().join("current.json");
-    std::fs::write(&path, snapshot(0, &candidate)).unwrap();
+    let mut old: serde_json::Value = serde_json::from_slice(&snapshot(0, &candidate)).unwrap();
+    old["projection"]["local_node"] = serde_json::json!(" test-node ");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     let (decoded, warning) = known(store.load());
     assert_eq!(Projection::of(&decoded), Projection::of(&candidate));
     assert_eq!(warning, None);
@@ -617,36 +619,42 @@ fn migration_user_default_validator_reports_key_and_supported_action() {
 #[cfg(unix)]
 #[tokio::test]
 async fn migration_failed_publication_keeps_server_and_read_only_cli_on_old_generation() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = FileApprovalStore(Some(temp.path().to_owned()));
-    let old = fixture();
-    store.save(&old).unwrap();
-    let candidate = remap(old.clone(), "/fixture/new.sock");
-    super::super::approval_store::FAIL_CURRENT_SYNC.with(|fault| fault.set(true));
-    let selected = select(
-        candidate.clone(),
-        &store,
-        &Rows::new(vec![]),
-        &NoHoldStore,
-        false,
-    )
-    .await
-    .into_hosts();
-    assert_eq!(Projection::of(&selected), Projection::of(&old));
-    assert_eq!(reason(&selected), Some("approval_snapshot_not_durable"));
-    assert!(
-        String::from_utf8(std::fs::read(temp.path().join("current.json")).unwrap())
-            .unwrap()
-            .contains("new.sock"),
-        "fault happened after publication"
-    );
-    let (loaded, warning) = known(store.load());
-    assert_eq!(Projection::of(&loaded), Projection::of(&old));
-    assert_eq!(warning, Some("approval_snapshot_not_durable"));
-    let cli = select(candidate, &store, &Rows::new(vec![]), &NoHoldStore, true)
+    for cleanup in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FileApprovalStore(Some(temp.path().to_owned()));
+        let old = fixture();
+        store.save(&old).unwrap();
+        let candidate = remap(old.clone(), "/fixture/new.sock");
+        if cleanup {
+            super::super::approval_store::FAIL_CLEANUP_SYNC.with(|fault| fault.set(true));
+        } else {
+            super::super::approval_store::FAIL_CURRENT_SYNC.with(|fault| fault.set(true));
+        }
+        let selected = select(
+            candidate.clone(),
+            &store,
+            &Rows::new(vec![]),
+            &NoHoldStore,
+            false,
+        )
         .await
         .into_hosts();
-    assert_eq!(Projection::of(&cli), Projection::of(&old));
+        assert_eq!(Projection::of(&selected), Projection::of(&old));
+        assert_eq!(reason(&selected), Some("approval_snapshot_not_durable"));
+        assert!(
+            String::from_utf8(std::fs::read(temp.path().join("current.json")).unwrap())
+                .unwrap()
+                .contains("new.sock"),
+            "fault happened after publication"
+        );
+        let (loaded, warning) = known(store.load());
+        assert_eq!(Projection::of(&loaded), Projection::of(&old));
+        assert_eq!(warning, Some("approval_snapshot_not_durable"));
+        let cli = select(candidate, &store, &Rows::new(vec![]), &NoHoldStore, true)
+            .await
+            .into_hosts();
+        assert_eq!(Projection::of(&cli), Projection::of(&old));
+    }
 }
 
 #[cfg(unix)]

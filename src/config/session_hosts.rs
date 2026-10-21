@@ -95,8 +95,8 @@ pub(crate) struct BootSessionHosts {
     config: SessionHostsConfig,
     channels: BTreeMap<u64, ChannelEndpoint>,
     local_node: Option<String>,
-    candidate: Option<SessionHostsConfig>,
-    migration: Option<migration::Diagnostic>,
+    candidate: Option<Box<SessionHostsConfig>>,
+    migration: Option<Box<migration::Diagnostic>>,
     admission_stopped: bool,
 }
 
@@ -183,15 +183,15 @@ impl BootSessionHosts {
     }
 
     pub(crate) fn restart_required(&self, config: &Config) -> bool {
-        self.candidate.as_ref().unwrap_or(&self.config) != &config.session_hosts
+        self.candidate.as_deref().unwrap_or(&self.config) != &config.session_hosts
     }
 
     pub(crate) fn candidate(&self) -> &SessionHostsConfig {
-        self.candidate.as_ref().unwrap_or(&self.config)
+        self.candidate.as_deref().unwrap_or(&self.config)
     }
 
     pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
-        self.migration.as_ref()
+        self.migration.as_deref()
     }
 
     pub(crate) fn admission_stopped(&self) -> bool {

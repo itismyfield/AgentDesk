@@ -36,8 +36,8 @@ impl HostsBootSelection {
     }
 
     pub(crate) fn into_hosts(mut self) -> BootSessionHosts {
-        self.hosts.candidate = Some(self.candidate);
-        self.hosts.migration = self.diagnostic;
+        self.hosts.candidate = Some(Box::new(self.candidate));
+        self.hosts.migration = self.diagnostic.map(Box::new);
         self.hosts.admission_stopped = self.admission_stopped;
         self.hosts
     }
