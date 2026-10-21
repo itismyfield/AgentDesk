@@ -1,6 +1,9 @@
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
+#[path = "actual_submit_tests/source_io_tests.rs"]
+pub(crate) mod source_io;
+
 pub(crate) fn driver(
     context: &BindingContext,
     native_session: &str,
@@ -100,4 +103,65 @@ pub(crate) fn options(native: &str, cwd: &std::path::Path) -> CodexLaunchOptions
         .with_resume_session_id(Some(native))
         .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
         .with_cwd(cwd.to_str())
+}
+
+thread_local! {
+    static FAIL_TAIL_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn fail_tail_once() {
+    FAIL_TAIL_ONCE.with(|value| value.set(true));
+}
+
+pub(crate) fn take_tail_fault() -> bool {
+    FAIL_TAIL_ONCE.with(|value| value.replace(false))
+}
+
+thread_local! {
+    static BEFORE_CREATE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn before_pane_effect(effect: Box<dyn FnOnce()>) {
+    super::tui_session_launch::BEFORE_PANE_EFFECT.with_borrow_mut(|slot| *slot = Some(effect));
+}
+
+pub(crate) fn before_create_effect(effect: Box<dyn FnOnce()>) {
+    BEFORE_CREATE_EFFECT.with_borrow_mut(|slot| *slot = Some(effect));
+}
+
+pub(crate) fn after_initial_absence_capture(effect: Box<dyn FnOnce(bool)>) {
+    super::absence_launch::AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| *slot = Some(effect));
+}
+
+pub(crate) fn observe_absence_admission(observer: super::absence_launch::AdmissionObserver) {
+    super::absence_launch::ADMISSION_OBSERVER.with_borrow_mut(|slot| *slot = Some(observer));
+}
+
+pub(crate) fn run_before_create_effect() {
+    BEFORE_CREATE_EFFECT.with_borrow_mut(|slot| {
+        if let Some(effect) = slot.take() {
+            effect();
+        }
+    });
+}
+
+type CleanupTrace = std::collections::HashMap<String, Vec<&'static str>>;
+static DEAD_TEMP_CLEANUP: std::sync::LazyLock<std::sync::Mutex<CleanupTrace>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(CleanupTrace::new()));
+
+pub(crate) fn note_dead_temp_cleanup(tmux: &str, operation: &'static str) {
+    DEAD_TEMP_CLEANUP
+        .lock()
+        .unwrap()
+        .entry(tmux.to_owned())
+        .or_default()
+        .push(operation);
+}
+
+pub(crate) fn take_dead_temp_cleanup_trace(tmux: &str) -> Vec<&'static str> {
+    DEAD_TEMP_CLEANUP
+        .lock()
+        .unwrap()
+        .remove(tmux)
+        .unwrap_or_default()
 }

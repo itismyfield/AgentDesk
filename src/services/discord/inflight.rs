@@ -23,7 +23,6 @@ pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
-#[cfg(test)]
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // Re-export the domain model at its existing visibility for root and sibling callers.

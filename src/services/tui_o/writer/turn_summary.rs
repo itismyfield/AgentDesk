@@ -48,6 +48,16 @@ impl TurnSummaryRun {
         }
     }
 
+    pub(super) fn has_pending_projection_probe(&self) -> bool {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-summary-open") {
+            return self.open.is_some();
+        }
+        self.open
+            .as_ref()
+            .is_some_and(|turn| turn.first.is_some() && turn.eligible)
+    }
+
     fn open(&mut self, value: &Value, id: Option<String>) {
         self.open = Some(Turn {
             id,

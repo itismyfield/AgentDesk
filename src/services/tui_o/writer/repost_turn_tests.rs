@@ -12,6 +12,8 @@ use super::*;
 
 #[path = "local_retry_repost_tests.rs"]
 mod local_retry;
+#[path = "scoped_repost_tests.rs"]
+mod scoped;
 #[path = "tool_result_repost_tests.rs"]
 mod tool_result;
 use crate::db::auto_queue::test_support::TestPostgresDb;

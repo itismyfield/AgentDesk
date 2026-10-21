@@ -23,6 +23,155 @@ const DIRECTORY: &str = "discord_terminal_delivery_custody";
 const BATCH_SIZE: usize = 10;
 static NEXT_ENTRY: AtomicUsize = AtomicUsize::new(0);
 
+mod codex_absence {
+    //! Pending terminal custody keeps its captured source available before a fresh launch.
+
+    use super::*;
+    use crate::services::discord::inflight::{CodexRange, InflightTurnState};
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::{binding_events, clear_relaunch::Captured};
+
+    #[derive(Deserialize)]
+    struct Identity {
+        version: u8,
+        provider: String,
+        channel_id: u64,
+        watcher_owner_channel_id: u64,
+        local: InflightTurnState,
+        admitted: Option<CodexRange>,
+    }
+
+    pub(crate) fn codex_absent_launch_clear(captured: &Captured) -> bool {
+        if captured.context.owner_runtime_root != tc::current_tmux_owner_marker() {
+            return false;
+        }
+        let Ok(root) = root() else { return false };
+        let source = binding_events::codex::read_ownership(&captured.context)
+            .ok()
+            .filter(|fold| !fold.conflicted && fold.pending.is_empty())
+            .and_then(|fold| fold.verified)
+            .map(|proof| proof.source);
+        let generation = generation(&captured.context.tmux_session);
+        observes_retained_at(&root, true, |payload| {
+            holds(payload, captured, source.as_ref(), generation)
+        })
+        .is_ok_and(|pending| !pending)
+    }
+
+    fn holds(
+        payload: &Value,
+        captured: &Captured,
+        source: Option<&binding_events::SourceId>,
+        generation: Option<i64>,
+    ) -> bool {
+        let Ok(identity) = serde_json::from_value::<Identity>(payload.clone()) else {
+            return true;
+        };
+        let local = &identity.local;
+        if identity.version != 1
+            || local.provider_kind().is_none()
+            || identity.provider != local.provider
+            || identity.channel_id != local.channel_id
+            || identity.watcher_owner_channel_id != local.delivery_record_owner_channel_id()
+            || identity.channel_id == 0
+            || identity.watcher_owner_channel_id == 0
+        {
+            return true;
+        }
+        if let Some(range) = &identity.admitted {
+            if range.source.provider != identity.provider
+                || range.source.delivery_channel_id != identity.channel_id
+                || range.source.offset_authority_channel_id != identity.watcher_owner_channel_id
+                || !range.identity.matches_state(local)
+                || Some(range.source.tmux_session_name.as_str())
+                    != local.tmux_session_name.as_deref()
+                || Some(range.source.turn_nonce.as_str()) != local.turn_nonce.as_deref()
+                || Some(range.rollout_path.as_str()) != local.output_path.as_deref()
+                || Some(range.session_id.as_str()) != local.session_id.as_deref()
+                || Some(range.source.range.0) != local.turn_start_offset
+                || range.source.range.1 != local.last_offset
+                || local
+                    .tui_terminal_source_file_identity
+                    .is_some_and(|file| Some(file) != range.source_file_identity)
+                || local
+                    .tui_terminal_generation_mtime_ns
+                    .is_some_and(|stamp| stamp != range.source.generation_mtime_ns)
+            {
+                return true;
+            }
+        }
+        if identity.provider != "codex" {
+            return false;
+        }
+        let channel = captured.context.channel_id.unwrap_or_default();
+        if identity.channel_id != channel && identity.watcher_owner_channel_id != channel {
+            return false;
+        }
+        let Some(tmux) = local
+            .tmux_session_name
+            .as_deref()
+            .filter(|tmux| !tmux.trim().is_empty())
+        else {
+            return true;
+        };
+        if tmux != captured.context.tmux_session {
+            return false;
+        }
+        let (Some(range), Some(source), Some(generation)) =
+            (&identity.admitted, source, generation)
+        else {
+            return true;
+        };
+        let Some(file) = range.source_file_identity else {
+            return true;
+        };
+        if local.runtime_kind != Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+            || range.source.range.0 >= range.source.range.1
+            || range.session_id.is_empty()
+            || !Path::new(&range.rollout_path).is_absolute()
+            || range.source.turn_nonce.is_empty()
+            || range.source.generation_mtime_ns <= 0
+        {
+            return true;
+        }
+        let matches = [
+            Path::new(&range.rollout_path) == source.path.as_path(),
+            range.session_id == source.session_id,
+            file == (source.dev, source.ino),
+            range.source.generation_mtime_ns == generation,
+        ];
+        // Mixed identities cannot establish an unrelated incarnation; an exact one is pending.
+        matches.into_iter().any(|same| same)
+    }
+
+    fn generation(tmux: &str) -> Option<i64> {
+        let legacy = PathBuf::from(tc::legacy_tmp_session_path(tmux, "generation"));
+        let canonical = tc::persistent_sessions_dir()?.join(legacy.file_name()?);
+        let mut seen = None;
+        for path in [canonical, legacy] {
+            let meta = match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_file() => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                _ => return None,
+            };
+            let stamp = i64::try_from(
+                meta.modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos(),
+            )
+            .ok()?;
+            if stamp <= 0 || seen.is_some_and(|previous| previous != stamp) {
+                return None;
+            }
+            seen = Some(stamp);
+        }
+        seen
+    }
+}
+pub(crate) use codex_absence::codex_absent_launch_clear;
+
 #[derive(Serialize, Deserialize)]
 struct Record {
     version: u8,
@@ -230,6 +379,24 @@ pub(in crate::services::discord) fn retains_channel(channel: u64) -> Result<bool
 }
 
 fn retains_channel_at(root: &Path, channel: u64) -> Result<bool, String> {
+    observes_retained_at(root, false, |payload| {
+        [
+            "/channel_id",
+            "/watcher_owner_channel_id",
+            "/local/channel_id",
+            "/local/watcher_owner_channel_id",
+            "/local/logical_channel_id",
+        ]
+        .iter()
+        .any(|id| payload.pointer(id).and_then(Value::as_u64) == Some(channel))
+    })
+}
+
+fn observes_retained_at(
+    root: &Path,
+    exact_path: bool,
+    mut holds: impl FnMut(&Value) -> bool,
+) -> Result<bool, String> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -240,6 +407,9 @@ fn retains_channel_at(root: &Path, channel: u64) -> Result<bool, String> {
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
+        if exact_path && !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+            return Ok(true);
+        }
         let encoded = match fs::read_to_string(&path) {
             Ok(encoded) => encoded,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -249,18 +419,7 @@ fn retains_channel_at(root: &Path, channel: u64) -> Result<bool, String> {
         let Some(record) = record.filter(Record::valid) else {
             return Ok(true);
         };
-        let payload = &record.payload;
-        let ids = [
-            "/channel_id",
-            "/watcher_owner_channel_id",
-            "/local/channel_id",
-            "/local/watcher_owner_channel_id",
-            "/local/logical_channel_id",
-        ];
-        if ids
-            .iter()
-            .any(|id| payload.pointer(id).and_then(Value::as_u64) == Some(channel))
-        {
+        if (exact_path && record_path(root, &record.key) != path) || holds(&record.payload) {
             return Ok(true);
         }
     }

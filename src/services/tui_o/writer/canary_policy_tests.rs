@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "fresh_resume_tests.rs"]
+pub(crate) mod fresh_resume;
+
 #[path = "operator_resume_source_tests.rs"]
 mod operator_resume;
 use crate::services::tui_prompt_dedupe::{

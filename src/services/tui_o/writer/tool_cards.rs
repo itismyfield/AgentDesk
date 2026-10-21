@@ -42,6 +42,10 @@ impl ToolCardRun {
         }
     }
 
+    pub(super) fn has_pending_projection_probe(&self) -> bool {
+        !self.rows.is_empty()
+    }
+
     pub(super) fn observe(&mut self, value: &Value) {
         let cwd = value
             .get("cwd")

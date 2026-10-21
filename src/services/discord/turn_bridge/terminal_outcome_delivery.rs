@@ -5,9 +5,6 @@
 //! delivery lease commits, terminal-controller cutover, voice completion,
 //! TUI completion gate, dispatch completion/fail, watcher-delivered mark,
 //! `tv_done`, and terminal status readiness.
-
-use std::sync::Arc;
-
 use super::intake_settlement;
 use super::output_lifecycle::BridgeOutputOwner;
 use super::stream_tick::{
@@ -32,10 +29,13 @@ use delivery_epilogue::{
 use empty_response_recovery::{
     EmptyResponseRecoveryContext, EmptyResponseRecoveryMessage, EmptyResponseRecoveryState,
 };
+#[cfg(test)]
+pub(in crate::services::discord) use foreign_terminal_handoff::custody_test_adapter;
 use recovery_retry::{
     RecoveryRetryContext, RecoveryRetryMessage, RecoveryRetryOutcome, RecoveryRetryState,
     handle_recovery_retry,
 };
+use std::sync::Arc;
 #[cfg(unix)]
 pub(super) use stream_loop::types::PinnedTerminalTransport;
 
