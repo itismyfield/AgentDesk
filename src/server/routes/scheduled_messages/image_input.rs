@@ -160,7 +160,7 @@ pub(super) fn validate_context(context: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(super) fn extract<T>(
+pub(super) fn extract<T: 'static>(
     body: Result<axum::Json<T>, axum::extract::rejection::JsonRejection>,
 ) -> Result<T, AppError> {
     body.map(|axum::Json(body)| body).map_err(|error| {
@@ -169,7 +169,10 @@ pub(super) fn extract<T>(
         } else {
             error.status()
         };
-        let message = match data_error_detail(&error) {
+        // A JsonValue body has no schema, so every path segment is a client key.
+        let schemaless = std::any::TypeId::of::<T>() == std::any::TypeId::of::<JsonValue>();
+        let detail = data_error_detail(&error).filter(|_| !schemaless);
+        let message = match detail {
             Some(detail) => format!("invalid scheduled message JSON: {detail}"),
             None => "invalid scheduled message JSON".to_owned(),
         };
@@ -188,6 +191,10 @@ fn data_error_detail(error: &axum::extract::rejection::JsonRejection) -> Option<
 /// Client literals ("…" strings, `…` values) become `<redacted>`; `field` names, paths and types stay.
 fn redacted_detail(detail: &str) -> Option<String> {
     if detail.contains("imageAttachment") || detail.contains("dataBase64") {
+        return None;
+    }
+    // JsonValue paths (providerTargets, any array-form field) carry client-chosen keys.
+    if detail.starts_with("providerTargets") || detail.starts_with('[') {
         return None;
     }
     let mut out = String::with_capacity(detail.len());

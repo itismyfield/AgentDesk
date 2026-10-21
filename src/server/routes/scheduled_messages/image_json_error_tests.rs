@@ -2,8 +2,12 @@ use super::*;
 
 const PREFIX: &str = "invalid scheduled message JSON";
 
-/// Drives the real create route; extraction fails before the absent pool is touched.
 async fn post_raw(body: &str) -> (StatusCode, String) {
+    send_raw("POST", "/scheduled-messages", body).await
+}
+
+/// Drives the real route; extraction fails before the absent pool is touched.
+async fn send_raw(method: &str, uri: &str, body: &str) -> (StatusCode, String) {
     use std::sync::Arc;
     use tower::ServiceExt;
     let mut config = crate::config::Config::default();
@@ -22,8 +26,8 @@ async fn post_raw(body: &str) -> (StatusCode, String) {
     let response = app
         .oneshot(
             axum::http::Request::builder()
-                .method("POST")
-                .uri("/scheduled-messages")
+                .method(method)
+                .uri(uri)
                 .header("authorization", "Bearer json-error-token")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(body.to_owned()))
@@ -87,7 +91,7 @@ async fn create_json_data_error_detail_is_capped_at_200_chars() {
         error.contains("discordMentionUserIds") && !error.contains('가'),
         "{error}"
     );
-    // No current field yields 200 chars once values are redacted, so the cap is checked directly.
+    // Redacted router details stay short, so the 200-char cap is checked on the helper directly.
     let long = format!(
         "{}: invalid type: string \"{}\", expected {}",
         "가".repeat(150),
@@ -126,4 +130,40 @@ async fn create_json_data_errors_redact_client_values() {
             "{error}"
         );
     }
+}
+
+#[tokio::test]
+async fn dynamic_json_value_errors_stay_generic() {
+    let raw = r#"{"$serde_json::private::RawValue":73757265}"#;
+    // A raw value that fails to reparse errors at the parent path, without the token segment.
+    let nested = r#"{"$serde_json::private::RawValue":"[1,"}"#;
+    let head = r#"{"content":"body","scheduledAt":"2030-01-01T00:00:00Z","providerTargets":"#;
+    // Array form fills fields in declaration order: 0 imageAttachment, 1 content, 10 scheduledAt, 17 providerTargets.
+    let array = |index: usize, value: &str| {
+        let mut items = vec!["null".to_owned(); 20];
+        items[1] = r#""body""#.to_owned();
+        items[10] = r#""2030-01-01T00:00:00Z""#.to_owned();
+        items[index] = value.to_owned();
+        format!("[{}]", items.join(","))
+    };
+    let mut responses = Vec::new();
+    for body in [
+        format!(r#"{head}{{"`":{raw}}}}}"#),
+        format!(r#"{head}{{"field `c2VjcmV0`":{raw}}}}}"#),
+        array(17, &format!(r#"{{"field `c2VjcmV0`":{raw}}}"#)),
+        array(0, &format!(r#"{{"field `c2VjcmV0`":{raw}}}"#)),
+        format!(r#"{head}{{"c2VjcmV0":{nested}}}}}"#),
+    ] {
+        responses.push(post_raw(&body).await);
+    }
+    for body in [
+        format!(r#"{{"field `c2VjcmV0`":{raw}}}"#),
+        format!(r#"{{"c2VjcmV0":{nested}}}"#),
+    ] {
+        responses.push(send_raw("PATCH", "/scheduled-messages/sm-1", &body).await);
+    }
+    assert_eq!(
+        responses,
+        vec![(StatusCode::BAD_REQUEST, PREFIX.to_owned()); 7]
+    );
 }
