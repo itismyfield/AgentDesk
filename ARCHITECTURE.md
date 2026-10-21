@@ -1845,6 +1845,8 @@ src/
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
 │   │   ├── startup_reclaim/
+│   │   │   ├── tests/
+│   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
@@ -1904,7 +1906,8 @@ src/
 │   │   │   ├── retirement_await_tests.rs
 │   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
-│   │   │   └── orphan_sweep_tests.rs
+│   │   │   ├── orphan_sweep_tests.rs
+│   │   │   └── source_guard_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -2566,6 +2569,7 @@ src/
 │   │   ├── queue_overflow_dlq.rs
 │   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
+│   │   ├── queued_dequeue_dispatch_guard_wiring_tests.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
 │   │   ├── reaction_lifecycle.rs

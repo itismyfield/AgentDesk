@@ -6237,6 +6237,8 @@ services::discord::queue_park_ledger::tests::stale_cancelled_snapshot_cannot_red
 services::discord::queue_park_ledger::tests::stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls
 services::discord::queue_park_ledger::tests::unobserved_source_age_is_none_instead_of_zero
 services::discord::queue_reactions::tests::drain_sets_include_only_queue_markers
+services::discord::queued_dequeue_dispatch_guard_wiring_tests::dequeue_guard_ignores_a_decoy_helper_and_code_outside_the_helper
+services::discord::queued_dequeue_dispatch_guard_wiring_tests::dequeue_guard_rejects_commented_helper_or_guard_and_counts_coded_bypass_only
 services::discord::queued_dequeue_dispatch_guard_wiring_tests::dequeue_uses_preservation_aware_stale_dispatch_guard
 services::discord::queued_placeholder_cluster_characterization_tests::a0_failure_signal_characterization_tests::a0_commit_records_each_outcome_verbatim_without_collapsing
 services::discord::queued_placeholder_cluster_characterization_tests::a0_failure_signal_characterization_tests::a0_lease_outcome_has_exactly_three_distinct_arms
@@ -8075,6 +8077,8 @@ services::discord::startup_reclaim::tests::one_shot_guard_is_independent_per_pas
 services::discord::startup_reclaim::tests::orphan_placeholder_candidate_is_exact_old_owned_and_unlinked
 services::discord::startup_reclaim::tests::orphan_placeholder_delete_is_terminal_cleanup_guarded
 services::discord::startup_reclaim::tests::prior_generation_filter_excludes_post_boot_rows
+services::discord::startup_reclaim::tests::source_guard_tests::orphan_delete_order_reads_the_reclaim_item_not_other_code
+services::discord::startup_reclaim::tests::source_guard_tests::orphan_delete_order_rejects_each_commented_step_and_each_swap
 services::discord::startup_reclaim::tests::startup_outer_sweep_builds_durable_plan_and_keeps_linked_placeholders
 services::discord::startup_reclaim::tests::startup_passes_claim_and_reclaim_legacy_channels
 services::discord::status_panel_orphan_store::tests::checked_pending_bind_removal_proves_removal_and_never_queues_a_delete
@@ -8361,6 +8365,8 @@ services::discord::tmux::tmux_output_stream::tests::unique_provider_prose_flood_
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_bound_placeholder_keeps_events_on_status_panel
 services::discord::tmux::tmux_output_stream::tests::watcher_status_panel_fallback_inlines_events_without_status_message
 services::discord::tmux::tmux_session_files::orphan_sweep_tests::orphan_file_sweep_removes_aged_bound_and_unbound_groups
+services::discord::tmux::tmux_session_files::source_guard_tests::spawn_marker_guard_counts_coded_calls_and_writes_but_not_comments
+services::discord::tmux::tmux_session_files::source_guard_tests::spawn_marker_guard_rejects_commented_combined_and_prepared_calls
 services::discord::tmux::tmux_session_files::tests::adoption_current_generation_marker_is_a_noop
 services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fresh_incarnation_with_an_old_mtime
 services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
