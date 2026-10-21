@@ -2215,7 +2215,14 @@ async fn idle_queue_take_next_soft_if_ready(
 }
 
 #[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests;
+mod queued_dequeue_dispatch_guard_wiring_tests {
+    mod source_guard_tests;
+
+    #[test]
+    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
+        source_guard_tests::assert_dequeue_guard();
+    }
+}
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     shared: &SharedData,

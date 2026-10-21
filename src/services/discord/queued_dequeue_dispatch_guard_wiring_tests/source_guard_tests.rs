@@ -1,10 +1,10 @@
 //! Classification 2: the dequeue helper's stale guard inside the real helper item, comments
 //! excluded. A lexical tripwire; aliases, macros and reachability are not proven.
 
-use super::router::source_guard_support::{Lexed, forge};
+use crate::services::discord::router::source_guard_support::{Lexed, forge};
 use crate::test_support::CommentForgery;
 
-const QUEUE_DISPATCH: &str = include_str!("queue_dispatch.rs");
+const QUEUE_DISPATCH: &str = include_str!("../queue_dispatch.rs");
 
 const HELPER: &str = "async fn mailbox_take_soft_intervention(";
 const QUEUED_GUARD: &str = "stale_dispatch_turn_for_queued_intervention(";
@@ -29,8 +29,7 @@ fn queued_stale_guard_gaps(source: &str) -> Vec<String> {
     gaps
 }
 
-#[test]
-fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
+pub(super) fn assert_dequeue_guard() {
     assert_eq!(
         queued_stale_guard_gaps(QUEUE_DISPATCH),
         Vec::<String>::new()

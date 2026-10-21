@@ -1470,6 +1470,8 @@ src/
 │   │   ├── queue_park_ledger/
 │   │   │   ├── cancel_park_tests.rs
 │   │   │   └── promote_hold.rs
+│   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
+│   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
@@ -2610,7 +2612,6 @@ src/
 │   │   ├── queue_overflow_dlq.rs
 │   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
-│   │   ├── queued_dequeue_dispatch_guard_wiring_tests.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
 │   │   ├── reaction_lifecycle.rs
