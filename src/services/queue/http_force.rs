@@ -1,6 +1,5 @@
-//! A forced cancel of a Herdr execution. It is chosen from the same session read the cancel made,
-//! retired by the P11 terminate service, and its effects run under that service's exclusion;
-//! every other cancel keeps its existing path.
+//! A forced cancel of a Herdr execution, picked from the cancel's own session read: the P11
+//! terminate service retires it and its effects run under that service's exclusion.
 
 use std::sync::Arc;
 

@@ -3378,9 +3378,8 @@ fn exclusion_built_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<Stri
     )]
 }
 
-/// Effects a forced Herdr cancel may reach only through the terminate service and the
-/// exclusion it hands back: lifecycle kills, token cancels, raw host or process kills, SQL,
-/// and queue purges or drains.
+/// Effects a forced Herdr cancel reaches only through the terminate service and its exclusion:
+/// lifecycle and raw kills, token cancels, SQL, and queue purges or drains.
 const E07_FORBIDDEN: &[&str] = &[
     "force_kill_turn",
     "force_kill_turn_for_row",

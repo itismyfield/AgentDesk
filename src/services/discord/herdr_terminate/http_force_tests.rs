@@ -1,6 +1,5 @@
-//! The forced turn cancel through the production router on the fake Herdr rig and a throwaway
-//! PG: it ends the execution through the scoped P11 terminate, and its dispatch, session and
-//! queue effects happen only once that run retired and settled, under its exclusion.
+//! The forced turn cancel through the production router on the fake Herdr rig and a throwaway PG:
+//! its dispatch, session and queue effects happen only once the scoped run retired and settled.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -313,9 +312,8 @@ async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-// The positive control: a forced cancel of a running dispatched turn on a row the turn-start
-// writer marked active retires the execution, then cancels its dispatch, disconnects its row and
-// purges and records its queue, answering with the existing keys and one cancel observation.
+// The positive control: a forced cancel of a dispatched turn on a row the turn-start writer marked
+// active retires it, then cancels, disconnects, purges and records once, with the existing keys.
 #[test]
 fn e07_force_retires_then_applies_effects_once_pg() {
     let Some((rig, runtime)) = rig_child("e07_force_retires_then_applies_effects_once_pg") else {
@@ -563,9 +561,8 @@ fn e07_retired_postlude_field_comparison_pg() {
     });
 }
 
-// The dispatch the cancel selected binds the run: a captured turn on another dispatch, a row whose
-// active dispatch moved under the fence, or a turn that ended and gave way are refused before
-// any close, and the running turn and both dispatches stay.
+// The selected dispatch binds the run: another dispatch's captured turn, a row whose dispatch moved
+// under the fence, or a turn that gave way is refused before any close, the running turn kept.
 #[test]
 fn e07_lookup_capture_dispatch_change_refuses_pg() {
     let Some((rig, runtime)) = rig_child("e07_lookup_capture_dispatch_change_refuses_pg") else {
@@ -653,10 +650,8 @@ impl Node {
     }
 }
 
-// Every refusal and failure of the run leaves the session, dispatches and queue as they were;
-// one that went past the close says so with a 500, and only a run that retired and settled
-// reaches the postlude. An idle execution's retire purges its actor's queue, and with no actor
-// the reply claims no queue proof.
+// Every refusal or failure leaves session, dispatches and queue as they were, a 500 past the close;
+// only a retired, settled run reaches the postlude, and with no actor no queue proof is claimed.
 #[test]
 fn force_terminal_failure_matrix_pg() {
     let Some((rig, runtime)) = rig_child("force_terminal_failure_matrix_pg") else {
@@ -948,9 +943,8 @@ fn force_o_and_legacy_output_continuity_pg() {
     });
 }
 
-// Cancels the force branch does not take answer exactly as with the switch off: a Qwen record,
-// a row this channel names only by its thread while its execution is another channel's, a row
-// with no channel identity, and a non-forced cancel; none of them closes anything.
+// Cancels the force branch does not take (Qwen, another channel's execution named by its thread,
+// no channel identity, not forced) answer as with the switch off and close nothing.
 #[test]
 fn force_non_target_equivalence_pg() {
     let Some((rig, runtime)) = rig_child("force_non_target_equivalence_pg") else {
@@ -1008,9 +1002,8 @@ fn force_non_target_equivalence_pg() {
     });
 }
 
-// A row a Retired record already closes is no forced cancel's success, whoever retired it: a
-// recovery's retire before the run's fence, or one whose hold cleanup is still pending, is
-// refused with nothing applied; and while the run holds the transition a recovery cannot take it.
+// A recovery's retire before the fence, or one with hold cleanup pending, is refused with nothing
+// applied; while the run holds the transition through its postlude a recovery cannot take it.
 #[test]
 fn e07_root_replaced_force_race_pg() {
     let Some((rig, runtime)) = rig_child("e07_root_replaced_force_race_pg") else {
@@ -1071,9 +1064,8 @@ fn e07_root_replaced_force_race_pg() {
     });
 }
 
-// A record a `!clear` retired by RootReplaced recovery is no forced cancel's success: the cancel is
-// refused, and the dispatch, the row's state and the input queued after the clear are as the clear
-// left them, so what the clear did is never counted as the cancel's.
+// A record a `!clear` retired by RootReplaced recovery is no forced cancel's success: refused, with
+// the dispatch, row and input queued after the clear left as the clear left them.
 #[test]
 fn e07_root_replaced_retired_is_not_http_success_pg() {
     use super::super::super::commands::control::{

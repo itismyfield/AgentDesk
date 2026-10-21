@@ -248,9 +248,8 @@ async fn run_probe(slot: &'static std::thread::LocalKey<ProbeSlot>) {
     }
 }
 
-/// `exclusion` (channel transition guard and execution fence) is handed back only once the turn
-/// settled, and dropped before any other answer, so input arriving once the hold is gone waits
-/// in the queue instead of reaching the pane.
+/// `exclusion` (transition guard and fence) comes back only once the turn settled and is dropped
+/// on any other answer, so input arriving once the hold is gone waits in the queue.
 async fn settle_and_release<E>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

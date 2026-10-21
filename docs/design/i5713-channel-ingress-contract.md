@@ -166,6 +166,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/text_commands/native_stop.rs` | admission | `admit_command` :10, `command_scope` :14; !stop preflight·ACK·종료 확인이 같은 permit 안에서 실행된다 |
 | `src/services/discord/turn_bridge/tmux_runtime/native_stop.rs` | command context | `current_command`·`command_scope`; 전달 task가 caller 취소 뒤에도 받은 permit을 I/O 완료까지 보유한다 |
 | `src/services/discord/herdr_terminate/root_replaced.rs` | admission | `admit_command` :226 뒤 같은 permit을 proof·retirement·cleanup까지 보유. blocking proof :265·:290와 cleanup :347은 `command_worker_scope`를 복원하며 새 home 권위를 만들지 않음 |
+| `src/services/discord/herdr_terminate/http_force.rs` | command context | `command_scope` :46: 넘겨받은 permit을 detached 종료·후처리 task가 결과 기록까지 보유한다. 새 home 권위를 만들지 않음 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
@@ -182,7 +183,8 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/tui_o/writer/actor/transition_snapshot.rs` | 관측 | `home_now` :155: `registered_channel`로 요청 epoch의 home이 열려 있는지만 읽는다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/transition_port.rs` | admission | 전환 요청이 `CommandPermit` :40을 운반한다. 발급은 `admit_command` |
 | `src/services/discord/health/o_transition.rs` | admission | 운영자 전환 요청의 Context 조달 `home_admission` :109: 같은 home lock 아래 `registered_channel`·`ownership`으로 epoch를 확인하고 `admit_at_epoch(…, recovery=false)`로 `CommandPermit`을 받는다. row·gate를 쓰지 않는다 |
-| `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :243, `admit_command` :501 |
+| `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :106·:110, `admit_command` :353 |
+| `src/services/queue/http_force.rs` | command context | `current_command` :52: 강제 취소가 받은 `cancel_turn` permit을 clone해 Herdr 종료 어댑터에 넘긴다. 새 admission 없음 |
 | `src/services/session_forwarding/home_stop.rs` | 라우팅·admission | sender `read_home` :176, receiver `read_home` :335 → `registered` :368 |
 | `src/services/turn_host.rs` | admission·readiness | `home_refusal` :118, `for_turn` :130, `refusal_before_turn` :155 |
 | `src/services/tui_o/cutover.rs` | admission | `delegated` → `registered` :121 |

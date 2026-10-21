@@ -1,6 +1,5 @@
-//! An HTTP force cancel's way into the P11 terminate service: the scoped run and the caller's
-//! postlude share one detached task, so a dropped request ends neither, and the postlude runs
-//! only while the run's [`RetiredExclusion`] is held.
+//! An HTTP force cancel's way into the P11 terminate service: the scoped run and its postlude
+//! share one detached task, and the postlude runs only while the [`RetiredExclusion`] is held.
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
