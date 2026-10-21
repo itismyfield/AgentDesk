@@ -103,6 +103,21 @@ fn pinned_upstream_unit_outputs_match_the_replica() {
             }
             operation => panic!("unknown pinned upstream operation: {operation}"),
         };
+        let name = case["upstream_test"].as_str().unwrap();
+        let body = UNIT_TESTS.split(&format!("fn {name}() {{")).nth(1).unwrap()
+            .split("    }").next().unwrap();
+        let mut assertions = 0;
+        for line in body.lines() {
+            if let Some(expression) = line.trim().strip_prefix("assert!(").and_then(|s| s.strip_suffix(");")) {
+                let negative = expression.starts_with('!');
+                let expression = expression.strip_prefix('!').unwrap_or(expression);
+                let literal = expression.strip_prefix("updated.contains(").and_then(|s| s.strip_suffix(')')).unwrap();
+                let needle: String = serde_json::from_str(literal).unwrap();
+                assert_eq!(actual.contains(&needle), !negative, "pinned_upstream_original_expectation_contract: {name} {literal}");
+                assertions += 1;
+            }
+        }
+        assert!(assertions > 0, "pinned_upstream_expectations_execute_nonzero_contract");
         let expected = case["expected"].as_str().unwrap();
         assert_eq!(
             oracle, expected,
