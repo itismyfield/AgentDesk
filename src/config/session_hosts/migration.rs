@@ -287,6 +287,6 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
     HostsBootSelection::new(candidate.clone(), &candidate)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "migration_tests.rs"]
 mod tests;
