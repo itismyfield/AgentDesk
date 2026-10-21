@@ -41,10 +41,6 @@ pub(in crate::services::discord) fn marker_witness(marker: HostKindMarker) -> Ho
     }
 }
 
-pub(in crate::services::discord) fn tmux_marker_is_known(name: &str) -> bool {
-    read_host_kind_marker(name) == HostKindMarker::Known(HostKind::Tmux)
-}
-
 /// Adds what the inflight row carries without overwriting what the caller read.
 /// A differing locator reads as unrecognized and a differing tmux name as a name conflict.
 pub(in crate::services::discord) fn with_inflight_row(

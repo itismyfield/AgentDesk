@@ -425,7 +425,6 @@ async fn run_tick_with_tools(
         output_path: &fx.output_path,
         turn_delivered: &delivered_flag,
         host: &HostSnapshot::new(WatchHost::Legacy),
-        legacy_mode: WatcherLegacyMode::Legacy,
     };
     let turn = StreamingStatusTickTurn {
         data_start_offset: 0,

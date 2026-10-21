@@ -17,7 +17,6 @@ pub(in crate::services::discord) struct Snapshot {
     pub(in crate::services::discord) stream_decoder_initialization_observed: bool,
     pub(in crate::services::discord) decoded_chunks: Vec<String>,
     pub(in crate::services::discord) parser_responses: Vec<String>,
-    pub(in crate::services::discord) retired_terminal_ranges: Vec<(u64, u64)>,
     pub(in crate::services::discord) events: BTreeMap<&'static str, usize>,
 }
 
@@ -58,12 +57,6 @@ impl Snapshot {
                 .iter()
                 .skip(baseline.parser_responses.len())
                 .cloned()
-                .collect(),
-            retired_terminal_ranges: self
-                .retired_terminal_ranges
-                .iter()
-                .skip(baseline.retired_terminal_ranges.len())
-                .copied()
                 .collect(),
             events,
         }
@@ -239,20 +232,6 @@ pub(in crate::services::discord) fn source_decoded(source: SourceFileIdentity, t
         keyed.decoded_source_chunks += 1;
         keyed.decoded_chunks.push(text.to_owned());
     }
-}
-
-pub(in crate::services::discord) fn retired_terminal_consumed(
-    provider: &ProviderKind,
-    channel: u64,
-    range: (u64, u64),
-) {
-    update(provider, channel, |snapshot| {
-        snapshot.retired_terminal_ranges.push(range);
-        *snapshot
-            .events
-            .entry("retired_terminal_consumed")
-            .or_default() += 1;
-    });
 }
 
 #[path = "o_seed_observation/terminal_barrier_test.rs"]

@@ -150,9 +150,6 @@ impl super::loop_poll_prologue::WatcherSourceAuthority {
             &ctx.watcher_provider,
             ctx.channel_id.get(),
         );
-        if !ctx.legacy_mode.is_legacy() {
-            return Ok((tool_state, None));
-        }
         let row = crate::services::discord::inflight::load_inflight_state(
             &ctx.watcher_provider,
             ctx.channel_id.get(),
@@ -350,10 +347,6 @@ impl Utf8ChunkDecoder {
                 }
             }
         }
-    }
-
-    pub(super) fn pending_len(&self) -> u64 {
-        self.pending.len() as u64
     }
 
     pub(super) fn has_pending(&self) -> bool {

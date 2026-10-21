@@ -93,7 +93,6 @@ pub(in crate::services::discord) fn recorded_episode(
 
 #[derive(Clone)]
 pub(in crate::services::discord) struct Pending {
-    legacy_mode: WatcherLegacyMode,
     provider: ProviderKind,
     session: String,
     path: String,
@@ -146,53 +145,37 @@ impl Pending {
             custody.path.as_str(),
             &custody.cancel,
         );
-        let same_episode = if !custody.legacy_mode.is_legacy() {
-            self.legacy_mode == custody.legacy_mode
-                && self.identity.is_none()
-                && self.nonce.is_none()
-                && self.restored.is_none()
-                && self.rewind.is_none()
-                && self.rewind_key.is_none()
-                && self.rewind_attempts == 0
-                && self.turn.as_ref().is_none_or(|turn| {
-                    turn.startup_inflight_snapshot.is_none()
-                        && turn.turn_identity_for_panel.is_none()
-                        && turn.restored_response_seed.is_empty()
-                })
-        } else {
-            self.legacy_mode.is_legacy()
-                && match row {
-                    Some(row) => {
+        let same_episode = match row {
+            Some(row) => {
+                self.identity
+                    .as_ref()
+                    .is_some_and(|id| id.matches_state(row))
+                    && self.nonce == row.turn_nonce
+                    && row.output_path.as_deref() == Some(path)
+            }
+            None => {
+                // Missing projection is not lost custody. Resume only an episode
+                // captured while the original source/turn was known, never a fresh
+                // rowless read or an identity reconstructed from the successor.
+                // Existing publication/receipt/lease gates still decide delivery.
+                self.turn
+                    .as_ref()
+                    .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
+                    .is_some_and(|original| {
                         self.identity
                             .as_ref()
-                            .is_some_and(|id| id.matches_state(row))
-                            && self.nonce == row.turn_nonce
-                            && row.output_path.as_deref() == Some(path)
-                    }
-                    None => {
-                        // Missing projection is not lost custody. Resume only an episode
-                        // captured while the original source/turn was known, never a fresh
-                        // rowless read or an identity reconstructed from the successor.
-                        // Existing publication/receipt/lease gates still decide delivery.
-                        self.turn
-                            .as_ref()
-                            .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
-                            .is_some_and(|original| {
-                                self.identity
-                                    .as_ref()
-                                    .is_some_and(|id| id.matches_state(original))
-                                    && self.nonce.as_deref().is_some_and(|nonce| !nonce.is_empty())
-                                    && self.nonce == original.turn_nonce
-                                    && original.provider == provider.as_str()
-                                    && original.channel_id == channel.get()
-                                    && original.tmux_session_name.as_deref() == Some(session)
-                                    && original.output_path.as_deref() == Some(path)
-                                    && original
-                                        .turn_start_offset
-                                        .is_some_and(|start| start < self.offset)
-                            })
-                    }
-                }
+                            .is_some_and(|id| id.matches_state(original))
+                            && self.nonce.as_deref().is_some_and(|nonce| !nonce.is_empty())
+                            && self.nonce == original.turn_nonce
+                            && original.provider == provider.as_str()
+                            && original.channel_id == channel.get()
+                            && original.tmux_session_name.as_deref() == Some(session)
+                            && original.output_path.as_deref() == Some(path)
+                            && original
+                                .turn_start_offset
+                                .is_some_and(|start| start < self.offset)
+                    })
+            }
         };
         self.provider == *provider
             && self.session == session
@@ -233,7 +216,6 @@ pub(super) struct Custody {
     pending: OwnedMutexGuard<Vec<Pending>>,
     checkpoint: Option<Pending>,
     cancel: Arc<AtomicBool>,
-    legacy_mode: WatcherLegacyMode,
     provider: ProviderKind,
     session: String,
     path: String,
@@ -247,7 +229,6 @@ impl Custody {
         session: &str,
         path: &str,
         cancel: &Arc<AtomicBool>,
-        legacy_mode: WatcherLegacyMode,
     ) -> Option<Self> {
         let store = shared.tmux_relay_coord(channel).cancel_handoffs.clone();
         let pending = match tokio::time::timeout(
@@ -271,7 +252,6 @@ impl Custody {
             pending,
             checkpoint: None,
             cancel: cancel.clone(),
-            legacy_mode,
             provider: provider.clone(),
             session: session.into(),
             path: path.into(),
@@ -319,36 +299,26 @@ impl Custody {
             }
             // Re-read at the incarnation-fenced take, and do not treat an I/O or
             // parse failure as rowless permission. This read cannot backfill a row.
-            let row = if self.legacy_mode.is_legacy() {
-                crate::services::discord::inflight::load_inflight_state_read_only_result(
-                    &self.provider,
-                    channel.get(),
-                )
-                .ok()?
-            } else {
-                None
-            };
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &self.provider,
+                channel.get(),
+            )
+            .ok()?;
             let index = self
                 .pending
                 .iter()
                 .position(|pending| pending.matches(self, shared, channel, row.as_ref()))?;
             let pending = self.pending.remove(index);
-            if self.legacy_mode.is_legacy() {
-                *self
-                    .store
-                    .recorded
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = pending.recorded_episode();
-            }
+            *self
+                .store
+                .recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = pending.recorded_episode();
             #[cfg(test)]
             crate::services::discord::inflight::o_seed_observation::record_event(
                 &self.provider,
                 channel.get(),
-                if self.legacy_mode.is_legacy() {
-                    "capsule_legacy_adopted"
-                } else {
-                    "capsule_o_adopted"
-                },
+                "capsule_legacy_adopted",
             );
             // Moving custody is not settlement. Keep an outgoing checkpoint
             // before the successor can await: cancellation before its first
@@ -378,22 +348,11 @@ impl Custody {
         if turn.is_none() && parser.all_data.is_empty() && !parser.utf8_decoder.has_pending() {
             return;
         }
-        let row = if self.legacy_mode.is_legacy() {
-            turn.and_then(|turn| turn.startup_inflight_snapshot.as_ref())
-                .or(row)
-        } else {
-            None
-        };
-        let mut turn = turn.cloned();
-        if !self.legacy_mode.is_legacy() {
-            if let Some(turn) = &mut turn {
-                turn.startup_inflight_snapshot = None;
-                turn.turn_identity_for_panel = None;
-                turn.restored_response_seed.clear();
-            }
-        }
+        let row = turn
+            .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
+            .or(row);
+        let turn = turn.cloned();
         self.checkpoint = Some(Pending {
-            legacy_mode: self.legacy_mode,
             provider: self.provider.clone(),
             session: self.session.clone(),
             path: self.path.clone(),
@@ -407,26 +366,10 @@ impl Custody {
             turn,
             identity: row.map(InflightTurnIdentity::from_state),
             nonce: row.and_then(|row| row.turn_nonce.clone()),
-            restored: self
-                .legacy_mode
-                .is_legacy()
-                .then(|| parser.restored_turn.clone())
-                .flatten(),
-            rewind: self
-                .legacy_mode
-                .is_legacy()
-                .then(|| parser.pending_terminal_rewind_seed.clone())
-                .flatten(),
-            rewind_key: self
-                .legacy_mode
-                .is_legacy()
-                .then(|| parser.terminal_rewind_attempt_key.clone())
-                .flatten(),
-            rewind_attempts: if self.legacy_mode.is_legacy() {
-                *parser.terminal_rewind_attempts
-            } else {
-                0
-            },
+            restored: parser.restored_turn.clone(),
+            rewind: parser.pending_terminal_rewind_seed.clone(),
+            rewind_key: parser.terminal_rewind_attempt_key.clone(),
+            rewind_attempts: *parser.terminal_rewind_attempts,
             mirrored: *relay.all_data_fully_mirrored_to_session_relay,
             ack: relay.all_data_session_bound_relay_ack.clone(),
             first_sequence: *relay.all_data_first_forwarded_relay_sequence,
@@ -452,42 +395,6 @@ impl Custody {
         self.checkpoint(parser, relay, authority, turn, row.as_ref());
     }
 
-    // Only this completed prefix settles; the successor still owns every tail byte.
-    pub(super) fn settle_retired_prefix(
-        &mut self,
-        authority: WatcherSourceAuthority,
-        range: (u64, u64),
-    ) -> bool {
-        let Some(pending) = self.checkpoint.as_mut() else {
-            return false;
-        };
-        if pending.legacy_mode.is_legacy()
-            || pending.authority != authority
-            || pending.identity.is_some()
-            || pending.nonce.is_some()
-            || pending.restored.is_some()
-            || pending.rewind.is_some()
-            || pending.rewind_key.is_some()
-            || pending.rewind_attempts != 0
-            || pending.buffer_start != range.1
-            || !pending.turn.as_ref().is_some_and(|turn| {
-                turn.found_result
-                    && turn.turn_data_start_offset == range.0
-                    && turn.startup_inflight_snapshot.is_none()
-                    && turn.completion_actor.is_none()
-                    && turn.turn_identity_for_panel.is_none()
-                    && turn.restored_response_seed.is_empty()
-            })
-        {
-            return false;
-        }
-        pending.turn = None;
-        if pending.buffer.is_empty() && !pending.utf8.has_pending() {
-            self.checkpoint = None;
-        }
-        true
-    }
-
     pub(super) fn settled(&mut self) {
         self.checkpoint = None;
         *self
@@ -505,13 +412,11 @@ impl Drop for Custody {
         {
             tracing::info!(session = %self.session, offset = checkpoint.offset,
                 "watcher retained cancellation source/parser/body without advancing delivery");
-            if self.legacy_mode.is_legacy() {
-                *self
-                    .store
-                    .recorded
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = checkpoint.recorded_episode();
-            }
+            *self
+                .store
+                .recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = checkpoint.recorded_episode();
             self.pending.push(checkpoint);
         }
     }
@@ -564,7 +469,6 @@ pub(in crate::services::discord) mod capsule_observation {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(in crate::services::discord) struct Summary {
-        pub(in crate::services::discord::tmux::tmux_watcher) origin: WatcherLegacyMode,
         pub body: String,
         pub buffer: String,
         pub offset: u64,
@@ -594,7 +498,6 @@ pub(in crate::services::discord) mod capsule_observation {
         pending
             .iter()
             .map(|capsule| Summary {
-                origin: capsule.legacy_mode,
                 body: capsule
                     .turn
                     .as_ref()
