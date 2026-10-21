@@ -695,7 +695,7 @@ services::discord::task_notification_delivery::tests
 services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::sweep_tests
 services::discord::terminal_ui_obligation::tests
-services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::pg_tests
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -2445,7 +2445,7 @@ services::discord::terminal_delivery_custody::pg_tests::foreign_terminal_custody
 services::discord::terminal_ui_obligation::sweep_tests::sweep_reconciles_every_obligation_shape_pg
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
-services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
+services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
