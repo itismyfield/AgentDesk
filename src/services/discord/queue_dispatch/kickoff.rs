@@ -5,6 +5,82 @@ use super::super::*;
 #[path = "cancel_backstop_race_support_tests.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
+#[cfg(test)]
+type OwnerRacePause = (
+    ChannelId,
+    &'static str,
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+);
+#[cfg(test)]
+static OWNER_RACE_PAUSES: std::sync::Mutex<Vec<OwnerRacePause>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static OWNER_RACE_KICKS: std::sync::Mutex<Vec<(ChannelId, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(in crate::services::discord) fn owner_race_kick_attempts(channel: ChannelId) -> usize {
+    OWNER_RACE_KICKS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.0 == channel)
+        .map_or(0, |entry| entry.1)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn install_owner_race_pause(
+    channel: ChannelId,
+    stage: &'static str,
+) -> (
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut pauses = OWNER_RACE_PAUSES.lock().unwrap();
+    assert!(
+        !pauses
+            .iter()
+            .any(|pause| pause.0 == channel && pause.1 == stage)
+    );
+    pauses.push((channel, stage, entered.clone(), resume.clone()));
+    if stage == "kickoff_before_take" {
+        let mut counts = OWNER_RACE_KICKS.lock().unwrap();
+        if !counts.iter().any(|entry| entry.0 == channel) {
+            counts.push((channel, 0));
+        }
+    }
+    (entered, resume)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) async fn owner_race_pause(
+    channel: ChannelId,
+    stage: &'static str,
+) {
+    if stage == "kickoff_before_take"
+        && let Some(entry) = OWNER_RACE_KICKS
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry.0 == channel)
+    {
+        entry.1 += 1;
+    }
+    let pause = {
+        let mut pauses = OWNER_RACE_PAUSES.lock().unwrap();
+        pauses
+            .iter()
+            .position(|pause| pause.0 == channel && pause.1 == stage)
+            .map(|at| pauses.remove(at))
+    };
+    if let Some((_, _, entered, resume)) = pause {
+        entered.notify_one();
+        resume.notified().await;
+    }
+}
+
 /// The authority one kickoff runs with: the idle start, or only the busy-TUI paste of the first
 /// ready input, named by the automatic entry point that asked for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +176,9 @@ async fn kickoff_queue_channel_inner(
 
     #[cfg(test)]
     let _cancel_backstop_race = cancel_backstop_test_support::pause(channel_id).await;
+
+    #[cfg(test)]
+    owner_race_pause(channel_id, "kickoff_before_take").await;
 
     let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
     if let Some(error) = take_next.persistence_error.as_ref() {

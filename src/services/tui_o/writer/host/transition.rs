@@ -13,14 +13,20 @@ pub(super) struct Ports {
 
 impl<I: HostIo> Hosted<'_, I> {
     /// Starts the actor inside the scopes that hand this run's receivers to it.
-    pub(super) fn spawn_ports<T>(&self, spawn: impl FnOnce() -> T) -> (Ports, T) {
+    pub(super) fn spawn_ports<T>(
+        &self,
+        suspension: super::super::suspension::Suspension,
+        spawn: impl FnOnce() -> T,
+    ) -> (Ports, T) {
         let generation = self.claim.generation;
         let wall: transition_port::Wall = Arc::new(SystemTime::now);
         let stopping = self.stopping.clone();
         let (transition, receiver) =
             TransitionPort::new(generation, Arc::clone(self.gate), wall, stopping);
+        let transition = transition.with_suspension(suspension.clone());
         let (submission, spawned) = if self.provider == ShadowProvider::Codex {
             let (submission, commands) = actor::codex_submission::Port::new(generation);
+            let submission = submission.with_suspension(suspension);
             let spawn = || actor::codex_submission::spawning(commands, spawn);
             (Some(submission), transition_port::spawning(receiver, spawn))
         } else {
@@ -93,7 +99,11 @@ impl Readiness {
         {
             return Err("actor_unavailable");
         }
-        consume(live.transition.as_ref().ok_or("actor_unavailable")?)
+        let port = live.transition.as_ref().ok_or("actor_unavailable")?;
+        if !port.sources_unsuspended() {
+            return Err("suspended_sources");
+        }
+        consume(port)
     }
 }
 

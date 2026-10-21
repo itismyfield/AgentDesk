@@ -6,6 +6,14 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home;
 
+mod input;
+#[cfg(test)]
+pub(crate) use input::{InputProbe, install_probe};
+pub(crate) use input::{
+    for_claimed_input, for_input_placement, held_input_channels, selected_codex_input,
+    text_for_input_placement,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeRoute {
     /// Not an O channel, or the writer is off: existing placement applies unchanged.
@@ -36,18 +44,33 @@ pub(crate) fn route_text_for_placement(provider: &str, channel: &str) -> IntakeR
 }
 
 fn placed(provider: &str, channel: Option<u64>) -> IntakeRoute {
+    placed_with(provider, channel, judge)
+}
+
+fn placed_with(
+    provider: &str,
+    channel: Option<u64>,
+    judge: fn(&str, u64, RuntimeHandoffKind) -> IntakeRoute,
+) -> IntakeRoute {
     if let Some(reason) = channel.and_then(crate::services::cluster::home_availability::refusal) {
         return IntakeRoute::Hold(format!("delegation unavailable: {reason}"));
     }
     if let Err(detail) = super::claim_for_placement(channel) {
         return IntakeRoute::Hold(detail);
     }
-    route_parsed(provider, || channel)
+    route_parsed_with(provider, || channel, judge)
 }
 
 /// O-owned channels this process must not claim for `provider`, and delegated channels whose
 /// home takes no intake here, as stored in intake rows.
 pub(crate) fn held_channels(provider: &str) -> Vec<String> {
+    held_with(provider, judge)
+}
+
+fn held_with(
+    provider: &str,
+    judge: fn(&str, u64, RuntimeHandoffKind) -> IntakeRoute,
+) -> Vec<String> {
     let owned = super::owned_channels();
     let held = |&(channel, kind): &(u64, RuntimeHandoffKind)| {
         let held = judge(provider, channel, kind) != IntakeRoute::Gateway;
@@ -70,6 +93,14 @@ pub(crate) fn held_channels(provider: &str) -> Vec<String> {
 /// A known destination reads only its own adoption, so another channel's adoption in progress
 /// never delays it; an unknown one is held once any channel is O-owned.
 fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> IntakeRoute {
+    route_parsed_with(provider, channel, judge)
+}
+
+fn route_parsed_with(
+    provider: &str,
+    channel: impl FnOnce() -> Option<u64>,
+    judge: impl FnOnce(&str, u64, RuntimeHandoffKind) -> IntakeRoute,
+) -> IntakeRoute {
     match channel() {
         Some(channel)
             if crate::services::cluster::home_availability::refusal(channel).is_some() =>
@@ -95,6 +126,15 @@ fn route_parsed(provider: &str, channel: impl FnOnce() -> Option<u64>) -> Intake
 }
 
 fn judge(provider: &str, channel: u64, kind: RuntimeHandoffKind) -> IntakeRoute {
+    judge_with(provider, channel, kind, writer_route)
+}
+
+fn judge_with(
+    provider: &str,
+    channel: u64,
+    kind: RuntimeHandoffKind,
+    accept: impl FnOnce(u64) -> IntakeRoute,
+) -> IntakeRoute {
     let provider_kind = match provider.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(RuntimeHandoffKind::ClaudeTui),
         "codex" => Some(RuntimeHandoffKind::CodexTui),
@@ -111,13 +151,21 @@ fn judge(provider: &str, channel: u64, kind: RuntimeHandoffKind) -> IntakeRoute 
             "O channel {channel} waits for its Codex turn confirmation"
         ));
     }
+    accept(channel)
+}
+
+fn writer_route(channel: u64) -> IntakeRoute {
     if accepts(channel) {
         IntakeRoute::Gateway
     } else {
-        IntakeRoute::Hold(format!(
-            "O channel {channel} runs only on the gateway with its writer ready"
-        ))
+        writer_unready(channel)
     }
+}
+
+fn writer_unready(channel: u64) -> IntakeRoute {
+    IntakeRoute::Hold(format!(
+        "O channel {channel} runs only on the gateway with its writer ready"
+    ))
 }
 
 pub(super) fn accepts(channel: u64) -> bool {

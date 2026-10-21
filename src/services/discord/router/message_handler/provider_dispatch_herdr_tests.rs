@@ -1225,6 +1225,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         system_prompt: None,
         allowed_tools: &[],
         cancel: Arc::new(CancelToken::new()),
+        codex_observation: None,
         remote_profile: None,
         tmux_session_name: Some("AgentDesk-claude-dash"),
         teardown: None,

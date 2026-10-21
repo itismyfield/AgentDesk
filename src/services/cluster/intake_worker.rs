@@ -26,7 +26,7 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 #[cfg(not(test))]
 use crate::services::discord::execute_intake_turn_core;
 use crate::services::discord::{IntakeExecution, IntakeRequest, SharedData, TurnKind};
-use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::tui_o::cutover::intake_route;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use sqlx::PgPool;
@@ -36,6 +36,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(test)]
 use test_executor::execute_intake_turn_core;
+
+mod o_input;
+use o_input::hold_off_o_gateway;
 
 #[derive(Default)]
 struct MarkDoneMissCounters {
@@ -282,7 +285,9 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
-    let mut held = intake_route::held_channels(provider);
+    let mut held = intake_route::held_input_channels(provider)
+        .await
+        .map_err(sqlx::Error::Protocol)?;
     held.sort_unstable();
     held.dedup();
     let claimed =
@@ -328,7 +333,17 @@ pub(crate) async fn run_intake_worker_tick(
             return Ok(TickOutcome::Processed);
         }
     };
-    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+    if hold_off_o_gateway(
+        pool,
+        &row,
+        claim_owner,
+        provider,
+        request.channel_id,
+        target_instance_id,
+        "preaccept",
+    )
+    .await?
+    {
         return Ok(TickOutcome::Held);
     }
 
@@ -401,7 +416,17 @@ pub(crate) async fn run_intake_worker_tick(
     }
 
     // Readiness may have changed while the runtime and uploads resolved.
-    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+    if hold_off_o_gateway(
+        pool,
+        &row,
+        claim_owner,
+        provider,
+        request.channel_id,
+        target_instance_id,
+        "final",
+    )
+    .await?
+    {
         return Ok(TickOutcome::Held);
     }
 
@@ -518,33 +543,6 @@ async fn release_cancelled_claim(
         );
     }
     Ok(())
-}
-
-/// Returns an O channel's claim to pending unless this node's writer can take it right now, so the
-/// row waits for its gateway instead of running here or failing into a retry. A delegated row
-/// also waits unless this node holds the home at the row's epoch with intake open.
-async fn hold_off_o_gateway(
-    pool: &PgPool,
-    row: &IntakeOutboxRow,
-    claim_owner: &str,
-    provider: &str,
-    channel_id: ChannelId,
-) -> Result<bool, sqlx::Error> {
-    let home = super::channel_home::intake_hold(&row.channel_id, row.home_epoch);
-    let Some(detail) = home.or_else(|| match intake_route::route(provider, channel_id.get()) {
-        IntakeRoute::Hold(detail) => Some(detail),
-        IntakeRoute::Unselected | IntakeRoute::Gateway => None,
-    }) else {
-        return Ok(false);
-    };
-    let released = return_claimed_to_pending(pool, row.id, claim_owner).await?;
-    tracing::warn!(
-        row_id = row.id,
-        channel_id = row.channel_id,
-        released,
-        "[intake_worker] O channel held before accept: {detail}"
-    );
-    Ok(true)
 }
 
 /// Run the poll loop forever. Returns when the shutdown probe reads true.

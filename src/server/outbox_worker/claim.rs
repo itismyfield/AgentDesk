@@ -1,4 +1,4 @@
-//! Claim at most one image while retaining the text batch and existing lease.
+//! Claim an id-ordered prefix holding at most one image, keeping the existing lease.
 
 use crate::server::*;
 
@@ -31,8 +31,12 @@ pub(in crate::server) async fn claim_pending_message_outbox_batch_pg(
              FOR UPDATE SKIP LOCKED
              LIMIT 10
         ), claimed AS (
-            SELECT id FROM candidates
-             WHERE NOT image OR id = (SELECT MIN(id) FROM candidates WHERE image)
+            -- Strict id-order prefix that stops before the second image.
+            SELECT id FROM (
+                SELECT id, COUNT(*) FILTER (WHERE image) OVER (ORDER BY id) AS images
+                  FROM candidates
+            ) ordered
+             WHERE images <= 1
         )
         UPDATE message_outbox mo
            SET status = 'processing',
