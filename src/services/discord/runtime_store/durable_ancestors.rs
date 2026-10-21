@@ -1,9 +1,5 @@
-//! Flush of the directories between a published file's parent and a trusted root, so a newly
-//! created provider/token/store directory is linked durably, not just the file inside it.
-//!
-//! A chain flushed by this process is remembered with the identity of every directory on it.
-//! Later publications under the same parent skip the chain only while those identities still
-//! match; a new process, a replaced directory, an eviction or a failed flush re-flushes it all.
+//! Flushes the directories between a published file's parent and a trusted root, remembering
+//! each flushed chain with its directory identities so steady publications skip it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,19 +16,14 @@ const WITNESS_CAP: usize = 512;
 type DirIdentity = (u64, u64);
 type ChainKey = (PathBuf, PathBuf);
 
-/// Flushes every directory strictly above `path`'s parent, up to and including `root`; the
-/// parent itself is the caller's flush. Never opens anything above `root`. A `path` whose parent
-/// is not `root` or below it, through plain names only, is refused as unbounded.
+/// Flushes every directory above `path`'s parent up to and including `root`, never above it;
+/// a parent outside `root` (or reached through `..`) is refused.
 pub(crate) fn fsync_created_ancestors(root: &Path, path: &Path) -> io::Result<()> {
     fsync_ancestors_with(&WITNESS, root, path)
 }
 
 fn fsync_ancestors_with(witness: &Mutex<Witness>, root: &Path, path: &Path) -> io::Result<()> {
     if !PARENT_DIR_FSYNC_FLUSHES {
-        return Ok(());
-    }
-    #[cfg(test)]
-    if super::durable_publish::probe::bypassed(path) {
         return Ok(());
     }
     let parent = path.parent().unwrap_or(Path::new(""));

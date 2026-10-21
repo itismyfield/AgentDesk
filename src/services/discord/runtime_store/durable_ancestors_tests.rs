@@ -10,9 +10,8 @@ fn chain(root: &Path, parent: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// A chain another caller already created is still flushed on first use; a second publication
-/// under the same parent reuses the witness; a new process (fresh witness) and a replaced
-/// directory both flush the whole chain again.
+/// A pre-created chain is still flushed on first use and reused after; a new process, a replaced
+/// directory and racing first publications all end with the whole chain flushed.
 #[cfg(unix)]
 #[test]
 fn ancestors_precreated_raced_and_restarted() {

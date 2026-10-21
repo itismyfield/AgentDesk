@@ -135,9 +135,8 @@ impl std::io::Write for Capture {
     }
 }
 
-/// Every step is told apart: a failure before the rename is an `Err` that leaves the old bytes,
-/// a directory flush failure after it is a published `SyncFailed` holding the whole new bytes.
-/// The target is never removed.
+/// A pre-rename failure is an `Err` leaving the old bytes; a later flush failure is a published
+/// `SyncFailed` holding the whole new bytes. The target is never removed.
 #[cfg(unix)]
 #[test]
 fn publication_failures_at_each_stage() {
@@ -472,10 +471,11 @@ fn blocked_sync_other_channel_keeps_progress() {
             tokio::task::spawn_blocking(move || entered.wait_entered(Duration::from_secs(10)));
         assert!(entered.await.unwrap(), "channel A reached its parent flush");
 
-        let other = registry.handle(b).enqueue(intervention(32), persistence());
+        let other_handle = registry.handle(b);
+        let other = other_handle.enqueue(intervention(32), persistence());
         let other = tokio::time::timeout(Duration::from_secs(10), other).await;
         assert!(other.expect("channel B is not held by A's flush").enqueued);
-        let appended = tokio::task::spawn_blocking(|| {
+        let appended = tokio::task::spawn_blocking(move || {
             crate::services::discord::outbound::completed_turn_ledger::append_before_publish_for_tests(
                 b.get(), 32, "n", 1, || {},
             )

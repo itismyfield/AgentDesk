@@ -1,9 +1,5 @@
-//! Opt-in durable publication for recovery-critical snapshots. The bytes go through the same
-//! temp-write → file sync → rename sequence as `atomic_write`; only after the rename succeeds
-//! are the parent directory and the directories up to a trusted root flushed.
-//!
-//! A flush failure never turns a visible publication back into a write failure: callers that
-//! roll memory back on `Err` would otherwise disagree with what is already on disk.
+//! Opt-in durable publication: the `atomic_write` sequence, then, only after a successful rename,
+//! a flush of the parent and of the directories up to a trusted root.
 
 use std::fs;
 use std::io::{self, Write};
@@ -60,9 +56,8 @@ pub(crate) struct Published {
     pub(crate) flush_status: FlushStatus,
 }
 
-/// Publishes `data` at `path`, then flushes its parent and the directories up to `root`.
-/// `root` is the deepest directory whose own entry the caller already trusts to be durable;
-/// nothing above it is opened.
+/// Publishes `data` at `path`, then flushes its parent and the directories up to `root`, the
+/// deepest directory whose own entry the caller already trusts to be durable.
 pub(crate) fn publish_durable(
     root: &Path,
     path: &Path,
@@ -103,16 +98,10 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
     file.sync_all()
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     #[cfg(test)]
-    probe::mark(path, probe::Step::Rename, &tmp);
-    #[cfg(test)]
     super::rename_fault::before(path, &tmp);
     let renamed = fs::rename(&tmp, path);
     #[cfg(test)]
     super::rename_fault::after(path, &renamed);
-    #[cfg(test)]
-    if renamed.is_ok() {
-        probe::mark(path, probe::Step::Published, &tmp);
-    }
     renamed.map_err(failed(PrePublishStage::Rename, "rename"))
 }
 
@@ -154,7 +143,6 @@ pub(super) fn flush_dir(
     #[cfg(test)]
     match probe::dir_decision(target, open_stage, dir) {
         probe::Decision::Proceed => {}
-        probe::Decision::Bypass => return Ok(()),
         probe::Decision::Fail(stage, error) => return Err((stage, error)),
     }
     #[cfg(not(test))]
@@ -171,9 +159,8 @@ pub(super) fn flush_dir(
     synced
 }
 
-/// For writers with their own post-rename classification: `fsync_parent_dir`, then the directories
-/// up to the runtime root. A path outside the runtime root has no trusted boundary; only its
-/// parent is synced.
+/// `fsync_parent_dir`, then the directories up to the runtime root, for writers that classify the
+/// post-rename outcome themselves; outside the runtime root only the parent is synced.
 pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
     super::fsync_parent_dir(path)?;
     match super::runtime_root() {
@@ -234,9 +221,8 @@ fn log_flush_status(path: &Path, context: &AtomicWriteContext<'_>, status: &Flus
     }
 }
 
-/// Recovery-critical publication: only a failure before the rename is an `Err`, with the same
-/// text and log line `critical_atomic_write` produced. A later flush failure is logged as
-/// published and returns `Ok`, so callers neither retry the rename nor roll memory back.
+/// Recovery-critical publication: only a pre-rename failure is an `Err` (same text and log as
+/// before); a later flush failure is logged as published so callers never roll memory back.
 pub(crate) fn critical_publish(
     path: &Path,
     data: &str,
@@ -312,10 +298,6 @@ pub(crate) fn critical_atomic_write(
 mod tests;
 
 #[cfg(test)]
-#[path = "durable_bench_tests.rs"]
-mod bench;
-
-#[cfg(test)]
 pub(crate) mod probe {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};
@@ -327,9 +309,6 @@ pub(crate) mod probe {
         CreateTemp,
         Write,
         FileSync,
-        /// About to rename; `Published` once the rename succeeded.
-        Rename,
-        Published,
         ParentOpen,
         ParentSync,
         Ancestors,
@@ -353,7 +332,6 @@ pub(crate) mod probe {
         pub(crate) dir: PathBuf,
         pub(crate) ok: bool,
         pub(crate) target_bytes: Option<String>,
-        pub(crate) at: std::time::Instant,
     }
 
     /// Holds a flush until released; `entered` reports that a flush reached it.
@@ -393,12 +371,8 @@ pub(crate) mod probe {
     pub(crate) struct Plan {
         /// Every attempt of these steps fails with `EIO`.
         pub(crate) fail: Vec<Step>,
-        /// Directory flushes return `Ok` without a syscall (the pre-helper baseline).
-        pub(crate) bypass: bool,
         /// Parent flushes wait here before running.
         pub(crate) block: Option<Arc<Gate>>,
-        /// Events leave `target_bytes` empty, so recording adds no read to a timed path.
-        pub(crate) skip_bytes: bool,
     }
 
     struct Entry {
@@ -444,16 +418,6 @@ pub(crate) mod probe {
                 .collect()
         }
 
-        /// Takes the events recorded so far.
-        pub(crate) fn drain(&self) -> Vec<Event> {
-            let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
-            watched
-                .iter_mut()
-                .find(|entry| entry.scope == self.0)
-                .map(|entry| std::mem::take(&mut entry.events))
-                .unwrap_or_default()
-        }
-
         pub(crate) fn count(&self, step: Step) -> usize {
             self.events().iter().filter(|e| e.step == step).count()
         }
@@ -489,14 +453,8 @@ pub(crate) mod probe {
         if fail { Err(eio()) } else { Ok(()) }
     }
 
-    /// The scope stands in for the pre-helper code: no directory work at all.
-    pub(crate) fn bypassed(target: &Path) -> bool {
-        plan_for(target).is_some_and(|plan| plan.bypass)
-    }
-
     pub(super) enum Decision {
         Proceed,
-        Bypass,
         Fail(SyncStage, std::io::Error),
     }
 
@@ -508,9 +466,6 @@ pub(crate) mod probe {
             && let Some(gate) = &plan.block
         {
             gate.pass();
-        }
-        if plan.bypass {
-            return Decision::Bypass;
         }
         let sync_stage = match open_stage {
             SyncStage::ParentOpen => SyncStage::ParentSync,
@@ -529,18 +484,8 @@ pub(crate) mod probe {
         push(target, Step::of(stage), dir, ok);
     }
 
-    pub(super) fn mark(target: &Path, step: Step, tmp: &Path) {
-        push(target, step, tmp, true);
-    }
-
     fn push(target: &Path, step: Step, dir: &Path, ok: bool) {
-        let at = std::time::Instant::now();
-        let skip = plan_for(target).is_none_or(|plan| plan.skip_bytes);
-        let target_bytes = if skip {
-            None
-        } else {
-            std::fs::read_to_string(target).ok()
-        };
+        let target_bytes = std::fs::read_to_string(target).ok();
         let mut watched = WATCHED.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = watched
             .iter_mut()
@@ -553,7 +498,6 @@ pub(crate) mod probe {
                 dir: dir.to_path_buf(),
                 ok,
                 target_bytes,
-                at,
             });
         }
     }
