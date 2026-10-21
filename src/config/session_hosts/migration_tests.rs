@@ -608,7 +608,7 @@ async fn migration_file_store_recovers_previous_generation_without_applying_cand
     let candidate = remap(old.clone(), "/fixture/new.sock");
     std::fs::write(temp.path().join("current.json"), snapshot(1, &candidate)).unwrap();
     std::fs::write(&pending, b"committed").unwrap();
-    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o000)).unwrap();
     assert!(std::fs::read(&pending).is_err());
     let (loaded, warning) = known(store.load());
     assert_eq!(Projection::of(&loaded), Projection::of(&old));
