@@ -236,6 +236,16 @@ async fn fresh_false_can_have_no_startup_proof() {
         cache.startup_for(next.witness()).unwrap().is_none(),
         "next restart evidence does not invent historical startup"
     );
+    let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
+        execution_node: "test-node".into(),
+        config_key: "user".into(),
+        socket_addr: next.witness().socket.to_string_lossy().into_owned(),
+        herdr_session: "agentdesk".into(),
+    };
+    assert!(
+        permit::CreatePermit::new(endpoint, next.clone()).is_ok(),
+        "fresh_create_without_startup_contract"
+    );
     next.revalidate(source.as_ref()).unwrap();
 }
 

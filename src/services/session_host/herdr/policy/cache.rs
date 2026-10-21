@@ -44,10 +44,10 @@ impl ProofCache {
             .get(&key)
             .cloned();
         let prepared = tokio::task::spawn_blocking(move || {
-            if let Some(proof) = cached {
-                if proof.fast_revalidate(&peer).is_ok() {
-                    return Ok((proof, false));
-                }
+            if let Some(proof) = cached
+                && proof.fast_revalidate(&peer).is_ok()
+            {
+                return Ok((proof, false));
             }
             peer.image.fast_unchanged()?;
             let read = file::read(&peer.config)?;
