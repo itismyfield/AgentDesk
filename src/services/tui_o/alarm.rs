@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 use sqlx::PgPool;
 
 use super::shadow::tap::TuiOConfig;
-use super::writer::{AlarmSink, WriterAlarm};
+#[cfg(test)]
+use super::writer::AlarmSink;
+use super::writer::WriterAlarm;
+
+mod sink;
 
 /// NotFound is expected now and then; it becomes an alarm at this many per channel per window.
 pub(crate) const NOT_FOUND_THRESHOLD: usize = 3;
@@ -143,7 +147,7 @@ impl AlarmHealth {
         hits.len() >= NOT_FOUND_THRESHOLD
     }
 
-    /// Pause and reader count end on their own evidence; other sticky conditions wait for an operator.
+    /// The gateway pause ends when owned delivery returns.
     fn resume_gateway(&self, channel: u64) {
         let reason = format!("tui_o:{}:{channel}", PAUSED_NO_GATEWAY);
         locked(&self.active).remove(&reason);
@@ -314,52 +318,6 @@ impl AlarmRouter {
             },
             attempt,
         );
-    }
-}
-
-impl AlarmSink for AlarmRouter {
-    fn raise(&self, channel: u64, alarm: WriterAlarm) {
-        self.raise_at(channel, &alarm, Instant::now());
-    }
-
-    fn reconcile_reader_count(&self, channel: u64, count: usize) {
-        if count <= super::writer::rotation::MAX_READERS {
-            locked(&self.health.active).remove(&format!("tui_o:too_many_readers:{channel}"));
-        }
-    }
-
-    fn resume_pending(&self, channel: u64, pending: bool) {
-        self.health.set_resume_pending(channel, pending);
-    }
-
-    fn halt_cleared(&self, channel: u64) {
-        self.health.clear_halted(channel);
-    }
-
-    fn waiting_cleared(&self, channel: u64) {
-        self.health.clear_waiting(channel);
-    }
-}
-
-impl AlarmSink for Arc<AlarmRouter> {
-    fn raise(&self, channel: u64, alarm: WriterAlarm) {
-        self.as_ref().raise(channel, alarm);
-    }
-
-    fn reconcile_reader_count(&self, channel: u64, count: usize) {
-        self.as_ref().reconcile_reader_count(channel, count);
-    }
-
-    fn resume_pending(&self, channel: u64, pending: bool) {
-        self.as_ref().resume_pending(channel, pending);
-    }
-
-    fn halt_cleared(&self, channel: u64) {
-        self.as_ref().halt_cleared(channel);
-    }
-
-    fn waiting_cleared(&self, channel: u64) {
-        self.as_ref().waiting_cleared(channel);
     }
 }
 

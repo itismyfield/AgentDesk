@@ -926,6 +926,8 @@ src/
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
 │   │   ├── session/
+│   │   │   ├── source_observation_tests/
+│   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
@@ -3078,6 +3080,8 @@ src/
 │   │   ├── submission.rs
 │   │   └── submission_tmux.rs
 │   ├── tui_o/
+│   │   ├── alarm/
+│   │   │   └── sink.rs
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
 │   │   │   │   └── body_check.rs
@@ -3215,11 +3219,13 @@ src/
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
+│   │   │   ├── codex_launch_cause_tests.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_pg_tests.rs
@@ -3379,6 +3385,8 @@ src/
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
+│   │   │   ├── pane_registration/
+│   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
 │   │   │   ├── claude_source.rs
