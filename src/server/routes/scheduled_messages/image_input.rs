@@ -191,16 +191,46 @@ pub(super) fn extract<T>(
     })
 }
 
-/// Field-level serde detail, withheld whenever it touches imageAttachment so base64 never echoes.
 fn data_error_detail(error: &axum::extract::rejection::JsonRejection) -> Option<String> {
     let axum::extract::rejection::JsonRejection::JsonDataError(error) = error else {
         return None;
     };
-    let detail = std::error::Error::source(error)?.to_string();
+    redacted_detail(&std::error::Error::source(error)?.to_string())
+}
+
+/// Field-level serde detail, withheld whenever it touches imageAttachment so base64 never echoes.
+/// Client literals ("…" strings, `…` values) become `<redacted>`; `field` names, paths and types stay.
+fn redacted_detail(detail: &str) -> Option<String> {
     if detail.contains("imageAttachment") || detail.contains("dataBase64") {
         return None;
     }
-    Some(detail.chars().take(200).collect())
+    let mut out = String::with_capacity(detail.len());
+    let mut chars = detail.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => _ = chars.next(),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+                out.push_str("\"<redacted>\"");
+            }
+            '`' => {
+                let literal: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                let kept = if out.ends_with("field ") {
+                    literal.as_str()
+                } else {
+                    "<redacted>"
+                };
+                out.push_str(&format!("`{kept}`"));
+            }
+            _ => out.push(c),
+        }
+    }
+    Some(out.chars().take(200).collect())
 }
 
 #[cfg(test)]

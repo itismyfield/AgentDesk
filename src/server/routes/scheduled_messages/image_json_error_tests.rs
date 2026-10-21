@@ -83,12 +83,47 @@ async fn create_json_data_error_detail_is_capped_at_200_chars() {
     );
     let (status, error) = post_raw(&body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let detail = error
-        .strip_prefix(PREFIX)
-        .unwrap()
-        .strip_prefix(": ")
-        .unwrap();
-    assert!(detail.contains("discordMentionUserIds"), "{error}");
-    assert_eq!(detail.chars().count(), 200, "{error}");
-    assert!(detail.ends_with('가'), "{error}");
+    assert!(
+        error.contains("discordMentionUserIds") && !error.contains('가'),
+        "{error}"
+    );
+    // No current field yields 200 chars once values are redacted, so the cap is checked directly.
+    let long = format!(
+        "{}: invalid type: string \"{}\", expected {}",
+        "가".repeat(150),
+        "나".repeat(300),
+        "다".repeat(100)
+    );
+    let detail = redacted_detail(&long).unwrap();
+    assert_eq!(detail.chars().count(), 200, "{detail}");
+    assert!(detail.ends_with('다') && !detail.contains('나'), "{detail}");
+}
+
+#[tokio::test]
+async fn create_json_data_errors_redact_client_values() {
+    let field =
+        r#"{"content":"body","scheduledAt":"2030-01-01T00:00:00Z","discordMentionUserIds":"#;
+    for (body, kept) in [
+        (
+            format!(r#"{field}"c2VjcmV0"}}"#),
+            "discordMentionUserIds: invalid type: string",
+        ),
+        (format!(r#"{field}"x\"c2VjcmV0"}}"#), "expected a sequence"),
+        (
+            format!(r#"{field}["1",73757265]}}"#),
+            "discordMentionUserIds[1]: invalid type: integer",
+        ),
+        (
+            r#""c2VjcmV0""#.to_owned(),
+            "expected struct CreateScheduledMessageBody",
+        ),
+    ] {
+        let (status, error) = post_raw(&body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error.starts_with(PREFIX) && error.contains(kept), "{error}");
+        assert!(
+            !error.contains("c2VjcmV0") && !error.contains("73757265"),
+            "{error}"
+        );
+    }
 }

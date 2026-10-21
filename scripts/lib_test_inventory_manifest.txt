@@ -1606,6 +1606,7 @@ server::routes::scheduled_messages::discord_mentions::tests::required_discord_me
 server::routes::scheduled_messages::discord_mentions::tests::required_discord_mentions_do_not_apply_to_agent_delivery
 server::routes::scheduled_messages::image_input::json_error_tests::create_json_data_error_detail_is_capped_at_200_chars
 server::routes::scheduled_messages::image_input::json_error_tests::create_json_data_errors_name_the_offending_field
+server::routes::scheduled_messages::image_input::json_error_tests::create_json_data_errors_redact_client_values
 server::routes::scheduled_messages::image_input::json_error_tests::create_json_errors_keep_image_and_non_data_rejections_generic
 server::routes::scheduled_messages::image_input::tests::image_context_rejects_mixed_targets_and_rendered_utf16_overflow
 server::routes::scheduled_messages::image_input::tests::image_upload_validates_filename_mime_magic_and_base64
