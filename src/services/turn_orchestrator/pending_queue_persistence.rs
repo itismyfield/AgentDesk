@@ -476,7 +476,7 @@ fn save_channel_queue_locked(
         ));
     }
     if queue.is_empty() && meta.is_none() {
-        return match fs::remove_file(&path) {
+        return match crate::services::discord::runtime_store::remove_file_synced(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
@@ -514,7 +514,7 @@ fn save_channel_queue_locked(
             .provider(provider.as_str())
             .token_hash(token_hash)
             .channel_id(channel_id.get());
-    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)?;
+    crate::services::discord::runtime_store::critical_publish(&path, &json, context)?;
     #[cfg(test)]
     if post_save_fault::take(channel_id) {
         return Err(format!(
@@ -611,7 +611,7 @@ pub(crate) fn save_channel_pending_dispatch_marker(
     .provider(provider.as_str())
     .token_hash(token_hash)
     .channel_id(channel_id.get());
-    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
+    crate::services::discord::runtime_store::critical_publish(&path, &json, context)
 }
 
 pub(super) fn remove_channel_pending_dispatch_marker(
@@ -622,7 +622,7 @@ pub(super) fn remove_channel_pending_dispatch_marker(
     let Some(path) = pending_dispatch_marker_file_path(provider, token_hash, channel_id) else {
         return Ok(());
     };
-    match fs::remove_file(&path) {
+    match crate::services::discord::runtime_store::remove_file_synced(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -661,7 +661,7 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
             if !path.is_file() {
                 continue;
             }
-            match fs::remove_file(&path) {
+            match crate::services::discord::runtime_store::remove_file_synced(&path) {
                 Ok(()) => removed += 1,
                 Err(error) => tracing::warn!(
                     provider = provider.as_str(),

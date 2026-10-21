@@ -2,6 +2,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod durable_ancestors;
+mod durable_publish;
+pub(crate) use durable_publish::{
+    best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, remove_file_synced,
+};
+#[cfg(test)]
+pub(crate) use durable_publish::{critical_atomic_write, probe as durable_probe};
+
 pub(super) fn agentdesk_root() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -827,7 +835,7 @@ pub(super) fn save_last_message_id(provider: &str, channel_id: u64, message_id: 
         .unwrap_or(message_id);
     #[cfg(test)]
     checkpoint_lock_tests::after_read();
-    best_effort_atomic_write_logged(
+    best_effort_publish_logged(
         &path,
         &checkpoint.to_string(),
         AtomicWriteContext::new("last_message")
@@ -1040,6 +1048,8 @@ pub(crate) struct AtomicWriteContext<'a> {
     pub(crate) channel_id: Option<u64>,
     pub(crate) session_key: Option<&'a str>,
     pub(crate) turn_id: Option<&'a str>,
+    /// Trusted root of a durable publication; `None` means the runtime root.
+    pub(crate) durable_root: Option<&'a Path>,
 }
 
 impl<'a> AtomicWriteContext<'a> {
@@ -1051,7 +1061,13 @@ impl<'a> AtomicWriteContext<'a> {
             channel_id: None,
             session_key: None,
             turn_id: None,
+            durable_root: None,
         }
+    }
+
+    pub(crate) fn durable_root(mut self, root: &'a Path) -> Self {
+        self.durable_root = Some(root);
+        self
     }
 
     pub(crate) fn provider(mut self, provider: &'a str) -> Self {
@@ -1067,51 +1083,6 @@ impl<'a> AtomicWriteContext<'a> {
     pub(crate) fn channel_id(mut self, channel_id: u64) -> Self {
         self.channel_id = Some(channel_id);
         self
-    }
-}
-
-/// Recovery-critical writes must be visible when they fail because startup
-/// reconciliation depends on their last durable snapshot.
-pub(crate) fn critical_atomic_write(
-    path: &Path,
-    data: &str,
-    context: AtomicWriteContext<'_>,
-) -> Result<(), String> {
-    atomic_write(path, data).map_err(|error| {
-        tracing::error!(
-            store = context.store,
-            path = %path.display(),
-            provider = ?context.provider,
-            token_hash = ?context.token_hash,
-            channel_id = ?context.channel_id,
-            session_key = ?context.session_key,
-            turn_id = ?context.turn_id,
-            error = %error,
-            "recovery-critical atomic write failed"
-        );
-        error
-    })
-}
-
-/// Best-effort snapshots may not abort their caller, but failures should still
-/// be observable in structured logs.
-pub(crate) fn best_effort_atomic_write_logged(
-    path: &Path,
-    data: &str,
-    context: AtomicWriteContext<'_>,
-) {
-    if let Err(error) = atomic_write(path, data) {
-        tracing::warn!(
-            store = context.store,
-            path = %path.display(),
-            provider = ?context.provider,
-            token_hash = ?context.token_hash,
-            channel_id = ?context.channel_id,
-            session_key = ?context.session_key,
-            turn_id = ?context.turn_id,
-            error = %error,
-            "best-effort atomic write failed"
-        );
     }
 }
 
@@ -1693,7 +1664,7 @@ mod atomic_write_logging_tests {
         fs::write(&parent_file, "blocking-file").unwrap();
         let target = parent_file.join("queue.json");
 
-        let error = critical_atomic_write(
+        let error = critical_publish(
             &target,
             "[]",
             AtomicWriteContext::new("discord_pending_queue")
