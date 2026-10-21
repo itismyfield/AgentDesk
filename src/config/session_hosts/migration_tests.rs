@@ -52,8 +52,8 @@ impl ApprovalStore for CountWrites<'_> {
         self.inner.save(hosts)
     }
 
-    fn recovery_action(&self) -> String {
-        self.inner.recovery_action()
+    fn recovery_action(&self, reason: &str) -> String {
+        self.inner.recovery_action(reason)
     }
 }
 
@@ -317,6 +317,10 @@ async fn migration_live_row_variants_refuse_moves_and_legacy_or_retired_allow_th
             assert_eq!(
                 selected.migration().unwrap().blockers,
                 ["channel 41 row 123"]
+            );
+            assert!(
+                !selected.migration().unwrap().action.contains("interrupted"),
+                "refused migration action must not claim an interrupted approval: {name}"
             );
         }
     }
@@ -713,12 +717,30 @@ fn migration_mode_omitted_and_explicit_legacy_normalize_identically() {
 
 #[test]
 fn migration_user_default_validator_reports_key_and_supported_action() {
-    let config: crate::config::Config = serde_yaml::from_str(
-        "server: {}\nsession_hosts:\n  herdr:\n    endpoints:\n      one:\n        mode: user_default\n        execution_node: test-node\n"
-    ).unwrap();
-    let error = crate::config::validate_config(&config)
-        .unwrap_err()
-        .to_string();
+    let mut config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {}, "cluster": {"instance_id": "test-node"},
+        "agents": [{"id": "fixture", "name": "fixture", "channels": {
+            "claude": {"id": "41", "runtime": "tui"}
+        }}],
+        "session_hosts": {"herdr": {
+            "endpoints": {"one": {"execution_node": "test-node",
+                "socket_path": "/fixture/herdr.sock", "herdr_home": "/fixture/herdr",
+                "herdr_session": "agentdesk"}},
+            "channels": {"41": "one"}
+        }}
+    }))
+    .unwrap();
+    crate::config::validate_config(&config).expect("complete legacy fixture is supported");
+    config
+        .session_hosts
+        .herdr
+        .endpoints
+        .get_mut("one")
+        .unwrap()
+        .mode = EndpointMode::UserDefault;
+    let result = crate::config::validate_config(&config);
+    assert!(result.is_err(), "user_default unsupported guard contract");
+    let error = result.unwrap_err().to_string();
     for required in [
         "session_hosts.herdr.endpoints.one.mode",
         "user_default",
@@ -859,7 +881,7 @@ async fn migration_interrupted_first_seed_reseeds_without_stopping_admission() {
     let (loaded, warning) = known(store.load());
     assert_eq!(Projection::of(&loaded), Projection::of(&candidate));
     assert_eq!(warning, None);
-    let action = store.recovery_action();
+    let action = store.recovery_action("approval_snapshot_not_durable");
     assert!(action.contains(&temp.path().join("pending").display().to_string()));
     assert!(
         action.contains("Restart") && action.contains("permissions") && action.contains("storage")
@@ -967,4 +989,150 @@ async fn migration_no_pool_only_blocks_changes_to_herdr_channels() {
         Some("session_hosts_migration_unverified")
     );
     assert!(store.saved.borrow().is_empty());
+}
+
+#[tokio::test]
+async fn migration_unchanged_diagnostic_keeps_candidate_shape_on_every_return() {
+    let mut candidate = fixture();
+    candidate
+        .config
+        .herdr
+        .endpoints
+        .get_mut("one")
+        .unwrap()
+        .execution_node = " test-node ".into();
+    let endpoint = candidate.config.herdr.channels.remove("41").unwrap();
+    candidate
+        .config
+        .herdr
+        .channels
+        .insert(" 41 ".into(), endpoint);
+    let approved = Projection::of(&candidate).into_hosts().unwrap();
+    assert_ne!(
+        approved, candidate,
+        "fixture must preserve noncanonical source keys"
+    );
+    assert_eq!(Projection::of(&approved), Projection::of(&candidate));
+    for (warning, read_only) in [
+        ("approval_snapshot_not_durable", false),
+        ("approval_snapshot_not_durable", true),
+        ("approval_snapshot_corrupt", false),
+        ("approval_snapshot_corrupt", true),
+        ("approval_snapshot_newer", false),
+    ] {
+        let mut store = Store::new(Some(approved.clone()));
+        store.warning = Some(warning);
+        store.fail_save = true;
+        let rows = Rows::new(Vec::new());
+        let holds = Holds::<true>::new(Err("unchanged projection must not read holds".into()));
+        let selected = select(candidate.clone(), &store, &rows, &holds, read_only)
+            .await
+            .into_hosts();
+        assert_eq!(
+            selected.hosts, candidate,
+            "unchanged diagnostic equality contract: {warning}, read_only={read_only}"
+        );
+        assert_eq!(reason(&selected), Some(warning));
+        assert_eq!(
+            store.saved.borrow().len(),
+            usize::from(warning == "approval_snapshot_not_durable" && !read_only)
+        );
+        assert!(rows.requested.borrow().is_empty());
+        assert_eq!(holds.calls.get(), 0);
+    }
+}
+
+#[tokio::test]
+async fn migration_recovery_actions_describe_the_actual_reason_and_store_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let file_store = FileApprovalStore(Some(temp.path().to_owned()));
+    let old = fixture();
+    file_store.save(&old).unwrap();
+    for (warning, required) in [
+        ("approval_snapshot_not_durable", "pending"),
+        ("approval_snapshot_corrupt", "current.json"),
+        ("approval_snapshot_unreadable", "current.json"),
+        ("approval_snapshot_newer", "compatible"),
+    ] {
+        if warning == "approval_snapshot_not_durable" {
+            std::fs::write(temp.path().join("previous.json"), snapshot(1, &old)).unwrap();
+            std::fs::write(
+                temp.path().join("pending"),
+                br#"{"state":"pending","had_previous":true}"#,
+            )
+            .unwrap();
+        } else {
+            std::fs::write(temp.path().join("pending"), b"committed").unwrap();
+            match warning {
+                "approval_snapshot_corrupt" => {
+                    std::fs::write(temp.path().join("current.json"), b"corrupt").unwrap()
+                }
+                "approval_snapshot_newer" => {
+                    std::fs::write(temp.path().join("current.json"), snapshot(999, &old)).unwrap()
+                }
+                "approval_snapshot_unreadable" => {
+                    std::fs::remove_file(temp.path().join("current.json")).unwrap();
+                    std::fs::create_dir(temp.path().join("current.json")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        let selected = select(
+            old.clone(),
+            &file_store,
+            &Rows::new(Vec::new()),
+            &NoHoldStore,
+            true,
+        )
+        .await
+        .into_hosts();
+        let diagnostic = selected.migration().unwrap();
+        assert_eq!(diagnostic.reason, warning);
+        assert!(
+            diagnostic
+                .action
+                .contains(&temp.path().display().to_string())
+        );
+        assert!(
+            diagnostic.action.contains(required),
+            "{warning}: {}",
+            diagnostic.action
+        );
+        assert_eq!(
+            diagnostic.action.contains("interrupted"),
+            warning == "approval_snapshot_not_durable",
+            "reason-specific recovery action contract: {warning}"
+        );
+        if warning == "approval_snapshot_unreadable" {
+            std::fs::remove_dir(temp.path().join("current.json")).unwrap();
+        }
+    }
+    for (rows, expected) in [
+        (
+            Ok(vec![row(located(HostedState::Bound))]),
+            "session_hosts_migration_refused",
+        ),
+        (
+            Err("postgres unavailable".into()),
+            "session_hosts_migration_unverified",
+        ),
+    ] {
+        let source = Rows::new(Vec::new());
+        *source.result.borrow_mut() = rows;
+        let selected = select(
+            remap(old.clone(), "/fixture/new.sock"),
+            &Store::new(Some(old.clone())),
+            &source,
+            &NoHoldStore,
+            false,
+        )
+        .await
+        .into_hosts();
+        let diagnostic = selected.migration().unwrap();
+        assert_eq!(diagnostic.reason, expected);
+        assert!(
+            !diagnostic.action.contains("interrupted"),
+            "non-interrupted recovery action contract: {expected}"
+        );
+    }
 }

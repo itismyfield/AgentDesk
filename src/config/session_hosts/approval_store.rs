@@ -15,8 +15,15 @@ pub(crate) enum Loaded {
 pub(crate) trait ApprovalStore {
     fn load(&self) -> Loaded;
     fn save(&self, hosts: &BootSessionHosts) -> Result<(), String>;
-    fn recovery_action(&self) -> String {
-        "Restart to retry an interrupted approval; repair approval-store permissions and storage before retrying if it fails again.".into()
+    fn recovery_action(&self, reason: &str) -> String {
+        match reason {
+            "approval_snapshot_not_durable" => "Restart to retry an interrupted approval; repair approval-store permissions and storage before retrying if it fails again.",
+            "approval_snapshot_corrupt" | "approval_snapshot_unreadable" => "Repair or restore readable compatible approval snapshots, then restart.",
+            "approval_snapshot_newer" => "Run the newer binary or restore compatible approval snapshots, then restart.",
+            "session_hosts_migration_refused" => "Resolve the listed live rows and holds at the approved endpoints before restarting.",
+            "session_hosts_migration_unverified" => "Restore database and hold-store availability before restarting to verify the proposed migration.",
+            _ => "Run the server to verify the proposed migration before updating approval snapshots.",
+        }.into()
     }
 }
 
@@ -172,13 +179,36 @@ impl ApprovalStore for FileApprovalStore {
         Ok(())
     }
 
-    fn recovery_action(&self) -> String {
-        match &self.0 {
-            Some(root) => format!(
+    fn recovery_action(&self, reason: &str) -> String {
+        let Some(root) = &self.0 else {
+            return "Restore AGENTDESK_ROOT_DIR so the approval-store path can be resolved, repair permissions or storage, then restart.".into();
+        };
+        match reason {
+            "approval_snapshot_not_durable" => format!(
                 "Restart to retry the interrupted approval at {}. If it fails again, repair this directory's permissions or storage and restart; preserve previous.json while live rows still use it.",
                 root.join("pending").display()
             ),
-            None => "Restore AGENTDESK_ROOT_DIR so the approval-store pending path can be resolved, repair permissions or storage, then restart.".into(),
+            "approval_snapshot_corrupt" | "approval_snapshot_unreadable" => format!(
+                "Repair or restore a readable compatible snapshot at {} or {}; repair directory permissions or storage, preserve the previous generation, then restart.",
+                root.join("current.json").display(),
+                root.join("previous.json").display()
+            ),
+            "approval_snapshot_newer" => format!(
+                "Run the newer binary or restore compatible approval snapshots at {}, then restart.",
+                root.display()
+            ),
+            "session_hosts_migration_refused" => format!(
+                "Keep the approved snapshots at {}; resolve the listed live rows and holds before restarting.",
+                root.display()
+            ),
+            "session_hosts_migration_unverified" => format!(
+                "Restore database and hold-store availability before restarting to verify migration; preserve the approved snapshots at {}.",
+                root.display()
+            ),
+            _ => format!(
+                "Run the server to verify migration before updating approval snapshots at {}.",
+                root.display()
+            ),
         }
     }
 }
@@ -186,7 +216,7 @@ impl ApprovalStore for FileApprovalStore {
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_CLEANUP_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(super) static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn cleanup_sync(path: &std::path::Path) -> std::io::Result<()> {

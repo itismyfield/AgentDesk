@@ -83,6 +83,7 @@ fn boot_entries_select_approved_hosts_pg() {
             for scenario in [
                 "first",
                 "unchanged",
+                "unchanged-not-durable",
                 "refused",
                 "removed-agent",
                 "unreadable",
@@ -120,7 +121,7 @@ fn boot_entries_select_approved_hosts_pg() {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let mut old_config = config(&root, "old.sock");
-        if matches!(scenario, "first" | "unchanged") {
+        if matches!(scenario, "first" | "unchanged" | "unchanged-not-durable") {
             // The installed snapshot must keep the source shape used by existing equality consumers.
             let herdr = &mut old_config.session_hosts.herdr;
             herdr
@@ -136,8 +137,20 @@ fn boot_entries_select_approved_hosts_pg() {
         let mut candidate = old_config.clone();
         let old = BootSessionHosts::from_config(&old_config).unwrap();
         let store = FileApprovalStore::runtime();
-        if scenario == "unchanged" {
+        if matches!(scenario, "unchanged" | "unchanged-not-durable") {
             store.save(&old).unwrap();
+        }
+        if scenario == "unchanged-not-durable" {
+            store.save(&old).unwrap();
+            std::fs::write(
+                store.0.as_ref().unwrap().join("pending"),
+                br#"{"state":"pending","had_previous":true}"#,
+            )
+            .unwrap();
+            if entry != "cli" {
+                crate::config::session_hosts::approval_store::FAIL_CURRENT_SYNC
+                    .with(|fault| fault.set(true));
+            }
         }
         if matches!(scenario, "refused" | "removed-agent" | "no-pool") {
             store.save(&old).unwrap();
@@ -170,7 +183,7 @@ fn boot_entries_select_approved_hosts_pg() {
                 .await
                 .unwrap();
         }
-        if matches!(scenario, "first" | "unchanged") {
+        if matches!(scenario, "first" | "unchanged" | "unchanged-not-durable") {
             session_hosts::with_boot(|boot| {
                 assert_eq!(
                     boot.unwrap(),
@@ -238,6 +251,25 @@ fn boot_entries_select_approved_hosts_pg() {
                     entry != "cli" || scenario == "unchanged",
                     "the read-only CLI never seeds approval"
                 );
+            }
+            "unchanged-not-durable" => {
+                assert_eq!(
+                    health["migration"]["reason"],
+                    "approval_snapshot_not_durable"
+                );
+                let action = health["migration"]["action"].as_str().unwrap();
+                assert!(
+                    action.contains(
+                        &store
+                            .0
+                            .as_ref()
+                            .unwrap()
+                            .join("pending")
+                            .display()
+                            .to_string()
+                    )
+                );
+                assert!(action.contains("interrupted"));
             }
             "refused" | "removed-agent" => {
                 let reason = if entry == "cli" {

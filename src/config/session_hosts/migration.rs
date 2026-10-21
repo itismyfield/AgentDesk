@@ -56,7 +56,7 @@ impl HostsBootSelection {
             reason,
             channels: channels.iter().copied().collect(),
             blockers,
-            action: "Keep the approved endpoints; clear/terminate/retire live rows and resolve holds there, then restart. Repair approval snapshots before retrying an unverified migration.".into(),
+            action: String::new(),
         });
         self
     }
@@ -197,8 +197,7 @@ pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
 ) -> HostsBootSelection {
     let mut selected = select_projection(candidate, store, rows, holds, read_only).await;
     if let Some(diagnostic) = &mut selected.diagnostic {
-        diagnostic.action.push(' ');
-        diagnostic.action.push_str(&store.recovery_action());
+        diagnostic.action = store.recovery_action(diagnostic.reason);
     }
     selected
 }
@@ -248,13 +247,18 @@ async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
     } else {
         affected(&approved, &candidate)
     };
-    let selection = HostsBootSelection::new(approved.clone(), &candidate);
+    let applied = if unchanged {
+        candidate.clone()
+    } else {
+        approved.clone()
+    };
+    let selection = HostsBootSelection::new(applied, &candidate);
     let recovering = warning == Some("approval_snapshot_not_durable");
     if let Some(reason) = warning.filter(|_| !recovering) {
         return selection.diagnose(reason, &changes, vec![]);
     }
     if unchanged && !recovering {
-        return HostsBootSelection::new(candidate.clone(), &candidate);
+        return selection;
     }
     if read_only {
         return selection.diagnose(
