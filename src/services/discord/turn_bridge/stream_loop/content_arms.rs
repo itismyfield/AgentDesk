@@ -450,7 +450,7 @@ pub(super) async fn handle_stream_content_message(
                                     full_response = guidance;
                                 }
                             }
-                            if ordinary {
+                            if ordinary && inflight_state.owned_by_turn_nonce(ctx.cancel_token.turn_nonce()) {
                                 sync_terminal_error_delivery_state_for_bridge_owner(&full_response, &mut response_sent_offset, &mut bridge_confirmed_response_sent_offset,
                                     inflight_state, channel_id, watcher_owns_assistant_relay && watcher_relay_available_for_turn);
                             }

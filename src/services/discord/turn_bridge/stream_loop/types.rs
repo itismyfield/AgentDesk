@@ -207,8 +207,9 @@ pub(in super::super) fn persist_pinned_terminal_anchor(
     let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(state);
     let authority = crate::services::discord::inflight::StreamRelayAuthority::from_state(state);
     let (channel, current, len) = (state.channel_id, state.current_msg_id, state.current_msg_len);
+    let (offset, nonce) = (state.turn_start_offset, state.turn_nonce.clone());
     crate::services::discord::inflight::bind_recovery_anchor_if_matches_identity(
-        &provider, channel, &expected, state.turn_start_offset, current, Some(len), anchor.get(), len,
+        &provider, channel, (&expected, offset, nonce.as_deref()), current, Some(len), anchor.get(), len,
         Some(authority), Some(state),
     ) == crate::services::discord::inflight::GuardedSaveOutcome::Saved
 }

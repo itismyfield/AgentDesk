@@ -141,16 +141,21 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     if !expected.matches_state(state) || !expected.matches_state(persisted_baseline) {
         return GuardedSaveOutcome::AuthorityPinned;
     }
+    let captured_nonce = state.turn_nonce.clone();
+    if !persisted_baseline.owned_by_turn_nonce(captured_nonce.as_deref()) {
+        return GuardedSaveOutcome::SuccessorOwned;
+    }
     let path = inflight_state_path(root, &provider, state.channel_id);
     let Ok(_lock) = crate::services::discord::inflight::store::try_lock_inflight_state_path(&path)
     else {
         return GuardedSaveOutcome::IoError;
     };
-    let on_disk = match super::read_inflight_state_for_guarded_write(
+    let on_disk = match super::read_owned_row_for_guarded_write(
         &path,
         &provider,
         state.channel_id,
         expected,
+        captured_nonce.as_deref(),
         caller,
     ) {
         Ok(on_disk) => on_disk,
@@ -194,7 +199,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         // A durable current-message epoch change is NOT rejected on its own.
         // What `authority_changed` above rules out is a changed relay-owner
         // triple. What rules out a DURABLE row belonging to another turn is the
-        // lock-held reload plus its refusal (`restart_mode` / `rebind_origin` /
+        // nonce-checked reload plus its refusal (`restart_mode` / `rebind_origin` /
         // `expected.matches_state(&on_disk)`); the entry check is a separate one on the
         // two IN-MEMORY snapshots (`state` / `persisted_baseline`) and says
         // nothing about the row on disk. What is left is an epoch advance by a
@@ -223,8 +228,8 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         // The epoch change deliberately gets no adopt-and-return branch of its
         // own: it falls through to the three-way merge below, so the BODY that
         // rides along with it stays subject to `merge_stream_response_progress`
-        // — the only prefix-compatibility / forward-progress check on this
-        // path, and a body-only one. The epoch itself gets no monotonicity
+        // — the only prefix-compatibility / forward-progress check in this
+        // file, and a body-only one. The epoch itself gets no monotonicity
         // check anywhere here; the merge below takes `on_disk`'s epoch as given. A
         // branch that adopted `on_disk` wholesale would additionally bypass the
         // body check and report `Saved` without writing anything.

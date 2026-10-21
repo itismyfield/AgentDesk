@@ -60,6 +60,7 @@ fn contended_stream_tick_keeps_scheduler_timer_and_loopback_live() {
                 let mut pending = Some(current);
                 let mut created = Some(current);
                 entered_tx.send(()).unwrap();
+                let actor_nonce = baseline.turn_nonce.clone();
                 let context = StreamTickCandidateSaveContext {
                     gateway: &gateway,
                     provider: &ProviderKind::Codex,
@@ -72,6 +73,7 @@ fn contended_stream_tick_keeps_scheduler_timer_and_loopback_live() {
                     current_msg_id: &mut current,
                     pending_current_message_candidate: &mut pending,
                     bridge_created_response_placeholder_msg_id: &mut created,
+                    captured_nonce: actor_nonce.as_deref(),
                 };
                 let outcome = match mode {
                     0 => {
@@ -207,6 +209,7 @@ fn one_shot_candidate_bind_waits_out_brief_sidecar_contention() {
     let mut current = MessageId::new(2);
     let mut pending = Some(current);
     let mut created = Some(current);
+    let actor_nonce = baseline.turn_nonce.clone();
     let context = StreamTickCandidateSaveContext {
         gateway: &gateway,
         provider: &ProviderKind::Codex,
@@ -219,6 +222,7 @@ fn one_shot_candidate_bind_waits_out_brief_sidecar_contention() {
         current_msg_id: &mut current,
         pending_current_message_candidate: &mut pending,
         bridge_created_response_placeholder_msg_id: &mut created,
+        captured_nonce: actor_nonce.as_deref(),
     };
     let bound = runtime.block_on(settle_pending_current_message_candidate_on_loop_exit(
         context,

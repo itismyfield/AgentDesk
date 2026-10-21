@@ -461,6 +461,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 bridge_created_placeholder: &mut bridge_created_response_placeholder_msg_id,
                 last_edit_text: &mut last_edit_text,
                 resumed_placeholder_clear_applied: &mut resumed_placeholder_clear_applied,
+                captured_nonce: cancel_token.turn_nonce(),
             },
             bridge_entry_persist::BridgeEntryRuntimeState {
                 inflight_state: &mut inflight_state,

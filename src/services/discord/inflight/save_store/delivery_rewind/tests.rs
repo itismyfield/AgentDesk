@@ -73,6 +73,7 @@ impl Fixture {
             !save_inflight_delivery_rewind_if_matches_identity_in_root(
                 &self.root,
                 desired,
+                Some("rewind-owner-cas"),
                 StreamRelayAuthority::from_state(&self.row),
                 InflightDeliveryRewindReason::MissingWatcherReclaim,
             )
@@ -103,6 +104,7 @@ fn rewind_rejects_rebind_owner_without_writing() {
         !save_inflight_delivery_rewind_if_matches_identity_in_root(
             &f.root,
             &desired,
+            Some("rewind-owner-cas"),
             StreamRelayAuthority::from_state(&f.row),
             InflightDeliveryRewindReason::TerminalErrorReset,
         )
@@ -139,6 +141,7 @@ fn rewind_applies_when_expected_owner_matches() {
         save_inflight_delivery_rewind_if_matches_identity_in_root(
             &f.root,
             &desired,
+            Some("rewind-owner-cas"),
             StreamRelayAuthority::from_state(&f.row),
             InflightDeliveryRewindReason::MissingWatcherReclaim,
         )
@@ -175,6 +178,7 @@ fn terminal_reset_preserves_matching_bridge_authority() {
         save_inflight_delivery_rewind_if_matches_identity_in_root(
             &f.root,
             &desired,
+            Some("rewind-owner-cas"),
             StreamRelayAuthority::from_state(&f.row),
             InflightDeliveryRewindReason::TerminalErrorReset,
         )
@@ -212,6 +216,7 @@ fn rewind_legacy_watcher_authority_matches() {
         save_inflight_delivery_rewind_if_matches_identity_in_root(
             &f.root,
             &desired,
+            Some("rewind-owner-cas"),
             expected_owner,
             InflightDeliveryRewindReason::TerminalErrorReset,
         )
@@ -238,6 +243,7 @@ fn rewind_rejects_unknown_owner_without_writing() {
         !save_inflight_delivery_rewind_if_matches_identity_in_root(
             &f.root,
             &f.desired(),
+            Some("rewind-owner-cas"),
             StreamRelayAuthority::from_state(&f.row),
             InflightDeliveryRewindReason::TerminalErrorReset,
         )
@@ -304,6 +310,7 @@ fn rewind_observes_owner_after_lock_contention() {
         let result = save_inflight_delivery_rewind_if_matches_identity_in_root(
             &root,
             &desired,
+            Some("rewind-owner-cas"),
             expected_owner,
             InflightDeliveryRewindReason::MissingWatcherReclaim,
         );

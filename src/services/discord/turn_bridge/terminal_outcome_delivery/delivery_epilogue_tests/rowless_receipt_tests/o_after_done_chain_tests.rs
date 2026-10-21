@@ -51,6 +51,7 @@ async fn hand_off_after_done(
     let (mut claim, mut handed_off, mut owns) = (WatcherHandoffClaimOutcome::None, false, false);
     let mut adopted_after_done = false;
     let (mut dirty, mut drain, mut heartbeat) = (false, None, None);
+    let actor_nonce = state.inflight_state.turn_nonce.clone();
     let _ = handle_runtime_handoff_loop_message(
         message,
         RuntimeHandoffLoopContext {
@@ -59,6 +60,7 @@ async fn hand_off_after_done(
             channel_id,
             done: true,
             adk_session_name: &None,
+            captured_nonce: actor_nonce.as_deref(),
         },
         RuntimeHandoffLoopState {
             terminal_control_ready_observed: &mut ready,

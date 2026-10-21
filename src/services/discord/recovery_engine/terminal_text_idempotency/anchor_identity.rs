@@ -45,6 +45,7 @@ impl RecoveryDeliveryContext {
             self.channel_id.get(),
             &self.identity,
             self.expected_turn_start_offset,
+            self.turn_nonce.as_deref(),
         )
     }
 }

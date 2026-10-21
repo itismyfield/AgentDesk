@@ -54,6 +54,7 @@ pub(super) struct BridgeStreamTickContext<'a> {
     pub(super) provider: &'a ProviderKind,
     pub(super) turn_id: &'a str,
     pub(super) expected_identity: &'a crate::services::discord::inflight::InflightTurnIdentity,
+    pub(super) captured_nonce: Option<&'a str>,
     pub(super) status_interval: std::time::Duration,
     pub(super) single_message_panel_footer_mode: bool,
     pub(super) footer_owner: super::super::footer_view_reconciler::CompletionFooterOwner,
@@ -122,7 +123,7 @@ pub(super) async fn run_bridge_stream_tick(
     let channel_id = ctx.channel_id;
     let provider = ProviderRef(ctx.provider);
     let turn_id = TurnIdRef(ctx.turn_id);
-    let stream_tick_expected = ctx.expected_identity;
+    let (stream_tick_expected, captured_nonce) = (ctx.expected_identity, ctx.captured_nonce);
     let status_interval = ctx.status_interval;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
     let footer_owner = ctx.footer_owner;
@@ -190,6 +191,7 @@ pub(super) async fn run_bridge_stream_tick(
                 provider: &provider,
                 turn_id: turn_id.as_str(),
                 stream_tick_expected,
+                captured_nonce,
                 status_interval,
                 single_message_panel_footer_mode,
                 status_panel_started_at,
@@ -447,6 +449,7 @@ pub(super) async fn run_bridge_stream_tick(
                 &shared_owned.token_hash,
                 channel_id,
                 stream_tick_expected,
+                captured_nonce,
                 &mut current_msg_id,
                 bridge_created_response_placeholder_msg_id,
                 inflight_state,
@@ -559,6 +562,7 @@ pub(super) async fn run_bridge_stream_tick(
                 current_msg_id: &mut current_msg_id,
                 pending_current_message_candidate,
                 bridge_created_response_placeholder_msg_id,
+                captured_nonce,
             },
             "turn_bridge::stream_tick::dirty_flush",
         )
@@ -885,6 +889,7 @@ pub(super) mod provider_output_guard_tests {
                 "anchor-test-token",
                 channel_id,
                 &expected,
+                state.turn_nonce.clone().as_deref(),
                 &mut detached,
                 &mut stale_created_candidate,
                 &mut state,
@@ -936,6 +941,7 @@ pub(super) mod provider_output_guard_tests {
                 "anchor-test-token",
                 channel_id,
                 &expected,
+                stale.turn_nonce.clone().as_deref(),
                 &mut detached,
                 &mut created_candidate,
                 &mut stale,
@@ -987,6 +993,7 @@ pub(super) mod provider_output_guard_tests {
                 "anchor-test-token",
                 channel_id,
                 &expected,
+                local.turn_nonce.clone().as_deref(),
                 &mut detached,
                 &mut created_candidate,
                 &mut local,

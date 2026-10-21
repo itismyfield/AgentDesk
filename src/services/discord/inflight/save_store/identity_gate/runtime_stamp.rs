@@ -513,15 +513,23 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
     let Some(provider) = requested.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
+    let captured_nonce = requested.turn_nonce.as_deref();
+    if baseline
+        .as_ref()
+        .is_some_and(|row| !row.owned_by_turn_nonce(captured_nonce))
+    {
+        return GuardedSaveOutcome::SuccessorOwned;
+    }
     let path = inflight_state_path(root, &provider, requested.channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let mut on_disk = match read_inflight_state_for_guarded_write(
+    let mut on_disk = match read_owned_row_for_guarded_write(
         &path,
         &provider,
         requested.channel_id,
         expected,
+        captured_nonce,
         caller,
     ) {
         Ok(on_disk) => on_disk,

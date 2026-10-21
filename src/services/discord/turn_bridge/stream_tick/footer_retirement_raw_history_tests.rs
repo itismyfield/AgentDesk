@@ -70,6 +70,7 @@ async fn drive(
     let mut spans = crate::services::discord::turn_bridge::bridge_latency_spans::BridgeLatencySpans::starting_at(std::time::Instant::now());
     let mut dirty = false;
     let none = None;
+    let actor_nonce = baseline.turn_nonce.clone();
     let context = runtime::TickContext {
         shared_owned: &shared,
         gateway: &gateway_dyn,
@@ -77,6 +78,7 @@ async fn drive(
         provider,
         turn_id: "retired-raw-history",
         stream_tick_expected: &expected,
+        captured_nonce: actor_nonce.as_deref(),
         status_interval: std::time::Duration::ZERO,
         single_message_panel_footer_mode: false,
         status_panel_started_at: START,

@@ -38,6 +38,32 @@ pub(super) struct StreamToolAuthorityContext<'a> {
     pub(super) confirmed_offset: &'a mut usize,
     pub(super) any_tool_used: &'a mut bool,
     pub(super) has_post_tool_text: &'a mut bool,
+    pub(super) captured_nonce: Option<&'a str>,
+}
+
+/// Strict fence for a tool arm; a local or baseline that left the actor's start episode is
+/// refused before the store can merge or copy any durable row into it.
+fn strict_tool_fence_save(
+    context: &mut StreamToolAuthorityContext<'_>,
+    caller: &'static str,
+) -> crate::services::discord::inflight::GuardedSaveOutcome {
+    if !context
+        .inflight_state
+        .owned_by_turn_nonce(context.captured_nonce)
+        || !context
+            .persisted_inflight_baseline
+            .owned_by_turn_nonce(context.captured_nonce)
+    {
+        return crate::services::discord::inflight::GuardedSaveOutcome::SuccessorOwned;
+    }
+    crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
+        context.persisted_inflight_baseline,
+        context.inflight_state,
+        context.stream_tick_expected_identity,
+        context.expected_current_message.0,
+        context.expected_current_message.1,
+        caller,
+    )
 }
 
 /// Mirror of `stream_tick`'s post-save reconcile for the tool arms: after a
@@ -180,12 +206,8 @@ pub(super) fn fence_restart_visible_mutation(
     let intended_authority = crate::services::discord::inflight::StreamRelayAuthority::from_state(
         context.inflight_state,
     );
-    let outcome = crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
-        context.persisted_inflight_baseline,
-        context.inflight_state,
-        context.stream_tick_expected_identity,
-        context.expected_current_message.0,
-        context.expected_current_message.1,
+    let outcome = strict_tool_fence_save(
+        &mut context,
         "turn_bridge::stream_loop::tool_restart_visible_fence",
     );
     if matches!(
@@ -259,12 +281,8 @@ pub(super) async fn fence_terminal_tool_result_transition(
     let intended_authority = crate::services::discord::inflight::StreamRelayAuthority::from_state(
         context.inflight_state,
     );
-    let outcome = crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
-        context.persisted_inflight_baseline,
-        context.inflight_state,
-        context.stream_tick_expected_identity,
-        context.expected_current_message.0,
-        context.expected_current_message.1,
+    let outcome = strict_tool_fence_save(
+        &mut context,
         "turn_bridge::stream_loop::terminal_tool_result_visible_fence",
     );
     if outcome == crate::services::discord::inflight::GuardedSaveOutcome::Saved {

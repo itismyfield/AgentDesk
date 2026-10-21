@@ -324,6 +324,7 @@ pub(super) fn persist_bridge_entry_inflight_state(
     shared: &SharedData,
     runtime: &mut BridgeEntryRuntimeState<'_>,
     placeholder_clear_applied: &mut bool,
+    captured_nonce: Option<&str>,
 ) -> crate::services::discord::inflight::GuardedSaveOutcome {
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, patch_bridge_entry_state_if_identity_unchanged,
@@ -331,7 +332,12 @@ pub(super) fn persist_bridge_entry_inflight_state(
     };
 
     const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
-    let outcome = if before.long_running_placeholder_active
+    // The actor's start nonce, not the possibly replaced local, decides whose row this patches.
+    let outcome = if !before.owned_by_turn_nonce(captured_nonce)
+        || !runtime.inflight_state.owned_by_turn_nonce(captured_nonce)
+    {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if before.long_running_placeholder_active
         && !runtime.inflight_state.long_running_placeholder_active
     {
         patch_bridge_entry_state_tracking_placeholder_clear(
@@ -376,6 +382,7 @@ pub(super) struct BridgeEntryAuthorityContext<'a> {
     pub(super) bridge_created_placeholder: &'a mut Option<MessageId>,
     pub(super) last_edit_text: &'a mut String,
     pub(super) resumed_placeholder_clear_applied: &'a mut bool,
+    pub(super) captured_nonce: Option<&'a str>,
 }
 
 /// Proves durable bridge authority, then materializes an absent Discord anchor. Guards may be
@@ -390,6 +397,7 @@ pub(super) async fn establish_bridge_entry_authority(
         ctx.shared,
         &mut runtime,
         ctx.resumed_placeholder_clear_applied,
+        ctx.captured_nonce,
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     *ctx.entry_was_rowless =
@@ -408,6 +416,7 @@ pub(super) async fn establish_bridge_entry_authority(
         &ctx.shared.token_hash,
         ctx.bridge.channel_id,
         &identity,
+        ctx.captured_nonce,
         runtime.current_msg_id,
         ctx.bridge_created_placeholder,
         runtime.inflight_state,
@@ -786,6 +795,7 @@ mod tests {
         let channel_id = ChannelId::new(4_259_701);
         let mut state = rowless_entry_state(channel_id.get());
         let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let nonce = state.turn_nonce.clone();
         let mut detached = detached_current_msg_id_from_durable(state.current_msg_id);
         let anchor_present = durable_current_msg_id_from_detached(detached) != 0;
         assert!(!anchor_present, "this turn has no anchor to continue onto");
@@ -798,6 +808,7 @@ mod tests {
                 "entry-rowless-token",
                 channel_id,
                 &identity,
+                nonce.as_deref(),
                 &mut detached,
                 &mut created,
                 &mut state,
@@ -837,7 +848,9 @@ mod tests {
         let mut cleared = false;
         let runtime = &mut harness.runtime;
 
-        let outcome = persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared);
+        let nonce = before.turn_nonce.as_deref();
+        let outcome =
+            persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared, nonce);
 
         assert_eq!(outcome, GuardedSaveOutcome::RowAbsent);
         assert_eq!(
@@ -1017,6 +1030,7 @@ mod tests {
         let harness = ReconcileHarness::new(&mut durable, channel);
         let (mut rowless, mut created, mut last_edit, mut cleared) =
             (false, None, String::new(), false);
+        let nonce = bridge.inflight_state.turn_nonce.clone();
         let ctx = BridgeEntryAuthorityContext {
             entry_was_rowless: &mut rowless,
             bridge,
@@ -1024,6 +1038,7 @@ mod tests {
             bridge_created_placeholder: &mut created,
             last_edit_text: &mut last_edit,
             resumed_placeholder_clear_applied: &mut cleared,
+            captured_nonce: nonce.as_deref(),
         };
         let Err(notice) =
             establish_bridge_entry_authority(ctx, harness.runtime, "processing").await

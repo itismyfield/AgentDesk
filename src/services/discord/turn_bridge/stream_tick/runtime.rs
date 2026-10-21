@@ -40,6 +40,7 @@ pub(super) struct TickContext<'a> {
     pub(super) provider: &'a ProviderKind,
     pub(super) turn_id: &'a str,
     pub(super) stream_tick_expected: &'a crate::services::discord::inflight::InflightTurnIdentity,
+    pub(super) captured_nonce: Option<&'a str>,
     pub(super) status_interval: std::time::Duration,
     pub(super) single_message_panel_footer_mode: bool,
     pub(super) status_panel_started_at: i64,
@@ -140,6 +141,7 @@ pub(super) async fn authorize_visible_mutation(
         provider,
         shared_owned,
         stream_tick_expected,
+        captured_nonce,
         ..
     } = *ctx;
     let provider = ProviderRef(provider);
@@ -173,6 +175,7 @@ pub(super) async fn authorize_visible_mutation(
             pending_current_message_candidate: tick.pending_current_message_candidate,
             bridge_created_response_placeholder_msg_id: tick
                 .bridge_created_response_placeholder_msg_id,
+            captured_nonce,
         },
         caller,
     )

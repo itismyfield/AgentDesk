@@ -92,6 +92,7 @@ fn a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm() {
         .is_none(),
         "the fixture needs a VANISHED row, not a reowned one",
     );
+    let actor_nonce = baseline.turn_nonce.clone();
     let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
         shared_owned: &shared,
         gateway: &gateway,
@@ -105,6 +106,7 @@ fn a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm() {
         confirmed_offset: &mut confirmed_offset,
         any_tool_used: &mut any_tool_used,
         has_post_tool_text: &mut has_post_tool_text,
+        captured_nonce: actor_nonce.as_deref(),
     });
     assert_eq!(
         authority,
@@ -397,6 +399,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut any_tool_used = false;
     let mut has_post_tool_text = false;
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
         shared_owned: &shared,
         gateway: &gateway,
@@ -410,6 +413,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         confirmed_offset: &mut confirmed_offset,
         any_tool_used: &mut any_tool_used,
         has_post_tool_text: &mut has_post_tool_text,
+        captured_nonce: actor_nonce.as_deref(),
     });
     assert_eq!(
         authority,
@@ -481,6 +485,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut last_adk_heartbeat = std::time::Instant::now();
     let mut last_inflight_long_run_heartbeat = std::time::Instant::now();
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let tick_outcome = crate::services::discord::turn_bridge::stream_tick::run_bridge_stream_tick(
         crate::services::discord::turn_bridge::stream_tick::BridgeStreamTickContext {
             shared_owned: shared.clone(),
@@ -489,6 +494,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             provider: &ProviderKind::Codex,
             turn_id: "tool-flag-reseed-turn",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:
@@ -733,6 +739,7 @@ async fn the_watcher_self_handoff_fence_records_the_durable_body_it_adopts() {
     let mut has_post_tool_text = false;
 
     let logs = captured_logs(|| {
+        let actor_nonce = baseline.turn_nonce.clone();
         let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
             shared_owned: &shared,
             gateway: &gateway,
@@ -746,6 +753,7 @@ async fn the_watcher_self_handoff_fence_records_the_durable_body_it_adopts() {
             confirmed_offset: &mut confirmed_offset,
             any_tool_used: &mut any_tool_used,
             has_post_tool_text: &mut has_post_tool_text,
+            captured_nonce: actor_nonce.as_deref(),
         });
         // Not the claim under test, but pinned so a future authority change that
         // silently stops reaching the fence cannot make this test vacuous.

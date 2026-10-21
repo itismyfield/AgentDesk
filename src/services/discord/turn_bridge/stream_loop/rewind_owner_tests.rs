@@ -180,6 +180,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     let (mut heartbeat, mut long_run_heartbeat) =
         (std::time::Instant::now(), std::time::Instant::now());
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let tick_outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
             shared_owned: shared,
@@ -188,6 +189,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
             provider: &provider,
             turn_id: "rewind-owner-error",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:

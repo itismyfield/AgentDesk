@@ -22,6 +22,8 @@ pub(in crate::services::discord::turn_bridge) struct StreamTickCandidateSaveCont
         &'a mut Option<MessageId>,
     pub(in crate::services::discord::turn_bridge) bridge_created_response_placeholder_msg_id:
         &'a mut Option<MessageId>,
+    /// Nonce the bridge actor started with; a local or baseline holding another one is not saved.
+    pub(in crate::services::discord::turn_bridge) captured_nonce: Option<&'a str>,
 }
 
 /// Durable precondition for a Discord-visible stream mutation.
@@ -258,7 +260,15 @@ async fn persist_stream_tick_state_with_candidate_cleanup_mode<G: TurnGateway + 
     caller: &'static str,
     mode: StreamTickSaveMode,
 ) -> GuardedSaveOutcome {
-    let outcome = if mode == StreamTickSaveMode::StrictVisibleMutationFence {
+    let outcome = if !context
+        .inflight_state
+        .owned_by_turn_nonce(context.captured_nonce)
+        || !context
+            .persisted_baseline
+            .owned_by_turn_nonce(context.captured_nonce)
+    {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if mode == StreamTickSaveMode::StrictVisibleMutationFence {
         persist_stream_tick_visible_mutation_fence(
             context.persisted_baseline,
             context.inflight_state,
