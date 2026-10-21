@@ -139,8 +139,8 @@ fn masked(marker: Option<char>, content: &str) -> String {
     }
 }
 
-/// Non-empty rows without escapes or control characters, user input masked, each with whether
-/// it is a `❯` row. Indented rows under a prompt are its continuation and masked as well.
+/// Non-empty rows without escapes or control characters, each with whether it is a `❯` row.
+/// `❯`, `>` and bash-mode `!` rows and their indented continuation are user input, masked.
 fn rows(screen: &str) -> Vec<(bool, String)> {
     let mut in_prompt = false;
     screen
@@ -151,7 +151,10 @@ fn rows(screen: &str) -> Vec<(bool, String)> {
                 .filter(|ch| !ch.is_control())
                 .collect();
             let text = trim(&line);
-            let marker = text.chars().next().filter(|ch| matches!(ch, '❯' | '>'));
+            let marker = text
+                .chars()
+                .next()
+                .filter(|ch| matches!(ch, '❯' | '>' | '!'));
             let continued = in_prompt
                 && line.starts_with(char::is_whitespace)
                 && !text.chars().all(|ch| ch == '─')

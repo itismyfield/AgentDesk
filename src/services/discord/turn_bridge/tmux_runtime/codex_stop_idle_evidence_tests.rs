@@ -11,11 +11,11 @@ fn sha8(text: &str) -> String {
         .collect()
 }
 
-// Prompt rows, quoted rows and a prompt's indented continuation keep only a length and a hash;
-// escapes and control characters are gone, and tool rows under a prompt stay readable.
+// Prompt, quoted and bash-mode rows and a prompt's indented continuation keep only a length and
+// a hash; escapes and control characters are gone, and tool rows under a prompt stay readable.
 #[test]
 fn idle_evidence_tail_masks_user_input_and_strips_controls() {
-    let screen = "❯ deploy the secret build please\n  second line of that prompt\n  ⎿  Interrupted · What should Claude do instead?\n\n> quoted user text\n\x1b[1mbold\x1b[0m tab\there\x07bell\u{85}c1\r\n────────\n❯\u{a0}ghost text suggestion\u{a0}\n────────\n  status line\n";
+    let screen = "❯ deploy the secret build please\n  second line of that prompt\n  ⎿  Interrupted · What should Claude do instead?\n\n> quoted user text\n! git push --force\n\x1b[1mbold\x1b[0m tab\there\x07bell\u{85}c1\r\n────────\n❯\u{a0}ghost text suggestion\u{a0}\n────────\n  status line\n";
     let (tail, below) = tail(screen);
     assert_eq!(
         tail,
@@ -30,6 +30,7 @@ fn idle_evidence_tail_masks_user_input_and_strips_controls() {
             ),
             "⎿  Interrupted · What should Claude do instead?".to_owned(),
             format!("> <masked chars=16 sha={}>", sha8("quoted user text")),
+            format!("! <masked chars=16 sha={}>", sha8("git push --force")),
             "bold tabherebellc1".to_owned(),
             "─×8".to_owned(),
             format!("❯ <masked chars=21 sha={}>", sha8("ghost text suggestion")),

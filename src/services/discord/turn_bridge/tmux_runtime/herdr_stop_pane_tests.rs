@@ -300,7 +300,9 @@ fn herdr_claude_idle_refusal_logs_its_judged_inputs_once() {
                     "sources_same=true".to_owned(),
                     "truncated=false".to_owned(),
                 ] {
-                    assert!(line.contains(&field), "{name}: {field} missing in {line}");
+                    // The collector lists each field as one Debug-quoted element.
+                    let element = format!("{field:?}");
+                    assert!(line.contains(&element), "{name}: {field} missing in {line}");
                 }
                 for field in [
                     "ready=",
