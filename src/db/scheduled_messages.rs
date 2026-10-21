@@ -18,9 +18,7 @@ mod attachments;
 mod image_lifecycle;
 use attachments::{IMAGE_COLUMNS, LIST_IMAGE_COLUMNS};
 pub use attachments::{MAX_IMAGE_BYTES, ScheduledMessageImage, ScheduledMessageImageAttachment};
-pub use image_lifecycle::{
-    get_scheduled_message_metadata_pg, image_rollout_ready_pg, reclaim_terminal_images_pg,
-};
+pub use image_lifecycle::{get_scheduled_message_metadata_pg, reclaim_terminal_images_pg};
 mod api_json;
 mod discord_mentions;
 mod external_delivery;

@@ -160,20 +160,6 @@ pub(super) fn validate_context(context: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(super) async fn ensure_rollout(pool: &sqlx::PgPool) -> Result<(), AppError> {
-    match crate::db::scheduled_messages::image_rollout_ready_pg(pool).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(app_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "imageAttachment requires upgraded scheduled and outbox consumers on every registered worker (at least two)",
-        )),
-        Err(error) => Err(app_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("image rollout check: {error}"),
-        )),
-    }
-}
-
 pub(super) fn extract<T>(
     body: Result<axum::Json<T>, axum::extract::rejection::JsonRejection>,
 ) -> Result<T, AppError> {

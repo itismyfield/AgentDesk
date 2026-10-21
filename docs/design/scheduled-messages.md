@@ -530,7 +530,7 @@ alphanumerics, dots, underscores, and hyphens. Unknown attachment fields fail.
 Images require push delivery and a Discord target. `providerTargets` cannot be
 combined with an image. The canonical body must be nonempty and fit Discord's
 2000 UTF-16 units after the Discord mention prefix is rendered. Create and PATCH
-validation failures return 400; rollout unavailability returns 503. PATCH omission
+validation failures return 400. PATCH omission
 preserves the attachment, `null` clears the complete triplet, and an object replaces
 it. List, detail, create, PATCH and dedupe-conflict responses contain metadata only;
 base64 and raw bytes are never returned. Only the two scheduled create/PATCH
@@ -538,18 +538,18 @@ routes accept JSON bodies up to 12 MiB; oversize bodies return 413.
 
 ### Image rollout and delivery
 
-Image creation and fire require both `scheduled_messages.image_consumer_v1` and
-`message_outbox.image_consumer_v1` on every registered worker, with at least two
-registered nodes. Offline members remain in this conservative gate: stopping an
-old MacBook or Mac mini cannot enable the feature. Before enabling production,
-the coordinator verifies that both intended nodes remain registered and run the
-new binary. Stale or retired registry members keep the gate closed; this feature
-does not delete them or change their status. No operational setting is changed
-by the implementation lane.
+Image create, PATCH and fire (scheduler and trigger-now) do not consult the
+`worker_nodes` registry. The former gate, which required both `image_consumer_v1`
+capabilities on every registered worker including offline members and at least
+two registered nodes, is retired: a stale or retired registry row could keep it
+closed permanently. Workers still advertise both capabilities; nothing reads them.
+There is no runtime switch to turn images off; a defect is handled by a fix
+release like any other feature.
 
 A migration adds transaction-local consumer guards to scheduled and outbox claim
-updates, using the existing scheduled mention mechanism. An old binary cannot
-claim an image as text, including a stale outbox reclaim after a capability check.
+updates, using the existing scheduled mention mechanism. These guards are the
+safety boundary for mixed binaries: an old binary cannot claim an image as text,
+including a stale outbox reclaim.
 Text-only claims retain their existing behavior. Outbox batches load at most one
 image, and retry bookkeeping shares its buffer. The claimed definition snapshot
 is preserved through durable handoff and the authorized binary upload.
