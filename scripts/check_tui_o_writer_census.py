@@ -442,8 +442,6 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/tmux_watcher/o_delegated_arm.rs": (
         "o_took_channel:peek",
-        # After card await, consumption requires an explicit Ok(true) ownership peek.
-        "under_current_authority:peek",
     ),
     "src/services/discord/tmux_watcher/streaming_status_tick.rs": (
         "update_streaming_status_tick:peek",

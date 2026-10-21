@@ -8596,6 +8596,12 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_preserves_exact_row
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_emits_no_republication
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_preserves_cleanup_and_panel_parity
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::footer_retirement_raw_tests::retired_watcher_empty_existing_anchor_raw_patch_is_minimal
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::footer_retirement_raw_tests::retired_watcher_failed_tail_patch_keeps_the_visible_rollover_anchor_in_cache
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::footer_retirement_raw_tests::retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::footer_retirement_raw_tests::retired_watcher_tool_only_raw_post_is_minimal_before_the_body_patch
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::legacy_tick_observes_actual_progress
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::legacy_tick_with_legacy_ownership_emits_long_body
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_body_and_decoder_resume_without_new_append
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_split_utf8_and_json_resume_without_append
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_terminal_at_eof_keeps_exact_ack_and_one_visible_copy
@@ -8610,12 +8616,6 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::recovered_session_bound_codex_stream_tick_reaches_http
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_o_tick_preserves_row_and_observes_actual_legacy_control
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_empty_existing_anchor_raw_patch_is_minimal
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_failed_tail_patch_keeps_the_visible_rollover_anchor_in_cache
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_rollover_raw_history_keeps_rich_budget_and_visible_progress
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::footer_retirement_raw_tests::retired_watcher_tool_only_raw_post_is_minimal_before_the_body_patch
-services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::retired_transport_tests::retired_tick_with_legacy_ownership_preserves_long_body_and_row
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::source_guard_tests::tick_wiring_guard_rejects_commented_and_reordered_steps
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::source_guard_tests::tick_wiring_guard_requires_the_calls_inside_their_legacy_blocks
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
@@ -8781,7 +8781,6 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stre
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_streaming_tick_rechecks_the_host_before_capturing_the_pane
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::abort_kills_take_the_keyed_host_verdict_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::read_source_switch_tests::crossed_rebind_relay_reaches_discord_once_below_the_old_watermark
