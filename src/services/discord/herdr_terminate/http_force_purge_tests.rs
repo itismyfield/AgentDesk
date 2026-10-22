@@ -207,9 +207,8 @@ fn e07_snapshot_purge_refuses_late_durable_input_pg() {
     });
 }
 
-// Without a race the purge removes the captured queue and records exactly what it removed; another
-// namespace's file and actor stay, input after the purge stays, and a save error that still
-// published the removal records it and fails the request.
+// Without a race the purge records exactly what it removed and leaves other namespaces and later
+// input alone; a save error that still published the removal records it and fails the request.
 #[test]
 fn e07_snapshot_purge_records_exact_receipt_pg() {
     let Some((rig, runtime)) = rig("e07_snapshot_purge_records_exact_receipt_pg") else {

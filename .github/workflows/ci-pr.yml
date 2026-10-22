@@ -391,6 +391,7 @@ jobs:
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate/http_force_e08_tests.rs'
               - 'src/services/discord/herdr_terminate/http_force_identity_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_purge_tests.rs'
               - 'src/services/discord/herdr_terminate/http_force_tests.rs'
               - 'src/services/discord/herdr_terminate_exit_tests.rs'
               - 'src/services/discord/herdr_terminate_route_tests.rs'

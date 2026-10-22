@@ -141,9 +141,8 @@ fn rooted(work: impl std::future::Future<Output = ()>) {
     unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) };
 }
 
-// Every stage leaves memory, the queue file, the marker and the receipt in agreement: a stop
-// before publication changes nothing, one after it keeps the removal in the receipt, and a closed
-// actor answers with an explicit refusal that leaves its successor alone.
+// Every stage keeps memory, queue file, marker and receipt in agreement: a stop before publication
+// changes nothing, one after it keeps the receipt, and a closed actor refuses explicitly.
 #[test]
 fn checked_purge_stages_keep_queue_file_marker_and_receipt_in_agreement() {
     rooted(async {
