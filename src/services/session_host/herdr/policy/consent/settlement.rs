@@ -164,9 +164,8 @@ impl ConsentStore {
     }
 }
 
-/// Both operations are durable and idempotent by (store, id), including after a process restart.
-/// Nonce identifies the authorizing receipt; changing it must never repeat a payload.
-/// A release may succeed before consent acknowledgement fails; replay must never duplicate its payload.
+/// Both operations remain durable and idempotent by (store, id) after restart or acknowledgement failure.
+/// Nonce identifies the receipt; changing it must never repeat a payload.
 #[async_trait::async_trait]
 pub(crate) trait CustodySink: Send {
     async fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
