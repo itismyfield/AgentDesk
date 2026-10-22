@@ -46,7 +46,7 @@ async fn keyed_guard_warning_rearms_after_successful_clear_pg() {
             Some(&key),
             name,
             None,
-            "retry"
+            "startup"
         )
         .await,
         KeyedTeardown::Cleared(_)
