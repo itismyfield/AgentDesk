@@ -138,6 +138,15 @@ def main() -> int:
         candidate_sha = oid(candidate_sha)
         if oid("HEAD") != candidate_sha:
             raise RuntimeError("candidate SHA is not checked-out HEAD")
+        if event == "workflow_dispatch":
+            selector = "reject"
+            if (repository != "itismyfield/AgentDesk" or env.get("GFP_REF") != "refs/heads/main"
+                    or env.get("GFP_REF_PROTECTED") != "true"
+                    or candidate_sha != oid("refs/remotes/origin/main")):
+                raise RuntimeError("dispatch requires protected main head in itismyfield/AgentDesk")
+            selector = "main_no_regression_record"
+            payload.update({"ref": env["GFP_REF"], "ref_protected": True,
+                            "main_head_sha": candidate_sha})
         if event == "pull_request":
             selector = "pr_ordinary_no_regression"
             # Fork PRs use the same immutable candidate provenance checks.
@@ -188,7 +197,7 @@ def main() -> int:
                         "base_evaluator_sha256": base_evaluator_sha256,
                         "candidate_evaluator_sha256": candidate_evaluator_sha256})
                 reason = "candidate introduces no giant and no giant growth"
-            elif event == "push" and repository == "itismyfield/AgentDesk":
+            elif event in {"push", "workflow_dispatch"} and repository == "itismyfield/AgentDesk":
                 selector = "main_no_regression_record"
                 payload.update(main_record(candidate))
                 reason = "main records current giant-file debt"

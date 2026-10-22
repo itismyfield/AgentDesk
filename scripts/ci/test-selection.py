@@ -14,6 +14,7 @@ except main's non-PG filter replay ids, which run outside the ledger as on main.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import datetime
 import fnmatch
 import hashlib
@@ -36,6 +37,7 @@ KILL_LABEL = "ci-full"
 PLAN_ENV = "ADK_TEST_SELECTION_PLAN"
 LEDGER = "scripts/known_test_failures.txt"
 MAX_PLAN_BYTES = 60_000
+SWEEP_SHARD_COUNT = 4
 # Files holding a `#[cfg(test)]` test_support module re-exported under another path, whose
 # consumers never name the file; tests/test_test_selection.py keeps this equal to the source.
 SHARED_TEST_HELPERS = (
@@ -289,6 +291,39 @@ def shards(ids: list[str], full: bool) -> list[int]:
         {0, *(pgm.pg_test_shard(test_id) for test_id in ids)})
 
 
+def sweep_population(root: Path) -> list[str]:
+    """The existing full sweep: canonical skips plus their source-verified replay ids."""
+    runner, coverage = tools()[:2]
+    runtime, errors = runner.derive_expected_selection(
+        root / "scripts/lib_test_inventory_manifest.txt", "linux", [])
+    if errors:
+        raise ValueError("; ".join(errors))
+    skips = coverage.load_non_pg_skip_args(root)[1::2]
+    replay = set(coverage.load_non_pg_filter_replay(root))
+    return sorted(test_id for test_id in runtime
+                  if test_id in replay or not any(skip in test_id for skip in skips))
+
+
+def sweep_partition(ids: list[str]) -> list[list[str]]:
+    """Balanced, deterministic nonempty partitions, including small PR selections."""
+    count = min(SWEEP_SHARD_COUNT, len(ids))
+    return [sorted(ids)[index::count] for index in range(count)]
+
+
+def checked_sweep_partition(ids: list[str]) -> list[list[str]]:
+    """Independently prove that the proposed shards contain exactly the original set."""
+    parts = sweep_partition(ids)
+    combined = [test_id for part in parts for test_id in part]
+    if not ids or len(set(ids)) != len(ids) or not parts or not all(parts) \
+            or len(parts) != min(SWEEP_SHARD_COUNT, len(ids)) \
+            or Counter(combined) != Counter(ids):
+        raise ValueError("sweep partition has missing, duplicate, extra or empty test sets")
+    print(f"SWEEP_PARTITION_OK expected={len(ids)} shards={len(parts)} "
+          f"sizes={','.join(str(len(part)) for part in parts)} "
+          f"ids={digest(chr(10).join(sorted(ids)).encode())}", file=sys.stderr)
+    return parts
+
+
 def log(plan: dict, lane: str) -> None:
     entry = plan["lanes"][lane]
     print(f"test-selection: sha={plan['sha']} base={plan['base'] or '-'} "
@@ -375,7 +410,10 @@ def run_sweep(root: Path, ids: list[str]) -> int:
         if bad:
             print(f"ERROR test-selection sweep: replayed ids {what}: {' '.join(bad)}",
                   file=sys.stderr)
-    return rc or int(bool(missing or undeclared))
+    empty = not judged and not (outcome.executed & set(replayed))
+    if empty:
+        print("ERROR test-selection sweep: no planned test executed", file=sys.stderr)
+    return rc or int(bool(missing or undeclared or empty))
 
 
 def declared_ignored(root: Path) -> set[str]:
@@ -398,7 +436,19 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--head", default="HEAD")
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--lane", choices=LANES, required=True)
+    run_parser.add_argument("--shard", type=int)
+    run_parser.add_argument("--full", action="store_true")
+    commands.add_parser("sweep-matrix")
     args = parser.parse_args(argv)
+    if args.command == "sweep-matrix":
+        try:
+            parts = checked_sweep_partition(sweep_population(ROOT))
+            matrix = json.dumps({"shard": list(range(len(parts)))}, separators=(",", ":"))
+            print(matrix)
+            return 0
+        except (OSError, ValueError) as error:
+            print(f"ERROR sweep-matrix: {error}", file=sys.stderr)
+            return 1
     if args.command == "plan":
         plan = make_plan(args.root.resolve(), args.base, args.head)
         for lane in LANES:
@@ -407,14 +457,32 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         text = json.dumps(plan, separators=(",", ":"), sort_keys=True)
         matrix = json.dumps({"shard": plan["lanes"]["pg"]["shards"]}, separators=(",", ":"))
+        root = args.root.resolve()
+        ids = (sweep_population(root) if plan["lanes"]["sweep"]["mode"] == "full"
+               else Inventory(root).selected(plan["scopes"], "sweep"))
+        sweep_matrix = json.dumps({"shard": list(range(len(checked_sweep_partition(ids))))},
+                                  separators=(",", ":"))
         force = str(plan["force_full"]).lower()
         if output := os.environ.get("GITHUB_OUTPUT"):
             with open(output, "a", encoding="utf-8") as handle:
-                handle.write(f"matrix={matrix}\nplan={text}\nforce_full={force}\n")
+                handle.write(f"matrix={matrix}\nsweep_matrix={sweep_matrix}\n"
+                             f"plan={text}\nforce_full={force}\n")
         else:
             print(text)
         return 0
     try:
+        if args.full and (args.lane != "sweep" or args.shard is None):
+            raise ValueError("--full requires a sweep shard")
+        if args.shard is not None:
+            if args.lane != "sweep":
+                raise ValueError("--shard is only supported for the sweep lane")
+            entry, ids = ({"mode": "full"}, []) if args.full else load_plan(ROOT, "sweep")
+            if entry["mode"] == "full":
+                ids = sweep_population(ROOT)
+            parts = checked_sweep_partition(ids)
+            if not 0 <= args.shard < len(parts):
+                raise ValueError(f"sweep shard {args.shard} is not in this partition")
+            return run_sweep(ROOT, parts[args.shard])
         entry, ids = load_plan(ROOT, args.lane)
         if entry["mode"] == "full":
             command = [*FULL_PG] if args.lane == "pg" else ["bash", "-eo", "pipefail", "-c", FULL_SWEEP]

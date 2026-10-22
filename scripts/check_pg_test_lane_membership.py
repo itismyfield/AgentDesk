@@ -1698,6 +1698,13 @@ def non_pg_filter_contract_errors(
         if job is None:
             errors.append(f"{key}: required non-PG filter consumer job is missing")
             continue
+        # The full sweep's selector derives these same arrays and verifies each shard;
+        # the workflow hardening gate pins its matrix, command and required aggregate.
+        if key == ".github/workflows/ci-main.yml:full_non_pg" and (
+            'python3 scripts/ci/test-selection.py run --lane sweep --full --shard '
+            '"${{ matrix.shard }}"' in job.code
+        ):
+            continue
         variable = "${NON_PG_SKIP_ARGS[@]}"
         if variable not in job.code:
             errors.append(f"{key}: does not use the canonical {variable} array")

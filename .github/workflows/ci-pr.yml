@@ -1370,6 +1370,7 @@ jobs:
     outputs:
       force_full: ${{ steps.plan.outputs.force_full }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      sweep_matrix: ${{ steps.plan.outputs.sweep_matrix }}
       plan: ${{ steps.plan.outputs.plan }}
     steps:
       - uses: actions/checkout@v4
@@ -1803,10 +1804,13 @@ jobs:
 
   # The plan's non-PG tests, or main's full sweep and replay, against live PostgreSQL without DATABASE_URL.
   library_sweep:
-    name: Library test sweep
+    name: Library test sweep (shard ${{ matrix.shard }})
     needs: [changes, lib_test_prepare, pg_shards]
     if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pg_shards.outputs.sweep_matrix) }}
     env:
       RUST_BACKTRACE: 1
       # Fixture-side PostgreSQL wiring, matching `test_fast` /
@@ -1885,7 +1889,7 @@ jobs:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: python3 scripts/ci/test-selection.py run --lane sweep
+        run: python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"
 
       - name: Stop PostgreSQL service
         if: always()
@@ -2323,7 +2327,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9e174cce8786ea571dc1c14aaed0c0b57907a76f636276a48efb45cb93b45bcc
+          expected=7510add426ab39fc6e14ddc7d257ed24cdbd255c6784a076496a6caa93860b9a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2576,7 +2580,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=9e174cce8786ea571dc1c14aaed0c0b57907a76f636276a48efb45cb93b45bcc
+          expected=7510add426ab39fc6e14ddc7d257ed24cdbd255c6784a076496a6caa93860b9a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
