@@ -140,7 +140,7 @@ fn folding_never_combines_success_unknown_pending_or_failed_statuses() {
             },
             ToolMeta {
                 id: index.to_string(),
-                label: if index == 4 { "Read" } else { "Bash" },
+                label: if index == 4 { "Read" } else { "Bash" }.into(),
                 summary: None,
             },
         );
