@@ -1015,12 +1015,8 @@ pub(in crate::services::discord) mod rename_fault {
 /// fsync of the parent directory. What either one survives is not a claim this
 /// helper makes.
 ///
-/// A second call rather than a flag on `atomic_write`, which stays unflushed for
-/// stores that are not recovery-critical (those publish through `durable_publish`),
-/// and so callers can tell rename and parent sync failures apart. Gateway identity
-/// recovery skips its derived index on failure; generation allocation records a
-/// non-advanced route after its rename. The directory is opened read-only because
-/// opening one for writing fails with `EISDIR`.
+/// Separate from `atomic_write` (unflushed; recovery-critical stores use `durable_publish`) so
+/// rename and parent sync failures stay apart; read-only because a writable open fails `EISDIR`.
 #[cfg(not(windows))]
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path

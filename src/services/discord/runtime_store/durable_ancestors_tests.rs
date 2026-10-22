@@ -183,9 +183,8 @@ impl Born {
         self.0.extend(missing.into_iter().map(|dir| (dir, now)));
     }
 
-    /// Every entry between `target`'s parent and `root` was flushed by a sync of its directory
-    /// that ran after both ends of the entry were created, as a crash right after the publication
-    /// would need; a flush from before a directory's latest creation proves nothing.
+    /// Every entry up to `root` was flushed after both of its directories last appeared, as a
+    /// crash right after the publication needs; an earlier flush proves nothing.
     fn assert_durable(&self, watch: &Watch, root: &Path, target: &Path) {
         let events = watch.events();
         let mut child = target.parent().unwrap();
@@ -207,9 +206,8 @@ impl Born {
     }
 }
 
-/// After every publication each link up to the root is backed by a flush that ran after the
-/// link's directories last appeared, across new tokens, providers, replacements, failures and
-/// concurrent first publications.
+/// Each publication leaves every link up to the root durable, across new tokens, providers,
+/// replacements, a failed flush and concurrent first publications.
 #[test]
 fn every_chain_link_flushed_after_its_identity() {
     if !PARENT_DIR_FSYNC_FLUSHES {

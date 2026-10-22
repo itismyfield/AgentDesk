@@ -1,6 +1,5 @@
-//! Flushes the directories between a published file's parent and a trusted root. Each entry
-//! `P/name -> D` is remembered once this process synced `P` after reading both identities, so a
-//! publication skips only the links this process already proved, each checked on its own.
+//! Flushes the directories between a published file's parent and a trusted root, skipping only
+//! entries `P/name -> D` this process proved by syncing `P` after reading both identities.
 
 use std::collections::HashMap;
 use std::fs;
@@ -39,9 +38,8 @@ fn fsync_ancestors_with(witness: &Mutex<Witness>, root: &Path, path: &Path) -> i
     if depth == 0 {
         return Ok(());
     }
-    // dirs[0] is the parent and dirs[depth] the root; link i is the entry of dirs[i] in
-    // dirs[i + 1]. Identities are read before any flush, so a directory replaced after this
-    // read never matches what is remembered for it.
+    // Link i is the entry of dirs[i] in dirs[i + 1]; identities are read before any flush, so a
+    // directory replaced after this read never matches what is remembered for it.
     let dirs: Vec<&Path> = parent.ancestors().take(depth + 1).collect();
     let seen = dirs
         .iter()

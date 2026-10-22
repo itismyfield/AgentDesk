@@ -190,9 +190,8 @@ pub(crate) fn sync_removed(path: &Path) {
     }
 }
 
-/// After a successful rename of `from` to `to`, flushes the destination and the directories up
-/// to `root`, then the source, so a crash never keeps the removal without the copy. A failure
-/// is only logged, because the move already happened.
+/// After a rename of `from` to `to`, flushes the destination chain up to `root`, then the source,
+/// so a crash never keeps the removal without the copy; failures are only logged.
 pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
     let failed = match flush_published(root, to) {
         FlushStatus::Flushed => flush_parent(from)
@@ -213,9 +212,8 @@ pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
     }
 }
 
-/// Recovery-critical publication of a store file `<trusted root>/<store>/<provider>/<file>`;
-/// the store and provider come from the path, and the trusted root is the runtime root in
-/// production (a test's temp root otherwise).
+/// Recovery-critical publication of `<trusted root>/<store>/<provider>/<file>`, the trusted root
+/// being the runtime root in production; store and provider names come from the path.
 pub(crate) fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
     fn name(dir: Option<&Path>) -> Option<&str> {
         dir.and_then(Path::file_name).and_then(|name| name.to_str())
