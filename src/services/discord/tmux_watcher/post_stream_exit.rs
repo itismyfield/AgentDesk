@@ -41,6 +41,11 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         ..
     } = ctx;
 
+    let replacement = crate::services::discord::codex_absence::replacement::Probe::new(
+        channel_id.get(),
+        &tmux_session_name,
+    );
+
     // Cleanup: release this watcher's registry slot.
     // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
     // the replacement already occupies the slot — removing would delete the new entry.
@@ -77,6 +82,11 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         "post_stream_exit",
     )
     .await;
+    let cleanup = (teardown_admitted && provider == ProviderKind::Codex)
+        .then(|| replacement.cleanup())
+        .flatten();
+    let teardown_admitted =
+        teardown_admitted && (provider != ProviderKind::Codex || cleanup.is_some());
     let channel_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -144,7 +154,9 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let channel_id_inflight = channel_id;
             let watcher_identity_for_inflight = watcher_turn_identity.clone();
             let host = host.clone();
+            let cleanup = cleanup.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                let _cleanup = cleanup;
                 if !host_gate::tmux_pane_dead(
                     &provider_for_inflight,
                     channel_id_inflight,
@@ -172,7 +184,9 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             let sess = tmux_session_name.clone();
             let provider = provider.clone();
             let host = host.clone();
+            let cleanup = cleanup.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                let _cleanup = cleanup;
                 if host_gate::tmux_dead_pane_present(&provider, channel_id, &sess, &host) {
                     // Check if this is a unified-thread session before killing
                     if let Some((_, ch_name)) =
@@ -251,6 +265,8 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
             .await;
         }
     }
+
+    drop(cleanup);
 
     let defer_idle_status_to_bridge =
         crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
@@ -446,3 +462,7 @@ mod tests {
         assert!(!registry.contains_key(&channel));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "codex_replacement_tests.rs"]
+mod codex_replacement_tests;

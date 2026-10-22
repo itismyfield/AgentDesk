@@ -231,6 +231,7 @@ pub(super) fn execute_observed(
     let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
+    let mut replacement = None;
 
     // Disabled warm reuse keeps the existing cleanup and relaunch path.
     if warm_followup_enabled && prepared.is_none() {
@@ -253,10 +254,11 @@ pub(super) fn execute_observed(
                 reason,
             ) => warm_fallback_reason = Some(reason),
             crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::FallbackAfterPaneKill(
-                reason,
+                reason, guard,
             ) => {
                 warm_fallback_reason = Some(reason);
                 warm_fallback_pane_stopped = true;
+                replacement = guard;
             }
             crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::LegacyPath => {}
         }
@@ -271,6 +273,13 @@ pub(super) fn execute_observed(
     )
     .map_err(|error| error.to_string())?;
     if session_exists {
+        if warm_fallback_reason.is_some() && !warm_fallback_pane_stopped {
+            replacement = crate::services::discord::codex_absence::replacement::Replacement::begin(
+                report_channel_id,
+                tmux_session_name,
+                cancel_token.as_ref(),
+            )?;
+        }
         cleanup_existing_codex_tui_session(
             tmux_session_name,
             force_fresh_provider_session,
@@ -389,6 +398,10 @@ pub(super) fn execute_observed(
         tmux_session_name,
         Some(&prepared),
     ))?;
+
+    if let Some(replacement) = replacement {
+        replacement.complete();
+    }
 
     wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
 
