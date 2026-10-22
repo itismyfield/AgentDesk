@@ -1040,6 +1040,7 @@ src/
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
@@ -1211,6 +1212,7 @@ src/
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
+│   │   │   ├── http_force_hydrate_tests.rs
 │   │   │   ├── http_force_identity_tests.rs
 │   │   │   ├── http_force_purge_tests.rs
 │   │   │   ├── http_force_tests.rs
@@ -2131,6 +2133,7 @@ src/
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_activation_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_output_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── idle_inject_echo_e2e_tests.rs
