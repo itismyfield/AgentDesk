@@ -1279,6 +1279,7 @@ src/
 │   │   │   │   ├── coordinate_replay_tests.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
+│   │   │   │   ├── durable_writers_tests.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── outcome_decomposition_tests.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -1843,7 +1844,8 @@ src/
 │   │   │   ├── durable_ancestors.rs
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
-│   │   │   └── durable_publish_tests.rs
+│   │   │   ├── durable_publish_tests.rs
+│   │   │   └── durable_stores_tests.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
