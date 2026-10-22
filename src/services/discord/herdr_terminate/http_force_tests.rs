@@ -787,7 +787,7 @@ fn force_terminal_failure_matrix_pg() {
         let request = OperatorTerminate { session_key: node.key.clone(), execution_nonce: herdr::EXECUTION.into() };
         let calls = Arc::new(AtomicUsize::new(0));
         let postlude_calls = calls.clone();
-        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, None), None, "test", move |_| {
+        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, e08::identity::unbound(&rig, &node)), None, "test", move |_| {
             postlude_calls.fetch_add(1, Ordering::SeqCst);
             async {}.boxed()
         }).await;
@@ -1151,7 +1151,7 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
 }
 
 // The cancel's own read binds the run: when its turn ended and the successor's dispatch took the
-// channel right after that read, the re-read is refused before any close and the successor lives.
+// channel right after that read, the run is refused before any close and the successor lives.
 #[test]
 fn e07_selection_change_refuses_before_close_pg() {
     let Some((rig, runtime)) = rig_child("e07_selection_change_refuses_before_close_pg") else {
@@ -1166,7 +1166,7 @@ fn e07_selection_change_refuses_before_close_pg() {
         let untouched = node.effects(&rig).await;
         let (status, reply) = node.cancel().await;
         assert!(flag.load(Ordering::SeqCst));
-        let refused = result("refused", "selected dispatch changed");
+        let refused = result("refused", "captured turn runs another dispatch");
         assert_eq!(
             termination(status, &reply),
             (StatusCode::CONFLICT, refused),

@@ -23,14 +23,15 @@ pub(crate) struct SelectedRow {
     pub(crate) hosted: Option<serde_json::Value>,
 }
 
-/// [`load_cancel_turn_session`]'s selection with the chosen row as it was read.
+/// [`load_cancel_turn_session`]'s selection with the chosen row as it was read; `None` when its
+/// hosted columns do not read, so that row is no Herdr execution rather than a failed selection.
 #[cfg(unix)]
 pub(crate) async fn load_cancel_turn_hosted(
     pool: &PgPool,
     channel_id: &str,
-) -> ServiceResult<Option<(CancelTurnSessionInfo, SelectedRow)>> {
+) -> ServiceResult<Option<(CancelTurnSessionInfo, Option<SelectedRow>)>> {
     use sqlx::Row;
-    select(pool, channel_id, |row| {
+    let read = |row: &PgRow| -> Result<SelectedRow, sqlx::Error> {
         Ok(SelectedRow {
             identity: [
                 row.try_get("provider")?,
@@ -40,8 +41,8 @@ pub(crate) async fn load_cancel_turn_hosted(
             ],
             hosted: row.try_get("hosted_execution")?,
         })
-    })
-    .await
+    };
+    select(pool, channel_id, |row| Ok(read(row).ok())).await
 }
 
 async fn select<R>(
