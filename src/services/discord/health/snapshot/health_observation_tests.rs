@@ -253,7 +253,7 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
     });
 }
 
-/// After a barrier's release every read of the same actors answers, for this registry and a new one.
+/// After a barrier's release every read of the same actors answers, here and in a new registry.
 async fn assert_answers_after_release(registry: &HealthRegistry, shared: &Arc<SharedData>) {
     let (json, _) = detail(registry).await;
     assert_eq!(read_failures(&json), Vec::new(), "the same registry");
@@ -483,7 +483,7 @@ fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
     let claude = main.block_on(provider(&registry, "claude"));
     let (replaced, control) = (channel(6_871_340_000, 3), channel(6_871_340_000, 4));
     let json = main.block_on(async {
-        // Aged turns behind a watcher: a confirmed unpaired token classifies as `unpaired_active_token`.
+        // Aged turns behind a watcher: a confirmed unpaired token reads `unpaired_active_token`.
         for channel in [replaced, control] {
             nameless_turn(&claude, channel).await;
             let handle = claude.mailbox_peek(channel).unwrap();

@@ -121,13 +121,11 @@ impl PgWireProxy {
     }
 
     /// Client connections accepted since the proxy started.
-    #[cfg(unix)]
     pub(crate) fn accepted(&self) -> usize {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
     /// Client connections still being relayed.
-    #[cfg(unix)]
     pub(crate) fn open(&self) -> usize {
         self.shared.open.load(Ordering::SeqCst)
     }
