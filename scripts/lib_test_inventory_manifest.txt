@@ -6939,6 +6939,7 @@ services::discord::router::herdr_consent::service_tests::legacy_actual_component
 services::discord::router::herdr_consent::startup::tests::startup_legacy_returns_before_settings_or_policy_store_io
 services::discord::router::herdr_consent::startup::tests::startup_recovers_all_local_provider_accepts_before_apply_admission
 services::discord::router::herdr_consent::startup::tests::startup_store_failure_refuses_apply_without_aborting_the_process
+services::discord::router::herdr_consent::transport::tests::live_cards_preserve_body_components_and_send_failure_classification
 services::discord::router::intake_dispatch::attachment::tests::local_attachment_admission_runs_materialization_once
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
 services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg

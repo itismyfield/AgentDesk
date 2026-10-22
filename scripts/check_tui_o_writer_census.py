@@ -187,7 +187,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
     "recovery_paths/controller_cutover.rs": {"deliver_turn_output*": 1},
     "recovery_paths/restart.rs": {"relay_recovered_body_to_placeholder": 1},
-    "router/herdr_consent/transport.rs": {".edit_message": 2, ".send_message": 1},
+    "router/herdr_consent/transport.rs": {"edit_channel_message*": 2, "send_channel_message*": 1},
     "router/intake_dispatch/notice.rs": {"send_channel_message*": 1},
     "router/intake_gate.rs": {".say": 3},
     "router/intake_gate/busy_inject.rs": {".say": 1},
