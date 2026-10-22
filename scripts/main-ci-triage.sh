@@ -245,9 +245,10 @@ collect_failed_identifiers() {
   local prefix="$1"
   local repo="$2"
   local run_id="$3"
-  local jobs_json line job_id job_name job_url log_path matched identifier
+  local jobs_json failed_jobs line job_id job_name job_url log_path matched identifier
 
   jobs_json="$(gh api "/repos/$repo/actions/runs/$run_id/jobs?per_page=100")"
+  failed_jobs="$(jq '[.jobs[] | select(.conclusion == "failure")] | length' <<<"$jobs_json")"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     job_id="$(jq -r '.id' <<<"$line")"
@@ -264,6 +265,12 @@ collect_failed_identifiers() {
     done < <(parse_failed_identifiers_from_log "$log_path")
 
     if [[ "$matched" == "0" ]]; then
+      # An aggregate only repeats upstream red; retain its fallback if it is the
+      # sole failed job, including a skipped upstream or a broken aggregate step.
+      if (( failed_jobs > 1 )) && grep -E -q \
+        'aggregate-only: upstream=[A-Za-z0-9_-]+ result=(failure|cancelled|skipped)([[:space:]]|$)' "$log_path"; then
+        continue
+      fi
       # #3991/#3996: No `test … FAILED` assertion in a failed job's log means this
       # is a job-level fallback. Skip it as flaky ONLY when an infrastructure-level
       # termination (SIGTERM / signal 15 / exit 143 / runner cancellation) is the
@@ -1929,6 +1936,51 @@ EOF
   assert_contains "issue create --repo test/repo --title [ci-red] job::Full tests (ubuntu-latest) 실패 (main)" "$scenario_dir/issue-create.txt"
 }
 
+scenario_aggregate_failure() {
+  local mode="$1" scenario_dir="$TMP_DIR/selftest-aggregate-$1"
+  local runs=2 expected="" upstream="failure" shard_log="signal: 15, SIGTERM; exit code 143"
+  local index run_id jobs issue_count=0
+  mkdir -p "$scenario_dir"
+  install_mock_gh "$scenario_dir"
+  write_event_payload "$scenario_dir/event.json"
+  case "$mode" in
+    infra3) runs=3; expected="infra::job::Library sweep shard 0" ;;
+    assertion) shard_log="test sweep::regression ... FAILED"; expected="sweep::regression" ;;
+    aggregate-assertion) expected="aggregate::regression" ;;
+    alone) upstream="skipped"; expected="job::Full tests (ubuntu-latest)" ;;
+    unmarked|source-only) expected="job::Full tests (ubuntu-latest)" ;;
+  esac
+  jq -n --argjson count "$runs" '{workflow_runs: [range(0; $count) | {id: (200 - .), conclusion: "failure"}]}' >"$scenario_dir/workflow-runs.json"
+  for (( index = 0; index < runs; index++ )); do
+    run_id=$((200 - index))
+    jobs="current-jobs.json"
+    (( index == 0 )) || jobs="previous-jobs.json"
+    (( index < 2 )) || jobs="previous2-jobs.json"
+    jq -n --arg upstream "$upstream" '{jobs: [
+      {id: 1, name: "Library sweep shard 0", conclusion: $upstream},
+      {id: 2, name: "Full tests (ubuntu-latest)", conclusion: "failure"}]}' >"$scenario_dir/$jobs"
+    printf '%s\n' "$shard_log" >"$scenario_dir/log-$run_id-1.txt"
+    if [[ "$mode" == "unmarked" ]]; then
+      echo 'Process completed with exit code 1' >"$scenario_dir/log-$run_id-2.txt"
+    else
+      printf 'aggregate-only: upstream=full_non_pg result=%s\nProcess completed with exit code 1\n' "$upstream" >"$scenario_dir/log-$run_id-2.txt"
+    fi
+    [[ "$mode" != "aggregate-assertion" ]] || echo 'test aggregate::regression ... FAILED' >>"$scenario_dir/log-$run_id-2.txt"
+    [[ "$mode" != "source-only" ]] || echo 'echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"' >"$scenario_dir/log-$run_id-2.txt"
+  done
+  echo '[]' >"$scenario_dir/open-issues.json"
+  PATH="$scenario_dir:$PATH" GITHUB_REPOSITORY="test/repo" \
+    GITHUB_EVENT_PATH="$scenario_dir/event.json" GH_TOKEN="test-token" \
+    bash "$0"
+  issue_count="$(grep -c '^issue create ' "$scenario_dir/gh.log" || true)"
+  if [[ -z "$expected" ]]; then
+    [[ "$issue_count" == "0" ]] || { echo "assertion failed: two infra failures plus aggregates must create no issue" >&2; exit 1; }
+  else
+    [[ "$issue_count" == "1" ]] || { echo "assertion failed: aggregate scenario $mode must create exactly one issue, got $issue_count" >&2; exit 1; }
+    assert_contains "--title [ci-red] $expected 실패 (main)" "$scenario_dir/issue-create.txt"
+  fi
+}
+
 run_self_test() {
   require_cmd jq
   scenario_two_run_failure_creates_issue
@@ -1949,6 +2001,13 @@ run_self_test() {
   scenario_no_infra_candidates_skips_older_run_lookback
   scenario_sigterm_noise_with_real_test_failure_still_creates_issue
   scenario_compile_error_with_sigterm_noise_still_creates_issue
+  scenario_aggregate_failure infra2
+  scenario_aggregate_failure infra3
+  scenario_aggregate_failure assertion
+  scenario_aggregate_failure aggregate-assertion
+  scenario_aggregate_failure alone
+  scenario_aggregate_failure unmarked
+  scenario_aggregate_failure source-only
   echo "self-test passed"
 }
 

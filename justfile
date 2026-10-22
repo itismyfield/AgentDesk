@@ -194,20 +194,21 @@ test-postgres:
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
     cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
-# Both PG matrices run the targeted commands only on shard 0.
+# Numeric legs partition the PG selection; the continuity leg runs its targeted commands.
 test-postgres-shard:
     #!/usr/bin/env bash
     set -euo pipefail
-    python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
     test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    if [ "${PG_INCLUDE_SHARD:-}" = continuity ]; then
+        unset PG_INCLUDE_SHARD
+        just test-postgres-continuity
+        exit 0
+    fi
+    python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
     source scripts/ci/non-pg-test-filter.sh && run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
-    pg_selection_status=$?
-    if [ "$pg_selection_status" != 0 ]; then exit "$pg_selection_status"; fi
-    if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
-    unset PG_INCLUDE_SHARD && just test-postgres-continuity
 
-# Shard 0 of both PG matrices and the PR selector's shard 0 run these. The routing test
-# keeps them identical to the unsharded recipe's.
+# Both PG matrices run these once in a separate leg. The routing test keeps the
+# commands identical to the unsharded recipe's.
 test-postgres-continuity:
     #!/usr/bin/env bash
     set -euo pipefail

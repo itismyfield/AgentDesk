@@ -36,7 +36,7 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-PG_SHARD_COUNT = 4
+PG_SHARD_COUNT = 8
 PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
 PG_INCLUDE_DERIVATION = tuple('''\
@@ -1698,6 +1698,13 @@ def non_pg_filter_contract_errors(
         if job is None:
             errors.append(f"{key}: required non-PG filter consumer job is missing")
             continue
+        # The full sweep's selector derives these same arrays and verifies each shard;
+        # the workflow hardening gate pins its matrix, command and required aggregate.
+        if key == ".github/workflows/ci-main.yml:full_non_pg" and (
+            'python3 scripts/ci/test-selection.py run --lane sweep --full --shard '
+            '"${{ matrix.shard }}"' in job.code
+        ):
+            continue
         variable = "${NON_PG_SKIP_ARGS[@]}"
         if variable not in job.code:
             errors.append(f"{key}: does not use the canonical {variable} array")
@@ -1821,6 +1828,10 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
         if test not in pg_tests and any(value in test for value in skips)
     ]
     return skips, tuple(sorted(replay))
+
+
+def pg_shard_legs() -> list[int | str]:
+    return [*range(PG_SHARD_COUNT), "continuity"]
 
 
 def pg_test_shard(test_id: str) -> int:
@@ -2258,10 +2269,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.pg_shard_matrix:
-            print(json.dumps({"shard": list(range(PG_SHARD_COUNT))}, separators=(",", ":")))
+            print(json.dumps({"shard": pg_shard_legs()}, separators=(",", ":")))
             return 0
         if args.pg_job_names:
-            print("\n".join(f"PostgreSQL tests (shard {index})" for index in range(PG_SHARD_COUNT)))
+            print("\n".join(f"PostgreSQL tests (shard {index})" for index in pg_shard_legs()))
             return 0
         if args.validate_pg_shard is not None:
             validate_pg_shard(args.validate_pg_shard)
