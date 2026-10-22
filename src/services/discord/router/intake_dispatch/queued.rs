@@ -121,15 +121,23 @@ pub(crate) async fn admit_queued_intake(
     let local_permit = match admission {
         #[cfg(unix)]
         IntakeAdmission::ConsentHeld(hold) => {
-            let Some(dispatch_lease) = dispatch_lease else { return QueuedAdmissionDisposition::RejectedRestore; };
-            let owner = QueuedRestoreOwner { original: intervention.clone(), provider: submission.provider.clone(), channel_id, dispatch_lease };
-            if Box::pin(owner.restore(deps)).await == super::super::IntakeExecution::Deferred {
-                let result = match *hold {
-                    Ok(hold) => super::super::herdr_consent::admission::register_mailbox(deps, &submission.provider, &submission.request, hold, false).await,
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = result { tracing::warn!(%error, "restored consent queue remains held"); }
-            }
+            let Some(dispatch_lease) = dispatch_lease else {
+                return QueuedAdmissionDisposition::RejectedRestore;
+            };
+            let owner = QueuedRestoreOwner {
+                original: intervention.clone(),
+                provider: submission.provider.clone(),
+                channel_id,
+                dispatch_lease,
+            };
+            super::super::herdr_consent::admission::restore_then_register(
+                deps,
+                &submission.provider,
+                &submission.request,
+                *hold,
+                owner.restore(deps),
+            )
+            .await;
             return QueuedAdmissionDisposition::Deferred;
         }
         IntakeAdmission::ConsumedToHold => {
@@ -264,30 +272,23 @@ pub(crate) async fn finish_admitted_queued_intake(
             }
             Err(error) => {
                 #[cfg(unix)]
-                let error = match error
-                    .downcast::<super::super::herdr_consent::admission::QueuedHold>()
-                {
-                    Ok(hold) => {
-                        let provider = owner.provider.clone();
-                        let outcome = Box::pin(owner.restore(deps)).await;
-                        if outcome == super::super::IntakeExecution::Deferred
-                            && let Ok(hold) = hold.0
-                            && let Err(error) =
-                                super::super::herdr_consent::admission::register_mailbox(
+                let error =
+                    match error.downcast::<super::super::herdr_consent::admission::QueuedHold>() {
+                        Ok(hold) => {
+                            let provider = owner.provider.clone();
+                            let outcome =
+                                super::super::herdr_consent::admission::restore_then_register(
                                     deps,
                                     &provider,
                                     &original_request,
-                                    hold,
-                                    false,
+                                    hold.0,
+                                    owner.restore(deps),
                                 )
-                                .await
-                        {
-                            tracing::warn!(%error, "queued consent metadata retained for retry");
+                                .await;
+                            return Ok(outcome);
                         }
-                        return Ok(outcome);
-                    }
-                    Err(error) => error,
-                };
+                        Err(error) => error,
+                    };
                 Err(error)
             }
         },

@@ -83,6 +83,7 @@ impl Fixture {
             },
             owner: 1,
             bot: 2,
+            unreleased: Vec::new(),
         }
     }
     fn disk(&self) -> Vec<crate::services::turn_orchestrator::Intervention> {
@@ -1181,6 +1182,473 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
         f.state.local_note_posts.load(Ordering::SeqCst),
         0,
         "worker_policy_flip_no_provider_or_card_effect_contract"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+struct ScopedAdmissionPeer(Option<Arc<dyn crate::services::session_host::policy::PeerSource>>);
+impl Drop for ScopedAdmissionPeer {
+    fn drop(&mut self) {
+        TEST_SOURCE.with(|source| *source.borrow_mut() = self.0.take());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn expired_consent_backstop_restores_head_without_store_or_card_effects() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new("disabled").await;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let (_config, source) = preview::tests::fixture("printf 'config: ok\n'");
+    source.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
+    let _source = ScopedAdmissionPeer(TEST_SOURCE.with(|slot| slot.replace(Some(source))));
+    let patches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = patches.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let observed = observed.clone();
+        async move {
+            if request.method() == axum::http::Method::PATCH {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+            axum::Json(discord_mock::discord_message_json(8_916_990, "expired"))
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("isolated")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let deps = IntakeDeps {
+        http: &http,
+        ..f.deps()
+    };
+    for id in [8_916_100, 8_916_101] {
+        let mut input = submission(id, IntakeOrigin::SlashSkill);
+        input
+            .preloaded_uploads
+            .push(format!("original-{id}").into());
+        assert!(intake::defer_live_submission(&deps, input, true).await);
+    }
+    let original = f.disk();
+    let mut hold = f.hold();
+    // SAFETY: geteuid has no preconditions.
+    hold.key.user = unsafe { libc::geteuid() };
+    let held = hold
+        .record(
+            original
+                .iter()
+                .map(|item| IntentRef {
+                    store: "mailbox".into(),
+                    id: format!("{}:{}", item.message_id.get(), item.queued_generation),
+                    provider: "claude".into(),
+                    channel: discord_mock::CHANNEL_ID,
+                    source_message: item.message_id.get(),
+                    fifo: item.queued_generation,
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let reserved = store().reserve_card(&held, 100).unwrap();
+    let bound = store().bind_card(&reserved, 8_916_990).unwrap();
+    let expired = store().expire(&bound, 1_900).unwrap();
+    assert_eq!(expired.state, State::Expired);
+    let path = f
+        .root
+        .path()
+        .join("runtime/herdr_policy/consents")
+        .join(format!(
+            "{}.json",
+            crate::services::session_host::policy::durable::key(&expired.key).unwrap()
+        ));
+    let before = std::fs::read(&path).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    for _ in 0..3 {
+        let taken = f
+            .shared
+            .mailbox(ChannelId::new(discord_mock::CHANNEL_ID))
+            .take_next_soft(QueuePersistenceContext::new(
+                &ProviderKind::Claude,
+                &f.shared.token_hash,
+                None,
+            ))
+            .await;
+        let head = taken.intervention.as_ref().unwrap();
+        let result = intake::admit_queued_intake(
+            &deps,
+            ProviderKind::Claude,
+            ChannelId::new(discord_mock::CHANNEL_ID),
+            head,
+            head.author_id,
+            "owner".into(),
+            false,
+            false,
+            "expired-consent-backstop",
+            taken.dispatch_lease.clone(),
+        )
+        .await;
+        assert!(
+            matches!(result, QueuedAdmissionDisposition::Deferred),
+            "expired_backstop_retains_deferred_contract"
+        );
+    }
+    assert_eq!(
+        patches.load(Ordering::SeqCst),
+        0,
+        "expired_backstop_card_patch_zero_contract"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "expired_backstop_consent_bytes_unchanged_contract"
+    );
+    let after = std::fs::metadata(&path).unwrap();
+    assert_eq!(
+        (after.ino(), after.mtime(), after.mtime_nsec()),
+        (metadata.ino(), metadata.mtime(), metadata.mtime_nsec()),
+        "expired_backstop_store_write_zero_contract"
+    );
+    let restored = f.disk();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        original
+            .iter()
+            .map(|item| item.message_id)
+            .collect::<Vec<_>>(),
+        "expired_backstop_fifo_contract"
+    );
+    assert_eq!(
+        restored[0].pending_uploads, original[0].pending_uploads,
+        "expired_backstop_original_upload_contract"
+    );
+    let identities = |item: &crate::services::turn_orchestrator::Intervention| {
+        item.source_message_queued_generations()
+            .into_iter()
+            .map(|source| (source.message_id, source.queued_generation, source.origin))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        identities(&restored[0]),
+        identities(&original[0]),
+        "expired_backstop_exact_source_generation_contract"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn already_held_requires_every_original_source_and_exact_generation() {
+    for old_generation in [false, true] {
+        let f = Fixture::new("disabled").await;
+        let _boot =
+            session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+                .with_mode(EndpointMode::UserDefault);
+        let mut a = submission(8_916_110, IntakeOrigin::SlashSkill);
+        a.request.merge_consecutive = true;
+        a.request.has_reply_boundary = false;
+        a.request.reply_context = None;
+        assert!(intake::defer_live_submission(&f.deps(), a, true).await);
+        let first = f.disk().remove(0);
+        let fifo = first.source_message_queued_generations()[0].queued_generation
+            + u64::from(old_generation);
+        let hold = f.hold();
+        hold.record(vec![IntentRef {
+            store: "mailbox".into(),
+            id: format!("8916110:{fifo}"),
+            provider: "claude".into(),
+            channel: discord_mock::CHANNEL_ID,
+            source_message: 8_916_110,
+            fifo,
+        }])
+        .await
+        .unwrap();
+        let mut b = submission(8_916_111, IntakeOrigin::TextSkill);
+        b.request.merge_consecutive = true;
+        b.request.has_reply_boundary = false;
+        b.request.reply_context = None;
+        assert!(intake::defer_live_submission(&f.deps(), b, true).await);
+        let taken = f
+            .shared
+            .mailbox(ChannelId::new(discord_mock::CHANNEL_ID))
+            .take_next_soft(QueuePersistenceContext::new(
+                &ProviderKind::Claude,
+                &f.shared.token_hash,
+                None,
+            ))
+            .await;
+        let head = taken.intervention.as_ref().unwrap();
+        assert_eq!(
+            head.source_message_ids.len(),
+            2,
+            "already_held_mixed_fixture_has_both_sources_contract"
+        );
+        let result = intake::admit_queued_intake(
+            &f.deps(),
+            ProviderKind::Claude,
+            ChannelId::new(discord_mock::CHANNEL_ID),
+            head,
+            head.author_id,
+            "owner".into(),
+            false,
+            false,
+            "mixed-source-consent",
+            taken.dispatch_lease.clone(),
+        )
+        .await;
+        assert!(matches!(result, QueuedAdmissionDisposition::Deferred));
+        let consent = store().load_all().unwrap().remove(0);
+        for source in head.source_message_queued_generations() {
+            assert!(
+                consent
+                    .unresolved_intents()
+                    .iter()
+                    .any(|intent| intent.source_message == source.message_id.get()
+                        && intent.fifo == source.queued_generation),
+                "already_held_all_exact_sources_registered_contract"
+            );
+        }
+        assert_eq!(
+            consent.unresolved_intents().len(),
+            2 + usize::from(old_generation),
+            "already_held_never_drops_new_or_reused_generation_contract"
+        );
+    }
+}
+
+type BeforeRecord = Box<dyn FnMut() -> futures::future::BoxFuture<'static, ()>>;
+thread_local! {
+    static BEFORE_RECORD: std::cell::RefCell<Option<BeforeRecord>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) async fn before_record() {
+    let future = BEFORE_RECORD.with(|slot| slot.borrow_mut().as_mut().map(|callback| callback()));
+    if let Some(future) = future {
+        future.await;
+    }
+}
+struct RecordHook;
+impl Drop for RecordHook {
+    fn drop(&mut self) {
+        BEFORE_RECORD.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
+    use crate::services::cluster::intake_worker::{self as worker, test_executor};
+    let mut f = Fixture::new("disabled").await;
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    f.shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    f.shared
+        .http
+        .cached_bot_token
+        .set("isolated-worker-token".into())
+        .unwrap();
+    registry.register("claude".into(), f.shared.clone()).await;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    seed_ready_row(&pool, &f.shared).await;
+    let row = crate::db::intake_outbox::owner_fence_pg_tests::seed(
+        &pool,
+        &discord_mock::CHANNEL_ID.to_string(),
+        "pending",
+        true,
+    )
+    .await;
+    let before = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+    let observed_pool = pool.clone();
+    let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = injected.clone();
+    let checkpoint = test_executor::hook(Box::new(move |point| {
+        let pool = observed_pool.clone();
+        let observed = observed.clone();
+        Box::pin(async move {
+            if point == test_executor::Checkpoint::Spawned && !observed.swap(true, Ordering::SeqCst)
+            {
+                sqlx::query("ALTER TABLE sessions RENAME COLUMN hosted_execution TO unavailable_hosted_execution")
+                    .execute(&pool).await.unwrap();
+            }
+        })
+    }));
+    let result = worker::run_intake_worker_tick(
+        &pool,
+        &f.shared,
+        "fence-worker",
+        "claude",
+        "token",
+        &|| false,
+    )
+    .await;
+    drop(checkpoint);
+    assert!(
+        injected.load(Ordering::SeqCst),
+        "worker_assessment_failure_actual_spawned_checkpoint_contract"
+    );
+    assert!(
+        matches!(result, Ok(worker::TickOutcome::Held)),
+        "worker_assessment_failure_stops_effects_contract: {result:?}"
+    );
+    let after = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+    assert_eq!(
+        after["status"], "pending",
+        "worker_before_record_exact_row_rearmed_contract"
+    );
+    for field in [
+        "id",
+        "user_text",
+        "attachment_refs",
+        "attempt_no",
+        "retry_count",
+        "parent_outbox_id",
+    ] {
+        assert_eq!(
+            after[field], before[field],
+            "worker_before_record_preserves_original_contract: {field}"
+        );
+    }
+    assert!(
+        !f.root.path().join("runtime/herdr_policy/consents").exists(),
+        "worker_before_record_zero_consent_files_contract"
+    );
+    assert_eq!(
+        f.state.local_note_posts.load(Ordering::SeqCst),
+        1,
+        "worker_before_record_lifecycle_notice_contract"
+    );
+    assert!(
+        f.state
+            .written_texts()
+            .iter()
+            .any(|text| text.contains(&format!("row {row}")) && text.contains("Pending")),
+        "worker_before_record_notice_names_original_row_contract"
+    );
+    sqlx::query(
+        "ALTER TABLE sessions RENAME COLUMN unavailable_hosted_execution TO hosted_execution",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    f.hold()
+        .record(vec![IntentRef {
+            store: "intake_outbox".into(),
+            id: row.to_string(),
+            provider: "claude".into(),
+            channel: discord_mock::CHANNEL_ID,
+            source_message: discord_mock::CHANNEL_ID,
+            fifo: 1,
+        }])
+        .await
+        .unwrap();
+    let second = worker::run_intake_worker_tick(
+        &pool,
+        &f.shared,
+        "fence-worker",
+        "claude",
+        "token",
+        &|| false,
+    )
+    .await;
+    assert!(
+        matches!(second, Ok(worker::TickOutcome::Held)),
+        "worker_before_record_second_tick_holds_contract: {second:?}"
+    );
+    let final_row = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+    assert!(
+        final_row["last_error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("herdr-consent-custody:v1:")),
+        "worker_before_record_next_tick_durable_hold_contract"
+    );
+    assert_eq!(
+        store().load_all().unwrap()[0].unresolved_intents().len(),
+        1,
+        "worker_before_record_one_hold_after_retry_contract"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg() {
+    let mut f = Fixture::new("disabled").await;
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    f.shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let (row, _other, _store, _consent, _) =
+        crate::db::intake_outbox::consent_handoff::tests::setup(
+            &pool,
+            &discord_mock::CHANNEL_ID.to_string(),
+        )
+        .await;
+    let mut original = request(discord_mock::CHANNEL_ID);
+    original.intake_outbox_id = Some(row.id);
+    let hold = f.hold();
+    hold.record(vec![IntentRef {
+        store: "intake_outbox".into(),
+        id: row.id.to_string(),
+        provider: "claude".into(),
+        channel: discord_mock::CHANNEL_ID,
+        source_message: discord_mock::CHANNEL_ID,
+        fifo: row.attempt_no as u64,
+    }])
+    .await
+    .unwrap();
+    let directory = f.root.path().join("runtime/herdr_policy/consents");
+    let pending = directory.join(format!(
+        "{}.pending",
+        crate::services::session_host::policy::durable::key(&hold.key).unwrap()
+    ));
+    let marker = pending.clone();
+    BEFORE_RECORD.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let marker = marker.clone();
+            Box::pin(async move {
+                std::fs::write(marker, b"published state unknown").unwrap();
+            })
+        }))
+    });
+    let _hook = RecordHook;
+    assert!(
+        worker(
+            &f.deps(),
+            &original,
+            Some(crate::services::cluster::intake_worker::BeforeEffects::for_test(&row))
+        )
+        .await
+    );
+    let after = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+    assert_eq!(
+        after["status"], "spawned",
+        "worker_after_record_error_never_general_retry_contract"
+    );
+    assert_eq!(
+        after["claim_owner"],
+        row.claim_owner.unwrap(),
+        "worker_after_record_error_preserves_claim_contract"
+    );
+    assert!(
+        pending.exists(),
+        "worker_after_record_error_keeps_uncertain_publication_contract"
+    );
+    assert!(
+        f.state
+            .written_texts()
+            .iter()
+            .any(|text| text.contains(&format!("row {}", row.id)) && text.contains("Spawned")),
+        "worker_after_record_error_lifecycle_notice_contract"
     );
     pool.close().await;
     db.drop().await;

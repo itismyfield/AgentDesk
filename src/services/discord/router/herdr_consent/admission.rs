@@ -14,6 +14,7 @@ pub(in crate::services::discord) struct Hold {
     preview: Preview,
     owner: u64,
     bot: u64,
+    unreleased: Vec<IntentRef>,
 }
 
 /// None is the unchanged path. The mode guard precedes rows, files, checker and Discord reads.
@@ -49,7 +50,7 @@ async fn assess(
             && record.key.named_session == configured.herdr_session
     }) {
         let sink = custody::LiveSink::new(deps.shared.clone(), provider.clone(), &consent.key)?;
-        let mut held = false;
+        let mut unreleased = Vec::new();
         for intent in consent.unresolved_intents().iter().filter(|intent| {
             intent.channel == request.channel_id.get()
                 && (intent.source_message == request.user_msg_id.get()
@@ -58,15 +59,18 @@ async fn assess(
                         .iter()
                         .any(|id| id.get() == intent.source_message))
         }) {
-            held |= !sink.released(intent).await?;
+            if !sink.released(intent).await? {
+                unreleased.push(intent.clone());
+            }
         }
         let current = Hold {
             key: consent.key.clone(),
             preview: consent.preview.clone(),
             owner: consent.owner,
             bot: consent.bot,
+            unreleased,
         };
-        if held {
+        if !current.unreleased.is_empty() {
             return Ok(Some(current));
         }
         if matches!(
@@ -162,6 +166,7 @@ async fn assess(
         preview: token,
         owner,
         bot,
+        unreleased: Vec::new(),
     }))
 }
 
@@ -219,6 +224,64 @@ impl Hold {
     }
 }
 
+async fn mailbox_intents(
+    deps: &IntakeDeps<'_>,
+    provider: &ProviderKind,
+    request: &IntakeRequest,
+) -> Result<Vec<IntentRef>, String> {
+    let (provider_read, token_hash, channel) = (
+        provider.clone(),
+        deps.shared.token_hash.clone(),
+        request.channel_id,
+    );
+    let (items, _) = tokio::task::spawn_blocking(move || {
+        crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+            &provider_read,
+            &token_hash,
+            channel,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let mut wanted = request.source_message_ids.clone();
+    wanted.push(request.user_msg_id);
+    wanted.sort_unstable();
+    wanted.dedup();
+    wanted
+        .into_iter()
+        .map(|source| {
+            let found = items
+                .iter()
+                .flat_map(|item| item.source_message_queued_generations())
+                .find(|s| s.message_id == source)
+                .ok_or("original source not durably queued; checkpoint remains unread")?;
+            Ok(IntentRef {
+                store: "mailbox".into(),
+                id: format!("{}:{}", source.get(), found.queued_generation),
+                provider: provider.as_str().into(),
+                channel: channel.get(),
+                source_message: source.get(),
+                fifo: found.queued_generation,
+            })
+        })
+        .collect()
+}
+
+async fn register_intents(
+    deps: &IntakeDeps<'_>,
+    provider: &ProviderKind,
+    hold: Hold,
+    intents: Vec<IntentRef>,
+    explicit: bool,
+) -> Result<(), String> {
+    let consent = hold.record(intents).await?;
+    // Card failure never relinquishes custody or retries a send whose response was lost.
+    if let Err(error) = hold.effect(deps, provider, consent, explicit).await {
+        tracing::warn!(%error, "consent card held after durable input");
+    }
+    Ok(())
+}
+
 pub(in crate::services::discord::router) fn register_mailbox<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
     provider: &'a ProviderKind,
@@ -227,47 +290,38 @@ pub(in crate::services::discord::router) fn register_mailbox<'a, 'b: 'a>(
     explicit: bool,
 ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'a {
     Box::pin(async move {
-        let (provider_read, token_hash, channel) = (
-            provider.clone(),
-            deps.shared.token_hash.clone(),
-            request.channel_id,
-        );
-        let (items, _) = tokio::task::spawn_blocking(move || {
-            crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-                &provider_read,
-                &token_hash,
-                channel,
-            )
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        let mut wanted = request.source_message_ids.clone();
-        wanted.push(request.user_msg_id);
-        wanted.sort_unstable();
-        wanted.dedup();
-        let mut intents = Vec::new();
-        for source in wanted {
-            let found = items
-                .iter()
-                .flat_map(|item| item.source_message_queued_generations())
-                .find(|s| s.message_id == source)
-                .ok_or("original source not durably queued; checkpoint remains unread")?;
-            intents.push(IntentRef {
-                store: "mailbox".into(),
-                id: format!("{}:{}", source.get(), found.queued_generation),
-                provider: provider.as_str().into(),
-                channel: channel.get(),
-                source_message: source.get(),
-                fifo: found.queued_generation,
-            });
-        }
-        let consent = hold.record(intents).await?;
-        // Card failure never relinquishes custody or retries a send whose response was lost.
-        if let Err(error) = hold.effect(deps, provider, consent, explicit).await {
-            tracing::warn!(%error, "consent card held after durable input");
-        }
-        Ok(())
+        let intents = mailbox_intents(deps, provider, request).await?;
+        register_intents(deps, provider, hold, intents, explicit).await
     })
+}
+
+pub(in crate::services::discord::router) async fn restore_then_register(
+    deps: &IntakeDeps<'_>,
+    provider: &ProviderKind,
+    request: &IntakeRequest,
+    hold: Result<Hold, String>,
+    restore: impl std::future::Future<Output = super::super::IntakeExecution> + Send,
+) -> super::super::IntakeExecution {
+    let outcome = Box::pin(restore).await;
+    if outcome == super::super::IntakeExecution::Deferred {
+        let registered = async {
+            let hold = hold?;
+            let intents = mailbox_intents(deps, provider, request).await?;
+            // Backstop still restores the original head and lease, but repeats no card/store effect.
+            let already_held = intents
+                .iter()
+                .all(|intent| hold.unreleased.contains(intent));
+            if !already_held {
+                register_intents(deps, provider, hold, intents, false).await?;
+            }
+            Ok::<_, String>(())
+        }
+        .await;
+        if let Err(error) = registered {
+            tracing::warn!(%error, "restored consent queue remains held");
+        }
+    }
+    outcome
 }
 
 // Keep the custody enqueue future out of callers that take the unchanged Legacy branch.
@@ -307,10 +361,18 @@ pub(in crate::services::discord::router) async fn worker(
     let Some(held) = check(deps, provider, request).await else {
         return false;
     };
+    let mut proof = proof;
+    let row_id = proof
+        .as_ref()
+        .map(|proof| proof.row().id)
+        .or(request.intake_outbox_id);
+    let mut recording = false;
     let result = async {
         let hold = held?;
-        let proof = proof.ok_or("consent requires an exact before-effects worker handoff")?;
-        let row = proof.row();
+        let row = proof
+            .as_ref()
+            .ok_or("consent requires an exact before-effects worker handoff")?
+            .row();
         let intent = IntentRef {
             store: "intake_outbox".into(),
             id: row.id.to_string(),
@@ -319,15 +381,19 @@ pub(in crate::services::discord::router) async fn worker(
             source_message: request.user_msg_id.get(),
             fifo: row.attempt_no as u64,
         };
-        let consent = hold.record(vec![intent.clone()]).await?;
         let pool = deps
             .shared
             .pg_pool
             .as_ref()
             .ok_or("worker custody database unavailable")?;
+        #[cfg(test)]
+        tests::before_record().await;
+        // Any record attempt may have published; only earlier failures retain rollback authority.
+        recording = true;
+        let consent = hold.record(vec![intent.clone()]).await?;
         crate::db::intake_outbox::consent_handoff::hold_before_effects(
             pool,
-            proof,
+            proof.take().ok_or("before-effects authority missing")?,
             &store(),
             &consent,
             &intent,
@@ -337,7 +403,34 @@ pub(in crate::services::discord::router) async fn worker(
     }
     .await;
     if let Err(error) = result {
-        tracing::warn!(%error, "worker consent keeps original payload deferred");
+        let mut rearmed = false;
+        if !recording
+            && let Some(proof) = proof.take()
+            && let Some(pool) = deps.shared.pg_pool.as_ref()
+        {
+            match crate::db::intake_outbox::consent_handoff::return_before_record(pool, proof).await
+            {
+                Ok(changed) => rearmed = changed,
+                Err(rollback) => {
+                    tracing::warn!(%rollback, "consent before-record rollback unverified")
+                }
+            }
+        }
+        tracing::warn!(%error, ?row_id, rearmed, "worker consent keeps original payload deferred");
+        let detail = if rearmed {
+            "Pending; same original input will be checked again"
+        } else {
+            "Spawned; original input preserved; consent recovery requires inspection"
+        };
+        if let Some(row) = row_id {
+            let notice = format!("worker 입력 보류: row {row} ({detail}): {error}");
+            if let Err(notice_error) = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+                deps.http.clone(), deps.shared.clone(), request.channel_id, request.user_msg_id,
+                &notice, format!("herdr-consent-worker:{row}"), format!("held:{rearmed}"),
+            ).await {
+                tracing::warn!(%notice_error, "worker consent lifecycle notice failed");
+            }
+        }
     }
     true
 }

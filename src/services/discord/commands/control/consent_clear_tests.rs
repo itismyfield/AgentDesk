@@ -197,3 +197,113 @@ async fn legacy_actual_clear_ignores_unreadable_consent_storage() {
         b"unreadable consent snapshot"
     );
 }
+
+async fn actual_user_default_clear_settlement(retired: bool) {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedExecution, HostedOwner, HostedState, SourceRef,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel = ChannelId::new(CHANNEL);
+    let provider = ProviderKind::Claude;
+    super::super::clear_persist_failure_tests::seed_session(&shared, channel).await;
+    let name = provider.build_tmux_session_name("adk-6233-clear-persist");
+    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(&name);
+    let logical =
+        super::super::super::adk_session::build_adk_session_key(&shared, channel, &provider, None)
+            .await
+            .unwrap();
+    if retired {
+        let owner = HostedOwner {
+            provider: "claude".into(),
+            discord_token_hash: shared.token_hash.clone(),
+            channel_id: CHANNEL.to_string(),
+            logical_key: logical.clone(),
+            owner_node: "node".into(),
+            runtime_root: "/fixture/runtime".into(),
+        };
+        let mut hosted = HostedExecution::pending(
+            owner.clone(),
+            "retired-clear-fixture".into(),
+            SourceRef {
+                runtime_root: owner.runtime_root.clone(),
+                channel: owner.channel_id.clone(),
+                provider: owner.provider.clone(),
+                logical_key: logical.clone(),
+                execution_nonce: "retired-clear-fixture".into(),
+                initial_source: None,
+                baseline_event_seq: None,
+            },
+        );
+        hosted.state = HostedState::Retired;
+        sqlx::query("INSERT INTO sessions (session_key,provider,status,identity_kind,discord_token_hash,channel_id,hosted_execution) VALUES ($1,'claude','idle','discord_channel',$2,$3,$4)")
+            .bind(&logical).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(serde_json::to_value(hosted).unwrap())
+            .execute(&pool).await.unwrap();
+    }
+    let persistence = QueuePersistenceContext::new(&provider, &shared.token_hash, None);
+    let queued = shared.mailbox(channel).enqueue(input(), persistence).await;
+    assert!(
+        queued.enqueued && queued.persistence_error.is_none(),
+        "actual_clear_durable_fixture_contract"
+    );
+    let store = herdr_consent::store();
+    let held = store.hold(question(), 100).unwrap().into_consent();
+    let mut sentinel_question = question();
+    sentinel_question.key.target = "/fixture/other-generation.toml".into();
+    sentinel_question.intent.fifo += 1;
+    sentinel_question.intent.id = format!("{SOURCE}:{}", sentinel_question.intent.fifo);
+    let sentinel = store.hold(sentinel_question, 100).unwrap().into_consent();
+    let http = std::sync::Arc::new(poise::serenity_prelude::Http::new(""));
+    let report = super::super::clear_channel_session_state(
+        &http,
+        &shared,
+        &provider,
+        channel,
+        "/clear",
+        super::super::SoftClearNotifyMode::Suppress,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !report.failed.contains(&"consent_discard"),
+        "actual_clear_consent_settlement_has_no_failure_contract"
+    );
+    assert_eq!(
+        report.execution.is_some(),
+        retired,
+        "actual_clear_expected_public_branch_contract"
+    );
+    let settled = store.load(&held.key).unwrap().unwrap();
+    assert_eq!(
+        settled.settlements.len(),
+        1,
+        "actual_clear_entry_settles_exact_ref_once_contract: retired={retired}"
+    );
+    assert!(
+        settled.unresolved_intents().is_empty(),
+        "actual_clear_entry_releases_removed_ref_contract"
+    );
+    assert_eq!(
+        store.load(&sentinel.key).unwrap().unwrap(),
+        sentinel,
+        "actual_clear_entry_preserves_other_generation_contract"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn user_default_actual_general_clear_settles_exact_consent_once_pg() {
+    actual_user_default_clear_settlement(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn user_default_actual_herdr_clear_early_return_settles_exact_consent_once_pg() {
+    actual_user_default_clear_settlement(true).await;
+}

@@ -149,6 +149,57 @@ pub(crate) async fn release(
     tx.commit().await.map_err(|e| e.to_string())
 }
 
+/// Consumes exact pre-effects authority only when no consent record was attempted.
+pub(crate) async fn return_before_record(
+    pool: &PgPool,
+    proof: crate::services::cluster::intake_worker::BeforeEffects,
+) -> Result<bool, String> {
+    let expected = proof.row();
+    if expected.status != super::IntakeOutboxStatus::Spawned || expected.claim_owner.is_none() {
+        return Err("consent rollback requires this worker's before-effects spawned row".into());
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let identity = OwnerIdentity::new(&expected.provider, &expected.channel_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(identity.advisory_key())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let current: Option<Snapshot> =
+        sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
+            .bind(expected.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    let Some(Snapshot { row, last_error }) = current else {
+        return Ok(false);
+    };
+    if row.status != super::IntakeOutboxStatus::Spawned
+        || last_error.is_some()
+        || row.claim_owner != expected.claim_owner
+        || row.owner_instance_id != expected.owner_instance_id
+        || row.owner_generation != expected.owner_generation
+        || payload(&row)? != payload(expected)?
+    {
+        return Ok(false);
+    }
+    let owner_valid = match (&row.owner_instance_id, row.owner_generation) {
+        (None, None) => true,
+        (Some(owner), Some(generation)) => sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM intake_session_owners WHERE provider=$1 AND raw_channel_id=$2 AND status='active' AND owner_instance_id=$3 AND generation=$4)")
+            .bind(identity.provider()).bind(identity.raw_channel_id()).bind(owner).bind(generation)
+            .fetch_one(&mut *tx).await.map_err(|e| e.to_string())?,
+        _ => false,
+    };
+    if !owner_valid {
+        return Ok(false);
+    }
+    let changed = sqlx::query("UPDATE intake_outbox SET status='pending', claim_owner=NULL, claimed_at=NULL, accepted_at=NULL, spawned_at=NULL WHERE id=$1 AND status='spawned' AND claim_owner=$2 AND last_error IS NULL")
+        .bind(row.id).bind(&row.claim_owner).execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(changed == 1)
+}
+
 pub(crate) async fn hold_before_effects(
     pool: &PgPool,
     proof: crate::services::cluster::intake_worker::BeforeEffects,

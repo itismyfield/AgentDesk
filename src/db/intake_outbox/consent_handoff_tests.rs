@@ -392,3 +392,86 @@ async fn consent_handoff_stale_before_effects_proof_never_changes_row_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn consent_before_record_rollback_consumes_exact_authority_and_preserves_bookkeeping_pg() {
+    use crate::services::cluster::intake_worker::BeforeEffects;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (n, change) in [
+        "none",
+        "payload",
+        "claim",
+        "generation",
+        "owner",
+        "marker",
+        "status",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = (891220 + n).to_string();
+        let (row, _root, _store, _consent, _) = setup(&pool, &channel).await;
+        let statement = match change {
+            "payload" => Some("UPDATE intake_outbox SET user_text='changed' WHERE id=$1"),
+            "claim" => Some("UPDATE intake_outbox SET claim_owner='changed' WHERE id=$1"),
+            "generation" => {
+                Some("UPDATE intake_outbox SET owner_generation=owner_generation+1 WHERE id=$1")
+            }
+            "marker" => {
+                Some("UPDATE intake_outbox SET last_error='existing durable marker' WHERE id=$1")
+            }
+            "status" => Some("UPDATE intake_outbox SET status='dispatched' WHERE id=$1"),
+            _ => None,
+        };
+        if let Some(statement) = statement {
+            sqlx::query(statement)
+                .bind(row.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        if change == "owner" {
+            super::super::owner_fence_pg_tests::move_owner(&pool, &channel, "other-worker").await;
+        }
+        let before = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+        let changed = return_before_record(&pool, BeforeEffects::for_test(&row))
+            .await
+            .unwrap();
+        assert_eq!(
+            changed,
+            change == "none",
+            "consent_before_record_exact_authority_contract: {change}"
+        );
+        let after = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+        if change == "none" {
+            assert_eq!(
+                after["status"], "pending",
+                "consent_before_record_original_row_pending_contract"
+            );
+            for field in [
+                "id",
+                "user_text",
+                "attachment_refs",
+                "attempt_no",
+                "retry_count",
+                "parent_outbox_id",
+                "owner_instance_id",
+                "owner_generation",
+                "last_error",
+            ] {
+                assert_eq!(
+                    after[field], before[field],
+                    "consent_before_record_bookkeeping_unchanged_contract: {field}"
+                );
+            }
+        } else {
+            assert_eq!(
+                after, before,
+                "consent_before_record_stale_proof_mutation_zero_contract: {change}"
+            );
+        }
+    }
+    pool.close().await;
+    db.drop().await;
+}
