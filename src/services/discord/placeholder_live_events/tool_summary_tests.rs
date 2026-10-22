@@ -5,6 +5,18 @@ fn render(name: &str, value: serde_json::Value) -> Option<String> {
     safe_tool_summary(name, &value.to_string(), Some("/work/project"))
 }
 
+fn assert_secrets_hidden(tool: &str, input: serde_json::Value, secrets: &[&str]) {
+    for value in [input.clone(), json!(input.to_string())] {
+        let output = render(tool, value).unwrap_or_default();
+        let visible = output.replace(['\\', '\u{200b}'], "");
+        assert!(
+            secrets
+                .iter()
+                .all(|secret| !output.contains(secret) && !visible.contains(secret)),
+            "{tool}: {output}"
+        );
+    }
+}
 #[test]
 fn claude_and_codex_aliases_share_classes_and_summaries() {
     for name in [
@@ -309,15 +321,9 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let input =
                 json!({"command":command,"cmd":command,"description":command,"query":command});
-            for value in [input.clone(), json!(input.to_string())] {
-                let output = render(tool, value).unwrap_or_default();
-                let visible = output.replace(['\\', '\u{200b}'], "");
-                for secret in *secrets {
-                    assert!(
-                        !output.contains(secret) && !visible.contains(secret),
-                        "{tool}: {secret:?} survived in {output:?}"
-                    );
-                }
+            assert_secrets_hidden(tool, input, secrets);
+            if matches!(tool, "Bash" | "exec_command") {
+                assert_secrets_hidden(tool, json!({"command":command,"cmd":command}), secrets);
             }
         }
     }
@@ -390,15 +396,10 @@ fn repair_userpass_arguments_hide_both_halves() {
         "curl --us\"er\" UserLeak9:PairLeak9 example.test",
     ] {
         for tool in ["Bash", "Task", "WebSearch"] {
-            let output = render(
+            assert_secrets_hidden(
                 tool,
                 json!({"command":command,"description":command,"query":command}),
-            )
-            .unwrap_or_default();
-            let visible = output.replace(['\\', '\u{200b}'], "");
-            assert!(
-                !visible.contains("UserLeak9") && !visible.contains("PairLeak9"),
-                "{output}"
+                &["UserLeak9", "PairLeak9"],
             );
         }
     }
@@ -985,17 +986,16 @@ fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
         "pw was ProseLeak9",
         "api key is ProseLeak9",
     ] {
-        for tool in ["Bash", "Task", "WebSearch"] {
-            let output = render(
+        for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
+            let secrets = &["SpacedLeak9", "ProseLeak9"];
+            assert_secrets_hidden(
                 tool,
                 json!({"command":phrase,"description":phrase,"query":phrase}),
-            )
-            .unwrap_or_default();
-            let visible = output.replace(['\\', '\u{200b}'], "");
-            assert!(
-                !visible.contains("SpacedLeak9") && !visible.contains("ProseLeak9"),
-                "{tool}: {output}"
+                secrets,
             );
+            if matches!(tool, "Bash" | "exec_command") {
+                assert_secrets_hidden(tool, json!({"command":phrase,"cmd":phrase}), secrets);
+            }
         }
     }
     assert_eq!(

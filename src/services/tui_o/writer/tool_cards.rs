@@ -180,7 +180,7 @@ fn render<'a>(rows: impl Iterator<Item = &'a Row>, summaries: bool) -> String {
             while rows.get(at + count).is_some_and(|next| {
                 next.status == row.status
                     && next.meta.label == row.meta.label
-                    && next.meta.summary == row.meta.summary
+                    && (!summaries || next.meta.summary == row.meta.summary)
             }) {
                 count += 1;
             }

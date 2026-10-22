@@ -14013,6 +14013,7 @@ services::tui_o::writer::tool_cards::codex_result_tests::codex_error_aliases_req
 services::tui_o::writer::tool_cards::codex_result_tests::eight_unknown_codex_results_flush_and_fold_before_a_native_boundary
 services::tui_o::writer::tool_cards::codex_result_tests::folding_never_combines_success_unknown_pending_or_failed_statuses
 services::tui_o::writer::tool_cards::codex_result_tests::rollout_shaped_codex_outputs_never_claim_success_or_leak_result_text
+services::tui_o::writer::tool_cards::known_tests::hidden_summaries_group_by_label_and_status
 services::tui_o::writer::tool_cards::known_tests::panel_disposition_enters_live_known_before_another_tool
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_reports_a_drained_source_at_its_end_and_writes_nothing
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_sees_a_torn_tail_growth_and_a_rewritten_prefix

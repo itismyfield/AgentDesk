@@ -31,14 +31,21 @@ pub(crate) fn class(name: &str) -> String {
                 || !name
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
-                || name
-                    .split(['.', ':'])
-                    .any(|part| redact_token_prefixes(part).starts_with("***"))
+                || name.split(['.', ':']).any(|part| {
+                    std::iter::once(part)
+                        .chain(part.match_indices('_').map(|(at, _)| &part[at + 1..]))
+                        .any(|suffix| redact_token_prefixes(suffix).starts_with("***"))
+                })
                 || crate::utils::redact::contains_registered_secret(name)
             {
                 return "Tool".into();
             }
-            return name.chars().take(40).collect();
+            return name
+                .strip_prefix("functions.")
+                .unwrap_or(name)
+                .chars()
+                .take(40)
+                .collect();
         }
     }
     .into()
@@ -58,7 +65,7 @@ fn credential_command(input: &str) -> bool {
         Regex::new(r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>()])+|[;&|()\r\n]"#).expect("command words")
     });
     static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*=").expect("command environment assignment")
+        Regex::new(r"^[(\{]*[A-Za-z_][A-Za-z0-9_]*\+?=").expect("command environment assignment")
     });
     if input
         .replace(['\'', '"'], "")
@@ -461,22 +468,31 @@ fn shell_text(raw: &str) -> Option<String> {
 }
 
 fn shell_assignment_key(word: &str) -> Option<&str> {
-    static ASSIGNMENT: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*=").expect("shell assignment key"));
+    static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[(\{]*[A-Za-z_][A-Za-z0-9_]*\+?=").expect("shell assignment key")
+    });
     ASSIGNMENT.find(word).map(|key| key.as_str())
 }
 
-fn mask_shell_assignments(input: &str) -> String {
+fn mask_shell_assignments(input: &str) -> Option<String> {
     static WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(WORD).expect("shell words"));
-    WORDS
-        .replace_all(input, |captures: &regex::Captures<'_>| {
-            let word = &captures[0];
-            match shell_assignment_key(word) {
-                Some(key) => format!("{key}***"),
-                None => word.to_owned(),
-            }
-        })
-        .into_owned()
+    if WORDS.find_iter(input).any(|word| {
+        shell_assignment_key(word.as_str())
+            .is_some_and(|key| word.as_str()[key.len()..].starts_with('('))
+    }) {
+        return None;
+    }
+    Some(
+        WORDS
+            .replace_all(input, |captures: &regex::Captures<'_>| {
+                let word = &captures[0];
+                match shell_assignment_key(word) {
+                    Some(key) => format!("{key}***"),
+                    None => word.to_owned(),
+                }
+            })
+            .into_owned(),
+    )
 }
 
 fn credential_assignment(input: &str) -> bool {
@@ -486,8 +502,10 @@ fn credential_assignment(input: &str) -> bool {
             .expect("secret shell assignment")
     });
     WORDS.find_iter(input).any(|word| {
-        shell_assignment_key(word.as_str())
-            .is_some_and(|key| credential_env_key(key).is_some() || KEY.is_match(key))
+        shell_assignment_key(word.as_str()).is_some_and(|key| {
+            let key = key.trim_start_matches(['(', '{']).replace("+=", "=");
+            credential_env_key(&key).is_some() || KEY.is_match(&key)
+        })
     })
 }
 
@@ -563,7 +581,7 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
     {
         return None;
     }
-    let masked = mask_shell_assignments(&masked);
+    let masked = mask_shell_assignments(&masked)?;
     static REFERENCES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
             .expect("visible variable references")

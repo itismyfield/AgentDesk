@@ -18,6 +18,11 @@ fn unknown_names_are_bounded_and_arguments_stay_hidden() {
         assert!(safe_tool_summary(name, r#"{"description":"ARGUMENT_SENTINEL"}"#, None).is_none());
     }
     assert_eq!(class(&"N".repeat(41)), "N".repeat(40));
+    assert_eq!(class("functions.ToolSearch"), "ToolSearch");
+    assert_eq!(
+        class(&format!("functions.{}", "N".repeat(41))),
+        "N".repeat(40)
+    );
 }
 
 #[test]
@@ -33,6 +38,8 @@ fn unknown_names_reject_unsafe_bytes_even_after_the_visible_prefix() {
         "control\u{7f}",
         "도구",
         "ghp_ShortLeak9",
+        "x_ghp_ShortLeak9",
+        "functions.x_ghp_ShortLeak9",
         "",
     ]
     .into_iter()
@@ -77,6 +84,9 @@ fn bash_description_rejects_credentials_without_command_fallback() {
 fn shell_assignment_values_are_masked_as_whole_words() {
     for (command, expected) in [
         ("A=1 B=2 cmd", "A=*** B=*** cmd"),
+        ("(A=ShortValue9 cmd)", "(A=*** cmd)"),
+        ("{A=ShortValue9 cmd; }", "{A=*** cmd; }"),
+        ("FOO+=ShortValue9 cmd", "FOO+=*** cmd"),
         ("MODE='head tail' cmd", "MODE=*** cmd"),
         ("MODE='head'\"tail\" cmd", "MODE=*** cmd"),
         ("export X=ShortValue9", "export X=***"),
@@ -95,6 +105,10 @@ fn shell_credentials_still_omit_the_summary() {
         "echo ghp_ShortLeak9",
         "TOKEN=ShortLeak9 cargo test",
         "DB_PASS=ShortLeak9 client",
+        "MY_PASS+=ShortLeak9 client",
+        "(MY_PASS=ShortLeak9 client)",
+        "ARR=(head tail) cmd",
+        "ARR+=(head tail) cmd",
         "export SERVICE_AUTH=ShortLeak9",
     ] {
         assert!(bash(json!({"command":command})).is_none(), "{command}");
