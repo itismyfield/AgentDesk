@@ -169,8 +169,16 @@ async fn a_tui_direct_turn_is_one_outbox_row_across_boots_pg() {
     tui_direct(&env, 5_998_001, true);
     assert_eq!(boot(&env, Some(&pool)).await, 1);
     settle(&pool, "sent").await;
-    boot(&env, Some(&pool)).await;
-    boot(&env, Some(&pool)).await;
+    assert_eq!(
+        boot(&env, Some(&pool)).await,
+        0,
+        "terminal episodes must not enqueue"
+    );
+    assert_eq!(
+        boot(&env, Some(&pool)).await,
+        0,
+        "terminal episodes must not enqueue"
+    );
 
     let [dir] = episode_dirs(&env).try_into().unwrap();
     let [(target, bot, source, reason, session, text, status)] =
@@ -562,6 +570,12 @@ async fn old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg() {
         2
     );
     assert_eq!(rows(&pool).await.len(), 2, "persistent dedupe unchanged");
+    settle(&pool, "sent").await;
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        0,
+        "legacy terminal episodes must not enqueue"
+    );
     assert_eq!(
         rows(&pool)
             .await
@@ -578,6 +592,218 @@ async fn old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg() {
             .flatten()
             .all(|entry| entry.path().extension().is_none_or(|ext| ext != "json")),
         "custody notices must not create inflight rows"
+    );
+    finish(db, pool).await;
+}
+
+// Delivered custody expires after seven days; unknown and undelivered episodes keep their bytes.
+#[tokio::test(flavor = "current_thread")]
+async fn custody_retention_requires_old_delivery_and_keeps_unknown_episodes_pg() {
+    let (env, db, pool) = harness("custody retention states")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let root = custody(&env);
+    let cases = [
+        ("old-sent", "sent", true),
+        ("recent-sent", "sent", false),
+        ("missing-time", "sent", true),
+        ("pending", "pending", true),
+        ("processing", "processing", true),
+        ("failed", "failed", true),
+        ("cancelled", "cancelled", true),
+    ];
+    for (i, (name, _, _)) in cases.iter().enumerate() {
+        old_notice(&root, 7_264_000 + i as u64, name, false);
+    }
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        cases.len()
+    );
+    let old = chrono::Utc::now() - chrono::Duration::days(8);
+    for (i, (name, status, aged)) in cases.iter().enumerate() {
+        let sent_at =
+            (*name != "missing-time").then_some(if *aged { old } else { chrono::Utc::now() });
+        sqlx::query("UPDATE message_outbox SET status=$1, sent_at=$2, cancelled_at=CASE WHEN $1='cancelled' THEN NOW() END WHERE target=$3")
+            .bind(status).bind(sent_at).bind(format!("channel:{}", 7_264_000 + i as u64))
+            .execute(&pool).await.unwrap();
+    }
+    old_notice(&root, 7_264_008, "no-outbox-proof", false);
+    let malformed = root.join("malformed");
+    fs::create_dir_all(&malformed).unwrap();
+    fs::write(malformed.join("episode.json"), "{bad").unwrap();
+    age_tree(&root, old.timestamp());
+    let removed_bytes: u64 = snapshot(&root.join("old-sent"))
+        .iter()
+        .map(|(_, bytes)| bytes.len() as u64)
+        .sum();
+    let kept: Vec<_> = cases
+        .iter()
+        .skip(1)
+        .map(|(name, ..)| (root.join(name), snapshot(&root.join(name))))
+        .collect();
+    let unknown = snapshot(&malformed);
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    let guard = tracing::subscriber::set_default(subscriber);
+    enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await;
+    drop(guard);
+    assert!(
+        !root.join("old-sent").exists(),
+        "old terminal custody must be removed"
+    );
+    assert!(
+        root.join("no-outbox-proof/episode.json").is_file(),
+        "unproven custody must remain"
+    );
+    for (dir, before) in kept {
+        assert!(
+            dir.exists(),
+            "undelivered or recent custody must remain: {}",
+            dir.display()
+        );
+        assert_eq!(
+            snapshot(&dir),
+            before,
+            "undelivered or recent custody must remain: {}",
+            dir.display()
+        );
+    }
+    assert_eq!(
+        snapshot(&malformed),
+        unknown,
+        "unparseable custody must remain"
+    );
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.lines()
+            .any(|line| line.contains("custody retention removed")
+                && line.contains("removed=1")
+                && line.contains(&format!("bytes={removed_bytes}"))),
+        "removal totals must be logged together: {text}"
+    );
+    let statuses: Vec<String> = rows(&pool).await.into_iter().map(|row| row.6).collect();
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| *status == "pending")
+            .count(),
+        4,
+        "failed, cancelled and unknown notices still recover"
+    );
+    finish(db, pool).await;
+}
+
+fn age_tree(path: &Path, timestamp: i64) {
+    if path.is_dir() {
+        for entry in fs::read_dir(path).unwrap().flatten() {
+            age_tree(&entry.path(), timestamp);
+        }
+    }
+    filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(timestamp, 0)).unwrap();
+}
+
+// Exact retention boundary and a fresh descendant both decide whether the directory is retired.
+#[cfg(unix)]
+#[test]
+fn custody_retention_boundary_and_symlinks_never_follow_external_paths() {
+    use super::custody_notice::retention::remove_expired;
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("custody");
+    let dir = root.join("episode");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(dir.join("copy"), "held").unwrap();
+    fs::write(outside.join("sentinel"), "external bytes").unwrap();
+    let seconds = 1_700_000_000;
+    let cutoff = UNIX_EPOCH + Duration::from_secs(seconds);
+    let now: SystemTime = cutoff + Duration::from_secs(7 * 24 * 60 * 60);
+    age_tree(&dir, seconds as i64);
+    assert_eq!(
+        remove_expired(&dir, cutoff + Duration::from_nanos(1), now).unwrap(),
+        None,
+        "recent delivery must stay"
+    );
+    filetime::set_file_mtime(
+        dir.join("copy"),
+        filetime::FileTime::from_unix_time(seconds as i64, 1),
+    )
+    .unwrap();
+    assert_eq!(
+        remove_expired(&dir, cutoff, now).unwrap(),
+        None,
+        "recent custody copy must stay"
+    );
+    age_tree(&dir, seconds as i64);
+    symlink(&outside, dir.join("linked-revision")).unwrap();
+    filetime::set_symlink_file_times(
+        dir.join("linked-revision"),
+        filetime::FileTime::from_unix_time(seconds as i64, 0),
+        filetime::FileTime::from_unix_time(seconds as i64, 0),
+    )
+    .unwrap();
+    filetime::set_file_mtime(&dir, filetime::FileTime::from_unix_time(seconds as i64, 0)).unwrap();
+    let bytes = 4 + fs::symlink_metadata(dir.join("linked-revision"))
+        .unwrap()
+        .len();
+    assert_eq!(
+        remove_expired(&dir, cutoff, now).unwrap(),
+        Some(bytes),
+        "exactly seven days expires without traversing links"
+    );
+    assert!(!dir.exists(), "retirement removes the entire episode");
+    assert_eq!(
+        fs::read(outside.join("sentinel")).unwrap(),
+        b"external bytes"
+    );
+    symlink(&outside, &dir).unwrap();
+    assert!(
+        notices(&root, &CLAUDE).is_empty(),
+        "linked episode roots are never scanned"
+    );
+    assert!(
+        remove_expired(&dir, cutoff, now).is_err(),
+        "linked episode roots are never retired"
+    );
+    assert!(fs::symlink_metadata(&dir).unwrap().is_symlink());
+}
+
+// Both boot writers and retirement take the same stable provider sidecar lock.
+#[tokio::test(flavor = "current_thread")]
+async fn custody_lock_contention_preserves_pending_recovery_pg() {
+    let (env, db, pool) = harness("custody lock contention")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    tui_direct(&env, 7_264_101, true);
+    assert_eq!(boot(&env, Some(&pool)).await, 1);
+    let root = custody(&env);
+    let before = snapshot(&root);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.with_extension("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        0,
+        "contended retirement must leave custody alone"
+    );
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(rows(&pool).await.len(), 1);
+    drop(lock);
+    assert_eq!(
+        enqueue_custody_notices(&root, &CLAUDE, Some(&pool)).await,
+        1,
+        "pending recovery resumes after contention"
     );
     finish(db, pool).await;
 }
