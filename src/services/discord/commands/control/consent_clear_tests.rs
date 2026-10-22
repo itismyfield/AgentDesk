@@ -215,10 +215,11 @@ async fn actual_user_default_clear_settlement(retired: bool) {
     super::super::clear_persist_failure_tests::seed_session(&shared, channel).await;
     let name = provider.build_tmux_session_name("adk-6233-clear-persist");
     let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(&name);
-    let logical =
-        super::super::super::adk_session::build_adk_session_key(&shared, channel, &provider, None)
-            .await
-            .unwrap();
+    let logical = crate::services::discord::adk_session::build_adk_session_key(
+        &shared, channel, &provider, None,
+    )
+    .await
+    .unwrap();
     if retired {
         let owner = HostedOwner {
             provider: "claude".into(),

@@ -1213,7 +1213,7 @@ async fn expired_consent_backstop_restores_head_without_store_or_card_effects() 
             if request.method() == axum::http::Method::PATCH {
                 observed.fetch_add(1, Ordering::SeqCst);
             }
-            axum::Json(discord_mock::discord_message_json(8_916_990, "expired"))
+            axum::Json(discord_mock::user_message(8_916_990, "expired"))
         }
     });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

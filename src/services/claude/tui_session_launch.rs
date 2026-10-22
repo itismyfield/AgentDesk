@@ -219,7 +219,7 @@ mod tests {
     fn claude_herdr_prepare_refuses_resume_before_binary_resolution() {
         let root = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
-        let prepared = PreparedIncarnation::prepare_at(
+        let prepared = super::PreparedIncarnation::prepare_at(
             "claude",
             "fresh-claude",
             Some(1),
