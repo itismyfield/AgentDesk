@@ -9,7 +9,7 @@ use crate::services::session_host::policy::{LocalChecker, ProofCache};
 use consent::{ConsentKey, IntentRef, Preview, Question, workflow::Request};
 
 #[derive(Debug, Clone)]
-pub(in crate::services::discord::router) struct Hold {
+pub(in crate::services::discord) struct Hold {
     key: ConsentKey,
     preview: Preview,
     owner: u64,

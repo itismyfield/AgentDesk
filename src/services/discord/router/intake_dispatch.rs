@@ -73,7 +73,8 @@ pub(crate) struct IntakeSubmission {
     pub(crate) origin: IntakeOrigin,
     pub(crate) preserve_on_cancel: bool,
     pub(crate) has_nonportable_uploads: bool,
-    pub(crate) attachments: Vec<message_handler::AttachmentDescriptor>,
+    pub(in crate::services::discord::router) attachments:
+        Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
