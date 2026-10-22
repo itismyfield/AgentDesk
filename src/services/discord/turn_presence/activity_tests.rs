@@ -592,7 +592,13 @@ fn b2_generic_observer_keeps_its_existing_unknown_policy() {
         probe.target.clone(),
     );
     assert_eq!(unknown.0.activity, Activity::Unknown);
-    assert_eq!(busy.1, unknown.1);
+    // Ageing alone leaves the watch position; only the stamp's per-answer notice differs.
+    let position = |stamp: &Option<Stamp>| {
+        stamp
+            .as_ref()
+            .map(|s| (s.key.clone(), s.generation, s.revision, s.source.clone()))
+    };
+    assert_eq!(position(&busy.1), position(&unknown.1));
 }
 
 #[test]
