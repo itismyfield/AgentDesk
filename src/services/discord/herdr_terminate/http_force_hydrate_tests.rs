@@ -5,6 +5,7 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
 
+use super::super::super::Node;
 use super::*;
 
 const FOREIGN_TOKEN: &str = "foreign-registry";
