@@ -12,8 +12,8 @@ use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
 use std::io::Write;
 
 const NODE: &str = "synthetic-recovery-test-node";
-const N1: &str = "synthetic-execution-n1";
-const N2: &str = "synthetic-execution-n2";
+const N1: &str = "00112233445566778899aabbccddee11";
+const N2: &str = "00112233445566778899aabbccddee12";
 
 mod final_recheck_tests;
 mod hosted_classification_tests;

@@ -1044,6 +1044,7 @@ async fn actual_live_checkpoint_waits_for_second_check_failed_custody_pg() {
 async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg() {
     use crate::services::cluster::intake_worker::{self as worker, test_executor};
     let mut f = Fixture::new("disabled").await;
+    let _rest = crate::services::discord::shared_state::test_rest::install(f.http.clone());
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     f.shared =
@@ -1180,7 +1181,13 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
     );
     assert_eq!(
         f.state.local_note_posts.load(Ordering::SeqCst),
-        0,
+        1,
+        "worker_policy_flip_lifecycle_notice_once_contract"
+    );
+    let texts = f.state.written_texts();
+    let notice_prefix = format!("worker 입력 보류: row {row} (Spawned;");
+    assert!(
+        !texts.is_empty() && texts.iter().all(|text| text.starts_with(&notice_prefix)),
         "worker_policy_flip_no_provider_or_card_effect_contract"
     );
     pool.close().await;
@@ -1445,6 +1452,7 @@ impl Drop for RecordHook {
 async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
     use crate::services::cluster::intake_worker::{self as worker, test_executor};
     let mut f = Fixture::new("disabled").await;
+    let _rest = crate::services::discord::shared_state::test_rest::install(f.http.clone());
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     f.shared =

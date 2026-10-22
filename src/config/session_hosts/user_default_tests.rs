@@ -2,6 +2,7 @@ use super::*;
 
 fn config(node: &str) -> Config {
     serde_json::from_value(serde_json::json!({
+        "server": {},
         "cluster": { "instance_id": node },
         "session_hosts": {"herdr": {"endpoints": {"user": {
             "mode": "user_default", "execution_node": "worker"

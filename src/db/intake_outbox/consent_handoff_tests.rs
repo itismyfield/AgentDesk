@@ -421,7 +421,9 @@ async fn consent_before_record_rollback_consumes_exact_authority_and_preserves_b
             "marker" => {
                 Some("UPDATE intake_outbox SET last_error='existing durable marker' WHERE id=$1")
             }
-            "status" => Some("UPDATE intake_outbox SET status='dispatched' WHERE id=$1"),
+            "status" => Some(
+                "UPDATE intake_outbox SET status='dispatched', dispatched_at=NOW() WHERE id=$1",
+            ),
             _ => None,
         };
         if let Some(statement) = statement {

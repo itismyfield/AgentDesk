@@ -5,7 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::session_host::herdr_endpoints;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 
-const NONCE: &str = "e-claude-composer";
+const NONCE: &str = "00112233445566778899aabbccddee01";
 fn pane(above: &str, input: &str) -> String {
     format!(
         "{above}\n────────────────────────────────────────────────────\n❯ {input}\n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2"
