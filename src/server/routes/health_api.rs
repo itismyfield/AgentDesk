@@ -22,6 +22,8 @@ mod db_collection;
 mod db_deadline_tests;
 #[cfg(test)]
 mod host_guard_tests;
+#[cfg(all(test, unix))]
+mod presence_unknown_tests;
 /// Disclosure rules for the unauthenticated `/api/health` body.
 mod public_projection;
 mod response;
@@ -29,6 +31,7 @@ mod runtime_profile;
 mod session_repair;
 #[cfg(all(test, unix))]
 mod unread_tail_attribution_tests;
+use public_projection::public_health_json;
 use runtime_profile::attach_runtime_profile;
 
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
@@ -262,113 +265,6 @@ fn ensure_startup_doctor_state_reason(
 
 fn delivery_record_rollout_health_json() -> serde_json::Value {
     outbound::delivery_record_rollout_health_json()
-}
-
-fn public_health_json(json: serde_json::Value) -> serde_json::Value {
-    let status = json
-        .get("status")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!("unknown"));
-    let version = json
-        .get("version")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(env!("CARGO_PKG_VERSION")));
-    let db = json
-        .get("db")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(false));
-    let dashboard = json
-        .get("dashboard")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(false));
-    let server_up = json.get("server_up").cloned().unwrap_or_else(|| db.clone());
-    let fully_recovered = json
-        .get("fully_recovered")
-        .cloned()
-        .unwrap_or_else(|| server_up.clone());
-    let cluster_standby = json
-        .get("cluster_standby")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(false));
-    let startup_status = json.get("startup_status").cloned();
-    let startup_degraded = json.get("startup_degraded").cloned();
-    let startup_degraded_reasons = json.get("startup_degraded_reasons").cloned();
-    let delivery_record_rollout = json.get("delivery_record_rollout").cloned();
-    let release_source = json.get("release_source").cloned();
-    let intake_routing = json.get("intake_routing").cloned();
-    // Only credential-free signal of stranded cleanup. Field by field so new detail fields (run
-    // id, error) cannot leak; kept out of `degraded_reasons`/`status` so it never moves `ok`.
-    let auto_queue_cleanup = json.get("auto_queue_cleanup").map(|block| {
-        serde_json::json!({
-            "pending": block.get("pending").cloned().unwrap_or(serde_json::json!(0)),
-            "dead_lettered": block
-                .get("dead_lettered")
-                .cloned()
-                .unwrap_or(serde_json::json!(0)),
-        })
-    });
-    // Count-only: never the per-server `warm_servers` array, pids, ports or startup tails.
-    let opencode_public = json.get("opencode").map(|block| {
-        serde_json::json!({
-            "warm_server_count": block.get("warm_server_count").cloned().unwrap_or(serde_json::json!(0)),
-            "warm_server_active_sessions": block.get("warm_server_active_sessions").cloned().unwrap_or(serde_json::json!(0)),
-            "warm_server_suspicious_count": block.get("warm_server_suspicious_count").cloned().unwrap_or(serde_json::json!(0)),
-        })
-    });
-    let degraded = status.as_str().is_some_and(|status| status != "healthy");
-    // Always an array, so `degraded <=> non-empty degraded_reasons` holds on the public
-    // shape and callers need not guess the cause from `startup_degraded_reasons`.
-    let degraded_reasons = public_projection::sanitize_public_degraded_reasons(
-        json.get("degraded_reasons")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([])),
-    );
-    let expired_relay_ledgers = public_projection::expired_relay_ledgers(&json);
-    let tui_output_gateway_channels = public_projection::tui_output_gateway_channels(&json);
-    let mut public = serde_json::json!({
-        "ok": !degraded,
-        "status": status,
-        "version": version,
-        "db": db,
-        "dashboard": dashboard,
-        "server_up": server_up,
-        "fully_recovered": fully_recovered,
-        "cluster_standby": cluster_standby,
-        "runtime_profile": json.get("runtime_profile"),
-        "modules": json.get("modules"),
-        "dashboard_required": json.get("dashboard_required"),
-        "degraded": degraded,
-        "degraded_reasons": degraded_reasons,
-        "expired_relay_ledgers": expired_relay_ledgers,
-    });
-    if let Some(startup_status) = startup_status {
-        public["startup_status"] = startup_status;
-    }
-    if let Some(startup_degraded) = startup_degraded {
-        public["startup_degraded"] = startup_degraded;
-    }
-    if let Some(startup_degraded_reasons) = startup_degraded_reasons {
-        public["startup_degraded_reasons"] = startup_degraded_reasons;
-    }
-    if let Some(delivery_record_rollout) = delivery_record_rollout {
-        public["delivery_record_rollout"] = delivery_record_rollout;
-    }
-    if let Some(release_source) = release_source {
-        public["release_source"] = release_source;
-    }
-    if let Some(intake_routing) = intake_routing {
-        public["intake_routing"] = intake_routing;
-    }
-    if let Some(opencode_public) = opencode_public {
-        public["opencode"] = opencode_public;
-    }
-    if let Some(auto_queue_cleanup) = auto_queue_cleanup {
-        public["auto_queue_cleanup"] = auto_queue_cleanup;
-    }
-    if !tui_output_gateway_channels.is_empty() {
-        public["tui_output_gateway_channels"] = tui_output_gateway_channels.into();
-    }
-    public
 }
 
 fn stale_mailbox_repair_applied(
@@ -1495,14 +1391,14 @@ mod tests {
         request
     }
 
-    struct EnvVarGuard {
+    pub(super) struct EnvVarGuard {
         key: String,
         previous_value: Option<std::ffi::OsString>,
         _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvVarGuard {
-        fn set_path(key: &str, path: &Path) -> Self {
+        pub(super) fn set_path(key: &str, path: &Path) -> Self {
             let lock = crate::config::shared_test_env_lock()
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -2359,7 +2255,7 @@ mod tests {
 
     /// Serve one health request on a fresh router and return the decoded body.
     /// `Some(registry)` runs the registry arm of `health_response`, `None` the standalone arm.
-    async fn health_body(
+    pub(super) async fn health_body(
         uri: &str,
         registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     ) -> serde_json::Value {
