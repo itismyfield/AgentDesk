@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "collection_publication_tests.rs"]
 mod collection_publication_tests;
+#[path = "effect_read_defer_tests.rs"]
+mod effect_read_defer_tests;
 
 pub(in crate::services::discord::turn_presence::activity) struct Rig {
     pub(in crate::services::discord::turn_presence::activity) shared: Arc<SharedData>,

@@ -11048,6 +11048,8 @@ services::discord::turn_lease::tests::restart_mode_row_still_refuses_operator_in
 services::discord::turn_lease::tests::successor_normal_complete_preserves_negative_admission_after_operator_release_r2
 services::discord::turn_lease::tests::unbound_message_id_lease_is_inspectable_and_refuses_release_without_effects
 services::discord::turn_lease::tests::unbound_message_id_lease_with_its_own_row_is_inspectable
+services::discord::turn_presence::activity::effect_reads::tests::ended_effect_read_stops_deferring_at_once
+services::discord::turn_presence::activity::effect_reads::tests::running_effect_read_defers_only_within_its_own_bound
 services::discord::turn_presence::activity::notice_tests::a_changed_spawn_nonce_revokes_the_old_notice_publication
 services::discord::turn_presence::activity::notice_tests::binding_seq_failure_retains_the_judged_target_label
 services::discord::turn_presence::activity::notice_tests::resumed_worker_progress_differs_from_settled_boundary_wait
@@ -11152,6 +11154,7 @@ services::discord::turn_presence::activity::unbound::live::ownership::file_tests
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::a2_s2_superseded_collection_preserves_live_presence_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_existing_superseded_counters_cover_saved_reading_rejections_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_unrelated_owner_churn_measures_read_availability_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::effect_read_defer_tests::observer_tick_defers_to_a_running_effect_read_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg

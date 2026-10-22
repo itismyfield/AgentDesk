@@ -331,6 +331,7 @@ src/services/discord/turn_presence/activity/unbound/collection_publication_tests
 src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs
 src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
+src/services/discord/turn_presence/activity/unbound/effect_read_defer_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
 src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs
@@ -778,6 +779,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_
 services::discord::turn_presence::activity::unbound::live::review_tests
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests
+services::discord::turn_presence::activity::unbound::live::review_tests::effect_read_defer_tests
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests
 services::discord::turn_presence::activity::unbound::routine_owner::registered_receipt_tests
 services::discord::turn_presence::activity::unbound::routine_owner::tests
@@ -2755,6 +2757,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::unresolv
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::a2_s2_superseded_collection_preserves_live_presence_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_existing_superseded_counters_cover_saved_reading_rejections_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_unrelated_owner_churn_measures_read_availability_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::effect_read_defer_tests::observer_tick_defers_to_a_running_effect_read_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
