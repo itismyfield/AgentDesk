@@ -1,6 +1,7 @@
 //! Periodic repair plus immediate wakeup after a committed provider-error intent.
 use super::*;
 pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKind) {
+    super::super::o_transition::automatic::spawn(Arc::clone(&registry), &provider);
     tokio::spawn(async move {
         let wake = crate::services::agent_recovery::recovery_wakeup(&provider);
         tokio::select! {

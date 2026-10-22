@@ -72,11 +72,12 @@ enum Stage {
     Apply(VecDeque<String>),
 }
 
-type Worker = mpsc::Receiver<Vec<(String, Observation)>>;
+type Worker = mpsc::Receiver<Vec<(String, Observation, Option<std::time::SystemTime>)>>;
 
-struct Job {
-    request: Request,
+pub(super) struct Job {
+    pub(super) request: Request,
     apply: bool,
+    pub(super) automatic: Option<super::super::transition_port::Idle>,
     /// The scope an Apply was admitted for, never replaced while it runs.
     scope: Option<ScopeApproval>,
     /// The host's stop, read with the actor's before each retirement write.
@@ -84,17 +85,17 @@ struct Job {
     context: Context,
     reply: oneshot::Sender<Reply>,
     gate: Arc<OwnershipGate>,
-    wall: Wall,
+    pub(super) wall: Wall,
     common: Common,
     /// The judgment the job started from.
     first: Vec<Judged>,
-    probes: BTreeMap<String, Probe>,
+    pub(super) probes: BTreeMap<String, Probe>,
     queue: VecDeque<String>,
     stage: Stage,
     worker: Option<Worker>,
     deadline: Instant,
     hashed: u64,
-    outcomes: BTreeMap<String, Outcome>,
+    pub(super) outcomes: BTreeMap<String, Outcome>,
 }
 
 impl Job {
@@ -162,7 +163,7 @@ fn path_unchanged(source: &SourceId, later: Option<&Observation>) -> bool {
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     /// Takes requests only once the sources are restored: at most one envelope and one step a poll.
-    pub(super) fn poll_transition(&mut self, resumed: bool, unsettled: &Unsettled) {
+    pub(super) async fn poll_transition(&mut self, resumed: bool, unsettled: &Unsettled) {
         let suspended = !self.writer.suspension.is_empty();
         #[cfg(test)]
         let suspended = suspended
@@ -171,9 +172,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             if let Some(receiver) = &mut self.transitions.receiver
                 && let Ok(Some(envelope)) = receiver.try_next()
             {
-                let id = match &envelope.operation {
-                    Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
-                };
+                let id = &envelope.operation.request().job_id;
                 let _ = envelope
                     .reply
                     .send(Reply::refused(id, Refused::CodexDeferred));
@@ -187,7 +186,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let Some(mut job) = self.transitions.job.take() else {
             return;
         };
-        if self.step(&mut job, unsettled) {
+        if self.step(&mut job, unsettled).await {
             self.finish(job);
         } else {
             self.transitions.job = Some(job);
@@ -217,9 +216,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             reply,
             ..
         } = envelope;
-        let (apply, request, expected) = match operation {
-            Operation::Inspect(request) => (false, request, None),
-            Operation::Apply(request, digest) => (true, request, Some(digest)),
+        let (apply, request, expected, automatic) = match operation {
+            Operation::Inspect(request) => (false, request, None, None),
+            #[cfg(test)]
+            Operation::Apply(request, digest) => (true, request, Some(digest), None),
+            Operation::AutomaticApply(request, digest, idle) => {
+                (true, request, Some(digest), Some(idle))
+            }
         };
         let refused = match &self.transitions.job {
             Some(job) if job.request.job_id == request.job_id => {
@@ -229,7 +232,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     at: job.request.at,
                     ..request.clone()
                 };
-                let same = apply == job.apply && asked == job.request;
+                let same = apply == job.apply
+                    && automatic.is_some() == job.automatic.is_some()
+                    && asked == job.request;
                 if same && !conflicts(self.writer.store().cursors(), &request) {
                     let _ = reply.send(job.receipt());
                     return;
@@ -302,12 +307,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     token,
                     earlier,
                     later,
+                    last_dialogue: None,
                 },
             );
         }
         self.transitions.job = Some(Job {
             request,
             apply,
+            automatic,
             scope,
             stopping,
             context,
@@ -327,12 +334,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// One step of `job`; true once it has nothing left to do.
-    fn step(&mut self, job: &mut Job, unsettled: &Unsettled) -> bool {
+    async fn step(&mut self, job: &mut Job, unsettled: &Unsettled) -> bool {
         if let Stage::Apply(queue) = &mut job.stage {
             let Some(key) = queue.pop_front() else {
                 return true;
             };
-            let outcome = self.retire_one(job, &key, unsettled);
+            let outcome = self.retire_one(job, &key, unsettled).await;
             let rest = match outcome {
                 Outcome::Unknown => Some(Outcome::Held(Hold::NotTried)),
                 Outcome::Held(Hold::Stopping | Hold::InspectScopeChanged) => Some(outcome.clone()),
@@ -384,7 +391,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             // The clock is read once the probes are taken, so probes taken past the deadline stay
             // unrecorded, however close to it they came back.
             let late = now() >= job.deadline;
-            for (key, seen) in seen {
+            for (key, seen, last_dialogue) in seen {
+                if !first && let Some(probe) = job.probes.get_mut(&key).filter(|_| !late) {
+                    probe.last_dialogue = last_dialogue;
+                }
                 if let Some(probe) = job.probes.get_mut(&key).filter(|_| !late) {
                     *(if first {
                         &mut probe.earlier
@@ -437,12 +447,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
         let (send, worker) = mpsc::channel();
         let wall = Arc::clone(&job.wall);
+        let automatic = job.automatic.is_some();
         #[cfg(test)]
         let done = test_hooks::worker_started();
         tokio::task::spawn_blocking(move || {
-            let seen = batch
-                .into_iter()
-                .map(|(key, cursor)| (key, observe(&cursor, wall())));
+            let seen = batch.into_iter().map(|(key, cursor)| {
+                let age = automatic
+                    .then(|| super::automatic_age::last_dialogue(&cursor))
+                    .flatten();
+                (key, observe(&cursor, wall()), age)
+            });
             let _ = send.send(seen.collect());
             #[cfg(test)]
             done.store(true, std::sync::atomic::Ordering::Release);
@@ -452,10 +466,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Holds the session transition lock and the pane's source authority across one retirement,
     /// both taken and released within this call.
-    fn retire_one(&mut self, job: &Job, key: &str, unsettled: &Unsettled) -> Outcome {
+    async fn retire_one(&mut self, job: &mut Job, key: &str, unsettled: &Unsettled) -> Outcome {
         let Ok(_transition) = Arc::clone(&job.context.lock).try_lock_owned() else {
             return Outcome::Held(Hold::TransitionBusy);
         };
+        if !super::automatic::ready(job, key).await {
+            return Outcome::Unchanged;
+        }
         let tmux = job.context.tmux.clone();
         let admitted =
             try_with_tmux_source_authority(&tmux, |_| self.retire_admitted(job, key, unsettled));
@@ -524,6 +541,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Answers the job with the judgment of the actor's state now and the projection after it.
     fn finish(&mut self, job: Job) {
+        super::automatic::log(&job);
         let operation = Some(job.kind());
         let Job {
             request,

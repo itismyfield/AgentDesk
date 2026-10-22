@@ -28,7 +28,24 @@ pub(crate) enum Operation {
     Inspect(Request),
     /// Retires each source the judgment passes, one per actor poll, while the scope is still the
     /// one whose digest the Inspect gave.
+    #[cfg(test)]
     Apply(Request, ScopeDigest),
+    /// The periodic retention policy applies an inspected scope, with a fresh idle check.
+    AutomaticApply(Request, ScopeDigest, Idle),
+}
+
+/// A runtime-owned check; a missing or unreachable mailbox never counts as idle.
+#[derive(Clone)]
+pub(crate) struct Idle(
+    pub  Arc<
+        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
+    >,
+);
+
+impl std::fmt::Debug for Idle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Idle")
+    }
 }
 
 /// The operation a job runs.
@@ -288,6 +305,16 @@ impl TransitionPort {
     }
 }
 
+impl Operation {
+    pub(super) fn request(&self) -> &Request {
+        match self {
+            Self::Inspect(request) | Self::AutomaticApply(request, _, _) => request,
+            #[cfg(test)]
+            Self::Apply(request, _) => request,
+        }
+    }
+}
+
 impl Receiver {
     /// The next envelope sent to this run; one sent to another run is answered as foreign.
     pub(super) fn try_next(&mut self) -> Result<Option<Envelope>, mpsc::error::TryRecvError> {
@@ -297,9 +324,7 @@ impl Receiver {
             Err(closed) => return Err(closed),
         };
         if envelope.generation != self.generation || !Arc::ptr_eq(&envelope.run, &self.run) {
-            let job = match &envelope.operation {
-                Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
-            };
+            let job = &envelope.operation.request().job_id;
             let _ = (envelope.reply).send(Reply::refused(job, Refused::ForeignRun));
             return Ok(None);
         }

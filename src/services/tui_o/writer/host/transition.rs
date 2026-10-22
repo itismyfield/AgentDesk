@@ -41,6 +41,11 @@ impl<I: HostIo> Hosted<'_, I> {
 }
 
 impl Readiness {
+    /// Ready channels considered by the periodic retention sweep.
+    pub(crate) fn transition_channels(&self) -> Vec<u64> {
+        locked(&self.ready).iter().copied().collect()
+    }
+
     /// Registers a run's ports; a transition port no actor took is left out. Returns it to close.
     pub(super) fn register_ports(&self, channel: u64, ports: Ports) -> Option<TransitionPort> {
         let mut live = locked(&self.live);
