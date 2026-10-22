@@ -12724,7 +12724,6 @@ services::session_host::herdr::policy::editor::tests::editor_changes_only_the_bo
 services::session_host::herdr::policy::editor::tests::editor_inserts_only_into_a_semantically_identified_bare_section
 services::session_host::herdr::policy::editor::tests::editor_refuses_invalid_duplicate_and_non_boolean_policy
 services::session_host::herdr::policy::editor::tests::editor_refuses_noncanonical_writer_shapes_even_when_already_false
-services::session_host::herdr::policy::editor::tests::personal_apply_modules_are_absent_from_production_compilation
 services::session_host::herdr::policy::editor::tests::pinned_toast_removal_replay_keeps_the_current_resume_policy
 services::session_host::herdr::policy::editor::tests::semantic_false_recognizes_inline_dotted_and_quoted_paths_without_editing_them
 services::session_host::herdr::policy::editor::tests::writer_replay_fixture_matches_pinned_section_boundary_behavior

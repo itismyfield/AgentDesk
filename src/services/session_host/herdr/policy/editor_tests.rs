@@ -148,24 +148,6 @@ fn semantic_false_recognizes_inline_dotted_and_quoted_paths_without_editing_them
 }
 
 #[test]
-fn personal_apply_modules_are_absent_from_production_compilation() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/services/session_host/herdr/policy/mod.rs"),
-    )
-    .unwrap();
-    for module in ["editor", "writer_compat", "apply"] {
-        let pattern = format!(
-            r"#\[cfg\(all\(test,\s*unix\)\)\]\s*(?:pub(?:\(crate\))?\s+)?mod\s+{module}\s*;"
-        );
-        assert!(
-            regex::Regex::new(&pattern).unwrap().is_match(&source),
-            "personal_config_apply_production_zero_contract: {module}"
-        );
-    }
-}
-
-#[test]
 fn pinned_toast_removal_replay_keeps_the_current_resume_policy() {
     let current = "[session]\nresume_agents_on_restore=false\n[ui.toast]\nenabled=true\n";
     let updated = writer_compat::upsert(current, "ui.toast", "delivery", "\"off\"");

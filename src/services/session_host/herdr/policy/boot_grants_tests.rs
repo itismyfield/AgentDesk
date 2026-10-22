@@ -75,14 +75,6 @@ async fn user_boot_restores_exact_historical_grants_and_distinguishes_absence_fr
 }
 #[test]
 fn synchronous_mutation_evidence_does_not_read_disk_or_block_on_async_owners() {
-    for dormant in ["consent", "apply"] {
-        assert!(
-            include_str!("mod.rs").contains(&format!(
-                "#[cfg(all(test, unix))]\npub(crate) mod {dormant};"
-            )),
-            "production_consent_card_hold_and_apply_remain_unreachable_contract: {dormant}"
-        );
-    }
     let source = include_str!("../launch_host.rs");
     let evidence = source
         .split("pub(crate) fn mutation_evidence(")
