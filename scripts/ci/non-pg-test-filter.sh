@@ -889,7 +889,6 @@ NON_PG_FILTER_REPLAY=(
   services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
   services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
-  services::herdr_launch::tests::policy_tests::user_default_file_grant_roundtrip_failure_is_unavailable_and_never_creates_pg
   services::herdr_launch::tests::retired_durability_tests::retired_hold_absent_still_requires_directory_fsync
   services::herdr_launch::tests::retired_durability_tests::retired_hold_dangling_directory_is_not_confirmed_absent
   services::herdr_launch::tests::retired_durability_tests::retired_hold_metadata_error_is_preserved_without_cleanup
