@@ -190,32 +190,30 @@ impl Overlap {
 
 impl Text {
     /// `!clear` through the text dispatcher: whether it was consumed and the replies it posted.
-    fn text_clear(&self) -> impl std::future::Future<Output = (bool, Vec<String>)> + '_ {
-        async move {
-            let mut message = serenity::Message::default();
-            message.id = MessageId::new(CHANNEL + 2);
-            message.channel_id = channel();
-            message.author.id = UserId::new(1);
-            message.author.name = "clear-test".into();
-            message.content = "!clear".into();
-            self.api.take();
-            let handled = Box::pin(super::super::handle_text_command_with_uploads(
-                &self.ctx,
-                &message,
-                &self.data,
-                channel(),
-                "!clear",
-                &[],
-                &mut None,
-            ))
-            .await;
-            let posted = format!("POST /api/v10/channels/{CHANNEL}/messages ");
-            let replies = self.api.take().into_iter().filter_map(|call| {
-                let body: Value = serde_json::from_str(call.strip_prefix(&posted)?).ok()?;
-                Some(body["content"].as_str()?.to_owned())
-            });
-            (handled.expect("the clear ran"), replies.collect())
-        }
+    async fn text_clear(&self) -> (bool, Vec<String>) {
+        let mut message = serenity::Message::default();
+        message.id = MessageId::new(CHANNEL + 2);
+        message.channel_id = channel();
+        message.author.id = UserId::new(1);
+        message.author.name = "clear-test".into();
+        message.content = "!clear".into();
+        self.api.take();
+        let handled = Box::pin(super::super::handle_text_command_with_uploads(
+            &self.ctx,
+            &message,
+            &self.data,
+            channel(),
+            "!clear",
+            &[],
+            &mut None,
+        ))
+        .await;
+        let posted = format!("POST /api/v10/channels/{CHANNEL}/messages ");
+        let replies = self.api.take().into_iter().filter_map(|call| {
+            let body: Value = serde_json::from_str(call.strip_prefix(&posted)?).ok()?;
+            Some(body["content"].as_str()?.to_owned())
+        });
+        (handled.expect("the clear ran"), replies.collect())
     }
 }
 
