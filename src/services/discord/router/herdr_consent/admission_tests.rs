@@ -156,6 +156,17 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
         frame < 16 * 1024,
         "legacy_consent_future_frame_contract: {frame} bytes"
     );
+    let held = hold_live(
+        &deps,
+        submission(8_916_099, IntakeOrigin::LiveMessage),
+        Err("unpolled frame contract".into()),
+    );
+    let frame = std::mem::size_of_val(&held);
+    assert!(
+        frame <= 2 * std::mem::size_of::<usize>(),
+        "legacy_consent_future_frame_contract: custody {frame} bytes"
+    );
+    drop(held);
     for (index, origin) in [
         IntakeOrigin::LiveMessage,
         IntakeOrigin::SlashSkill,

@@ -268,27 +268,32 @@ pub(in crate::services::discord::router) async fn register_mailbox(
     Ok(())
 }
 
-pub(in crate::services::discord::router) async fn hold_live(
-    deps: &IntakeDeps<'_>,
+// Keep the custody enqueue future out of callers that take the unchanged Legacy branch.
+pub(in crate::services::discord::router) fn hold_live<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
     mut submission: IntakeSubmission,
     hold: Result<Hold, String>,
-) -> Result<(), Error> {
-    let uploads = super::super::intake_dispatch::turn_mode_uploads(
-        deps,
-        &submission,
-        &submission.request.channel_id.get().to_string(),
-    )
-    .await?;
-    submission.preloaded_uploads.extend(uploads);
-    submission.attachments.clear();
-    let (provider, request) = (submission.provider.clone(), submission.request.clone());
-    let explicit = !matches!(submission.origin, IntakeOrigin::QueuedDrain(_));
-    if !super::super::intake_dispatch::defer_live_submission(deps, submission, true).await {
-        return Err("herdr consent durable custody unavailable; checkpoint remains unread".into());
-    }
-    register_mailbox(deps, &provider, &request, hold?, explicit)
-        .await
-        .map_err(Into::into)
+) -> impl std::future::Future<Output = Result<(), Error>> + Send + 'a {
+    Box::pin(async move {
+        let uploads = super::super::intake_dispatch::turn_mode_uploads(
+            deps,
+            &submission,
+            &submission.request.channel_id.get().to_string(),
+        )
+        .await?;
+        submission.preloaded_uploads.extend(uploads);
+        submission.attachments.clear();
+        let (provider, request) = (submission.provider.clone(), submission.request.clone());
+        let explicit = !matches!(submission.origin, IntakeOrigin::QueuedDrain(_));
+        if !super::super::intake_dispatch::defer_live_submission(deps, submission, true).await {
+            return Err(
+                "herdr consent durable custody unavailable; checkpoint remains unread".into(),
+            );
+        }
+        register_mailbox(deps, &provider, &request, hold?, explicit)
+            .await
+            .map_err(Into::into)
+    })
 }
 
 pub(in crate::services::discord::router) async fn worker(
