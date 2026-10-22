@@ -273,7 +273,12 @@ fn live_custody_replays_a_lost_response_and_wake_without_recreating_payload() {
                                 None,
                             ))
                             .await;
-                        if taken.intervention.is_some() {
+                        if let Some(item) = taken.intervention {
+                            let lease = taken.dispatch_lease.expect("dequeued fixture owns its lease");
+                            assert!(shared.mailbox(channel).abandon_pending_dispatch_if_lease_matches(
+                                item.message_id, lease,
+                                QueuePersistenceContext::new(&provider, &shared.token_hash, None),
+                            ).await, "fake executor settles only its own original dispatch");
                             *counts.lock().unwrap() += 1;
                         }
                         Some(IdleQueueKickoffChannelOutcome { started: true })
