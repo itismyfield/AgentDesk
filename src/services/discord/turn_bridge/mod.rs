@@ -992,3 +992,6 @@ pub(in crate::services::discord) use terminal_outcome_delivery::custody_test_ada
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod resume_pin_tests;
 pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_terminal_custody;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use runtime_handoff_loop::adopt_codex_replacement_for_test;

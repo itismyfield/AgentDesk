@@ -3448,6 +3448,7 @@ services::codex_tui::session::tests::requested_session_without_matching_rollout_
 services::codex_tui::session::tests::shared_discovery_primitive_matches_direct_scan
 services::codex_tui::session::tests::warm_lookup_picks_up_newer_rollout_after_first_resolve
 services::codex_tui::verified_tail::diagnostic_tests::verified_tail_hold_diagnostic_is_bounded_to_one_warning_per_minute
+services::codex_tui::warm_followup::submit::tests::tracked_retry_safe_draft_carries_replacement_through_its_pane_kill
 services::codex_tui::warm_followup::tests::eligibility_requires_all_reuse_axes
 services::codex_tui::warm_followup::tests::fallback_reason_codes_are_stable_and_complete
 services::codex_tui::warm_followup::tests::fingerprint_without_matching_snapshot_still_decides_by_fingerprint_alone
@@ -3739,6 +3740,9 @@ services::discord::codex_absence::observation_tests::full_snapshot_refuses_forei
 services::discord::codex_absence::observation_tests::observations_refuse_legacy_driver_and_missing_target_identity
 services::discord::codex_absence::observation_tests::observations_refuse_process_fallback_when_tmux_becomes_unavailable
 services::discord::codex_absence::observation_tests::readiness_observation_refuses_new_rows_and_read_errors_without_repair
+services::discord::codex_absence::replacement::tests::replacement_begin_and_terminal_cleanup_have_one_winner
+services::discord::codex_absence::replacement::tests::replacement_probe_detects_the_whole_successful_gap_but_not_failure_or_cancel
+services::discord::codex_absence::replacement::tests::replacement_requires_its_exact_turn_and_unwinds_on_panic
 services::discord::codex_absence::test_setup::setup_constructs_and_drops_a_non_send_guard_on_the_worker_once
 services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg
 services::discord::commands::cancel_backstop_tests::preserve_stop_completed_native_zombie_slash_recovers_queue_pg
@@ -8597,6 +8601,12 @@ services::discord::tmux::tmux_watcher::panel_decisions::redrive_placeholder_shie
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::path_b_records_the_late_row_else_only_the_pin_of_this_committed_range
 services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_host_gate_rechecks_a_replacement_completed_inside_the_probe
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_replacement_create_failure_releases_watcher_and_clears_row
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_true_crash_after_replacement_clears_row
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_warm_replacement_preserves_paused_watcher_and_start_activity
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_watcher_exit_preserves_row_until_create_failure_bridge_settles
 services::discord::tmux::tmux_watcher::post_stream_exit::tests::post_stream_exit_releases_its_own_registry_entry
 services::discord::tmux::tmux_watcher::post_stream_exit::tests::stale_post_stream_exit_preserves_a_rebound_channel_entry
 services::discord::tmux::tmux_watcher::post_stream_exit::tests::stale_post_stream_exit_preserves_a_replacement_watcher_entry
@@ -10308,6 +10318,8 @@ services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_restamps_output_path_when_this_turn_still_owns_the_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_skips_and_does_not_clobber_a_re_owned_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_uses_explicit_pre_mutation_identity
+services::discord::turn_bridge::runtime_handoff_loop::tests::codex_replacement::codex_runtime_ready_replaces_paused_incumbent_and_old_exit_keeps_successor
+services::discord::turn_bridge::runtime_handoff_loop::tests::codex_replacement::codex_runtime_ready_row_absent_still_cannot_claim_a_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::direct_tmux_adoption_rejects_claim_evicted_before_publication
 services::discord::turn_bridge::runtime_handoff_loop::tests::herdr_owner::a_listing_inside_a_legacy_handoff_lands_after_its_claim
 services::discord::turn_bridge::runtime_handoff_loop::tests::herdr_owner::a_withheld_handoff_records_no_owner_and_a_legacy_one_records_it_before_the_claim

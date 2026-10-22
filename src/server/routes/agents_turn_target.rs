@@ -256,3 +256,12 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) async fn codex_replacement_start_conflict_for_test(
+    registry: Option<&crate::services::discord::health::HealthRegistry>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    external_turn_conflict(registry, provider, channel_id).await
+}

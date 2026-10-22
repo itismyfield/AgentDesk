@@ -940,6 +940,8 @@ src/
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
+│   │   ├── warm_followup/
+│   │   │   └── submit.rs
 │   │   ├── busy_inject.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
@@ -986,6 +988,8 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── codex_absence/
 │   │   │   ├── observation_tests.rs
+│   │   │   ├── replacement.rs
+│   │   │   ├── replacement_tests.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
 │   │   │   ├── control/
@@ -1994,6 +1998,7 @@ src/
 │   │   │   │   └── stream_seed.rs
 │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   ├── cancel_handoff.rs
+│   │   │   ├── codex_replacement_tests.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
 │   │   │   ├── completion_gate.rs
@@ -2261,6 +2266,7 @@ src/
 │   │   │   ├── retry_state/
 │   │   │   │   └── delivery_rewind.rs
 │   │   │   ├── runtime_handoff_loop/
+│   │   │   │   ├── codex_replacement_tests.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── tests.rs
