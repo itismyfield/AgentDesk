@@ -251,11 +251,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         bridge.adk_session_key.as_deref(),
         bridge.inflight_state.turn_start_offset,
     );
-    // Attach the span via `.instrument(..)` on the async block instead of
-    // holding a sync `Span::enter()` guard across `.await`. The sync-guard
-    // pattern leaks the span into unrelated tasks scheduled on the same
-    // thread (tokio + tracing task propagation), which caused logs to be
-    // attributed to the wrong channel_id (see retired issue #901).
+    // Instrument the async block so a synchronous span guard cannot cross an await
+    // and attribute unrelated tasks to this channel.
     let bridge_span = tracing::info_span!(
         "discord_turn_bridge",
         channel_id = bridge.channel_id.get(),
