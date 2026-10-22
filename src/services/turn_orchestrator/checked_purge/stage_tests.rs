@@ -11,17 +11,19 @@ use super::super::test_support::{AGENTDESK_ROOT_DIR_ENV, lock_test_env};
 use super::herdr::{CheckedPurge, PurgeStage};
 use super::*;
 use crate::services::cluster::attachment_transfer::uploads::Upload;
+use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
 use crate::voice::prompt::VoiceTranscriptAnnouncement;
 
 const TOKEN: &str = "checked-purge";
 const GENERATION: u64 = 5;
 
 /// Where each row stops; the queue, receipt, file and marker it leaves are asserted per row.
-const STAGES: [&str; 9] = [
+const STAGES: [&str; 10] = [
     "saved",
     "reservation-kept",
     "not-saved",
     "published-error",
+    "dir-sync-failed",
     "marker-failed",
     "foreign-namespace",
     "file-differs",
@@ -173,7 +175,7 @@ fn checked_purge_stages_keep_queue_file_marker_and_receipt_in_agreement() {
                 rows += 1;
                 continue;
             }
-            if row == "published-error" {
+            if matches!(row, "published-error" | "dir-sync-failed") {
                 with_metadata(channel);
             }
             if row != "marker-failed" {
@@ -221,7 +223,18 @@ fn checked_purge_stages_keep_queue_file_marker_and_receipt_in_agreement() {
                 // The queue file is absent, so only the marker unlink needs the directory writable.
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
             }
+            let plan = Plan {
+                fail: vec![Step::ParentSync],
+                block: None,
+            };
+            let watch = (row == "dir-sync-failed").then(|| Watch::new(&dir, plan));
             let purged = purge(&handle, token, captured).await;
+            let synced = watch.map(|watch| {
+                (
+                    watch.count(Step::ParentSync),
+                    watch.flushed(Step::ParentSync),
+                )
+            });
             if row == "marker-failed" {
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
@@ -262,6 +275,20 @@ fn checked_purge_stages_keep_queue_file_marker_and_receipt_in_agreement() {
                     assert!(hydrated.await.unwrap().persistence_error.is_none(), "{row}");
                     let restored = ids(&restart.snapshot().await.intervention_queue);
                     assert_eq!(restored, [63], "{row}");
+                }
+                "dir-sync-failed" => {
+                    // The flush failed after the rename, so the published removal is kept as saved.
+                    assert_eq!(
+                        synced,
+                        Some((1, vec![])),
+                        "{row}: the parent flush failed once"
+                    );
+                    assert_eq!(outcome(&purged), (None, vec![61, 62]), "{row}");
+                    assert_eq!(
+                        after,
+                        (vec![], None, vec![], None),
+                        "{row}: the removal stands"
+                    );
                 }
                 "marker-failed" => {
                     assert_eq!(
