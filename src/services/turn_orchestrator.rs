@@ -1413,6 +1413,9 @@ enum ChannelMailboxMsg {
     /// The forced Herdr cancel's purge, refused unless the queue is still the one it captured.
     #[cfg(unix)]
     PurgeQueueIfUnchanged(checked_purge::CheckedPurgeRequest),
+    /// The forced Herdr cancel's capture, after the actor absorbed its own queue file.
+    #[cfg(unix)]
+    CaptureOwnQueue(checked_purge::OwnCaptureRequest),
     /// #3864: blind queue overwrite. Production restore now uses
     /// `MergeRestoredQueueItems` (in-actor, race-immune); `ReplaceQueue` has no
     /// production caller and survives ONLY as a `#[cfg(test)]` queue-seeding
@@ -2460,6 +2463,8 @@ fn input_mailbox_step(
         }
         #[cfg(unix)]
         ChannelMailboxMsg::PurgeQueueIfUnchanged(request) => request.run(&mut state, channel_id),
+        #[cfg(unix)]
+        ChannelMailboxMsg::CaptureOwnQueue(request) => request.run(&mut state, channel_id),
         #[cfg(test)]
         ChannelMailboxMsg::ReplaceQueue {
             queue,

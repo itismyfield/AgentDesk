@@ -97,9 +97,9 @@ impl ChannelMailboxHandle {
 }
 
 #[cfg(unix)]
-pub(super) use herdr::CheckedPurgeRequest;
-#[cfg(unix)]
 pub(crate) use herdr::ExpectedQueue;
+#[cfg(unix)]
+pub(super) use herdr::{CheckedPurgeRequest, OwnCaptureRequest};
 
 /// Arms a failure returned after the next queue save of `channel` is already published.
 #[cfg(all(test, unix))]
@@ -107,8 +107,8 @@ pub(crate) fn fail_next_publication_for_test(channel: ChannelId) {
     super::pending_queue_persistence::post_save_fault::fail_next(channel);
 }
 
-/// The forced Herdr cancel's purge: it removes only the queue the cancel captured from this actor
-/// and answers with what it actually removed.
+/// The forced Herdr cancel's capture and purge: it removes only the queue the cancel captured from
+/// this actor and answers with what it actually removed.
 #[cfg(unix)]
 mod herdr {
     use std::time::{Instant, SystemTime};
@@ -285,7 +285,50 @@ mod herdr {
         }
     }
 
+    /// The forced cancel's capture, taken once the actor absorbed its own queue file.
+    pub(in crate::services::turn_orchestrator) struct OwnCaptureRequest {
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<Result<ChannelMailboxSnapshot, String>>,
+    }
+
+    impl OwnCaptureRequest {
+        pub(in crate::services::turn_orchestrator) fn refuse_closed(self) -> &'static str {
+            let _ = (self.reply).send(Err("the mailbox actor is purge-closed".into()));
+            "CaptureOwnQueue"
+        }
+
+        /// Another namespace is refused before any read; a file the actor cannot read or trust
+        /// absorbs nothing, and a read error answers no capture.
+        pub(in crate::services::turn_orchestrator) fn run(
+            self,
+            state: &mut ChannelMailboxState,
+            channel_id: ChannelId,
+        ) {
+            let absorb = super::super::dispatch_reservation::absorb_disk_queue_error;
+            let captured = own_namespace(state, &self.persistence).and_then(|()| {
+                match absorb(state, channel_id, &self.persistence) {
+                    Some(error) => Err(error),
+                    None => Ok(state.snapshot()),
+                }
+            });
+            let _ = self.reply.send(captured);
+        }
+    }
+
     impl ChannelMailboxHandle {
+        /// Absorbs this actor's queue file of `persistence`'s namespace, then answers its queue;
+        /// the inner error is a refusal or a failed read, after which nothing was captured.
+        pub(crate) async fn try_capture_own_queue(
+            &self,
+            persistence: QueuePersistenceContext,
+        ) -> Result<Result<ChannelMailboxSnapshot, String>, MailboxUnreachable> {
+            self.request(|reply| {
+                let request = OwnCaptureRequest { persistence, reply };
+                ChannelMailboxMsg::CaptureOwnQueue(request)
+            })
+            .await
+        }
+
         /// Purges this actor's queue only while it is still `expected`; unreachable is an error.
         pub(crate) async fn try_purge_queue_if_unchanged(
             &self,

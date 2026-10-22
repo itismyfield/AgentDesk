@@ -176,6 +176,8 @@ pub(super) fn gate_closed_arm(
         M::PurgeQueue { .. } => "PurgeQueue",
         #[cfg(unix)]
         M::PurgeQueueIfUnchanged(request) => request.refuse_closed(),
+        #[cfg(unix)]
+        M::CaptureOwnQueue(request) => request.refuse_closed(),
         M::CancelQueuedPrimaryMessage { .. } => "CancelQueuedPrimaryMessage",
         #[cfg(test)]
         M::ReplaceQueue { .. } => "ReplaceQueue",

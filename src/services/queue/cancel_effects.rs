@@ -311,20 +311,29 @@ pub(super) mod herdr {
         };
         // The capture, the purge it conditions and the record of its receipt all address the
         // exclusion's actor; a queue the actor no longer holds as captured is refused, not purged.
-        let capture = actor.try_snapshot().await;
         let token = SessionIdentity::parse(session_key).and_then(|identity| identity.token_hash);
-        let persistence = QueuePersistenceContext::new(provider, &token.unwrap_or_default(), None);
-        #[cfg(test)]
-        super::run_pre_purge_hook_for_test(provider, channel, actor).await;
+        let persistence =
+            QueuePersistenceContext::new(provider, token.as_deref().unwrap_or_default(), None);
+        // Only the runtime's own namespace is absorbed first; another one is captured as held.
+        let capture = match token.as_deref() == exclusion.owner_token() {
+            true => match actor.try_capture_own_queue(persistence.clone()).await {
+                Ok(captured) => captured.map_err(|why| format!("queue hydrate: {why}")),
+                Err(_) => Err("queue hydrate: the mailbox actor did not answer".to_string()),
+            },
+            false => (actor.try_snapshot().await)
+                .map_err(|_| "queue capture: the mailbox actor did not answer".to_string()),
+        };
         let checked = match capture {
             Ok(snapshot) => {
+                #[cfg(test)]
+                super::run_pre_purge_hook_for_test(provider, channel, actor).await;
                 let expected = ExpectedQueue::of(&snapshot);
                 let purge = actor.try_purge_queue_if_unchanged(persistence, expected);
                 purge
                     .await
-                    .map_err(|_| "queue purge: the mailbox actor did not answer")
+                    .map_err(|_| "queue purge: the mailbox actor did not answer".to_string())
             }
-            Err(_) => Err("queue capture: the mailbox actor did not answer"),
+            Err(why) => Err(why),
         };
         let receipt = checked
             .as_ref()
@@ -333,7 +342,7 @@ pub(super) mod herdr {
             Ok(purge) => {
                 (purge.failed.as_ref()).map(|(stage, why)| format!("queue purge {stage:?}: {why}"))
             }
-            Err(why) => Some(why.to_string()),
+            Err(why) => Some(why.clone()),
         };
         let reason = "queue_api_cancel_turn_force";
         let complete = failed.is_none();
