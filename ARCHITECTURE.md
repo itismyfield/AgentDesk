@@ -905,6 +905,13 @@ src/
 │   │   │   ├── inject_tests.rs
 │   │   │   ├── rollout.rs
 │   │   │   └── screen.rs
+│   │   ├── execution_end/
+│   │   │   ├── attempt.rs
+│   │   │   ├── attempt_tests.rs
+│   │   │   ├── capture.rs
+│   │   │   ├── confirm.rs
+│   │   │   ├── identity.rs
+│   │   │   └── mod.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   ├── source_guard_tests.rs
@@ -991,7 +998,9 @@ src/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── clear_end_record.rs
-│   │   │   │   │   └── clear_end_record_tests.rs
+│   │   │   │   │   ├── clear_end_record_tests.rs
+│   │   │   │   │   ├── codex_end_record.rs
+│   │   │   │   │   └── codex_end_tests.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -3180,6 +3189,8 @@ src/
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
+│   │   │   ├── codex_end.rs
+│   │   │   ├── codex_end_tests.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── durable.rs

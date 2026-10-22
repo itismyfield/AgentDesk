@@ -15,6 +15,10 @@ use crate::services::provider::{CancelToken, ProviderKind};
 mod clear_end_record;
 #[cfg(all(test, unix))]
 mod clear_end_record_tests;
+#[cfg(unix)]
+mod codex_end_record;
+#[cfg(all(test, unix))]
+mod codex_end_tests;
 
 /// Advances the channel's transcript clear boundary, retried once; it also supersedes any
 /// unresolved native clear boundary, so no older clear holds the next input.
@@ -88,6 +92,9 @@ pub(super) async fn end_session(
         #[cfg(unix)]
         let clear_end =
             clear_end_record::capture_for(provider, channel_id.get(), name, &transition);
+        #[cfg(unix)]
+        let codex_end =
+            codex_end_record::capture_for(provider, channel_id.get(), name, &transition);
         let ended = super::managed_reset::end_managed_process_session(name);
         if ended.tmux_unconfirmed {
             tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
@@ -99,6 +106,8 @@ pub(super) async fn end_session(
         }
         #[cfg(unix)]
         clear_end_record::commit_confirmed(clear_end, (ended.reset, ended.tmux_unconfirmed)).await;
+        #[cfg(unix)]
+        codex_end_record::commit_confirmed(codex_end, (ended.reset, ended.tmux_unconfirmed)).await;
     } else if tmux.is_none()
         && matches!(provider, ProviderKind::Codex)
         && channel_id.get() == crate::services::codex_tui::canary::CANARY_CHANNEL
