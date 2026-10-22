@@ -437,7 +437,7 @@ async fn tick_settled(supervisor: &Supervisor<Fake>, channel: u64) {
 /// notice at once, and the same cause stays at one notice while the input leaves and returns.
 #[tokio::test(start_paused = true)]
 async fn unknown_without_input_notices_only_when_a_waiting_head_is_affected() {
-    let channel = 6_200_017;
+    let channel = 6_200_031;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
     let mut supervisor = Supervisor::new(fake.clone());
@@ -482,7 +482,7 @@ async fn unknown_without_input_notices_only_when_a_waiting_head_is_affected() {
 /// and none once the token is released.
 #[tokio::test(start_paused = true)]
 async fn unknown_with_only_a_token_notices_until_the_token_is_released() {
-    let channel = 6_200_018;
+    let channel = 6_200_032;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
     fake.token.store(true, Ordering::SeqCst);
