@@ -190,6 +190,7 @@ impl T19Server {
             .env("TMPDIR", at("tmp"))
             .env("HERDR_CONFIG_PATH", at("home/config.toml"))
             .env("HERDR_SOCKET_PATH", self.socket())
+            .env("HERDR_LOG", "herdr=debug")
             .env("TERM", "xterm-256color")
             .env("LANG", "en_US.UTF-8")
             .env("SHELL", "/bin/sh")
@@ -511,7 +512,6 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             HerdrCreateOutcome::Created { pane_id } => pane_id,
             other => panic!("T19 actual launch {provider}: {other:?}"),
         };
-        server.confirm_launch(ordinal);
         let provider_pid = server.dir.join(format!("{provider}.pid"));
         wait_for(|| provider_pid.exists(), "fake provider started");
         let pid = std::fs::read_to_string(provider_pid)
@@ -520,6 +520,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             .parse()
             .unwrap();
         server.record(pid, provider);
+        server.confirm_launch(ordinal);
         let env_path = server.dir.join(format!("{provider}.env"));
         wait_for(
             || {

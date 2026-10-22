@@ -218,7 +218,7 @@ impl<'a> AdmissionFence<'a> {
         {
             return Err("synthetic exact and canonical hosted rows differ".into());
         }
-        if !super::super::herdr_adoption::execution_current(record).await {
+        if !crate::services::tui_prompt_dedupe::hosted_source::execution_current(record).await {
             return Err("synthetic original execution is no longer alive".into());
         }
         // The map guard is a leaf: no database, file or actor await runs while it is held.

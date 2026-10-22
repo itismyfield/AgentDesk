@@ -85,7 +85,6 @@ pub(in crate::services::discord) use self::anchor_completion::{
 };
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
-mod herdr_adoption;
 #[cfg(unix)]
 pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]
@@ -313,7 +312,7 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
-    if !herdr_adoption::current(
+    if !crate::services::tui_prompt_dedupe::hosted_source::current_execution_for_adoption(
         shared,
         &prompt.provider,
         channel_id,
