@@ -2692,6 +2692,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_idle_refusal_logs_its_judged_inputs_once
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_shares_the_tmux_pane_evidence
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
