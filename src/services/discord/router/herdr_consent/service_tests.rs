@@ -500,7 +500,8 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
     let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
     let _peer = ScopedPeer(previous);
-    let fixture_config = runtime.path().join("fixture-agentdesk.json");
+    let fixture_config = crate::runtime_layout::config_file_path(runtime.path());
+    std::fs::create_dir_all(fixture_config.parent().unwrap()).unwrap();
     std::fs::write(&fixture_config,serde_json::to_vec(&json!({"server":{},"agents":[{"id":"service-consent","name":"Consent fixture","provider":"claude","voice_enabled":false,"channels":{"claude":{"id":discord_mock::CHANNEL_ID.to_string(),"name":"service-consent-cc","workspace":config_dir.path(),"runtime":"tui"}}}]})).unwrap()).unwrap();
     let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
@@ -523,6 +524,16 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     ));
     let shared = crate::services::discord::make_shared_data_for_tests();
     let message = discord_mock::user_message(940_487_400_000_061, "!herdr consent retry");
+    let binding = crate::services::discord::settings::resolve_role_binding(
+        message.channel_id,
+        Some("service-consent-cc"),
+    );
+    assert!(
+        binding
+            .as_ref()
+            .is_some_and(|binding| binding.provider.as_ref() == Some(&ProviderKind::Claude)),
+        "actual service fixture must use its canonical configured provider binding"
+    );
     {
         let mut settings = shared.settings.write().await;
         settings.owner_user_id = Some(message.author.id.get());
@@ -560,7 +571,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let enqueued = shared
         .mailbox(message.channel_id)
         .enqueue(
-            original,
+            original.clone(),
             QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None),
         )
         .await;
@@ -747,27 +758,134 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         1,
         "the exact original reference must be acknowledged once"
     );
-    let calls = calls.lock().unwrap();
-    let sends: Vec<_> = calls
-        .iter()
-        .filter(|(path, body)| path.ends_with("/messages") && body.get("components").is_some())
-        .collect();
+    {
+        let calls = calls.lock().unwrap();
+        let sends: Vec<_> = calls
+            .iter()
+            .filter(|(path, body)| path.ends_with("/messages") && body.get("components").is_some())
+            .collect();
+        assert_eq!(
+            sends.len(),
+            1,
+            "owner retry and duplicate decisions must send only one card"
+        );
+        assert_eq!(
+            sends[0].1["components"][0]["components"][0]["disabled"], true,
+            "the actual transport must initially send disabled buttons"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|(_, body)| body["components"][0]["components"][0]["disabled"] == false),
+            "the actual transport must enable buttons only after durable binding"
+        );
+        drop(calls);
+    }
+    // Reconstruct receipt-committed / release-not-yet-run crash state with an existing custody ref.
+    let restored_id = serenity::MessageId::new(message.id.get() + 100);
+    let mut restored = original;
+    restored.message_id = restored_id;
+    restored.queued_generation = 18;
+    restored.source_message_ids = vec![restored_id];
+    restored.source_message_queued_generations.clear();
+    restored.source_text_segments.clear();
+    let second = shared
+        .mailbox(message.channel_id)
+        .enqueue(
+            restored,
+            QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None),
+        )
+        .await;
+    assert!(
+        second.enqueued && second.persistence_error.is_none(),
+        "startup replay fixture must retain its exact second original input durably"
+    );
+    let interrupted = store()
+        .hold(
+            consent::Question {
+                key: key.clone(),
+                preview: applied.preview.clone(),
+                owner: applied.owner,
+                bot: applied.bot,
+                provider: applied.provider.clone(),
+                channel: applied.channel,
+                message: applied.message,
+                intent: consent::IntentRef {
+                    store: "mailbox".into(),
+                    id: format!("{}:18", restored_id.get()),
+                    provider: "claude".into(),
+                    channel: message.channel_id.get(),
+                    source_message: restored_id.get(),
+                    fifo: 18,
+                },
+            },
+            now(),
+        )
+        .unwrap()
+        .into_consent();
     assert_eq!(
-        sends.len(),
+        interrupted.nonce, applied.nonce,
+        "startup replay fixture must preserve the already applied generation"
+    );
+    assert_eq!(interrupted.state, State::Applied);
+    assert_eq!(
+        interrupted.releasable_intents().len(),
         1,
-        "owner retry and duplicate decisions must send only one card"
+        "startup replay fixture must leave one receipt-backed original reference unresolved"
+    );
+    for _ in 0..2 {
+        let recovered = startup::restore(&ctx.http, &shared, &ProviderKind::Claude).await;
+        assert!(
+            recovered.is_ok(),
+            "actual Applied startup replay must complete: {recovered:?}"
+        );
+    }
+    assert_eq!(
+        drained.load(Ordering::SeqCst),
+        2,
+        "startup_applied_recovery_drains_original_once_contract"
+    );
+    let recovered = store().load(&key).unwrap().unwrap();
+    assert_eq!(
+        recovered.settlements.len(),
+        2,
+        "startup Applied replay must acknowledge each original reference once"
     );
     assert_eq!(
-        sends[0].1["components"][0]["components"][0]["disabled"], true,
-        "the actual transport must initially send disabled buttons"
+        recovered.nonce, applied.nonce,
+        "startup Applied replay must use the original consent nonce"
+    );
+    assert_eq!(
+        recovered.apply, applied.apply,
+        "startup Applied replay must preserve the original durable receipt and backup"
     );
     assert!(
-        calls
-            .iter()
-            .any(|(_, body)| body["components"][0]["components"][0]["disabled"] == false),
-        "the actual transport must enable buttons only after durable binding"
+        shared
+            .mailbox(message.channel_id)
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty(),
+        "startup Applied replay must drain its original payload without recreating it"
     );
-    drop(calls);
+    assert_eq!(
+        std::fs::read_to_string(config_dir.path().join("apply.calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "startup Applied replay must perform zero new config apply checks"
+    );
+    let sends = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, body)| path.ends_with("/messages") && body.get("components").is_some())
+        .count();
+    assert_eq!(
+        sends, 1,
+        "startup Applied replay must send zero new consent cards"
+    );
     http_server.abort();
     gateway_server.abort();
 }
