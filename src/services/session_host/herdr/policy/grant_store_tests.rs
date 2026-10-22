@@ -31,13 +31,11 @@ async fn durable_grant_roundtrip_survives_owner_restart_without_rechecking_curre
         Some(expected.clone()),
         "durable_grant_rehydrates_exact_authority_contract"
     );
-    assert_eq!(
-        restored
-            .load_all(std::slice::from_ref(&endpoint))
-            .await
-            .unwrap(),
-        [expected.clone()]
-    );
+    let loaded = restored
+        .load_all(std::slice::from_ref(&endpoint))
+        .await
+        .unwrap();
+    assert_eq!(loaded.as_slice(), std::slice::from_ref(&expected));
     assert!(
         restored
             .load(&endpoint, "another-nonce")
