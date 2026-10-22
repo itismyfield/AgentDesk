@@ -165,7 +165,7 @@ async fn agentdesk_session_probe_failure_is_graded_as_unmeasured() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_dead_rowless_orphan_token_still_needs_a_warrant() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _tmux = super::super::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let root = tempfile::tempdir().expect("runtime root");
     let _env =
         TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());

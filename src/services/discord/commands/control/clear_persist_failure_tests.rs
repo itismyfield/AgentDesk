@@ -301,7 +301,7 @@ fn persisted_clear_still_resets_the_managed_process() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     #[cfg(unix)]
-    let _tmux = crate::services::discord::health::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(6_233_104);
     let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
@@ -460,7 +460,7 @@ fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() 
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     #[cfg(unix)]
-    let _tmux = crate::services::discord::health::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(6_233_106);
     let session_name = provider.build_tmux_session_name(CHANNEL_NAME);

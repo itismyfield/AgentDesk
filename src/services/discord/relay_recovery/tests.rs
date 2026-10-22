@@ -2705,7 +2705,7 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, _root_dir) = isolated_agentdesk_root();
     #[cfg(unix)]
-    let _tmux = crate::services::discord::health::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     #[cfg(not(unix))]
     if !crate::services::platform::tmux::is_available() {
         eprintln!("skipping manual plan/admit instant: tmux unavailable");

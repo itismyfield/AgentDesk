@@ -1,4 +1,5 @@
-//! Shared Discord stand-in, durable-record fingerprints and private tmux fixtures.
+//! Shared fixtures for Legacy cleanup tests: a local Discord stand-in and
+//! durable-record fingerprints (bytes, existence, mtime).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -206,86 +207,4 @@ pub(in crate::services::discord) fn tree_fingerprint(
         }
     }
     out
-}
-
-/// A live private server makes a never-created session a measured negative.
-#[cfg(unix)]
-pub(in crate::services::discord) struct MissingSessionTmux {
-    binary: PathBuf,
-    socket: PathBuf,
-    _env: [crate::config::TestEnvVarGuard; 3],
-    _root: tempfile::TempDir,
-}
-
-#[cfg(unix)]
-impl MissingSessionTmux {
-    /// The caller must hold the shared environment lock until this fixture is dropped.
-    pub(in crate::services::discord) fn new_after_shared_test_env_lock() -> Self {
-        crate::config::test_env_lock::assert_shared_test_env_lock_held();
-        use crate::config::TestEnvVarGuard as Guard;
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = tempfile::Builder::new()
-            .prefix("adk-missing-")
-            .tempdir_in("/tmp")
-            .expect("short private tmux root");
-        let socket_dir = root
-            .path()
-            .join(format!("tmux-{}", unsafe { libc::getuid() }));
-        std::fs::create_dir(&socket_dir).expect("private tmux socket directory");
-        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700))
-            .expect("private socket permissions");
-        let env = [
-            Guard::capture_after_shared_test_env_lock("TMUX"),
-            Guard::capture_after_shared_test_env_lock("TMUX_PANE"),
-            Guard::set_path_after_shared_test_env_lock("TMUX_TMPDIR", root.path()),
-        ];
-        unsafe {
-            std::env::remove_var("TMUX");
-            std::env::remove_var("TMUX_PANE");
-        }
-        let command = crate::services::platform::binary_resolver::runtime_command("tmux")
-            .expect("real tmux is required by the measured-missing fixture");
-        let fixture = Self {
-            binary: PathBuf::from(command.get_program()),
-            socket: socket_dir.join("default"),
-            _env: env,
-            _root: root,
-        };
-        let started = fixture
-            .command()
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                "fixture-keeper",
-                "exec sleep 600",
-            ])
-            .output()
-            .expect("start private tmux server");
-        assert!(
-            started.status.success(),
-            "private tmux keeper must start: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
-        fixture
-    }
-
-    fn command(&self) -> std::process::Command {
-        let mut command = std::process::Command::new(&self.binary);
-        command
-            .args(["-f", "/dev/null", "-S"])
-            .arg(&self.socket)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE");
-        command
-    }
-}
-
-#[cfg(unix)]
-impl Drop for MissingSessionTmux {
-    fn drop(&mut self) {
-        // The explicit socket keeps cleanup inside this fixture even during unwinding.
-        let _ = self.command().arg("kill-server").output();
-    }
 }
