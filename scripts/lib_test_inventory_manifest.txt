@@ -8601,7 +8601,7 @@ services::discord::tmux::tmux_watcher::panel_decisions::redrive_placeholder_shie
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::path_b_records_the_late_row_else_only_the_pin_of_this_committed_range
 services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests::live_tmux_redrive_reclaim_cycle_terminates_4299
-services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane_pg
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_host_gate_rechecks_a_replacement_completed_inside_the_probe
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_replacement_create_failure_releases_watcher_and_clears_row
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_true_crash_after_replacement_clears_row

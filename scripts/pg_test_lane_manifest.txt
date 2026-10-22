@@ -2488,7 +2488,7 @@ services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
-services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane_pg
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_replacement_create_failure_releases_watcher_and_clears_row
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_true_crash_after_replacement_clears_row
 services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_warm_replacement_preserves_paused_watcher_and_start_activity

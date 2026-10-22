@@ -142,7 +142,7 @@ async fn codex_watcher_exit_preserves_row_until_create_failure_bridge_settles() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn codex_cancel_during_replacement_does_not_protect_dead_pane() {
+async fn codex_cancel_during_replacement_does_not_protect_dead_pane_pg() {
     run_replacement_case(
         ReplacementCase::CancelDuringGap,
         concat!(
