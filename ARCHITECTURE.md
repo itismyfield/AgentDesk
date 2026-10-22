@@ -430,7 +430,7 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── db_deadline_tests/
-│   │   │   │   └── resource_regression.rs
+│   │   │   │   └── resource_regression_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
@@ -3462,7 +3462,7 @@ src/
 │   │   │   │   └── restored_merge_tests.rs
 │   │   │   └── held_settle.rs
 │   │   ├── mailbox_unreachable_tests/
-│   │   │   └── health_barrier.rs
+│   │   │   └── health_barrier_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs

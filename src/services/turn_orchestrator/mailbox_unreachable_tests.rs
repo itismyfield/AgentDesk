@@ -11,7 +11,7 @@ use super::{
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 
-mod health_barrier;
+mod health_barrier_tests;
 
 pub(crate) fn closed_handle() -> ChannelMailboxHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
