@@ -186,7 +186,7 @@ impl ConsentStore {
             .normalized()
             .map_err(|e| self.0.failure("", e))?;
         self.0
-            .read(&durable::key(&key)?)?
+            .read_stable(&durable::key(&key)?)?
             .map(|bytes| self.decode(&bytes, &key))
             .transpose()
     }

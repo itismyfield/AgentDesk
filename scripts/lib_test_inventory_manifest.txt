@@ -12631,6 +12631,7 @@ services::session_host::herdr::policy::consent::tests::consent_one_card_preserve
 services::session_host::herdr::policy::consent::tests::consent_original_schema_without_card_phase_remains_bound
 services::session_host::herdr::policy::consent::tests::consent_owner_decision_expires_at_thirty_minutes_without_expire_call
 services::session_host::herdr::policy::consent::tests::consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decision
+services::session_host::herdr::policy::consent::tests::consent_reads_wait_for_a_live_writer_and_reject_an_abandoned_marker
 services::session_host::herdr::policy::consent::workflow::tests::workflow_changed_revision_preserves_new_intent_without_implicitly_retrying
 services::session_host::herdr::policy::consent::workflow::tests::workflow_denial_expiry_and_failed_apply_preserve_fifo_without_requestion
 services::session_host::herdr::policy::consent::workflow::tests::workflow_failed_receipt_keeps_custody_and_cannot_emit_a_drain_effect

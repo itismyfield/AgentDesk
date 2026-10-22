@@ -188,6 +188,21 @@ impl Directory {
         Ok(result)
     }
 
+    // A live writer's marker is transient; abandoned markers still fail after its lock is released.
+    #[cfg(test)]
+    pub(crate) fn read_stable(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        let path = self.path(key, "lock")?;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return self.read(key),
+            Err(error) => return Err(self.failure(key, error)),
+            Ok(_) => {}
+        }
+        let lock = private_file(&path, false, false).map_err(|error| self.failure(key, error))?;
+        lock.lock_shared()
+            .map_err(|error| self.failure(key, error))?;
+        self.read(key)
+    }
+
     pub(crate) fn change(
         &self,
         key: &str,

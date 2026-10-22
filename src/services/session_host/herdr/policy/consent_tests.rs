@@ -470,3 +470,51 @@ fn consent_original_schema_without_card_phase_remains_bound() {
         "old_consent_card_identity_remains_bound_contract"
     );
 }
+
+#[test]
+fn consent_reads_wait_for_a_live_writer_and_reject_an_abandoned_marker() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("consents");
+    let store = ConsentStore::new(Some(root.clone()));
+    let current = store.hold(question("first"), 1).unwrap().into_consent();
+    let key = durable::key(&current.key).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(format!("{key}.lock")))
+        .unwrap();
+    lock.lock().unwrap();
+    let marker = root.join(format!("{key}.pending"));
+    std::fs::write(&marker, b"live publication").unwrap();
+    let (ready, entered) = mpsc::channel();
+    let (sender, result) = mpsc::channel();
+    let (reader_root, reader_key) = (root.clone(), current.key.clone());
+    let reader = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        let read = ConsentStore::new(Some(reader_root)).load(&reader_key);
+        sender.send(read).unwrap();
+    });
+    entered.recv().unwrap();
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ),
+        "consent_live_writer_is_not_misclassified_as_interruption_contract"
+    );
+    std::fs::remove_file(&marker).unwrap();
+    drop(lock);
+    assert_eq!(
+        result.recv_timeout(Duration::from_secs(5)).unwrap(),
+        Ok(Some(current.clone())),
+        "consent_reader_observes_the_completed_writer_contract"
+    );
+    reader.join().unwrap();
+    std::fs::write(marker, b"abandoned publication").unwrap();
+    assert!(
+        store.load(&current.key).is_err(),
+        "consent_abandoned_marker_remains_fail_closed_contract"
+    );
+}
