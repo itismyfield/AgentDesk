@@ -16,7 +16,7 @@ use super::super::{
 use super::terminate_for_http;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::{ChannelId, SharedData, inflight};
+use crate::services::discord::{ChannelId, SharedData, inflight, runtime_store};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
@@ -77,16 +77,16 @@ struct Node {
 }
 
 impl Node {
-    /// The execution in `state`, its row the channel's active turn on `dispatch`.
+    /// The execution in `state` on `dispatch`, without the context and queue an earlier bind left.
     async fn bind(
         rig: &herdr::P11TerminationRig,
         state: herdr::HostedState,
         dispatch: Option<&str>,
     ) -> Self {
-        // A bind earlier in this child wrote the same launch context; the rig writes it anew.
         let root = crate::config::runtime_root().unwrap();
         let context = format!("runtime/binding_contexts/claude/{}.json", herdr::EXECUTION);
         let _ = std::fs::remove_file(root.join(context));
+        let _ = std::fs::remove_dir_all(runtime_store::discord_pending_queue_root().unwrap());
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) =
