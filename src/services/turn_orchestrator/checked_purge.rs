@@ -102,7 +102,7 @@ pub(super) use herdr::CheckedPurgeRequest;
 pub(crate) use herdr::ExpectedQueue;
 
 /// Arms a failure returned after the next queue save of `channel` is already published.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn fail_next_publication_for_test(channel: ChannelId) {
     super::pending_queue_persistence::post_save_fault::fail_next(channel);
 }
