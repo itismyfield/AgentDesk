@@ -1,3 +1,0 @@
-resolver | src/services/session_host/herdr/policy/apply.rs
-resolver | src/services/session_host/herdr/policy/editor.rs
-resolver | src/services/session_host/herdr/policy/writer_compat.rs
