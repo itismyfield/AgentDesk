@@ -723,6 +723,12 @@ fn custody_retention_boundary_and_symlinks_never_follow_external_paths() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(dir.join("copy"), "held").unwrap();
     fs::write(outside.join("sentinel"), "external bytes").unwrap();
+    fs::write(
+        outside.join("episode.json"),
+        json!({"episode": {"channel_id": 7_264_123, "anchorless": "external"}, "tui_direct": true})
+            .to_string(),
+    )
+    .unwrap();
     let seconds = 1_700_000_000;
     let cutoff = UNIX_EPOCH + Duration::from_secs(seconds);
     let now: SystemTime = cutoff + Duration::from_secs(7 * 24 * 60 * 60);
