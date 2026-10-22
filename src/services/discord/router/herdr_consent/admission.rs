@@ -16,18 +16,6 @@ pub(in crate::services::discord::router) struct Hold {
     bot: u64,
 }
 
-fn peer(endpoint: &HerdrLaunchEndpoint) -> Result<Arc<dyn PeerSource>, String> {
-    require_local(endpoint)?;
-    #[cfg(test)]
-    if let Some(source) = TEST_SOURCE.with(|source| source.borrow().clone()) {
-        return Ok(source);
-    }
-    crate::services::session_host::herdr_endpoints()
-        .launch_host()
-        .and_then(|host| host.consent_source(endpoint))
-        .ok_or("consent peer source unavailable".into())
-}
-
 /// None is the unchanged path. The mode guard precedes rows, files, checker and Discord reads.
 pub(in crate::services::discord::router) async fn check(
     deps: &IntakeDeps<'_>,

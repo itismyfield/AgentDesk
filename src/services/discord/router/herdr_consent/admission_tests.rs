@@ -575,10 +575,14 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
     std::fs::create_dir_all(&directory).unwrap();
     let obstacle = directory.join(&f.shared.token_hash);
     std::fs::write(&obstacle, b"fixture blocks queue directory").unwrap();
-    let result = hold_live(
+    let checkpoints = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let saved = checkpoints.clone();
+    let result = intake::dispatch_live_text_intake(
         &f.deps(),
         submission(8_916_060, IntakeOrigin::TextSkill),
-        Ok(f.hold()),
+        move || {
+            saved.fetch_add(1, Ordering::SeqCst);
+        },
     )
     .await;
     assert!(
@@ -600,11 +604,32 @@ async fn consent_persistence_failure_retains_live_payload_without_success_or_car
         .try_snapshot()
         .await
         .unwrap();
+    assert_eq!(
+        checkpoints.load(Ordering::SeqCst),
+        0,
+        "consent_failed_persistence_keeps_discord_source_unread_contract"
+    );
     assert!(
-        snapshot.intervention_queue.iter().any(
-            |item| item.message_id.get() == 8_916_060 && item.text == "expanded prompt 8916060"
-        ),
-        "consent_failed_persistence_preserves_existing_memory_custody_contract"
+        snapshot.intervention_queue.is_empty(),
+        "existing queue rolls back a failed durable enqueue"
+    );
+    std::fs::remove_file(obstacle).unwrap();
+    let replayed = hold_live(
+        &f.deps(),
+        submission(8_916_060, IntakeOrigin::TextSkill),
+        Ok(f.hold()),
+    )
+    .await;
+    assert!(
+        replayed.is_ok(),
+        "unread source retries after custody repair: {replayed:?}"
+    );
+    let disk = f.disk();
+    assert_eq!(disk.len(), 1, "unread source is durably replayed once");
+    assert_eq!(
+        (disk[0].message_id.get(), disk[0].text.as_str()),
+        (8_916_060, "expanded prompt 8916060"),
+        "consent_failed_persistence_retains_original_replay_payload_contract"
     );
 }
 

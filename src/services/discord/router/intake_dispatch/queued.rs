@@ -270,21 +270,19 @@ pub(crate) async fn finish_admitted_queued_intake(
                     Ok(hold) => {
                         let provider = owner.provider.clone();
                         let outcome = owner.restore(deps).await;
-                        if outcome == super::super::IntakeExecution::Deferred {
-                            if let Ok(hold) = hold.0 {
-                                if let Err(error) =
-                                    super::super::herdr_consent::admission::register_mailbox(
-                                        deps,
-                                        &provider,
-                                        &original_request,
-                                        hold,
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(%error, "queued consent metadata retained for retry");
-                                }
-                            }
+                        if outcome == super::super::IntakeExecution::Deferred
+                            && let Ok(hold) = hold.0
+                            && let Err(error) =
+                                super::super::herdr_consent::admission::register_mailbox(
+                                    deps,
+                                    &provider,
+                                    &original_request,
+                                    hold,
+                                    false,
+                                )
+                                .await
+                        {
+                            tracing::warn!(%error, "queued consent metadata retained for retry");
                         }
                         return Ok(outcome);
                     }

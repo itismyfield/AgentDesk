@@ -1,9 +1,20 @@
 use super::*;
-use crate::config::session_hosts::{self, approval_store::FileApprovalStore};
+use crate::config::session_hosts;
 use crate::services::session_host::ServerWitness;
 use crate::services::session_host::policy::consent::{
     ConsentKey, ConsentStore, IntentRef, Preview, Question,
 };
+
+// UserDefault cannot decode through the file validator until activation; supply the approved projection directly.
+struct Approved(BootSessionHosts);
+impl super::super::ApprovalStore for Approved {
+    fn load(&self) -> super::super::Loaded {
+        super::super::Loaded::Known(self.0.clone(), None)
+    }
+    fn save(&self, _: &BootSessionHosts) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 struct Rows;
 impl super::super::RowSource for Rows {
@@ -109,16 +120,14 @@ async fn migration_real_hold_source_is_mode_first_and_unchanged_is_read_free() {
         .join("runtime/herdr_policy/consents");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("unknown.json"), b"not json").unwrap();
-    let approval_root = tempfile::tempdir().unwrap();
-    let store = FileApprovalStore(Some(approval_root.path().to_owned()));
     for mode in [EndpointMode::LegacyDedicated, EndpointMode::UserDefault] {
         let approved = boot(mode);
-        super::super::ApprovalStore::save(&store, &approved).unwrap();
+        let store = Approved(approved.clone());
         let unchanged =
             super::super::select(approved.clone(), &store, &Rows, &ConsentHolds, false).await;
         assert!(
             unchanged.into_parts().1.migration().is_none(),
-            "unchanged boot does not consult corrupt holds"
+            "unchanged boot does not consult corrupt holds: {mode:?}"
         );
         let mut candidate = approved.clone();
         candidate.channels.get_mut(&41).unwrap().socket_path = "/fixture/new.sock".into();

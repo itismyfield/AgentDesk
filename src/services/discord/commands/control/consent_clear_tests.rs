@@ -7,7 +7,8 @@ use crate::services::session_host::{
     policy::consent::{ConsentKey, IntentRef, Preview, Question},
 };
 use crate::services::turn_orchestrator::{
-    Intervention, InterventionMode, QueuePersistenceContext, SourceMessageQueuedGeneration,
+    Intervention, InterventionMode, QueueExitEvent, QueueExitKind, QueuePersistenceContext,
+    SourceMessageQueuedGeneration,
 };
 use poise::serenity_prelude::{ChannelId, UserId};
 
@@ -73,9 +74,6 @@ fn input() -> Intervention {
 
 #[tokio::test(flavor = "current_thread")]
 async fn clear_consent_settles_only_exact_durable_waiting_refs_and_keeps_unknowns() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
-        .with_mode(EndpointMode::UserDefault);
     for case in [
         "confirmed",
         "failed",
@@ -85,13 +83,21 @@ async fn clear_consent_settles_only_exact_durable_waiting_refs_and_keeps_unknown
         "requeued",
         "outbox",
     ] {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+            .with_mode(EndpointMode::UserDefault);
         let shared = make_shared_data_for_tests();
         let channel = ChannelId::new(CHANNEL);
         let provider = ProviderKind::Claude;
         let persistence = QueuePersistenceContext::new(&provider, &shared.token_hash, None);
         let mailbox = shared.mailbox(channel);
         let queued = mailbox.enqueue(input(), persistence.clone()).await;
-        assert!(queued.enqueued && queued.persistence_error.is_none());
+        assert!(
+            queued.enqueued && queued.persistence_error.is_none(),
+            "clear fixture initial enqueue {case}: refusal={:?}, persistence={:?}",
+            queued.refusal_reason,
+            queued.persistence_error
+        );
         let store = herdr_consent::store();
         let mut q = question();
         q.key.target = format!("/fixture/{case}.toml").into();
@@ -103,20 +109,25 @@ async fn clear_consent_settles_only_exact_durable_waiting_refs_and_keeps_unknown
             q.intent.id = format!("{SOURCE}:{}", q.intent.fifo);
         }
         let held = store.hold(q, 100).unwrap().into_consent();
-        let mut cleared = mailbox.clear(persistence.clone()).await;
+        let mut cleared = if case == "requeued" {
+            // A stale clear receipt must not settle the source currently present in live and durable custody.
+            ClearChannelResult {
+                queue_exit_events: vec![QueueExitEvent {
+                    intervention: input(),
+                    kind: QueueExitKind::Superseded,
+                }],
+                discarded_message_ids: vec![MessageId::new(SOURCE)],
+                ..ClearChannelResult::default()
+            }
+        } else {
+            mailbox.clear(persistence).await
+        };
         assert!(cleared.persistence.failed.is_empty());
         assert!(!cleared.persistence.count_unknown);
         match case {
             "failed" => cleared.persistence.failed.push("queue"),
             "unknown" => cleared.persistence.count_unknown = true,
             "not_waiting" => cleared.persistence.not_waiting.push(MessageId::new(SOURCE)),
-            "requeued" => {
-                let requeued = mailbox.enqueue(input(), persistence).await;
-                assert!(
-                    requeued.enqueued && requeued.persistence_error.is_none(),
-                    "requeue race fixture must be present"
-                );
-            }
             _ => {}
         }
         let mut report = ClearReport::default();

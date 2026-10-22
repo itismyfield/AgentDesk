@@ -64,14 +64,18 @@ fn source(consent: &Consent) -> Result<Arc<dyn PeerSource>, String> {
     if consent.key.user != unsafe { libc::geteuid() } {
         return Err("consent execution user changed; preserve held inputs".into());
     }
-    require_local(&endpoint)?;
+    peer(&endpoint)
+}
+
+fn peer(endpoint: &HerdrLaunchEndpoint) -> Result<Arc<dyn PeerSource>, String> {
+    require_local(endpoint)?;
     #[cfg(test)]
     if let Some(source) = TEST_SOURCE.with(|source| source.borrow().clone()) {
         return Ok(source);
     }
     crate::services::session_host::herdr_endpoints()
         .launch_host()
-        .and_then(|host| host.consent_source(&endpoint))
+        .and_then(|host| host.consent_source(endpoint))
         .ok_or_else(|| "consent peer source unavailable".into())
 }
 
