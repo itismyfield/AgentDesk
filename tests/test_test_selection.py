@@ -513,6 +513,9 @@ class ReplayTests(unittest.TestCase):
                                       self.repo.base, "--head", head]), 0)
         lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
         self.assertEqual(json.loads(lines["matrix"]), {"shard": self.plan["lanes"]["pg"]["shards"]})
+        self.assertEqual(json.loads(lines["sweep_matrix"]), {
+            "shard": list(range(min(ts.SWEEP_SHARD_COUNT,
+                                    len(self.repo.selected(self.plan, "sweep")))))})
         self.assertEqual(json.loads(lines["plan"])["lanes"], self.plan["lanes"])
         self.assertEqual(lines["force_full"], "false")
 
@@ -578,6 +581,23 @@ class SweepShardTests(unittest.TestCase):
             ts.checked_sweep_partition([])
         with self.assertRaises(ValueError):
             ts.checked_sweep_partition([ids[0], ids[0]])
+
+    def test_small_selected_plan_schedules_only_nonempty_shards(self):
+        self.repo.base = git(self.repo.root, "rev-parse", "HEAD")
+        self.repo.plan({"src/beta/far/mod.rs": "// a narrow selection\n"})
+        output = Path(self.tmp.name) / "output"
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), **self.repo.env()}):
+            self.assertEqual(ts.main(["plan", "--root", str(self.repo.root),
+                                      "--base", self.repo.base]), 0)
+        lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(json.loads(lines["sweep_matrix"]), {"shard": [0]})
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.dict(os.environ, {ts.PLAN_ENV: lines["plan"]}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "0"]), 0)
+            self.assertEqual(run.call_args.args[1], ["beta::far::tests::far"])
+            self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "1"]), 1)
+            self.assertEqual(run.call_count, 1)
 
     def test_shards_keep_execution_set_gate_and_reject_zero_test_success(self):
         ids = [f"gamma::tests::g{index:02}" for index in range(12)]
