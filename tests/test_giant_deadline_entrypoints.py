@@ -173,7 +173,13 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         if count == 1:
             for detail in (GIANT, DEADLINE, ISSUE):
                 self.assertIn(detail, warnings[0])
-            self.assertIn("older than 30 days", output)
+            stale = next(line for line in output.splitlines() if "older than 30 days" in line)
+            for detail in ("giant_file_issue_metadata.json", "expired after", ISSUE):
+                self.assertIn(detail, stale)
+            closed = next(line for line in output.splitlines() if "has a dead deadline" in line)
+            for detail in (GIANT, DEADLINE, ISSUE):
+                self.assertIn(detail, closed)
+            self.assertNotIn("FATAL:", output)
 
     def progress(self, event):
         env = self.candidate()
@@ -198,6 +204,17 @@ class DeadlineEntrypointsTest(unittest.TestCase):
     def test_prepush_giant_docs_sequence_accepts_expired_closed_plan(self):
         self.assert_warning_pass(self.command_at(self.repo, ["sh", "-c", PREPUSH_SEQUENCE],
                                                  self.candidate()))
+
+    def test_unbounded_deadline_extension_needs_no_reset_record(self):
+        registry = (self.repo / "scripts/giant_file_registry.toml").read_text()
+        registry = "\n".join(line for line in registry.splitlines()
+                             if not line.startswith("# DEADLINE RESET")) + "\n"
+        registry = registry.replace(DEADLINE, "2030-01-01")
+        env = self.candidate({"scripts/giant_file_registry.toml": registry})
+        result = self.command_at(self.repo, [sys.executable, "scripts/giant_file_progress.py"], env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("WARNING:", result.stderr)
+        self.assertIn("2030-01-01", result.stderr)
 
     def test_same_expired_fixture_still_rejects_giant_growth(self):
         env = self.candidate({GIANT: (self.repo / GIANT).read_text() + "// one raw line\n"})
