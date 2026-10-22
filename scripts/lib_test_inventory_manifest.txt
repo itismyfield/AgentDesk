@@ -3900,6 +3900,8 @@ services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_a
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_first_overlap_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_overlap_pg
 services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
 services::discord::commands::text_commands::command_dispatch_contract_tests::source_guard_tests::dispatch_guard_counts_ok_false_in_code_but_not_in_comments
@@ -9452,6 +9454,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_rea
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::act_o_first_activation_applies_the_launched_source_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::output::force_actual_o_and_legacy_output_during_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
