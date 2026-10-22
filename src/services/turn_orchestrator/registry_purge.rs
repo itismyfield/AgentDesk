@@ -40,11 +40,11 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::closed_verdict::MailboxRefusal;
 use super::{
-    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
-    ChannelMailboxState, ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason,
-    GLOBAL_CHANNEL_MAILBOXES, GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS,
-    HydratePendingQueueResult, Intervention, MailboxUnreachable, QueuePersistenceContext,
-    RecoveryKickoffResult, RequeueInterventionResult, TryStartTurnResult,
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
+    ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
+    GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, HydratePendingQueueResult,
+    Intervention, MailboxUnreachable, QueuePersistenceContext, RecoveryKickoffResult,
+    RequeueInterventionResult, TryStartTurnResult,
 };
 use crate::services::provider::CancelToken;
 
@@ -331,26 +331,6 @@ pub(crate) struct PurgeQueueResult {
 }
 
 impl ChannelMailboxHandle {
-    /// Like `snapshot`, but an actor that never answered is an error, not an empty queue.
-    pub(crate) async fn try_snapshot(&self) -> Result<ChannelMailboxSnapshot, MailboxUnreachable> {
-        self.request(|reply| ChannelMailboxMsg::Snapshot { reply })
-            .await
-    }
-
-    /// Like `purge_queue`, but an actor that never answered is an error, not zero counts.
-    pub(crate) async fn try_purge_queue(
-        &self,
-        persistence: QueuePersistenceContext,
-        clear_cancelled_active_anchor: bool,
-    ) -> Result<PurgeQueueResult, MailboxUnreachable> {
-        self.request(|reply| ChannelMailboxMsg::PurgeQueue {
-            persistence,
-            clear_cancelled_active_anchor,
-            reply,
-        })
-        .await
-    }
-
     /// Like `hydrate_pending_queue_from_disk`, but an unreachable actor is an error.
     pub(crate) async fn try_hydrate_pending_queue_from_disk(
         &self,
