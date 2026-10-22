@@ -967,7 +967,7 @@ fn workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads() {
     ));
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(raw["schema"], 2, "consent_schema_two_writer_contract");
-    // The r1 reader checks the version before deserializing its deny_unknown_fields record.
+    // The old reader checks the version before deserializing its deny_unknown_fields record.
     fn r1_decode(bytes: &[u8]) -> Result<(), &'static str> {
         let raw: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|_| "consent_snapshot_corrupt")?;
