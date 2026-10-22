@@ -277,8 +277,12 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
     channel_id: ChannelId,
     reason: &'static str,
 ) -> IdleQueueKickoffChannelOutcome {
-    kick_queue_channel_if_context_available(shared, provider, channel_id, reason, KickoffLane::Idle)
-        .await
+    let lane = if reason == "turn_presence_idle" {
+        KickoffLane::IdleAfterPresenceWake
+    } else {
+        KickoffLane::Idle
+    };
+    kick_queue_channel_if_context_available(shared, provider, channel_id, reason, lane).await
 }
 
 /// The queued-only lane's kick: it may paste the first ready input into a busy TUI and nothing
@@ -326,8 +330,8 @@ async fn kick_queue_channel_if_context_available(
     let deps = transport.intake_deps(shared);
     let kickoff = async {
         match lane {
-            KickoffLane::Idle => {
-                super::kickoff_idle_queue_channel(&deps, provider, channel_id).await
+            KickoffLane::Idle | KickoffLane::IdleAfterPresenceWake => {
+                kickoff_queue_channel(&deps, provider, channel_id, lane).await
             }
             lane => kickoff_queue_channel(&deps, provider, channel_id, lane).await,
         }

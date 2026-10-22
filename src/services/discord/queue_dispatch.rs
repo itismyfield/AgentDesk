@@ -220,11 +220,35 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    mailbox_take_next_automatic_intervention_inner(shared, provider, channel_id, false).await
+}
+
+pub(super) async fn mailbox_take_next_automatic_intervention_after_presence_wake(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> MailboxTakeNextSoftOutcome {
+    mailbox_take_next_automatic_intervention_inner(shared, provider, channel_id, true).await
+}
+
+async fn mailbox_take_next_automatic_intervention_inner(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    allow_superseded_presence_recheck: bool,
+) -> MailboxTakeNextSoftOutcome {
     // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         use super::turn_presence::activity::{Activity, activity_now};
         use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
-        let observed = activity_now(shared, provider, channel_id).await;
+        let initial = activity_now(shared, provider, channel_id).await;
+        let observed = recheck_superseded_presence_once(
+            initial,
+            allow_superseded_presence_recheck,
+            std::time::Duration::from_secs(3),
+            || activity_now(shared, provider, channel_id),
+        )
+        .await;
         let cleared_canary_launch = observed.activity == Activity::Unknown
             && observed.reason == "session_identity_unresolved"
             && matches!(provider, ProviderKind::Codex)
@@ -339,6 +363,23 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
             return MailboxTakeNextSoftOutcome::default();
         }
     }
+}
+
+async fn recheck_superseded_presence_once<F, Fut>(
+    initial: super::turn_presence::activity::Observed,
+    enabled: bool,
+    delay: std::time::Duration,
+    recheck: F,
+) -> super::turn_presence::activity::Observed
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = super::turn_presence::activity::Observed>,
+{
+    if !enabled || initial.reason != "superseded" {
+        return initial;
+    }
+    tokio::time::sleep(delay).await;
+    recheck().await
 }
 
 async fn mailbox_take_soft_intervention(
@@ -530,4 +571,87 @@ pub(super) async fn mailbox_abandon_unclaimed_dispatch_after_success(
             super::queue_persistence_context(shared, provider, channel_id),
         )
         .await;
+}
+
+#[cfg(test)]
+mod superseded_presence_retry_tests {
+    use super::*;
+    use crate::services::discord::turn_presence::activity::{Activity, Observed};
+
+    #[tokio::test(start_paused = true)]
+    async fn turn_presence_wake_rechecks_superseded_once_after_one_tick() {
+        let started = tokio::time::Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let result = recheck_superseded_presence_once(
+            Observed {
+                activity: Activity::Unknown,
+                reason: "superseded",
+            },
+            true,
+            std::time::Duration::from_secs(3),
+            || async {
+                calls.set(calls.get() + 1);
+                assert_eq!(started.elapsed(), std::time::Duration::from_secs(3));
+                Observed {
+                    activity: Activity::Idle,
+                    reason: "no_session",
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.activity, Activity::Idle);
+        assert_eq!(result.reason, "no_session");
+    }
+
+    #[tokio::test]
+    async fn non_superseded_or_disabled_recheck_keeps_original_read() {
+        let initial = Observed {
+            activity: Activity::Busy,
+            reason: "active_turn",
+        };
+        let result =
+            recheck_superseded_presence_once(initial, true, std::time::Duration::ZERO, || async {
+                panic!("non-superseded reading must not be retried")
+            })
+            .await;
+        assert_eq!(result, initial);
+
+        let superseded = Observed {
+            activity: Activity::Unknown,
+            reason: "superseded",
+        };
+        let result = recheck_superseded_presence_once(
+            superseded,
+            false,
+            std::time::Duration::ZERO,
+            || async { panic!("disabled recheck must not read again") },
+        )
+        .await;
+        assert_eq!(result, superseded);
+    }
+
+    #[tokio::test]
+    async fn a_superseded_retry_is_not_retried_again() {
+        let calls = std::cell::Cell::new(0);
+        let result = recheck_superseded_presence_once(
+            Observed {
+                activity: Activity::Unknown,
+                reason: "superseded",
+            },
+            true,
+            std::time::Duration::ZERO,
+            || async {
+                calls.set(calls.get() + 1);
+                Observed {
+                    activity: Activity::Unknown,
+                    reason: "superseded",
+                }
+            },
+        )
+        .await;
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.reason, "superseded");
+    }
 }

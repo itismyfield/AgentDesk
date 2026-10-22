@@ -2145,6 +2145,23 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    idle_queue_take_next_soft_if_ready_inner(shared, provider, channel_id, false).await
+}
+
+async fn idle_queue_take_next_soft_if_ready_after_presence_wake(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> MailboxTakeNextSoftOutcome {
+    idle_queue_take_next_soft_if_ready_inner(shared, provider, channel_id, true).await
+}
+
+async fn idle_queue_take_next_soft_if_ready_inner(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    recheck_superseded_presence_once: bool,
+) -> MailboxTakeNextSoftOutcome {
     let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
@@ -2211,7 +2228,14 @@ async fn idle_queue_take_next_soft_if_ready(
         return MailboxTakeNextSoftOutcome::default();
     }
 
-    mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
+    if recheck_superseded_presence_once {
+        queue_dispatch::mailbox_take_next_automatic_intervention_after_presence_wake(
+            shared, provider, channel_id,
+        )
+        .await
+    } else {
+        mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
+    }
 }
 
 #[cfg(test)]

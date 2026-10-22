@@ -86,7 +86,14 @@ pub(in crate::services::discord) async fn owner_race_pause(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum KickoffLane {
     Idle,
+    IdleAfterPresenceWake,
     QueuedOnly(&'static str),
+}
+
+impl KickoffLane {
+    fn can_start_idle(self) -> bool {
+        matches!(self, Self::Idle | Self::IdleAfterPresenceWake)
+    }
 }
 
 pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
@@ -141,13 +148,14 @@ async fn kickoff_queue_channel_inner(
         Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
     let trigger = match lane {
         KickoffLane::Idle => "idle_kickoff",
+        KickoffLane::IdleAfterPresenceWake => "turn_presence_idle",
         KickoffLane::QueuedOnly(reason) => reason,
     };
     let held =
         queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate, trigger)
             .await;
     // The queued-only lane ends here whatever the paste answered: it never owns an idle start.
-    if held || lane != KickoffLane::Idle {
+    if held || !lane.can_start_idle() {
         return IdleQueueKickoffChannelOutcome::default();
     }
     let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
@@ -180,7 +188,11 @@ async fn kickoff_queue_channel_inner(
     #[cfg(test)]
     owner_race_pause(channel_id, "kickoff_before_take").await;
 
-    let take_next = idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await;
+    let take_next = if lane == KickoffLane::IdleAfterPresenceWake {
+        idle_queue_take_next_soft_if_ready_after_presence_wake(shared, provider, channel_id).await
+    } else {
+        idle_queue_take_next_soft_if_ready(shared, provider, channel_id).await
+    };
     if let Some(error) = take_next.persistence_error.as_ref() {
         tracing::error!(
             provider = provider.as_str(),
@@ -400,13 +412,14 @@ pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
         let outcome = kickoff_queue_channel(deps, provider, channel_id, lane).await;
         if outcome.started {
             started_count += 1;
-        } else if lane != KickoffLane::Idle
+        } else if !lane.can_start_idle()
             || crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
         {
             // Boot and full reconcile have no later no-start arm; a held direct turn needs one,
             // and so does whatever a queued-only paste left behind.
             let reason = match lane {
                 KickoffLane::Idle => "boot kickoff turn-mode no-start",
+                KickoffLane::IdleAfterPresenceWake => "turn_presence_idle",
                 KickoffLane::QueuedOnly(reason) => reason,
             };
             super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
