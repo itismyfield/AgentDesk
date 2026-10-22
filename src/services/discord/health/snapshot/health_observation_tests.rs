@@ -511,7 +511,11 @@ fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
             );
             barrier.release();
         };
-        let ((json, elapsed), ()) = tokio::join!(detail(&registry), replace);
+        // The replacement's own mailbox commands are bounded too, not just the snapshot.
+        let both = async { tokio::join!(detail(&registry), replace) };
+        let ((json, elapsed), ()) = tokio::time::timeout(Duration::from_secs(6), both)
+            .await
+            .expect("the snapshot and the episode replacement must finish within 6s");
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
         json
     });

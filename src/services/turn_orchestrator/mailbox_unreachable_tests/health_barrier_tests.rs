@@ -2,6 +2,7 @@
 //! actor, then reads nothing more until the test releases it, so later reads wait at a known point.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use poise::serenity_prelude::ChannelId;
@@ -10,6 +11,9 @@ use tokio::sync::{mpsc, oneshot};
 use super::super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES,
 };
+
+/// How long a test waits for a barrier signal before it fails instead of hanging.
+const SIGNAL_WAIT: Duration = Duration::from_secs(6);
 
 /// The installed barrier. Dropping it ends the test actor and puts the live actor back.
 pub(crate) struct HealthBarrier {
@@ -79,10 +83,7 @@ impl HealthBarrier {
 
     /// Waits until the test actor has answered its first Snapshot and stopped reading.
     pub(crate) async fn first_answered(&mut self) {
-        let answered = self.answered.take().expect("first_answered awaited once");
-        answered
-            .await
-            .expect("the test actor ended before answering");
+        wait_for(self.answered.take(), "its first answer").await;
     }
 
     /// Lets the test actor read again; every later message goes straight to the live actor.
@@ -90,6 +91,16 @@ impl HealthBarrier {
         if let Some(release) = self.release.take() {
             let _ = release.send(());
         }
+    }
+}
+
+/// Fails the test when `signal` does not come within `SIGNAL_WAIT`.
+async fn wait_for(signal: Option<oneshot::Receiver<()>>, what: &str) {
+    let signal = signal.unwrap_or_else(|| panic!("{what} awaited twice"));
+    match tokio::time::timeout(SIGNAL_WAIT, signal).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => panic!("the test actor ended before {what}"),
+        Err(_) => panic!("the test actor gave no signal of {what} within {SIGNAL_WAIT:?}"),
     }
 }
 
