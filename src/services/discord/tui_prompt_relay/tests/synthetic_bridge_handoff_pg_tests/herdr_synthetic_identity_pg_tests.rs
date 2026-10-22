@@ -27,6 +27,7 @@ struct Fixture {
     key: String,
     execution: HostedExecution,
     source: binding_events::SourceId,
+    incarnation: std::path::PathBuf,
     _registry: Box<dyn std::any::Any>,
     rig: crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
 }
@@ -117,6 +118,7 @@ impl Fixture {
             key,
             execution,
             source,
+            incarnation: context,
             _registry: Box::new(registry),
             rig,
         };
@@ -1454,8 +1456,7 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
         .await,
         "matched_live_execution_adoption_positive_contract"
     );
-    let context = fixture.rig.context(N1);
-    fixture.rig.restart_shell(&context);
+    fixture.rig.restart_shell(&fixture.incarnation);
     use std::io::Write as _;
     writeln!(std::fs::OpenOptions::new().append(true).open(&fixture.source.path).unwrap(), "{}", serde_json::json!({"type":"user", "sessionId":fixture.source.session_id, "message":{"role":"user","content":"human on restored provider"}})).unwrap();
     let record = fixture.pending(N1, &fixture.source, 7_263_002);

@@ -1590,28 +1590,27 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg() {
+    const CHANNEL: u64 = discord_mock::CHANNEL_ID + 301;
     let mut f = Fixture::new("disabled").await;
+    f.state.allow_channel(CHANNEL);
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     f.shared =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
         .with_mode(EndpointMode::UserDefault);
     let (row, _other, _store, _consent, _) =
-        crate::db::intake_outbox::consent_handoff::tests::setup(
-            &pool,
-            &discord_mock::CHANNEL_ID.to_string(),
-        )
-        .await;
-    let mut original = request(discord_mock::CHANNEL_ID);
+        crate::db::intake_outbox::consent_handoff::tests::setup(&pool, &CHANNEL.to_string()).await;
+    let mut original = request(CHANNEL);
+    original.channel_id = ChannelId::new(CHANNEL);
     original.intake_outbox_id = Some(row.id);
     let hold = f.hold();
     hold.record(vec![IntentRef {
         store: "intake_outbox".into(),
         id: row.id.to_string(),
         provider: "claude".into(),
-        channel: discord_mock::CHANNEL_ID,
-        source_message: discord_mock::CHANNEL_ID,
+        channel: CHANNEL,
+        source_message: CHANNEL,
         fifo: row.attempt_no as u64,
     }])
     .await
@@ -1652,6 +1651,11 @@ async fn actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_
     assert!(
         pending.exists(),
         "worker_after_record_error_keeps_uncertain_publication_contract"
+    );
+    assert_eq!(
+        f.state.local_note_posts.load(Ordering::SeqCst),
+        1,
+        "worker_after_record_error_one_isolated_lifecycle_post_contract"
     );
     assert!(
         f.state

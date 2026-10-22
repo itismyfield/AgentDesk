@@ -44,6 +44,8 @@ struct T19Server {
     child: Option<Child>,
     owned: Vec<(u32, String)>,
     generation: u32,
+    lease: PathBuf,
+    lease_bytes: Vec<u8>,
 }
 
 impl T19Server {
@@ -71,19 +73,65 @@ impl T19Server {
         assert_eq!(sha(&bin), PINNED_SHA256, "T19 pinned 0.9.3 bytes");
         let ledger = read("ADK_TEST_HERDR_PIDS");
         assert_eq!(ledger.parent().unwrap().canonicalize().unwrap(), root);
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.to_string_lossy().ends_with(".pids.jsonl") {
+                continue;
+            }
+            for line in std::fs::read_to_string(path).unwrap().lines() {
+                let event: Value = serde_json::from_str(line).unwrap();
+                if event["event"] != "process" {
+                    continue;
+                }
+                let pid = u32::try_from(event["pid"].as_u64().unwrap()).unwrap();
+                assert!(
+                    ps(pid, "pid=").is_empty(),
+                    "T19 does not overwrite fake providers while a recorded child is alive: {pid}"
+                );
+            }
+        }
         let dir = root.join(format!("run-{}", std::process::id()));
         assert!(
             !dir.exists(),
             "T19 never reuses a previous server directory"
         );
         for child in [
-            "home/xdg", "state", "data", "cache", "run", "tmp", "work", "pathbin",
+            "home/xdg",
+            "codex-home",
+            "claude-config",
+            "state",
+            "data",
+            "cache",
+            "run",
+            "tmp",
+            "work",
         ] {
             std::fs::create_dir_all(dir.join(child)).unwrap();
         }
-        for (tool, target) in [("git", "/usr/bin/git"), ("sh", "/bin/sh")] {
-            std::os::unix::fs::symlink(target, dir.join("pathbin").join(tool)).unwrap();
+        let lease = root.join("provider-fixture.lock");
+        let lease_bytes =
+            serde_json::to_vec(&json!({"pid":std::process::id(), "dir":dir})).unwrap();
+        let mut lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lease)
+            .expect("T19 requires exclusive ownership before replacing scratch fake providers");
+        lock.write_all(&lease_bytes).unwrap();
+        lock.sync_all().unwrap();
+        let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
+        let rc = format!(
+            "export PATH='{path}'\nexport CODEX_HOME='{}'\nexport CLAUDE_CONFIG_DIR='{}'\n",
+            dir.join("codex-home").display(),
+            dir.join("claude-config").display()
+        );
+        for name in [".zshrc", ".zprofile", ".bash_profile", ".profile"] {
+            std::fs::write(dir.join("home").join(name), &rc).unwrap();
         }
+        std::fs::write(
+            dir.join("network.sb"),
+            "(version 1)\n(allow default)\n(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\") (remote unix-socket))\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("home/config.toml"), observe::CANONICAL_CONFIG).unwrap();
         std::fs::File::options()
             .write(true)
@@ -99,7 +147,125 @@ impl T19Server {
             child: None,
             owned: Vec::new(),
             generation: 0,
+            lease,
+            lease_bytes,
         }
+    }
+
+    fn path(&self) -> String {
+        format!("{}:/usr/bin:/bin", self.root.join("bin").display())
+    }
+
+    fn fake(&self, provider: &str) -> PathBuf {
+        assert!(matches!(provider, "codex" | "claude"));
+        self.root.join("bin").join(provider)
+    }
+
+    fn sandboxed(&self) -> Command {
+        let at = |sub| self.dir.join(sub);
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-f")
+            .arg(at("network.sb"))
+            .env_clear()
+            .env("PATH", self.path())
+            .env("HOME", at("home"))
+            .env("CODEX_HOME", at("codex-home"))
+            .env("CLAUDE_CONFIG_DIR", at("claude-config"))
+            .env("XDG_CONFIG_HOME", at("home/xdg"))
+            .env("XDG_STATE_HOME", at("state"))
+            .env("XDG_DATA_HOME", at("data"))
+            .env("XDG_CACHE_HOME", at("cache"))
+            .env("XDG_RUNTIME_DIR", at("run"))
+            .env("TMPDIR", at("tmp"))
+            .env("HERDR_CONFIG_PATH", at("home/config.toml"))
+            .env("HERDR_SOCKET_PATH", self.socket())
+            .env("HERDR_LOG", "herdr=debug")
+            .env("TERM", "xterm-256color")
+            .env("LANG", "en_US.UTF-8")
+            .env("SHELL", "/bin/sh")
+            .current_dir(at("work"))
+            .process_group(0);
+        command
+    }
+
+    fn preflight(&mut self) {
+        let prefix = self.dir.join(format!("preflight-{}", self.generation));
+        let stdout = prefix.with_extension("stdout");
+        let stderr = prefix.with_extension("stderr");
+        let curl_out = prefix.with_extension("curl.stdout");
+        let curl_err = prefix.with_extension("curl.stderr");
+        let script = format!(
+            "IFS= read -r token; [ \"$token\" = t19-preflight ] || exit 90\n\
+             codex=$(command -v codex); claude=$(command -v claude); helper=$(command -v env)\n\
+             printf 'codex=%s\\nclaude=%s\\nenv=%s\\nPATH=%s\\nHOME=%s\\nCODEX_HOME=%s\\nCLAUDE_CONFIG_DIR=%s\\n' \"$codex\" \"$claude\" \"$helper\" \"$PATH\" \"$HOME\" \"$CODEX_HOME\" \"$CLAUDE_CONFIG_DIR\"\n\
+             [ \"$codex\" = '{}' ] && [ \"$claude\" = '{}' ] && [ \"$helper\" = /usr/bin/env ] && [ \"$PATH\" = '{}' ] || exit 91\n\
+             /usr/bin/curl -m 3 -sS https://example.com > '{}' 2> '{}'\n\
+             result=$?; printf 'curl_status=%s\\n' \"$result\"; [ \"$result\" -ne 0 ]\n",
+            self.fake("codex").display(),
+            self.fake("claude").display(),
+            self.path(),
+            curl_out.display(),
+            curl_err.display()
+        );
+        let mut child = self
+            .sandboxed()
+            .args(["/bin/sh", "-l", "-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(std::fs::File::create(&stdout).unwrap())
+            .stderr(std::fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        self.record(pid, "sandbox-login-preflight");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"t19-preflight\n")
+            .unwrap();
+        let status = child.wait().unwrap();
+        let text = std::fs::read_to_string(&stdout).unwrap();
+        let observed = |key: &str| text.lines().find_map(|line| line.strip_prefix(key));
+        let curl_status = text
+            .lines()
+            .find_map(|line| line.strip_prefix("curl_status="))
+            .and_then(|code| code.parse::<i32>().ok());
+        let profile = self.dir.join("network.sb");
+        let event = json!({"event":"isolation_preflight", "generation":self.generation,
+            "pid":pid, "sandbox_profile":profile, "sandbox_profile_sha256":sha(&profile),
+            "path":observed("PATH="), "codex":observed("codex="), "claude":observed("claude="),
+            "env":observed("env="), "curl_status":curl_status, "status":status.code(),
+            "stdout":stdout, "stdout_sha256":sha(&stdout), "stderr":stderr,
+            "stderr_sha256":sha(&stderr), "curl_stdout":curl_out, "curl_stderr":curl_err});
+        std::fs::write(
+            prefix.with_extension("json"),
+            serde_json::to_vec_pretty(&event).unwrap(),
+        )
+        .unwrap();
+        self.append(event);
+        assert!(
+            status.success(),
+            "T19 sandbox login preflight failed: {text}"
+        );
+        assert!(
+            curl_status.is_some_and(|code| code != 0),
+            "T19 outbound curl must fail"
+        );
+        let expected = format!(
+            "codex={}\nclaude={}\nenv=/usr/bin/env\nPATH={}\nHOME={}\nCODEX_HOME={}\nCLAUDE_CONFIG_DIR={}\ncurl_status={}\n",
+            self.fake("codex").display(),
+            self.fake("claude").display(),
+            self.path(),
+            self.dir.join("home").display(),
+            self.dir.join("codex-home").display(),
+            self.dir.join("claude-config").display(),
+            curl_status.unwrap()
+        );
+        assert_eq!(
+            text, expected,
+            "T19 observes sealed login-shell paths before any server"
+        );
     }
 
     fn append(&self, event: Value) {
@@ -174,28 +340,13 @@ impl T19Server {
     fn start(&mut self) {
         assert!(self.child.is_none());
         self.generation += 1;
+        self.preflight();
         let out = std::fs::File::create(self.dir.join(format!("server-{}.out", self.generation)))
             .unwrap();
-        let at = |sub| self.dir.join(sub);
-        let child = Command::new(&self.bin)
+        let child = self
+            .sandboxed()
+            .arg(&self.bin)
             .arg("server")
-            .env_clear()
-            .env("PATH", at("pathbin"))
-            .env("HOME", at("home"))
-            .env("XDG_CONFIG_HOME", at("home/xdg"))
-            .env("XDG_STATE_HOME", at("state"))
-            .env("XDG_DATA_HOME", at("data"))
-            .env("XDG_CACHE_HOME", at("cache"))
-            .env("XDG_RUNTIME_DIR", at("run"))
-            .env("TMPDIR", at("tmp"))
-            .env("HERDR_CONFIG_PATH", at("home/config.toml"))
-            .env("HERDR_SOCKET_PATH", self.socket())
-            .env("HERDR_LOG", "herdr=debug")
-            .env("TERM", "xterm-256color")
-            .env("LANG", "en_US.UTF-8")
-            .env("SHELL", "/bin/sh")
-            .current_dir(at("work"))
-            .process_group(0)
             .stdin(Stdio::null())
             .stdout(out.try_clone().unwrap())
             .stderr(out)
@@ -389,6 +540,11 @@ impl Drop for T19Server {
             }
         }
         self.append(json!({"event":"cleanup", "recorded":self.owned, "signalled_remaining":left}));
+        if left.is_empty()
+            && std::fs::read(&self.lease).is_ok_and(|bytes| bytes == self.lease_bytes)
+        {
+            std::fs::remove_file(&self.lease).unwrap();
+        }
     }
 }
 
@@ -400,10 +556,37 @@ fn provider_script(dir: &Path, provider: &str) -> String {
         .map(|key| format!("printf '%s\\n' \"{key}=${{{key}-}}\"\n"))
         .collect::<String>();
     format!(
-        "#!/bin/sh\nbase='{}'\nif [ \"${{1-}}\" = --version ]; then printf 'codex-cli 0.9.3\\n'; exit 0; fi\nif [ \"${{1-}}\" = resume ]; then base='{}'; fi\nprintf '%s\\n' \"$$\" > \"$base.pid\"\nprintf '%s\\n' \"$@\" > \"$base.argv\"\nprintf 'start\\n' >> \"$base.starts\"\ncase \"$*\" in *resume*|*continue*) printf 'RESUMED\\n' >> \"$base.resume\" ;; esac\n{{\n{env}}} > \"$base.env\"\nwhile IFS= read -r line; do :; done\n",
+        "#!/bin/sh\nbase='{}'\nif [ \"${{1-}}\" = --version ]; then printf 'codex-cli 0.9.3\\n'; exit 0; fi\nif [ \"${{1-}}\" = resume ]; then base='{}'; fi\nprintf '%s\\n' \"$$\" > \"$base.pid\"\nprintf '%s\\n' \"$0\" >> \"$base.exec\"\nprintf '%s\\n' \"$@\" > \"$base.argv\"\nprintf 'start\\n' >> \"$base.starts\"\nprintf 'PATH=%s\\nHOME=%s\\nCODEX_HOME=%s\\nCLAUDE_CONFIG_DIR=%s\\n' \"$PATH\" \"$HOME\" \"$CODEX_HOME\" \"$CLAUDE_CONFIG_DIR\" > \"$base.isolation\"\ncase \"$*\" in *resume*|*continue*) printf 'RESUMED\\n' >> \"$base.resume\" ;; esac\n{{\n{env}}} > \"$base.env\"\nwhile IFS= read -r line; do :; done\n",
         fresh.display(),
         control.display()
     )
+}
+
+fn assert_provider_isolation(server: &T19Server, record: &str, provider: &str, starts: usize) {
+    let executable = server.fake(provider);
+    assert_eq!(executable.canonicalize().unwrap(), executable);
+    assert_eq!(
+        std::fs::read_to_string(server.dir.join(format!("{record}.exec"))).unwrap(),
+        format!("{}\n", executable.display()).repeat(starts),
+        "T19 every provider invocation uses its absolute scratch fake path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(server.dir.join(format!("{record}.isolation"))).unwrap(),
+        format!(
+            "PATH={}\nHOME={}\nCODEX_HOME={}\nCLAUDE_CONFIG_DIR={}\n",
+            server.path(),
+            server.dir.join("home").display(),
+            server.dir.join("codex-home").display(),
+            server.dir.join("claude-config").display()
+        ),
+        "T19 actual provider inherits the sealed scratch environment"
+    );
+    server.append(
+        json!({"event":"provider_isolation", "generation":server.generation,
+        "record":record, "provider":executable, "starts":starts,
+        "exec_sha256":sha(&server.dir.join(format!("{record}.exec"))),
+        "isolation_sha256":sha(&server.dir.join(format!("{record}.isolation")))}),
+    );
 }
 
 fn assert_no_resume_metadata(value: &Value, control_cwd: &str) -> usize {
@@ -434,7 +617,7 @@ fn assert_no_resume_metadata(value: &Value, control_cwd: &str) -> usize {
     }
 }
 
-fn assert_control_resume_metadata(value: &Value, control_cwd: &str) -> usize {
+fn assert_control_resume_metadata(value: &Value, control_cwd: &str, fake: &Path) -> usize {
     match value {
         Value::Object(object) if object.get("cwd").and_then(Value::as_str) == Some(control_cwd) => {
             assert_eq!(
@@ -442,17 +625,23 @@ fn assert_control_resume_metadata(value: &Value, control_cwd: &str) -> usize {
                 Some(&json!({
                     "source":"herdr:codex", "agent":"codex", "kind":"id", "value":"t19-sentinel"
                 })),
-                "T19 positive control persisted the upstream exact Codex resume argv"
+                "T19 positive control persisted the upstream Codex session report"
+            );
+            assert_eq!(
+                object.get("agent_resume"),
+                Some(&json!({"source":"herdr:codex", "agent":"codex",
+                    "argv":["env", fake, "resume", "t19-sentinel"]})),
+                "T19 reported resume preserves the absolute fake provider path"
             );
             1
         }
         Value::Object(object) => object
             .values()
-            .map(|item| assert_control_resume_metadata(item, control_cwd))
+            .map(|item| assert_control_resume_metadata(item, control_cwd, fake))
             .sum(),
         Value::Array(values) => values
             .iter()
-            .map(|item| assert_control_resume_metadata(item, control_cwd))
+            .map(|item| assert_control_resume_metadata(item, control_cwd, fake))
             .sum(),
         _ => 0,
     }
@@ -474,7 +663,13 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
     );
     let mut server = T19Server::new();
     for provider in ["claude", "codex"] {
-        let path = server.dir.join("pathbin").join(provider);
+        let path = server.fake(provider);
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            assert!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "T19 replaces only its regular fake provider files"
+            );
+        }
         std::fs::write(&path, provider_script(&server.dir, provider)).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -483,10 +678,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
     let mut launched = Vec::new();
     let host = SocketHerdrLaunchHost::new(vec![server.endpoint()], HerdrSocketConfig::default());
     for (ordinal, provider) in ["claude", "codex"].into_iter().enumerate() {
-        let script = format!(
-            "#!/bin/sh\nexec {}\n",
-            server.dir.join("pathbin").join(provider).display()
-        );
+        let script = format!("#!/bin/sh\nexec {}\n", server.fake(provider).display());
         let script = unset_herdr_env_before_exec(&script).unwrap();
         let path = server.dir.join(format!("launch-{provider}.sh"));
         std::fs::write(&path, script).unwrap();
@@ -505,7 +697,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             endpoint,
             label: format!("adk-t19-{provider}"),
             cwd: server.dir.join("work"),
-            command: format!("sh {}", path.display()),
+            command: format!("/bin/sh {}", path.display()),
             restore_off_witness: witness,
         });
         let pane = match outcome {
@@ -546,6 +738,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             b"\n",
             "T19 provider receives fresh argv without resume"
         );
+        assert_provider_isolation(&server, provider, provider, 1);
         let info = server.process(&pane);
         server.record(info.shell_pid.unwrap(), "original-shell");
         assert!(
@@ -557,7 +750,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         );
         launched.push((provider, pane));
     }
-    // The same fake Codex must really resume when 0.9.3 receives a resumable argv.
+    // The supported report API persists a real resume plan without agent.start's bare provider command.
     let control_cwd = server.dir.join("work/control");
     std::fs::create_dir(&control_cwd).unwrap();
     let control_pane = match server.rpc(
@@ -572,16 +765,17 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         other => panic!("T19 positive control workspace: {other:?}"),
     };
     server.confirm_write("t19-control-create", "workspace.create");
+    let control_info = server.process(&control_pane);
+    server.record(control_info.shell_pid.unwrap(), "positive-control-shell");
+    let control_command = format!("{} resume t19-sentinel", server.fake("codex").display());
     let started = server.raw_rpc(
         "t19-control-start",
-        "agent.start",
+        "pane.send_input",
         json!({
-            "name":"t19-positive-control", "kind":"codex", "pane_id":control_pane,
-            "args":["resume","t19-sentinel"], "timeout_ms":300000
+            "pane_id":control_pane, "text":control_command, "keys":["enter"]
         }),
     );
-    assert_eq!(started["type"], "agent_started");
-    assert_eq!(started["argv"], json!(["codex", "resume", "t19-sentinel"]));
+    assert_eq!(started["type"], "ok");
     let control_pid = server.dir.join("codex-control.pid");
     wait_for(|| control_pid.exists(), "positive control fake Codex");
     let control_provider: u32 = std::fs::read_to_string(&control_pid)
@@ -591,7 +785,6 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         .unwrap();
     server.record(control_provider, "positive-control-codex");
     let control_info = server.process(&control_pane);
-    server.record(control_info.shell_pid.unwrap(), "positive-control-shell");
     assert!(
         control_info
             .foreground_processes
@@ -627,6 +820,35 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         std::fs::read(server.dir.join("codex-control.resume")).unwrap(),
         b"RESUMED\n"
     );
+    assert_provider_isolation(&server, "codex-control", "codex", 1);
+    wait_for(
+        || {
+            std::fs::read_to_string(server.dir.join("home/xdg/herdr/herdr-server.log")).is_ok_and(
+                |log| {
+                    log.lines().any(|line| {
+                        line.contains(&format!("process=codex pgid=Some({control_provider})"))
+                    })
+                },
+            )
+        },
+        "the actual upstream observes the fake Codex process",
+    );
+    // 0.9.3 accepts a plain helper name, and env executes the following absolute provider path.
+    let reported = server.raw_rpc(
+        "t19-control-report",
+        "pane.report_agent",
+        json!({"pane_id":control_pane, "source":"herdr:codex", "agent":"codex",
+            "state":"working", "seq":1, "agent_session_id":"t19-sentinel",
+            "resume_argv":["env", server.fake("codex"), "resume", "t19-sentinel"]}),
+    );
+    assert_eq!(
+        reported["type"], "ok",
+        "T19 upstream accepts the supported absolute-provider resume plan"
+    );
+    server.append(
+        json!({"event":"positive_control_report", "method":"pane.report_agent",
+        "provider":server.fake("codex"), "resume_helper":"/usr/bin/env", "session":"t19-sentinel"}),
+    );
     let session = server.dir.join("home/xdg/herdr/session.json");
     wait_for(|| session.exists(), "saved server session");
     wait_for(
@@ -645,7 +867,11 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         "T19 actually saved both provider panes"
     );
     assert_eq!(
-        assert_control_resume_metadata(&persisted, control_cwd.to_str().unwrap()),
+        assert_control_resume_metadata(
+            &persisted,
+            control_cwd.to_str().unwrap(),
+            &server.fake("codex")
+        ),
         1,
         "T19 actual snapshot contains the positive resume control"
     );
@@ -689,7 +915,9 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             .any(|process| process.pid == resumed_provider),
         "T19 positive resumed provider is foreground"
     );
-    server.append(json!({"event":"positive_control", "pane":control_pane, "provider_starts":2, "resumes":2, "resumed_provider":resumed_provider}));
+    assert_provider_isolation(&server, "codex-control", "codex", 2);
+    server.append(json!({"event":"positive_control", "pane":control_pane, "provider_starts":2, "resumes":2, "resumed_provider":resumed_provider,
+        "contract":"reported_resume_argv", "provider":server.fake("codex"), "resume_helper":"/usr/bin/env"}));
     for (index, (provider, pane)) in launched.iter().enumerate() {
         let info = server.process(pane);
         let shell = info.shell_pid.expect("T19 restored pane has a shell");
