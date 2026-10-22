@@ -1838,8 +1838,12 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── runtime_store/
-│   │   │   └── generation_allocation_tests/
-│   │   │       └── source_guard_tests.rs
+│   │   │   ├── generation_allocation_tests/
+│   │   │   │   └── source_guard_tests.rs
+│   │   │   ├── durable_ancestors.rs
+│   │   │   ├── durable_ancestors_tests.rs
+│   │   │   ├── durable_publish.rs
+│   │   │   └── durable_publish_tests.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs

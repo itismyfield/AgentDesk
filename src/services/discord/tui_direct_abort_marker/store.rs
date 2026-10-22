@@ -58,12 +58,13 @@ pub(in crate::services::discord) fn record(marker: &AbortedAnchorMarker) -> Resu
     };
     let path = root.join(format!("{}.json", marker.file_stem()));
     let data = serde_json::to_string_pretty(marker).map_err(|e| e.to_string())?;
-    crate::services::discord::runtime_store::critical_atomic_write(
+    crate::services::discord::runtime_store::critical_publish(
         &path,
         &data,
         crate::services::discord::runtime_store::AtomicWriteContext::new("tui_direct_abort_marker")
             .provider(&marker.provider)
-            .channel_id(marker.channel_id),
+            .channel_id(marker.channel_id)
+            .durable_root(root.parent().unwrap_or(&root)),
     )
 }
 
@@ -75,7 +76,9 @@ pub(in crate::services::discord) fn record(marker: &AbortedAnchorMarker) -> Resu
 pub(in crate::services::discord) fn delete(marker: &AbortedAnchorMarker) {
     if let Some(root) = root() {
         let stem = marker.file_stem();
-        let _ = std::fs::remove_file(root.join(format!("{stem}.json")));
+        let marker = root.join(format!("{stem}.json"));
+        let _ = std::fs::remove_file(&marker)
+            .map(|()| crate::services::discord::runtime_store::sync_removed(&marker));
         let _ = std::fs::remove_file(root.join(format!("{stem}.json.lock")));
     }
 }
@@ -323,14 +326,15 @@ pub(in crate::services::discord) fn record_commit_tombstone_at_with_offsets(
     let written = serde_json::to_string_pretty(&tombstone)
         .map_err(|e| e.to_string())
         .and_then(|data| {
-            crate::services::discord::runtime_store::critical_atomic_write(
+            crate::services::discord::runtime_store::critical_publish(
                 &path,
                 &data,
                 crate::services::discord::runtime_store::AtomicWriteContext::new(
                     "tui_direct_commit_tombstone",
                 )
                 .provider(provider)
-                .channel_id(channel_id),
+                .channel_id(channel_id)
+                .durable_root(root.parent().unwrap_or(&root)),
             )
         });
     if let Err(error) = written {

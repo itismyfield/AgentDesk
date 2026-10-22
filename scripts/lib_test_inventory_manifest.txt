@@ -5428,6 +5428,7 @@ services::discord::outbound::completed_turn_ledger::tests::alias_settles_only_wi
 services::discord::outbound::completed_turn_ledger::tests::an_absorbed_id_is_dated_only_by_its_exact_backing_episode
 services::discord::outbound::completed_turn_ledger::tests::append_dedups_by_user_msg_id_keeping_latest_commit_time
 services::discord::outbound::completed_turn_ledger::tests::append_then_read_roundtrips_the_user_msg_id
+services::discord::outbound::completed_turn_ledger::tests::ledger_operation_logs_keep_primary_and_issue
 services::discord::outbound::completed_turn_ledger::tests::none_nonce_never_joins_t_s4_6035
 services::discord::outbound::completed_turn_ledger::tests::parent_sync_failure_keeps_the_published_entry
 services::discord::outbound::completed_turn_ledger::tests::parent_sync_is_skipped_when_rename_fails
@@ -5437,6 +5438,7 @@ services::discord::outbound::completed_turn_ledger::tests::prune_caps_to_the_new
 services::discord::outbound::completed_turn_ledger::tests::prune_drops_entries_past_the_retention_window
 services::discord::outbound::completed_turn_ledger::tests::prune_only_removes_evidence_t_s6_6035
 services::discord::outbound::completed_turn_ledger::tests::settled_user_msg_ids_of_absent_ledger_is_empty
+services::discord::outbound::completed_turn_ledger::tests::unflushed_publication_is_observable
 services::discord::outbound::completed_turn_ledger::tests::zero_user_msg_id_is_a_no_op_sentinel
 services::discord::outbound::confirmation::terminal_notice_tests::turn_end_summary_spends_one_physical_post_and_consumes_every_response
 services::discord::outbound::delivery::tests::dispatch_v3_empty_content_posts_zero_width_placeholder
@@ -7752,6 +7754,17 @@ services::discord::runtime_bootstrap::startup_doctor::startup_doctor_rearm_tests
 services::discord::runtime_bootstrap::voice::voice_bootstrap_tests::manual_join_only_config_starts_rejoin_supervisor_and_routes_rejoin
 services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_write_returns_error_for_unwritable_parent_path
 services::discord::runtime_store::checkpoint_lock_tests::checkpoint_lock_keeps_max_across_a_paused_low_writer
+services::discord::runtime_store::durable_ancestors::tests::ancestors_precreated_raced_and_restarted
+services::discord::runtime_store::durable_ancestors::tests::failed_ancestor_flush_is_not_remembered
+services::discord::runtime_store::durable_ancestors::tests::walk_refuses_paths_outside_the_trusted_root
+services::discord::runtime_store::durable_ancestors::tests::witness_evicts_the_oldest_chain_at_its_cap
+services::discord::runtime_store::durable_publish::tests::b6_parent_failure_keeps_published_outcome
+services::discord::runtime_store::durable_publish::tests::b6_sync_only_after_successful_rename
+services::discord::runtime_store::durable_publish::tests::blocked_sync_other_channel_keeps_progress
+services::discord::runtime_store::durable_publish::tests::checkpoint_publication_flushes_and_stays_best_effort
+services::discord::runtime_store::durable_publish::tests::existing_durable_writers_do_not_double_flush
+services::discord::runtime_store::durable_publish::tests::publication_failures_at_each_stage
+services::discord::runtime_store::durable_publish::tests::retirement_syncs_without_resurrecting_memory
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
