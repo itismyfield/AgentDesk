@@ -4717,6 +4717,7 @@ services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initia
 services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
 services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_records_exact_receipt_pg
 services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_refuses_late_durable_input_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate::e07_force_absorbs_unhydrated_own_queue_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg

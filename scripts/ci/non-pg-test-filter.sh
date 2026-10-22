@@ -502,6 +502,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+  services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate::e07_force_absorbs_unhydrated_own_queue_pg
   services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
   services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
   services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
