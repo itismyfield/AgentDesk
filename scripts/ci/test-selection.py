@@ -305,37 +305,80 @@ def sweep_population(root: Path) -> list[str]:
                   if test_id in replay or not any(skip in test_id for skip in skips))
 
 
+def nested_pairs(root: Path) -> tuple[tuple[str, str], ...]:
+    return _module("nested_libtest", SCRIPTS / "ci/nested_libtest.py").inherited_pairs(root)
+
+
+def sweep_runnable_groups(ids, ignored, nested):
+    """Parents sharing inherited child output must use the same primary harness."""
+    runnable = sorted(set(ids) - ignored)
+    owner = {test_id: test_id for test_id in runnable}
+
+    def find(test_id):
+        while owner[test_id] != test_id:
+            test_id = owner[test_id]
+        return test_id
+
+    children = {}
+    for parent, child in nested:
+        if parent not in ids:
+            continue
+        if child not in ids or child not in ignored:
+            raise ValueError(f"nested child {child} must be selected and declared ignored with {parent}")
+        if parent in owner:
+            children.setdefault(child, []).append(parent)
+    for parents in children.values():
+        for parent in parents[1:]:
+            owner[find(parent)] = find(parents[0])
+    groups = {}
+    for test_id in runnable:
+        groups.setdefault(find(test_id), []).append(test_id)
+    return sorted(groups.values())
+
+
 def sweep_partition(ids: list[str], ignored: set[str] | frozenset[str] = frozenset(),
-                    replay: set[str] | frozenset[str] = frozenset()) -> list[list[str]]:
+                    replay: set[str] | frozenset[str] = frozenset(),
+                    nested: tuple[tuple[str, str], ...] = ()) -> list[list[str]]:
     """Keep each shard runnable and attach held judged ids to runnable judged ids."""
     runnable = sorted(test_id for test_id in ids if test_id not in ignored)
     held = sorted(test_id for test_id in ids if test_id in ignored)
-    count = min(SWEEP_SHARD_COUNT, len(runnable) or len(ids))
+    groups = sweep_runnable_groups(ids, ignored, nested)
+    count = min(SWEEP_SHARD_COUNT, len(groups) or len(ids))
     if not runnable:
         return [held[index::count] for index in range(count)]
-    parts = [runnable[index::count] for index in range(count)]
+    parts = [[test_id for group in groups[index::count] for test_id in group]
+             for index in range(count)]
     judged_shards = [index for index, part in enumerate(parts) if set(part) - replay]
     for test_id in held:
         eligible = judged_shards if test_id not in replay and judged_shards else range(count)
-        target = min(eligible, key=lambda index: (len(parts[index]), index))
+        required = {index for index, part in enumerate(parts)
+                    if any(parent in part and child == test_id for parent, child in nested)}
+        if len(required) > 1:
+            raise ValueError(f"nested parents for {test_id} span multiple shards")
+        target = next(iter(required)) if required else min(eligible, key=lambda index: (len(parts[index]), index))
         parts[target].append(test_id)
     return [sorted(part) for part in parts]
 
 
 def checked_sweep_partition(ids: list[str], ignored: set[str] | frozenset[str] = frozenset(),
-                            replay: set[str] | frozenset[str] = frozenset()) -> list[list[str]]:
+                            replay: set[str] | frozenset[str] = frozenset(),
+                            nested: tuple[tuple[str, str], ...] = ()) -> list[list[str]]:
     """Independently prove exact union, multiplicity and runnable subrun membership."""
-    parts = sweep_partition(ids, ignored, replay)
+    parts = sweep_partition(ids, ignored, replay, nested)
     combined = [test_id for part in parts for test_id in part]
     runnable = set(ids) - ignored
     judged = runnable - replay
     if not ids or len(set(ids)) != len(ids) or not parts or not all(parts) \
-            or len(parts) != min(SWEEP_SHARD_COUNT, len(runnable) or len(ids)) \
+            or len(parts) != min(SWEEP_SHARD_COUNT, len(sweep_runnable_groups(ids, ignored, nested)) or len(ids)) \
             or Counter(combined) != Counter(ids) \
             or (runnable and any(not (set(part) - ignored) for part in parts)) \
             or (judged and any((set(part) & (ignored - replay)) and not (set(part) & judged)
                                for part in parts)):
         raise ValueError("sweep partition has missing, duplicate, extra, empty or ignored-only test sets")
+    owners = {test_id: index for index, part in enumerate(parts) for test_id in part}
+    for parent, child in nested:
+        if parent in owners and owners.get(child) != owners[parent]:
+            raise ValueError(f"nested child {child} must share the shard of {parent}")
     print(f"SWEEP_PARTITION_OK expected={len(ids)} shards={len(parts)} "
           f"sizes={','.join(str(len(part)) for part in parts)} "
           f"ids={digest(chr(10).join(sorted(ids)).encode())}", file=sys.stderr)
@@ -374,8 +417,10 @@ def run_lane(root: Path, lane: str, ids: list[str], command: list[str], env=None
     that disagrees, an empty expectation or a run that executes none is red."""
     with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as handle:
         handle.write("\n".join(ids) + "\n")
+    summaries = 1 + len({child for parent, child in nested_pairs(root) if parent in ids})
     return subprocess.run(
-        [sys.executable, "scripts/run_test_lane.py", "--lane", lane, "--max-summaries", "4",
+        [sys.executable, "scripts/run_test_lane.py", "--lane", lane, "--max-summaries", str(summaries),
+         "--nested-declarations", str(root / "scripts/ci/nested_libtest_declarations.json"),
          "--expected-ids", handle.name, "--", *command], cwd=root, env=env,
         check=False).returncode
 
@@ -445,8 +490,8 @@ def declared_ignored(root: Path) -> set[str]:
     return declared
 
 
-def sweep_partition_inputs(root: Path) -> tuple[set[str], set[str]]:
-    return declared_ignored(root), set(tools()[1].load_non_pg_filter_replay(root))
+def sweep_partition_inputs(root: Path):
+    return declared_ignored(root), set(tools()[1].load_non_pg_filter_replay(root)), nested_pairs(root)
 
 
 def main(argv: list[str] | None = None) -> int:

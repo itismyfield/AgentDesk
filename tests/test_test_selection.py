@@ -156,7 +156,7 @@ class Fixture:
         self.label()
         self.write({**SOURCES, "scripts/ci/non-pg-test-filter.sh": FILTER,
                     "scripts/lib_test_inventory_manifest.txt": manifest(ALPHA + BETA + GAMMA + HOOK),
-                    ts.LEDGER: ""})
+                    ts.LEDGER: "", "scripts/ci/nested_libtest_declarations.json": '{"schema":1,"children":[]}'})
         git(self.root, "init", "-q")
         self.base = self.commit("base")
 
@@ -535,6 +535,72 @@ class SweepShardTests(unittest.TestCase):
 
     setUp = ReplayTests.setUp
 
+    def test_inherited_child_is_colocated_without_changing_the_selected_union(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        parts = ts.checked_sweep_partition(ids, {child}, frozenset(), ((parent, child),))
+        owner = next(part for part in parts if parent in part)
+        self.assertIn(child, owner, "the nested child's ignored row must share its parent's primary harness")
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), sorted(ids))
+        self.assertEqual(sum(child in part for part in parts), 1)
+
+    def test_nested_colocation_is_enforced_at_the_actual_sweep_entrypoint(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.object(ts, "load_plan", return_value=({"mode": "selected"}, ids)), \
+                mock.patch.object(ts, "sweep_partition_inputs", return_value=({child}, set(), ((parent, child),))), \
+                mock.patch.dict(os.environ, {"SWEEP_SHARD_TOTAL": "3"}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            for shard in range(3):
+                self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", str(shard)]), 0)
+            calls = [call.args[1] for call in run.call_args_list]
+        self.assertTrue(any({parent, child} <= set(part) for part in calls))
+        self.assertEqual(sorted(test_id for part in calls for test_id in part), sorted(ids))
+
+    def test_split_or_missing_nested_children_are_rejected_independently(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        nested = ((parent, child),)
+        broken = [["suite::a", child], ["suite::b"], [parent]]
+        with mock.patch.object(ts, "sweep_partition", return_value=broken), \
+                self.assertRaisesRegex(ValueError, "must share the shard"):
+            ts.checked_sweep_partition(ids, {child}, frozenset(), nested)
+        with self.assertRaisesRegex(ValueError, "must be selected and declared ignored"):
+            ts.checked_sweep_partition([parent, "suite::a"], {child}, frozenset(), nested)
+
+    def test_shared_nested_children_group_all_selected_parents_once(self):
+        first, second, child = "suite::p1", "suite::p2", "suite::child"
+        ids = [first, second, child, "suite::other"]
+        parts = ts.checked_sweep_partition(ids, {child}, frozenset(),
+                                         ((first, child), (second, child)))
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(any({first, second, child} <= set(part) for part in parts))
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), sorted(ids))
+
+    def test_real_runner_limits_nested_summaries_and_requires_the_selected_parent(self):
+        parent, child = ts.nested_pairs(REPO_ROOT)[0]
+        excerpt = (REPO_ROOT / "tests/fixtures/ci/nested_libtest/ci-7244-child-stdout.txt").read_text()
+        primary = "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        child_ignored = f"test {child} ... ignored\n"
+        original_run = subprocess.run
+
+        def invoke(ids, text):
+            def execute(command, **kwargs):
+                return original_run(command, capture_output=True, text=True, **kwargs)
+            with mock.patch.object(ts.subprocess, "run", side_effect=execute):
+                return ts.run_lane(REPO_ROOT, "non-pg-sweep", ids,
+                                   [sys.executable, "-c", f"print({text!r})"])
+
+        self.assertEqual(invoke([parent, child], excerpt + child_ignored + primary), 0)
+        child_summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        self.assertEqual(invoke([parent, child], excerpt + child_summary + child_ignored + primary), 1)
+        other = "unrelated::test"
+        without_parent = "\n".join(line for line in excerpt.splitlines()
+                                   if not line.startswith((f"test {parent} ", "test result:"))) + "\n"
+        self.assertEqual(invoke([child, other], without_parent + child_ignored
+                                + f"test {other} ... ok\n" + primary), 1)
+
     def test_workflows_parallelize_sweep_and_preserve_required_contexts(self):
         main, pr = (yaml.safe_load(path.read_text())["jobs"]
                     for path in (MAIN_WORKFLOW, PR_WORKFLOW))
@@ -846,6 +912,16 @@ class RepositoryTests(unittest.TestCase):
 
     def test_shared_test_helpers_equal_the_source_s_reexports(self) -> None:
         self.assertEqual(self.reexported_helpers(), set(ts.SHARED_TEST_HELPERS))
+
+    def test_production_sweep_keeps_inherited_subprocess_pairs_in_one_primary_harness(self):
+        ids = ts.sweep_population(REPO_ROOT)
+        parts = ts.checked_sweep_partition(ids, *ts.sweep_partition_inputs(REPO_ROOT))
+        declarations = ts._module("nested_libtest", REPO_ROOT / "scripts/ci/nested_libtest.py")
+        for parent, child in declarations.inherited_pairs(REPO_ROOT):
+            if parent in ids:
+                with self.subTest(parent=parent, child=child):
+                    self.assertTrue(any({parent, child} <= set(part) for part in parts))
+                    self.assertEqual(sum(child in part for part in parts), 1)
 
     def test_sweep_shards_equal_the_previous_canonical_filter_and_replay(self):
         runner, coverage = ts.tools()[:2]

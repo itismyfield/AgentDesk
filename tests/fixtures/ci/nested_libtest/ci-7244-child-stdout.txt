@@ -1,0 +1,7 @@
+
+running 1 test
+test services::claude_tui::hook_relay::tests::non_wait_relay_parent_subprocess_entry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15137 filtered out; finished in 0.00s
+
+test services::claude_tui::hook_relay::tests::claude_non_wait_hanging_transport_returns_after_stdout_within_750ms ... ok

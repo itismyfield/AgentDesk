@@ -20,9 +20,10 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "c0553c0666f841d32569b56194d3e139eb9cc3422cc9d353a33d6402fc3154f2"
+    "b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
 
 MIRROR_IF = "${{ !cancelled() }}"
 MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
@@ -2889,6 +2890,17 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             + hardening[job_match.end() :]
         )
 
+    def test_nested_libtest_checker_is_required_and_fails_closed(self) -> None:
+        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
+        pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(hardening.encode()).hexdigest())
+        baseline = self.run_hardening_fixture(pr)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        for label, checker in (("missing", None), ("invalid declarations", "raise SystemExit(79)\n")):
+            with self.subTest(checker=label):
+                rejected = self.run_hardening_fixture(pr, nested_checker=checker)
+                self.assertNotEqual(rejected.returncode, 0, "nested declaration checker must run and fail closed")
+                self.assertIn("nested libtest declarations must pass validation", rejected.stderr)
+
     def run_hardening_fixture(
         self,
         pr_workflow: str,
@@ -2896,6 +2908,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         workflow_symlinks: dict[str, str] | None = None,
         hardening_script: str | None = None,
         mirror_helper: str | None = None,
+        nested_checker: str | None = NESTED_CHECKER_STUB,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2926,6 +2939,11 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (root / "scripts/required-check-mirror.sh").write_text(
                 helper, encoding="utf-8"
             )
+            # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
+            if nested_checker is not None:
+                checker = root / "scripts/ci/nested_libtest.py"
+                checker.parent.mkdir()
+                checker.write_text(nested_checker, encoding="utf-8")
             return subprocess.run(
                 ["bash", "scripts/check-ci-runner-hardening.sh"],
                 cwd=root,

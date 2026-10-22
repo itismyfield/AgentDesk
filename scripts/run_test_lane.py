@@ -740,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(__file__).resolve().parent
                         / "known_test_failures.txt")
     parser.add_argument("--log", type=Path)
+    parser.add_argument("--nested-declarations", type=Path,
+                        help="validated parent/child declarations for inherited libtest output")
     parser.add_argument("--expected-ids", type=Path,
                         help="a selection plan's id set, replacing the manifest-derived one")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -765,6 +767,15 @@ def main(argv: list[str] | None = None) -> int:
         # A planned subset reports ignored only the declared ids it selected.
         entries = [entry for entry in entries
                    if entry.mode != "ignored" or entry.pattern in expected_selected]
+
+    nested = None
+    if args.nested_declarations is not None:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "ci"))
+            import nested_libtest as nested
+            nested.inherited_pairs(Path(__file__).resolve().parents[1], args.nested_declarations)
+        except (OSError, ValueError) as error:
+            manifest_errors.append(f"nested declarations: {error}")
 
     # A lane that declares fewer skips than it executes would shrink its own
     # expectation to match whatever it chose to run. Refuse before running.
@@ -795,6 +806,10 @@ def main(argv: list[str] | None = None) -> int:
     rc, outcome = run_and_capture(command, args.log)
     errors, warnings, counters = evaluate(args.lane, rc, outcome, entries,
                                           expected_selected, args.max_summaries)
+    if nested is not None:
+        errors.extend(nested.validate_execution(Path(__file__).resolve().parents[1],
+                                               expected_selected, outcome.executed,
+                                               args.nested_declarations))
     if args.expected_ids is not None and not counters["executed"]:
         errors.append("no planned test executed; a plan whose ids are all ignored proves nothing")
     for warning in warnings:

@@ -49,7 +49,15 @@ planner와 각 실행 leg는 원장의 declared-ignored ID를 같은 방식으�
 그 ID와 같은 샤드에 ignored 판정 대상 ID를 붙여, replay가 실행되기 전에 ignored-only
 하위 실행이 실패하는 새 경우를 만들지 않는다. 각 leg는 Counter 합집합·중복·빈 집합을
 검사하고 실제 matrix 크기인 `SWEEP_SHARD_TOTAL=${{ strategy.job-total }}`이 계획된
-샤드 수와 같은지도 실행 전에 검사한다. 실제 시험은 `run_test_lane.py`의 exact-ID
+샤드 수와 같은지도 실행 전에 검사한다. stdout을 상속하는 ignored subprocess 진입점은
+`scripts/ci/nested_libtest_declarations.json`의 관계에 따라 부모와 같은 primary
+하네스에 배치한다. 여러 부모가 같은 자식을 쓰면 그 부모들도 한 shard로 묶는다.
+선택 집합에 자식이 빠졌거나 분할 결과가 관계를 깨면 계획·실행 검사가 실패한다.
+추가 summary 예산은 그 shard에 있는 선언된 부모의 자식 수로 정하고,
+자식의 실행 출력은 선언된 부모도 실제로 선택·실행됐을 때만 받는다.
+`nested_libtest.py check`는 ignored 재실행 callsite·출력 경로·함수 hash·inventory와
+원장 및 PG hash/harness 정합성을 검사한다. 새 PG 상속 관계가 기존 hash에서
+갈라지면 hardening이 실패하므로 누락을 green으로 바꾸지 않는다. 실제 시험은 `run_test_lane.py`의 exact-ID
 판정을 거치며, replay ID도 판정 누락과 미등록 ignore를 거부한다. 모든 ID가 ignored면
 실행 0건이므로 실패한다. 샤드별 PostgreSQL 서비스는 계속 필요하다.
 

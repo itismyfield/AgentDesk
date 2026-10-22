@@ -8,6 +8,10 @@ error() {
   fail=1
 }
 
+if ! python3 scripts/ci/nested_libtest.py check; then
+  error "nested libtest declarations must pass validation"
+fi
+
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 
 verify_required_check_mirror_hash() {
