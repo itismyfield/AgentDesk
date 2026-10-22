@@ -2704,7 +2704,9 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, _root_dir) = isolated_agentdesk_root();
-    // Only a measured producer death admits the reclaim, and that takes a probe.
+    #[cfg(unix)]
+    let _tmux = crate::services::discord::health::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
+    #[cfg(not(unix))]
     if !crate::services::platform::tmux::is_available() {
         eprintln!("skipping manual plan/admit instant: tmux unavailable");
         return;

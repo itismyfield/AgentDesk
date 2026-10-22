@@ -142,10 +142,7 @@ async fn manual_recovery_finishes_a_measured_dead_orphan_and_promotes_its_queue(
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, _root_dir) = isolated_agentdesk_root();
-    if !crate::services::platform::tmux::is_available() {
-        eprintln!("skipping measured-death manual recovery: tmux unavailable");
-        return;
-    }
+    let _tmux = crate::services::discord::health::test_support::MissingSessionTmux::new_after_shared_test_env_lock();
     let provider = ProviderKind::Codex;
     let (registry, shared) = registry_with_shared(provider.clone()).await;
     let channel = ChannelId::new(5_996_501);
