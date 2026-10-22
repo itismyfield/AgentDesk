@@ -1,6 +1,5 @@
-//! The force-clear report, delivery record and watcher owner context publish through the durable
-//! helper: nothing is flushed before a failed publication, the new bytes are flushed with their
-//! chain, and a flush failure after the rename keeps what the caller was told it saved.
+//! The force-clear report, delivery record and watcher owner context flush nothing past a failed
+//! publication, flush the new bytes with their chain, and keep a save whose later flush fails.
 
 use super::*;
 use crate::services::discord::outbound::delivery_record;
@@ -69,9 +68,8 @@ fn force_clear_report_is_published_durably() {
     assert!(fs::read_to_string(path).unwrap().contains("the only copy"));
 }
 
-/// The delivery record a confirmed send writes is not published past a failed rename, is
-/// flushed once published, and stays (so the same body is still seen as delivered) when the
-/// flush after its rename fails.
+/// A confirmed send's delivery record is not published past a failed rename, is flushed once
+/// published, and stays (the body still reads as delivered) when the later flush fails.
 #[test]
 fn delivery_record_publication_keeps_delivered_content() {
     if !PARENT_DIR_FSYNC_FLUSHES {

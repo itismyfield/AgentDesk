@@ -1,6 +1,5 @@
-//! Inflight row writers publish through the durable helper: a real rename failure flushes
-//! nothing, a publication flushes its parent once the new bytes are visible, and a later flush
-//! failure keeps the saved outcome. Removals and the archive move sync their directories.
+//! Inflight row writers flush nothing past a failed rename, flush the new bytes once published and
+//! keep the saved outcome when that flush fails; removals and the archive move sync their dirs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -378,9 +377,8 @@ fn p2_post_rename_sync_failure_keeps_saved_outcome() {
     }
 }
 
-/// A create-new whose flush fails after the rename still returns `Ok`, so the caller never
-/// retries into `AlreadyExists` and the observer step that follows `Ok` runs; the next create
-/// of the same row is refused.
+/// A create-new whose flush fails after the rename still returns `Ok` (no retry into
+/// `AlreadyExists`, the observer step runs once); the next create of the same row is refused.
 #[test]
 fn create_new_observer_runs_once_after_publication() {
     if !PARENT_DIR_FSYNC_FLUSHES {
