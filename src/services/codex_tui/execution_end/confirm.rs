@@ -4,7 +4,7 @@ use super::capture::CapturedOldExecution;
 use crate::services::platform::tmux::{self, SessionPresence};
 use crate::services::process::{ProcessGroupProbe, ProcessIdentityProbe, process_group_probe};
 use crate::services::tmux_common as tc;
-use crate::services::tui_o::store::codex_end::{self, Appended, CodexEnd};
+use crate::services::tui_o::store::codex_end::{self, Appended, CodexEnd, ContextSnapshot};
 use crate::services::tui_prompt_dedupe::{binding_context, binding_events};
 
 const VACANT_WAIT: Duration = Duration::from_secs(2);
@@ -98,15 +98,14 @@ fn confirm(capture: &CapturedOldExecution) -> Result<ConfirmedOldEnd, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Err("pane owner marker changed or unreadable".into()),
     }
-    if binding_context::execution_context("codex", &old.execution_nonce)?
-        != capture.original_context
+    let context = binding_context::execution_context("codex", &old.execution_nonce)?;
+    if ContextSnapshot::from(&context) != old.context
         || binding_context::stable_host_identity().as_deref() != Some(old.host.as_str())
         || tc::current_tmux_owner_marker() != old.owner_runtime_root
     {
         return Err("execution context/host/owner changed".into());
     }
-    if super::identity::verify_source(&capture.original_context, &old.source)? != old.provider_root
-    {
+    if super::identity::verify_source(&context, &old.source)? != old.provider_root {
         return Err("provider root identity changed".into());
     }
     let events = binding_events::records_strict(old.channel)
@@ -121,6 +120,9 @@ fn confirm(capture: &CapturedOldExecution) -> Result<ConfirmedOldEnd, String> {
         return Err("pane binding moved after capture".into());
     }
     let mut record = old.clone();
+    if super::mutant("snapshot_normalized") {
+        record.context.provider_root = Some(record.provider_root.clone());
+    }
     record.ended_at = chrono::Utc::now();
     Ok(ConfirmedOldEnd(record))
 }

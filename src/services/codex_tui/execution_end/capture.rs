@@ -4,7 +4,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::platform::tmux::{self, SessionPresence};
 use crate::services::process::{ProcessIdentity, ProcessIdentityProbe};
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
-use crate::services::tui_o::store::codex_end::{CodexEnd, EndBasis};
+use crate::services::tui_o::store::codex_end::{CodexEnd, ContextSnapshot, EndBasis};
 use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
 use crate::services::tui_prompt_dedupe::binding_events::{
     self as p5, BindingEvent, BindingTarget, SourceId,
@@ -12,7 +12,6 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 
 pub(crate) struct CapturedOldExecution {
     pub(super) record: CodexEnd,
-    pub(super) original_context: binding_context::BindingContext,
     pub(super) pane_pid: u32,
     pub(super) identity: ProcessIdentity,
     pub(super) pgid: u32,
@@ -59,6 +58,7 @@ fn capture_under(
     {
         return Err("fresh source belongs to another execution".into());
     }
+    let provider_root = super::identity::verify_source(&context, &source)?;
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
         .ok_or("runtime source unavailable")?;
     if binding.runtime_kind != RuntimeHandoffKind::CodexTui
@@ -71,11 +71,6 @@ fn capture_under(
     {
         return Err("runtime and settled source disagree".into());
     }
-    let provider_root = super::identity::verify_source(&context, &source)?;
-    let original_context = context.clone();
-    let mut context = context;
-    // Persist canonical root identity while retaining the exact immutable context for confirmation.
-    context.provider_root = Some(provider_root.clone());
     let pane_pid = tmux::pane_pid(pane).ok_or("pane PID unavailable")?;
     let identity = ProcessIdentity::capture(pane_pid);
     if identity.probe(pane_pid) != ProcessIdentityProbe::Same {
@@ -97,11 +92,10 @@ fn capture_under(
         captured_at: Utc::now(),
         ended_at: Utc::now(),
         basis: EndBasis::ExplicitClear,
-        context,
+        context: ContextSnapshot::from(&context),
     };
     Ok(CapturedOldExecution {
         record,
-        original_context,
         pane_pid,
         identity,
         pgid,

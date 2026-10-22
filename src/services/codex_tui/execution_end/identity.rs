@@ -63,10 +63,14 @@ pub(crate) fn verify_source(
         {
             Ok(canonical_root)
         }
-        "fresh" => match fresh_source_matches(context, &verified) {
-            Some(true) => Ok(canonical_root),
-            Some(false) => Err("fresh source does not match execution context".into()),
-            None => Err("fresh source evidence pending".into()),
+        "fresh" => match fresh_source_evidence(context, &verified) {
+            Ok(Some(())) => Ok(canonical_root),
+            Ok(None) => Err("fresh source evidence pending".into()),
+            Err(reason) => Err(if super::mutant("reason_merged") {
+                "fresh source does not match execution context".into()
+            } else {
+                reason
+            }),
         },
         _ => Err("source is not the execution's fresh or resumed source".into()),
     }
@@ -77,18 +81,37 @@ pub(crate) fn fresh_source_matches(
     context: &BindingContext,
     source: &VerifiedCodexHookSource,
 ) -> Option<bool> {
-    if context.launch_mode != "fresh"
-        || context.expected_native_session_id.is_some()
-        || context.source_policy.as_deref() != Some("shadow")
-        || !source
-            .created_at
-            .is_some_and(|created| created >= context.created_at)
-    {
-        return Some(false);
+    match fresh_source_evidence(context, source) {
+        Ok(evidence) => evidence.map(|()| true),
+        Err(_) => Some(false),
     }
-    match context.first_prompt_digest.as_deref() {
-        Some(expected) => prompt_matches(source, expected),
-        None => Some(true),
+}
+
+fn fresh_source_evidence(
+    context: &BindingContext,
+    source: &VerifiedCodexHookSource,
+) -> Result<Option<()>, String> {
+    if context.launch_mode != "fresh" || context.expected_native_session_id.is_some() {
+        return Err("source is not a fresh execution".into());
+    }
+    let policy = context.source_policy.as_deref().unwrap_or("absent");
+    if policy != "shadow" {
+        return Err(format!("fresh policy {policy} outside shadow contract"));
+    }
+    if !source
+        .created_at
+        .is_some_and(|created| created >= context.created_at)
+    {
+        return Err("created_at before context".into());
+    }
+    match context
+        .first_prompt_digest
+        .as_deref()
+        .map(|digest| prompt_matches(source, digest))
+    {
+        Some(Some(false)) => Err("first prompt mismatch".into()),
+        Some(None) => Ok(None),
+        _ => Ok(Some(())),
     }
 }
 

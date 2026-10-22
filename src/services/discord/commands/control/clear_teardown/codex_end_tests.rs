@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
+
 use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
 use crate::services::codex_tui::execution_end::attempt;
 use crate::services::process::{ProcessGroupProbe, ProcessIdentity, ProcessIdentityProbe};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 use crate::services::tmux_common as tc;
+use crate::services::tui_o::store::codex_end::{self, ContextSnapshot};
 use crate::services::tui_prompt_dedupe::binding_context::{
     self, BindingContext, PreparedIncarnation,
 };
@@ -335,21 +338,22 @@ fn codex_clear_records_exact_end_after_marker_cleanup() {
     assert_eq!(records[0]["execution_nonce"], pane.context.execution_nonce);
     assert_eq!(records[0]["tmux_session"], pane.name);
     assert_eq!(records[0]["binding_seq"], 1);
-    let mut identity_context = pane.context.clone();
-    identity_context.provider_root = Some(fixture.logs.path().canonicalize().unwrap());
-    assert_ne!(identity_context.provider_root, pane.context.provider_root);
+    let canonical_root = fixture.logs.path().canonicalize().unwrap();
+    assert_ne!(Some(&canonical_root), pane.context.provider_root.as_ref());
     assert_eq!(
         records[0]["provider_root"],
-        serde_json::to_value(&identity_context.provider_root).unwrap()
+        serde_json::to_value(&canonical_root).unwrap()
     );
     assert_eq!(
         records[0]["context"],
-        serde_json::to_value(&identity_context).unwrap()
+        serde_json::to_value(&pane.context).unwrap(),
+        "stored context retains raw immutable values"
     );
-    assert_eq!(
-        binding_context::execution_context("codex", &pane.context.execution_nonce).unwrap(),
-        pane.context
-    );
+    let immutable =
+        binding_context::execution_context("codex", &pane.context.execution_nonce).unwrap();
+    assert_eq!(immutable, pane.context);
+    let stored = codex_end::read(&crate::config::runtime_root().unwrap(), pane.channel).unwrap();
+    assert_eq!(stored[0].context, ContextSnapshot::from(&immutable));
     assert_eq!(
         attempt::ticket(pane.channel, &pane.name).as_deref(),
         records[0]["end_id"].as_str()
@@ -482,6 +486,8 @@ fn context_owner_root_host_and_source_mismatches_record_nothing() {
         "source_header",
         "source_inode",
         "wrong_event_nonce",
+        "created_at",
+        "first_prompt_digest",
     ] {
         let pane = Pane::start(fixture.logs.path());
         match case {
@@ -530,10 +536,60 @@ fn context_owner_root_host_and_source_mismatches_record_nothing() {
                 std::fs::rename(&replacement, &pane.source).unwrap();
             }
             "wrong_event_nonce" => pane.rewrite_event_nonce(&"d".repeat(32)),
+            "created_at" => pane.rewrite_context(|context| {
+                context.created_at += chrono::Duration::seconds(2);
+            }),
+            "first_prompt_digest" => {
+                let mut body = std::fs::read_to_string(&pane.source).unwrap();
+                body.push_str("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"different input\"}}\n");
+                std::fs::write(&pane.source, body).unwrap();
+                pane.rewrite_context(|context| {
+                    context.first_prompt_digest =
+                        Some(format!("sha256:{:x}", Sha256::digest(b"launch input")));
+                });
+            }
             _ => unreachable!(),
         }
-        pane.end(true);
+        let logs = capture_logs(|| {
+            pane.end(true);
+        });
         pane.assert_no_end(case);
+        let reason = match case {
+            "created_at" => Some("created_at before context"),
+            "first_prompt_digest" => Some("first prompt mismatch"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            assert!(
+                logs.lines()
+                    .any(|line| line.contains("Codex clear end not captured")
+                        && line.contains(&format!("reason=\"{reason}\""))),
+                "{case}: exact capture reason {reason:?} missing: {logs}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_fresh_policies_record_no_end_and_explain_the_contract_boundary() {
+    let fixture = Fixture::new();
+    for policy in ["legacy", "verified"] {
+        let pane = Pane::start(fixture.logs.path());
+        pane.rewrite_context(|context| context.source_policy = Some(policy.into()));
+        let logs = capture_logs(|| {
+            pane.end(true);
+        });
+        pane.assert_no_end(policy);
+        let warning = logs
+            .lines()
+            .find(|line| line.contains("Codex clear end not captured"))
+            .unwrap_or_else(|| panic!("missing capture warning: {logs}"));
+        assert!(
+            warning.contains(&format!(
+                "reason=\"fresh policy {policy} outside shadow contract\""
+            )),
+            "{warning}"
+        );
     }
 }
 
@@ -650,11 +706,11 @@ fn late_group_child_inside_wait_can_finish_but_surviving_group_is_unknown_and_di
             );
             continue;
         }
+        pane.assert_no_end("late group child");
         assert!(
             started.elapsed() >= Duration::from_secs(2),
             "the observer waits its full bound"
         );
-        pane.assert_no_end("late group child");
         let warning = logs
             .lines()
             .find(|line| line.contains("Codex clear end not recorded"))

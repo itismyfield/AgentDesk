@@ -3793,6 +3793,7 @@ services::discord::commands::control::clear_teardown::codex_end_tests::explicit_
 services::discord::commands::control::clear_teardown::codex_end_tests::late_group_child_inside_wait_can_finish_but_surviving_group_is_unknown_and_diagnosed
 services::discord::commands::control::clear_teardown::codex_end_tests::resumed_same_source_can_end_when_unchanged_binding_keeps_an_older_nonce
 services::discord::commands::control::clear_teardown::codex_end_tests::unguarded_unacknowledged_and_live_pane_clears_record_nothing
+services::discord::commands::control::clear_teardown::codex_end_tests::unsupported_fresh_policies_record_no_end_and_explain_the_contract_boundary
 services::discord::commands::control::clear_wait_tests::a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_restored_head_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_off_with_stale_session_reaches_fresh_provider_pg
@@ -13248,10 +13249,13 @@ services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_init_only_an
 services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_write_failure_latches_and_keeps_prior_copy
 services::tui_o::store::clear_end::tests::a_failed_directory_sync_still_publishes_and_an_unpublished_write_announces_nothing
 services::tui_o::store::clear_end::tests::appends_keep_the_newest_records_and_announce_each_one
+services::tui_o::store::codex_end::tests::binding_context_extensions_do_not_change_the_snapshot_storage_format
 services::tui_o::store::codex_end::tests::byte_limit_evicts_oldest_but_single_oversize_and_changed_id_write_nothing
+services::tui_o::store::codex_end::tests::context_snapshot_preserves_raw_alias_root_beside_the_canonical_root
 services::tui_o::store::codex_end::tests::corrupt_foreign_and_unknown_records_are_preserved_on_append_failure
 services::tui_o::store::codex_end::tests::failed_write_preserves_old_bytes_and_published_unsynced_is_never_durable
 services::tui_o::store::codex_end::tests::missing_old_store_has_no_end_and_appends_keep_sixteen_newest
+services::tui_o::store::codex_end::tests::snapshot_equality_covers_each_current_identity_and_fresh_evidence_field
 services::tui_o::store::codex_end::tests::writes_are_serialized_for_same_channel_and_isolated_by_root_and_channel
 services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_failure_keeps_original_evidence
 services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_readback_mismatch_and_foreign_identity_are_typed

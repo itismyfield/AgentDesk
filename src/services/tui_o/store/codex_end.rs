@@ -24,6 +24,47 @@ pub(crate) enum EndBasis {
     ExplicitClear,
 }
 
+/// The validated immutable context values; unrelated future launch fields never enter this format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextSnapshot {
+    pub schema: u32,
+    pub provider: String,
+    pub created_at: DateTime<Utc>,
+    pub execution_nonce: String,
+    pub tmux_session: String,
+    pub channel_id: Option<u64>,
+    pub owner_runtime_root: String,
+    pub host: Option<String>,
+    pub expected_native_session_id: Option<String>,
+    pub launch_mode: String,
+    pub provider_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_policy: Option<String>,
+}
+
+impl From<&BindingContext> for ContextSnapshot {
+    fn from(context: &BindingContext) -> Self {
+        Self {
+            schema: context.schema,
+            provider: context.provider.clone(),
+            created_at: context.created_at,
+            execution_nonce: context.execution_nonce.clone(),
+            tmux_session: context.tmux_session.clone(),
+            channel_id: context.channel_id,
+            owner_runtime_root: context.owner_runtime_root.clone(),
+            host: context.host.clone(),
+            expected_native_session_id: context.expected_native_session_id.clone(),
+            launch_mode: context.launch_mode.clone(),
+            provider_root: context.provider_root.clone(),
+            first_prompt_digest: context.first_prompt_digest.clone(),
+            source_policy: context.source_policy.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CodexEnd {
@@ -40,7 +81,7 @@ pub(crate) struct CodexEnd {
     pub captured_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub basis: EndBasis,
-    pub context: BindingContext,
+    pub context: ContextSnapshot,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,7 +132,7 @@ fn valid(record: &CodexEnd, channel: u64) -> bool {
         && context.execution_nonce == record.execution_nonce
         && context.host.as_deref() == Some(record.host.as_str())
         && context.owner_runtime_root == record.owner_runtime_root
-        && context.provider_root.as_ref() == Some(&record.provider_root)
+        && context.provider_root.is_some()
         && context
             .expected_native_session_id
             .as_ref()

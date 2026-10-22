@@ -3,12 +3,11 @@ use std::io::ErrorKind;
 use super::*;
 use crate::services::tui_o::store::fault::{self, Step};
 
-fn record(channel: u64, seq: u64) -> CodexEnd {
-    let captured_at = Utc::now();
-    let context = BindingContext {
+fn context(channel: u64) -> BindingContext {
+    BindingContext {
         schema: 1,
         provider: "codex".into(),
-        created_at: captured_at,
+        created_at: Utc::now(),
         execution_nonce: "a".repeat(32),
         tmux_session: "pane".into(),
         channel_id: Some(channel),
@@ -19,7 +18,12 @@ fn record(channel: u64, seq: u64) -> CodexEnd {
         provider_root: Some("/codex".into()),
         first_prompt_digest: None,
         source_policy: Some("shadow".into()),
-    };
+    }
+}
+
+fn record(channel: u64, seq: u64) -> CodexEnd {
+    let context = context(channel);
+    let captured_at = context.created_at;
     CodexEnd {
         end_id: format!("end-{seq}"),
         channel,
@@ -39,7 +43,7 @@ fn record(channel: u64, seq: u64) -> CodexEnd {
         captured_at,
         ended_at: captured_at,
         basis: EndBasis::ExplicitClear,
-        context,
+        context: ContextSnapshot::from(&context),
     }
 }
 
@@ -181,4 +185,98 @@ fn failed_write_preserves_old_bytes_and_published_unsynced_is_never_durable() {
     );
     assert_eq!(append(root.path(), &end), Ok(Appended::Durable));
     assert_eq!(read(root.path(), 7).unwrap().len(), 2);
+}
+
+#[test]
+fn context_snapshot_preserves_raw_alias_root_beside_the_canonical_root() {
+    let root = tempfile::tempdir().unwrap();
+    let canonical = root.path().join("codex");
+    fs::create_dir(&canonical).unwrap();
+    let canonical = canonical.canonicalize().unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&canonical, &alias).unwrap();
+    let mut raw = context(7);
+    raw.provider_root = Some(alias.clone());
+    let mut end = record(7, 1);
+    end.provider_root = canonical.clone();
+    end.source.path = canonical.join("s1.jsonl");
+    end.context = ContextSnapshot::from(&raw);
+    assert_eq!(append(root.path(), &end), Ok(Appended::Durable));
+    let restored = read(root.path(), 7).unwrap().remove(0);
+    assert_eq!(restored.context, ContextSnapshot::from(&raw));
+    assert_eq!(restored.context.provider_root, Some(alias));
+    assert_eq!(restored.provider_root, canonical);
+    assert_ne!(
+        restored.context.provider_root.as_ref(),
+        Some(&restored.provider_root)
+    );
+    let before = fs::read(path(root.path(), 7)).unwrap();
+    end.context.provider_root = None;
+    assert!(append(root.path(), &end).is_err());
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+}
+
+#[test]
+fn snapshot_equality_covers_each_current_identity_and_fresh_evidence_field() {
+    let original = context(7);
+    let snapshot = ContextSnapshot::from(&original);
+    assert_eq!(snapshot, ContextSnapshot::from(&original.clone()));
+    for field in [
+        "schema",
+        "provider",
+        "created_at",
+        "execution_nonce",
+        "tmux_session",
+        "channel_id",
+        "owner_runtime_root",
+        "host",
+        "expected_native_session_id",
+        "launch_mode",
+        "provider_root",
+        "first_prompt_digest",
+        "source_policy",
+    ] {
+        let mut changed = original.clone();
+        match field {
+            "schema" => changed.schema += 1,
+            "provider" => changed.provider = "claude".into(),
+            "created_at" => changed.created_at += chrono::Duration::seconds(1),
+            "execution_nonce" => changed.execution_nonce = "b".repeat(32),
+            "tmux_session" => changed.tmux_session = "other-pane".into(),
+            "channel_id" => changed.channel_id = Some(8),
+            "owner_runtime_root" => changed.owner_runtime_root = "/other-owner".into(),
+            "host" => changed.host = Some("other-host".into()),
+            "expected_native_session_id" => changed.expected_native_session_id = Some("s1".into()),
+            "launch_mode" => changed.launch_mode = "resume".into(),
+            "provider_root" => changed.provider_root = Some("/raw/alias".into()),
+            "first_prompt_digest" => changed.first_prompt_digest = Some("sha256:prompt".into()),
+            "source_policy" => changed.source_policy = Some("legacy".into()),
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            snapshot,
+            ContextSnapshot::from(&changed),
+            "{field} must remain part of equality"
+        );
+    }
+}
+
+#[test]
+fn binding_context_extensions_do_not_change_the_snapshot_storage_format() {
+    let root = tempfile::tempdir().unwrap();
+    let original = context(7);
+    let snapshot = ContextSnapshot::from(&original);
+    let mut extended = serde_json::to_value(&original).unwrap();
+    extended["future_optional_evidence"] = serde_json::json!({"unrelated":"launch metadata"});
+    let expanded: BindingContext = serde_json::from_value(extended.clone()).unwrap();
+    assert!(serde_json::from_value::<ContextSnapshot>(extended).is_err());
+    assert_eq!(ContextSnapshot::from(&expanded), snapshot);
+    let mut end = record(7, 1);
+    end.context = snapshot;
+    append(root.path(), &end).unwrap();
+    let before = fs::read(path(root.path(), 7)).unwrap();
+    end.context = ContextSnapshot::from(&expanded);
+    assert_eq!(append(root.path(), &end), Ok(Appended::Durable));
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+    assert_eq!(read(root.path(), 7).unwrap(), [end]);
 }
