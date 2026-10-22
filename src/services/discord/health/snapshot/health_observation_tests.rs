@@ -222,8 +222,8 @@ fn health_snapshot_parallel_actors_keep_other_channels() {
     });
 }
 
-/// An actor that answers after 1.2s, inside the 1.5s deadline, is a live mailbox, not an
-/// unreachable one.
+/// An actor that answers 1.2s after the read reached it, inside the 1.5s deadline, is a live
+/// mailbox, not an unreachable one.
 #[test]
 fn health_snapshot_slow_actor_within_deadline_is_ok() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -233,9 +233,18 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
     let claude = main.block_on(provider(&registry, "claude"));
     let slow = channel(6_871_320_000, 1);
     parked_turn(&parked, &claude, slow);
-    let _driver = Driver::answer_from(parked, Duration::from_millis(1_200));
+    let mut parked = Some(parked);
+    // Dropped after `block_on`: the driver hands back a runtime, which cannot drop in async code.
+    let mut driver = None;
     main.block_on(async {
-        let (json, elapsed) = detail(&registry).await;
+        let mut barrier = claude.mailboxes.install_health_barrier_for_test(slow);
+        barrier.release();
+        let answer_late = async {
+            barrier.first_received().await;
+            let parked = parked.take().unwrap();
+            driver = Some(Driver::answer_from(parked, Duration::from_millis(1_200)));
+        };
+        let ((json, elapsed), ()) = tokio::join!(detail(&registry), answer_late);
         assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
         assert!(
             elapsed >= Duration::from_millis(1_150),
@@ -251,16 +260,27 @@ fn health_snapshot_slow_actor_within_deadline_is_ok() {
             true
         );
     });
+    drop(driver);
 }
 
-/// After a barrier's release every read of the same actors answers, here and in a new registry.
-async fn assert_answers_after_release(registry: &HealthRegistry, shared: &Arc<SharedData>) {
-    let (json, _) = detail(registry).await;
-    assert_eq!(read_failures(&json), Vec::new(), "the same registry");
+/// After a barrier's release every read of the same actors answers, here and in a new registry,
+/// and each `(channel, has turn)` the test made keeps its row and its turn's token.
+async fn assert_answers_after_release(
+    registry: &HealthRegistry,
+    shared: &Arc<SharedData>,
+    expected: &[(ChannelId, bool)],
+) {
     let fresh = HealthRegistry::new();
     fresh.register("claude".to_string(), shared.clone()).await;
-    let (json, _) = detail(&fresh).await;
-    assert_eq!(read_failures(&json), Vec::new(), "a new registry");
+    for (which, registry) in [("the same registry", registry), ("a new registry", &fresh)] {
+        let (json, _) = detail(registry).await;
+        assert_eq!(read_failures(&json), Vec::new(), "{which}");
+        for (channel, turn) in expected {
+            let entry = mailbox(&json, "claude", *channel)
+                .unwrap_or_else(|| panic!("{which} lost {channel}'s row: {json}"));
+            assert_eq!(entry["has_cancel_token"], *turn, "{which}, {channel}");
+        }
+    }
 }
 
 /// A build that starts 800ms (or 350ms more) after its request set the deadline still ends by it:
@@ -296,7 +316,8 @@ fn health_snapshot_by_late_start_keeps_the_request_deadline() {
             assert!(mailbox(&json, "claude", normal).is_some());
             barrier.first_answered().await;
             barrier.release();
-            assert_answers_after_release(&registry, &claude).await;
+            assert_answers_after_release(&registry, &claude, &[(silent, true), (normal, true)])
+                .await;
         });
     }
 }
@@ -360,7 +381,13 @@ fn health_snapshot_actor_timeout_covers_secondary_reads() {
         assert!(mailbox(&json, "claude", normal).is_some());
         assert!(reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
         barriers.iter_mut().for_each(|barrier| barrier.release());
-        assert_answers_after_release(&registry, &claude).await;
+        let expected = [
+            (thread, true),
+            (reconfirm, true),
+            (normal, true),
+            (parent, false),
+        ];
+        assert_answers_after_release(&registry, &claude, &expected).await;
     });
 }
 

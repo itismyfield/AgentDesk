@@ -1,5 +1,5 @@
-//! A test actor in front of a live mailbox actor: it answers the first Snapshot through the live
-//! actor, then reads nothing more until the test releases it, so later reads wait at a known point.
+//! A test actor in front of a live mailbox actor: it signals the first Snapshot, answers it via
+//! the live actor, then reads nothing more until released, so later reads wait at a known point.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +21,7 @@ pub(crate) struct HealthBarrier {
     channel: ChannelId,
     actor: ChannelMailboxHandle,
     front: ChannelMailboxHandle,
+    received: Option<oneshot::Receiver<()>>,
     answered: Option<oneshot::Receiver<()>>,
     release: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
@@ -32,17 +33,21 @@ impl ChannelMailboxRegistry {
         let actor = self
             .peek(channel)
             .expect("a live actor to put the barrier in front of");
+        let (received_tx, received) = oneshot::channel();
         let (answered_tx, answered) = oneshot::channel();
         let (release, released) = oneshot::channel::<()>();
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let live = actor.clone();
         let task = tokio::spawn(async move {
-            let mut answered_tx = Some(answered_tx);
+            let (mut received_tx, mut answered_tx) = (Some(received_tx), Some(answered_tx));
             while let Some(msg) = receiver.recv().await {
                 let ChannelMailboxMsg::Snapshot { reply } = msg else {
                     let _ = live.sender.send(msg);
                     continue;
                 };
+                if let Some(received_tx) = received_tx.take() {
+                    let _ = received_tx.send(());
+                }
                 if let Ok(snapshot) = live.try_snapshot().await {
                     let _ = reply.send(snapshot);
                 }
@@ -68,6 +73,7 @@ impl ChannelMailboxRegistry {
             channel,
             actor,
             front,
+            received: Some(received),
             answered: Some(answered),
             release: Some(release),
             task,
@@ -79,6 +85,11 @@ impl HealthBarrier {
     /// The live actor itself, which the barrier does not hold.
     pub(crate) fn actor(&self) -> &ChannelMailboxHandle {
         &self.actor
+    }
+
+    /// Waits until the first Snapshot has reached the test actor, before the live actor sees it.
+    pub(crate) async fn first_received(&mut self) {
+        wait_for(self.received.take(), "the first Snapshot's arrival").await;
     }
 
     /// Waits until the test actor has answered its first Snapshot and stopped reading.

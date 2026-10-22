@@ -223,7 +223,7 @@ fn deploy_ready(body: &Value, jq: bool) -> bool {
 }
 
 /// With and without jq, readiness refuses a stalled actor's public body, which names no channel,
-/// and accepts the same node without that actor or with one answering 1.2s into the request.
+/// and accepts the same node without that actor or with one answering 1.2s after its read arrived.
 #[test]
 fn health_timeout_consumers_keep_existing_gates() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -252,11 +252,20 @@ fn health_timeout_consumers_keep_existing_gates() {
         for registry in [&ready_registry, &stalled_registry, &slow_registry] {
             let addr = serve(&db.pool, registry.clone()).await;
             let slow_actor = Arc::ptr_eq(registry, &slow_registry);
-            if slow_actor {
-                let parked = slow_parked.take().unwrap();
-                driver = Some(Driver::answer_from(parked, Duration::from_millis(1_200)));
-            }
-            let (_, mut body, elapsed) = http_get(addr, "/api/health").await;
+            let (_, mut body, elapsed) = if slow_actor {
+                // Nothing else reads this channel, so the barrier's first Snapshot is the request's
+                // own and the 1.2s runs from its arrival, not from before the connection.
+                let mut barrier = slow_shared.mailboxes.install_health_barrier_for_test(slow);
+                barrier.release();
+                let answer_late = async {
+                    barrier.first_received().await;
+                    let parked = slow_parked.take().unwrap();
+                    driver = Some(Driver::answer_from(parked, Duration::from_millis(1_200)));
+                };
+                tokio::join!(http_get(addr, "/api/health"), answer_late).0
+            } else {
+                http_get(addr, "/api/health").await
+            };
             assert!(elapsed < BUDGET, "{elapsed:?}: {body}");
             assert!(
                 !slow_actor || elapsed >= Duration::from_millis(1_150),
