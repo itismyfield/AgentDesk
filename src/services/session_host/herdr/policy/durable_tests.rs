@@ -166,10 +166,7 @@ fn durable_process_crash_keeps_prepublication_marker() {
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                concat!(
-                    module_path!(),
-                    "::durable_process_crash_keeps_prepublication_marker"
-                ),
+                "services::session_host::herdr::policy::durable::tests::durable_process_crash_keeps_prepublication_marker",
             ])
             .env(ROOT, &root)
             .env(STAGE, stage)
