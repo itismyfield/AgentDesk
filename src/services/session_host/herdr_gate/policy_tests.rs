@@ -420,6 +420,12 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
     drop(store);
     let restarted_store = FileGrantStore::new(Some(grant_root.clone()));
     let restored = restarted_store.load_all(&[launch_endpoint]).await.unwrap();
+    assert!(!restored.unknown_failure);
+    let restored = restored
+        .by_endpoint
+        .into_values()
+        .flat_map(Result::unwrap)
+        .collect::<Vec<_>>();
     assert_eq!(
         restored,
         [grant],
@@ -483,5 +489,58 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
     assert!(
         !grant_root.exists(),
         "restored_grant_mutation_does_not_recreate_store_contract"
+    );
+}
+
+#[test]
+fn policy_remembered_grant_after_boot_failure_reaches_only_exact_nonce_input() {
+    use crate::services::herdr_launch::HerdrLaunchHost;
+    RESTORE_READS.with(|reads| reads.set(0));
+    let rig = rig();
+    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let host = crate::services::session_host::SocketHerdrLaunchHost::new(
+        vec![configured.clone()],
+        Default::default(),
+    )
+    .with_prepared_for_test(Err(Unverified::Cache));
+    host.remember_grant(admitted(&rig, NONCE, SERVER).grant.unwrap());
+    let registry = HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
+        .with_launch_host(host)
+        .with_reads((counted_invalid, launched_os(&rig)));
+    let mut other = stored(&rig.server, HostedState::Bound);
+    other.execution_nonce = "unremembered-nonce".into();
+    other.expected.as_mut().unwrap().binding_nonce = other.execution_nonce.clone();
+    let target = registry.target(&other).unwrap();
+    assert_eq!(
+        target.pin(Mutation::Input),
+        Err(HerdrGateRefusal::PolicyUnverified(Unverified::Cache)),
+        "unremembered_nonce_boot_failure_refuses_input_contract"
+    );
+    assert!(
+        rig.server.conns().is_empty(),
+        "unremembered_nonce_boot_failure_probe_zero_contract"
+    );
+    let target = registry
+        .target(&stored(&rig.server, HostedState::Bound))
+        .unwrap();
+    assert_eq!(
+        target.pin(Mutation::Input),
+        Ok(()),
+        "remembered_grant_after_boot_failure_allows_input_contract"
+    );
+    assert_eq!(
+        target.send_text("remembered durable grant").unwrap(),
+        HostMutation::Confirmed,
+        "remembered_grant_after_boot_failure_confirms_input_contract"
+    );
+    assert_eq!(
+        rig.server.mutations().len(),
+        1,
+        "remembered_grant_after_boot_failure_mutates_once_contract"
+    );
+    assert_eq!(
+        RESTORE_READS.with(Cell::get),
+        0,
+        "remembered_grant_after_boot_failure_does_not_read_e7_contract"
     );
 }

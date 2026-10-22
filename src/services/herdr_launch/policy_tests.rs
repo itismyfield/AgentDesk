@@ -16,6 +16,7 @@ struct Grants {
     loads: AtomicUsize,
     saves: AtomicUsize,
     fail_save: AtomicBool,
+    invalid_file_store: Option<crate::services::session_host::policy::grant_store::FileGrantStore>,
 }
 
 #[async_trait::async_trait]
@@ -46,6 +47,16 @@ impl LaunchGrantStore for Grants {
         ]);
         if self.fail_save.load(Ordering::SeqCst) {
             return Err("injected grant durability failure".into());
+        }
+        if let Some(store) = &self.invalid_file_store {
+            let mut witness = ServerWitness::for_test(1);
+            witness.socket = "/different/socket".into();
+            let invalid = crate::services::session_host::policy::permit::grant_for_test(
+                grant.endpoint(),
+                grant.nonce(),
+                witness,
+            );
+            return store.save(invalid).await;
         }
         *self.saved.lock().unwrap() = Some(grant);
         Ok(())
@@ -82,6 +93,7 @@ impl PolicyHost {
                 loads: AtomicUsize::new(0),
                 saves: AtomicUsize::new(0),
                 fail_save: AtomicBool::new(false),
+                invalid_file_store: None,
             },
             grant_accesses: AtomicUsize::new(0),
             permit_calls: AtomicUsize::new(0),
@@ -587,6 +599,43 @@ async fn user_default_occupied_rows_refuse_before_checker_grant_or_prepare_pg() 
         assert_eq!(host.grant_accesses.load(Ordering::SeqCst), 0);
         assert_eq!(stored(&pool).await, raw);
     }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_default_file_grant_roundtrip_failure_is_unavailable_and_never_creates_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    seed_row(&pool, None).await;
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("grants");
+    let mut fixture = PolicyHost::new(&pool, EndpointMode::UserDefault);
+    fixture.grants.invalid_file_store = Some(
+        crate::services::session_host::policy::grant_store::FileGrantStore::new(Some(
+            directory.clone(),
+        )),
+    );
+    let host = Arc::new(fixture);
+    let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone()).await;
+    assert!(
+        matches!(result, Err(HerdrLaunchError::GrantUnavailable(_))),
+        "invalid_file_grant_reaches_unavailable_launch_error_contract: {result:?}"
+    );
+    assert_eq!(
+        (
+            host.user_creates.load(Ordering::SeqCst),
+            host.inner.creates.load(Ordering::SeqCst),
+            host.inner.probes.load(Ordering::SeqCst)
+        ),
+        (0, 0, 0),
+        "invalid_file_grant_creates_and_probes_nothing_contract"
+    );
+    assert!(
+        !directory.exists(),
+        "invalid_file_grant_launch_creates_no_files_contract"
+    );
     pool.close().await;
     db.drop().await;
 }

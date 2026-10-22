@@ -49,9 +49,6 @@ fn durable_publication_preserves_bytes_and_private_modes() {
 #[test]
 fn durable_interrupted_publications_are_never_loaded_as_committed() {
     for stage in [
-        "marker_sync",
-        "candidate_sync",
-        "before_rename",
         "after_rename",
         "parent_sync",
         "before_marker_clear",
@@ -75,8 +72,120 @@ fn durable_interrupted_publications_are_never_loaded_as_committed() {
         );
         assert!(restored.keys().is_err());
         let on_disk = fs::read(store.path(&name, "json").unwrap()).unwrap();
+        assert_eq!(on_disk, b"new");
+    }
+}
+
+#[test]
+fn durable_returned_prepublication_error_preserves_the_committed_generation() {
+    for stage in ["marker_sync", "candidate_sync", "before_rename"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Directory(Some(temp.path().join("records")));
+        let name = key(&"returned-error").unwrap();
+        store.change(&name, |_| Ok(b"old".to_vec())).unwrap();
+        FAIL.with(|fail| fail.set(Some(stage)));
+        let result = store.change(&name, |_| Ok(b"new".to_vec()));
+        FAIL.with(|fail| fail.set(None));
+        assert!(
+            result.is_err(),
+            "durable_prepublication_error_is_reported_contract: {stage}"
+        );
+        let restored = Directory(store.0.clone());
         assert_eq!(
-            on_disk,
+            restored.read(&name),
+            Ok(Some(b"old".to_vec())),
+            "durable_returned_prepublication_error_keeps_old_authority_contract: {stage}"
+        );
+        assert_eq!(
+            restored.keys().unwrap().as_slice(),
+            std::slice::from_ref(&name)
+        );
+        assert!(!store.path(&name, "pending").unwrap().exists());
+        assert_eq!(
+            restored.change(&name, |_| Ok(b"retry".to_vec())).unwrap(),
+            b"retry",
+            "durable_prepublication_error_can_retry_without_manual_repair_contract: {stage}"
+        );
+    }
+}
+
+#[test]
+fn durable_prepublication_cleanup_failure_keeps_the_marker() {
+    for cleanup in ["cleanup_unlink", "cleanup_parent_sync"] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Directory(Some(temp.path().join("records")));
+        let name = key(&"cleanup-error").unwrap();
+        store.change(&name, |_| Ok(b"old".to_vec())).unwrap();
+        FAIL.with(|fail| fail.set(Some("before_rename")));
+        CLEANUP_FAIL.with(|fail| fail.set(Some(cleanup)));
+        let result = store.change(&name, |_| Ok(b"new".to_vec()));
+        FAIL.with(|fail| fail.set(None));
+        CLEANUP_FAIL.with(|fail| fail.set(None));
+        assert!(result.is_err());
+        assert!(
+            store.path(&name, "pending").unwrap().exists() && store.read(&name).is_err(),
+            "durable_cleanup_failure_retains_fail_closed_marker_contract: {cleanup}"
+        );
+        assert_eq!(
+            fs::read(store.path(&name, "json").unwrap()).unwrap(),
+            b"old"
+        );
+    }
+}
+
+#[test]
+fn durable_process_crash_keeps_prepublication_marker() {
+    const STAGES: [&str; 6] = [
+        "marker_sync",
+        "candidate_sync",
+        "before_rename",
+        "after_rename",
+        "parent_sync",
+        "before_marker_clear",
+    ];
+    const ROOT: &str = "ADK_DURABLE_CRASH_TEST_ROOT";
+    const STAGE: &str = "ADK_DURABLE_CRASH_TEST_STAGE";
+    if let Some(root) = std::env::var_os(ROOT) {
+        let requested = std::env::var(STAGE).unwrap();
+        let stage = STAGES
+            .into_iter()
+            .find(|stage| *stage == requested)
+            .unwrap();
+        CRASH.with(|crash| crash.set(Some(stage)));
+        let store = Directory(Some(root.into()));
+        let name = key(&"process-crash").unwrap();
+        let _ = store.change(&name, |_| Ok(b"new".to_vec()));
+        panic!("durable_crash_checkpoint_was_not_reached_contract");
+    }
+    for stage in STAGES {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("records");
+        let store = Directory(Some(root.clone()));
+        let name = key(&"process-crash").unwrap();
+        store.change(&name, |_| Ok(b"old".to_vec())).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                concat!(
+                    module_path!(),
+                    "::durable_process_crash_keeps_prepublication_marker"
+                ),
+            ])
+            .env(ROOT, &root)
+            .env(STAGE, stage)
+            .output()
+            .unwrap();
+        assert_eq!(
+            child.status.code(),
+            Some(86),
+            "durable_real_process_crash_checkpoint_contract: {stage}"
+        );
+        assert!(
+            Directory(Some(root)).read(&name).is_err(),
+            "durable_crash_does_not_run_returned_error_cleanup_contract: {stage}"
+        );
+        assert_eq!(
+            fs::read(store.path(&name, "json").unwrap()).unwrap(),
             if ["marker_sync", "candidate_sync", "before_rename"].contains(&stage) {
                 b"old"
             } else {
@@ -200,10 +309,20 @@ fn durable_new_snapshot_failure_leaves_no_committed_authority_after_restart() {
             failure.is_err(),
             "durable_new_snapshot_failure_contract: {stage}"
         );
-        assert!(
-            Directory(Some(root)).read(&name).is_err(),
-            "durable_unacknowledged_snapshot_never_admitted_contract: {stage}"
-        );
+        let restored = Directory(Some(root));
+        if ["marker_sync", "candidate_sync", "before_rename"].contains(&stage) {
+            assert_eq!(
+                restored.read(&name),
+                Ok(None),
+                "durable_prepublication_failure_remains_missing_contract: {stage}"
+            );
+            assert!(restored.keys().unwrap().is_empty());
+        } else {
+            assert!(
+                restored.read(&name).is_err(),
+                "durable_unacknowledged_snapshot_never_admitted_contract: {stage}"
+            );
+        }
     }
 }
 

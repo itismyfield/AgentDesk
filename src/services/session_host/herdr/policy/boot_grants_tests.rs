@@ -31,12 +31,12 @@ async fn legacy_boot_never_reads_even_an_unavailable_store_or_creates_policy_dir
     let config = configured(EndpointMode::LegacyDedicated);
     assert_eq!(
         load(&config, Some("node"), &FileGrantStore::new(None)).await,
-        Ok(vec![]),
+        Ok(GrantRestoration::default()),
         "legacy_boot_store_io_zero_contract"
     );
     assert_eq!(
         load(&config, Some("node"), &FileGrantStore::new(Some(path))).await,
-        Ok(vec![])
+        Ok(GrantRestoration::default())
     );
     assert!(
         !root.path().join("runtime").exists(),
@@ -50,7 +50,7 @@ async fn user_boot_restores_exact_historical_grants_and_distinguishes_absence_fr
     let config = configured(EndpointMode::UserDefault);
     assert_eq!(
         load(&config, Some("node"), &store).await,
-        Ok(vec![]),
+        Ok(GrantRestoration::default()),
         "missing_grant_is_absent_authority_contract"
     );
     let mut witness = ServerWitness::for_test(7);
@@ -59,7 +59,7 @@ async fn user_boot_restores_exact_historical_grants_and_distinguishes_absence_fr
     store.save(grant.clone()).await.unwrap();
     assert_eq!(
         load(&config, Some("node"), &store).await,
-        Ok(vec![grant]),
+        Ok(GrantRestoration::from_grants(vec![grant])),
         "boot_restores_grants_before_synchronous_gate_contract"
     );
     assert_eq!(
@@ -69,7 +69,7 @@ async fn user_boot_restores_exact_historical_grants_and_distinguishes_absence_fr
     );
     assert_eq!(
         load(&config, Some("other-node"), &FileGrantStore::new(None)).await,
-        Ok(vec![]),
+        Ok(GrantRestoration::default()),
         "remote_endpoint_store_io_zero_contract"
     );
 }

@@ -236,3 +236,102 @@ fn policy_endpoint_keys_do_not_alias_and_missing_source_is_a_refusal() {
         "missing_source_is_not_an_index_panic_contract"
     );
 }
+
+#[test]
+fn policy_remembered_grant_bypasses_only_its_boot_restore_failure() {
+    let server = serve(created("/tmp".into()));
+    let host = launch_host(&server).with_prepared_for_test(Err(Unverified::Cache));
+    let configured = host.endpoints[0].0.clone();
+    let endpoint = launch_endpoint(&server);
+    let grant = crate::services::session_host::policy::permit::grant_for_test(
+        &endpoint,
+        "remembered",
+        ServerWitness {
+            socket: server.path.clone(),
+            pid: 7,
+            start: start_of(7).identity,
+        },
+    );
+    assert!(
+        matches!(
+            host.mutation_evidence(&configured, "remembered"),
+            Err(Unverified::Cache)
+        ),
+        "boot_restore_failure_initially_refuses_contract"
+    );
+    host.remember_grant(grant.clone());
+    let evidence = host.mutation_evidence(&configured, "remembered");
+    assert!(
+        matches!(evidence, Ok(ref evidence) if evidence.grant == Some(grant)),
+        "remembered_grant_survives_boot_error_contract"
+    );
+    assert!(
+        matches!(
+            host.mutation_evidence(&configured, "other-nonce"),
+            Err(Unverified::Cache)
+        ),
+        "boot_error_still_blocks_unremembered_nonce_contract"
+    );
+    assert!(
+        server.methods().is_empty(),
+        "remembered_grant_evidence_reads_no_socket_contract"
+    );
+}
+
+#[test]
+fn policy_boot_restore_errors_are_endpoint_scoped_and_cache_poison_remains_closed() {
+    use crate::services::session_host::policy::grant_store::GrantRestoration;
+    let server = serve(created("/tmp".into()));
+    let endpoint = launch_endpoint(&server);
+    let mut other = endpoint.clone();
+    other.config_key = "another-endpoint".into();
+    let restored = GrantRestoration {
+        by_endpoint: [(other, Err(Unverified::Cache))].into_iter().collect(),
+        unknown_failure: false,
+    };
+    let host = launch_host(&server).with_restored_for_test(restored);
+    let configured = host.endpoints[0].0.clone();
+    assert!(
+        matches!(host.mutation_evidence(&configured, "missing"), Ok(ref evidence) if evidence.grant.is_none()),
+        "foreign_endpoint_restore_error_does_not_block_current_contract"
+    );
+
+    for poison in ["grants", "witnessed", "proof"] {
+        let host = launch_host(&server).with_prepared_for_test(Err(Unverified::Cache));
+        host.seed_witness_for_test(
+            &configured,
+            ServerWitness {
+                socket: server.path.clone(),
+                pid: 7,
+                start: start_of(7).identity,
+            },
+        );
+        host.remember_grant(
+            crate::services::session_host::policy::permit::grant_for_test(
+                &endpoint,
+                "remembered",
+                ServerWitness {
+                    socket: server.path.clone(),
+                    pid: 7,
+                    start: start_of(7).identity,
+                },
+            ),
+        );
+        match poison {
+            "grants" => host.poison_grants_for_test(),
+            "witnessed" => host.poison_witnessed_for_test(),
+            _ => host.poison_proof_for_test(),
+        }
+        assert!(
+            matches!(
+                host.mutation_evidence(&configured, "remembered"),
+                Err(Unverified::Cache)
+            ),
+            "remembered_grant_does_not_hide_poisoned_cache_contract: {poison}"
+        );
+    }
+    assert!(
+        server.methods().is_empty(),
+        "endpoint_restore_errors_probe_zero_contract"
+    );
+}

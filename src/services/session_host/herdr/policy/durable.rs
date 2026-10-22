@@ -63,6 +63,23 @@ fn private_file(path: &Path, write: bool, fresh: bool) -> Result<File, String> {
     Ok(file)
 }
 
+#[cfg(unix)]
+fn clear_marker(pending: &Path, unlink: &'static str, synced: &'static str) -> Result<(), String> {
+    checkpoint(unlink)?;
+    tempfile::TempPath::try_from_path(pending)
+        .and_then(|path| path.close())
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = checkpoint(synced).and_then(|()| sync_parent(pending)) {
+        // A failed cleanup barrier must remain visible to the next reader.
+        if let Ok(marker) = private_file(pending, true, true) {
+            let _ = marker.sync_all();
+            let _ = sync_parent(pending);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 impl Directory {
     pub(crate) fn failure(&self, key: &str, reason: impl std::fmt::Display) -> String {
         let root = self
@@ -193,39 +210,35 @@ impl Directory {
             }
             let pending = self.path(key, "pending")?;
             let mut marker = private_file(&pending, true, true)?;
-            marker
-                .write_all(b"publication not yet acknowledged")
-                .map_err(|e| e.to_string())?;
-            checkpoint("marker_sync")?;
-            marker.sync_all().map_err(|e| e.to_string())?;
-            sync_parent(&pending)?;
-            let mut temporary = tempfile::Builder::new()
-                .prefix(".policy-")
-                .tempfile_in(path.parent().ok_or("missing parent")?)
-                .map_err(|e| e.to_string())?;
-            temporary.write_all(&next).map_err(|e| e.to_string())?;
-            checkpoint("candidate_sync")?;
-            temporary.as_file().sync_all().map_err(|e| e.to_string())?;
-            checkpoint("before_rename")?;
-            temporary.persist(&path).map_err(|e| e.to_string())?;
-            checkpoint("after_rename")?;
-            checkpoint("parent_sync")?;
-            sync_parent(&path)?;
-            checkpoint("before_marker_clear")?;
-            tempfile::TempPath::try_from_path(&pending)
-                .and_then(|path| path.close())
-                .map_err(|e| e.to_string())?;
-            if let Err(error) =
-                checkpoint("after_marker_clear").and_then(|()| sync_parent(&pending))
-            {
-                // Keep an ambiguous acknowledgement fail-closed when the cleanup barrier fails.
-                if let Ok(marker) = private_file(&pending, true, true) {
-                    let _ = marker.sync_all();
-                    let _ = sync_parent(&pending);
-                }
-                return Err(error);
+            let mut persist_started = false;
+            let publication = (|| {
+                marker
+                    .write_all(b"publication not yet acknowledged")
+                    .map_err(|e| e.to_string())?;
+                checkpoint("marker_sync")?;
+                marker.sync_all().map_err(|e| e.to_string())?;
+                sync_parent(&pending)?;
+                let mut temporary = tempfile::Builder::new()
+                    .prefix(".policy-")
+                    .tempfile_in(path.parent().ok_or("missing parent")?)
+                    .map_err(|e| e.to_string())?;
+                temporary.write_all(&next).map_err(|e| e.to_string())?;
+                checkpoint("candidate_sync")?;
+                temporary.as_file().sync_all().map_err(|e| e.to_string())?;
+                checkpoint("before_rename")?;
+                // Persist errors may have crossed rename, so keep their marker too.
+                persist_started = true;
+                temporary.persist(&path).map_err(|e| e.to_string())?;
+                checkpoint("after_rename")?;
+                checkpoint("parent_sync")?;
+                sync_parent(&path)?;
+                clear_marker(&pending, "before_marker_clear", "after_marker_clear")?;
+                Ok(next)
+            })();
+            if publication.is_err() && !persist_started {
+                clear_marker(&pending, "cleanup_unlink", "cleanup_parent_sync")?;
             }
-            Ok(next)
+            publication
         })();
         result.map_err(|e: String| self.failure(key, e))
     }
@@ -234,13 +247,21 @@ impl Directory {
 #[cfg(unix)]
 fn checkpoint(_stage: &'static str) -> Result<(), String> {
     #[cfg(test)]
-    if FAIL.with(|f| f.get() == Some(_stage)) {
+    if CRASH.with(|f| f.get() == Some(_stage)) {
+        std::process::exit(86);
+    }
+    #[cfg(test)]
+    if FAIL.with(|f| f.get() == Some(_stage)) || CLEANUP_FAIL.with(|f| f.get() == Some(_stage)) {
         return Err(format!("injected {_stage}"));
     }
     Ok(())
 }
 #[cfg(all(test, unix))]
-thread_local! { static FAIL: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+thread_local! {
+    static FAIL: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static CLEANUP_FAIL: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
 #[cfg(all(test, unix))]
 #[path = "durable_tests.rs"]
 mod tests;

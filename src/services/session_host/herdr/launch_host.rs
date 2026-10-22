@@ -1,11 +1,12 @@
 //! Socket launch adapter; legacy E7 and user-default permits remain separate.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use super::policy::grant_store::GrantRestoration;
 use super::policy::permit::{CreatePermit, ExistingMutationEvidence, LaunchAdmissionGrant};
 use super::policy::{LocalChecker, PeerSource, ProofCache, Unverified, peer::SocketPeerSource};
 use crate::config::session_hosts::EndpointMode;
 use crate::services::herdr_launch::policy::{PermitFuture, UserDefaultCreateRequest};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,13 +32,61 @@ pub(crate) struct SocketHerdrLaunchHost {
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
-    grants: Mutex<HashMap<(HerdrLaunchEndpoint, String), LaunchAdmissionGrant>>,
+    grants: Mutex<GrantCache>,
     grant_store: super::policy::grant_store::FileGrantStore,
-    grant_error: bool,
     next_id: AtomicU64,
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     os: Box<dyn ProcessOs>,
     provider_window: Duration,
+}
+
+struct CachedGrant {
+    grant: LaunchAdmissionGrant,
+    remembered: bool,
+}
+
+#[derive(Default)]
+struct GrantCache {
+    grants: HashMap<(HerdrLaunchEndpoint, String), CachedGrant>,
+    failed: HashSet<HerdrLaunchEndpoint>,
+    unknown_failure: bool,
+}
+
+impl GrantCache {
+    fn restored(prepared: Result<GrantRestoration, Unverified>) -> Self {
+        let restored = match prepared {
+            Ok(restored) => restored,
+            Err(_) => {
+                return Self {
+                    unknown_failure: true,
+                    ..Self::default()
+                };
+            }
+        };
+        let mut cache = Self {
+            unknown_failure: restored.unknown_failure,
+            ..Self::default()
+        };
+        for (endpoint, grants) in restored.by_endpoint {
+            match grants {
+                Ok(grants) => {
+                    for grant in grants {
+                        cache.grants.insert(
+                            (endpoint.clone(), grant.nonce().into()),
+                            CachedGrant {
+                                grant,
+                                remembered: false,
+                            },
+                        );
+                    }
+                }
+                Err(_) => {
+                    cache.failed.insert(endpoint);
+                }
+            }
+        }
+        cache
+    }
 }
 
 struct PaneCommand<'a> {
@@ -92,13 +141,7 @@ impl SocketHerdrLaunchHost {
                 )) as Arc<dyn PeerSource>
             })
             .collect();
-        let prepared = super::policy::boot_grants::prepared();
-        let grant_error = prepared.is_err();
-        let grants = prepared
-            .unwrap_or_default()
-            .into_iter()
-            .map(|grant| ((grant.endpoint().clone(), grant.nonce().into()), grant))
-            .collect();
+        let grants = GrantCache::restored(super::policy::boot_grants::prepared());
         Self {
             endpoints,
             policy: ProofCache::default(),
@@ -106,7 +149,6 @@ impl SocketHerdrLaunchHost {
             witnessed: Mutex::default(),
             grants: Mutex::new(grants),
             grant_store: super::policy::boot_grants::store(),
-            grant_error,
             next_id: AtomicU64::new(1),
             read_restore: observe::read_restore_resume,
             os: Box::new(HostOs),
@@ -150,9 +192,6 @@ impl SocketHerdrLaunchHost {
         endpoint: &HerdrEndpoint,
         nonce: &str,
     ) -> Result<ExistingMutationEvidence, Unverified> {
-        if self.grant_error {
-            return Err(Unverified::Cache);
-        }
         let key = HerdrLaunchEndpoint {
             execution_node: endpoint.execution_node().into(),
             config_key: endpoint.config_key().into(),
@@ -169,12 +208,15 @@ impl SocketHerdrLaunchHost {
             .map(|w| self.policy.startup_for(&w))
             .transpose()?
             .flatten();
-        let grant = self
-            .grants
-            .lock()
-            .map_err(|_| Unverified::Cache)?
-            .get(&(key, nonce.into()))
-            .cloned();
+        let cache = self.grants.lock().map_err(|_| Unverified::Cache)?;
+        let grant = cache.grants.get(&(key.clone(), nonce.into()));
+        // Async owners remember only grants whose durable save/load completed this process.
+        if (cache.unknown_failure || cache.failed.contains(&key))
+            && !grant.is_some_and(|grant| grant.remembered)
+        {
+            return Err(Unverified::Cache);
+        }
+        let grant = grant.map(|grant| grant.grant.clone());
         Ok(ExistingMutationEvidence { startup, grant })
     }
 
@@ -216,14 +258,15 @@ impl SocketHerdrLaunchHost {
         mut self,
         prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
     ) -> Self {
-        self.grant_error = prepared.is_err();
-        self.grants = Mutex::new(
-            prepared
-                .unwrap_or_default()
-                .into_iter()
-                .map(|grant| ((grant.endpoint().clone(), grant.nonce().into()), grant))
-                .collect(),
-        );
+        self.grants = Mutex::new(GrantCache::restored(
+            prepared.map(GrantRestoration::from_grants),
+        ));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
+        self.grants = Mutex::new(GrantCache::restored(Ok(restored)));
         self
     }
 
@@ -333,7 +376,13 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
 
     fn remember_grant(&self, grant: LaunchAdmissionGrant) {
         if let Ok(mut grants) = self.grants.lock() {
-            grants.insert((grant.endpoint().clone(), grant.nonce().into()), grant);
+            grants.grants.insert(
+                (grant.endpoint().clone(), grant.nonce().into()),
+                CachedGrant {
+                    grant,
+                    remembered: true,
+                },
+            );
         }
     }
 

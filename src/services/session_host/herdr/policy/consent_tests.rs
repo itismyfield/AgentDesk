@@ -40,15 +40,24 @@ fn consent_one_card_preserves_original_fifo_and_custody_after_denial_expiry_and_
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("consents");
     let store = ConsentStore::new(Some(root.clone()));
-    let first = store.hold(question("first"), 100).unwrap();
-    let second = store.hold(question("second"), 101).unwrap();
+    let first = store
+        .hold(question("first"), 100)
+        .map(QuestionResult::into_consent)
+        .unwrap();
+    let second = store
+        .hold(question("second"), 101)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     assert_eq!(
         first.nonce, second.nonce,
         "one_pending_card_per_key_contract"
     );
     assert_eq!(second.expires, 1900);
     let denied = store.decide(&second, 1, false, 102).unwrap();
-    let preserved = store.hold(question("second"), 103).unwrap();
+    let preserved = store
+        .hold(question("second"), 103)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     assert_eq!(
         preserved.state,
         State::Denied,
@@ -77,7 +86,11 @@ fn consent_one_card_preserves_original_fifo_and_custody_after_denial_expiry_and_
     let mut automatic = question("second");
     automatic.preview.revision = 2;
     assert_eq!(
-        store.hold(automatic, 3802).unwrap().state,
+        store
+            .hold(automatic, 3802)
+            .map(QuestionResult::into_consent)
+            .unwrap()
+            .state,
         State::Expired,
         "expiry_does_not_requestion_contract"
     );
@@ -87,7 +100,10 @@ fn consent_one_card_preserves_original_fifo_and_custody_after_denial_expiry_and_
 fn consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decision() {
     let temp = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(temp.path().join("consents")));
-    let current = store.hold(question("first"), 10).unwrap();
+    let current = store
+        .hold(question("first"), 10)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     assert!(
         store.decide(&current, 2, true, 11).is_err(),
         "consent_owner_only_contract"
@@ -139,7 +155,10 @@ fn consent_owner_revision_nonce_endpoint_and_preview_cas_accept_only_first_decis
 fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
     let temp = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(temp.path().join("consents")));
-    let first = store.hold(question("first"), 1).unwrap();
+    let first = store
+        .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     for dimension in 0..6 {
         let mut next = question("first");
         match dimension {
@@ -150,7 +169,7 @@ fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
             4 => next.key.config = "/other/config".into(),
             _ => next.key.target = "/other/target".into(),
         }
-        let distinct = store.hold(next, 1);
+        let distinct = store.hold(next, 1).map(QuestionResult::into_consent);
         assert!(
             matches!(distinct, Ok(ref value) if value.nonce != first.nonce),
             "consent_full_dedup_key_contract: {dimension}"
@@ -162,7 +181,11 @@ fn consent_key_separates_every_scope_dimension_but_not_witness_or_channel() {
     channel.intent.channel = 100;
     channel.preview.witness.pid += 1;
     assert_eq!(
-        store.hold(channel, 2).unwrap().nonce,
+        store
+            .hold(channel, 2)
+            .map(QuestionResult::into_consent)
+            .unwrap()
+            .nonce,
         first.nonce,
         "consent_witness_and_channel_are_evidence_not_dedup_key_contract"
     );
@@ -174,6 +197,7 @@ fn consent_independent_store_instances_serialize_the_first_owner_decision() {
     let root = temp.path().join("consents");
     let current = ConsentStore::new(Some(root.clone()))
         .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
         .unwrap();
     let tasks: Vec<_> = [true, false]
         .into_iter()
@@ -197,26 +221,38 @@ fn consent_independent_store_instances_serialize_the_first_owner_decision() {
 fn consent_key_normalization_keeps_one_card_without_collapsing_scope() {
     let temp = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(temp.path().join("consents")));
-    let first = store.hold(question("first"), 1).unwrap();
+    let first = store
+        .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     let mut alias = question("second");
     alias.key.node = " one ".into();
     alias.key.named_session = " agentdesk ".into();
     alias.key.socket = "/fixture//./socket".into();
     alias.key.config = "/home/.config/./herdr/config.toml".into();
     alias.key.target = "/actual/./config.toml".into();
-    let same = store.hold(alias, 2).unwrap();
+    let same = store
+        .hold(alias, 2)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     assert_eq!(same.nonce, first.nonce, "consent_normalized_key_contract");
     assert_eq!(same.key, first.key);
     let mut parent_path = question("parent");
     parent_path.key.config = "/home/link/../config.toml".into();
     assert!(
-        store.hold(parent_path, 3).is_err(),
+        store
+            .hold(parent_path, 3)
+            .map(QuestionResult::into_consent)
+            .is_err(),
         "consent_parent_directory_components_are_refused_contract"
     );
     let mut unsafe_path = question("bad");
     unsafe_path.key.socket = "relative.sock".into();
     assert!(
-        store.hold(unsafe_path, 3).is_err(),
+        store
+            .hold(unsafe_path, 3)
+            .map(QuestionResult::into_consent)
+            .is_err(),
         "consent_relative_key_is_refused_contract"
     );
 }
@@ -226,7 +262,10 @@ fn consent_owner_decision_expires_at_thirty_minutes_without_expire_call() {
     for elapsed in [TTL - 1, TTL, TTL + 1] {
         let temp = tempfile::tempdir().unwrap();
         let store = ConsentStore::new(Some(temp.path().join("consents")));
-        let current = store.hold(question("first"), 100).unwrap();
+        let current = store
+            .hold(question("first"), 100)
+            .map(QuestionResult::into_consent)
+            .unwrap();
         assert_eq!(current.expires, 100 + TTL);
         let decided = store.decide(&current, 1, true, 100 + elapsed);
         assert_eq!(
@@ -248,14 +287,20 @@ fn consent_owner_decision_expires_at_thirty_minutes_without_expire_call() {
 fn consent_explicit_retry_replaces_revision_nonce_and_rejects_the_old_card() {
     let temp = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(temp.path().join("consents")));
-    let first = store.hold(question("first"), 1).unwrap();
+    let first = store
+        .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     let denied = store.decide(&first, 1, false, 2).unwrap();
     let mut changed = question("second");
     changed.preview.revision = 2;
     changed.preview.target_hash[0] += 1;
+    let changed = store.hold(changed, 3).unwrap();
     assert!(
-        store.hold(changed, 3).is_err(),
-        "consent_changed_policy_requires_explicit_retry_contract"
+        matches!(&changed, QuestionResult::RevisionChanged(value)
+            if value.state == State::Denied && value.decision == denied.decision
+                && value.preview == denied.preview && value.intents.len() == 2),
+        "consent_changed_policy_preserves_denial_and_custody_contract"
     );
     let retried = store.retry(question("second"), 4).unwrap();
     assert_ne!(retried.nonce, denied.nonce);
@@ -277,7 +322,10 @@ fn consent_explicit_retry_replaces_revision_nonce_and_rejects_the_old_card() {
     forged.intent.fifo += 1;
     forged.preview.revision = retried.preview.revision;
     assert!(
-        store.hold(forged, 5).is_err(),
+        store
+            .hold(forged, 5)
+            .map(QuestionResult::into_consent)
+            .is_err(),
         "consent_custody_identity_cannot_be_replaced_contract"
     );
 }
@@ -294,7 +342,10 @@ fn consent_absent_corrupt_newer_and_permissions_have_distinct_results() {
         !root.exists(),
         "consent_constructor_and_absent_load_are_lazy_contract"
     );
-    let current = store.hold(question("first"), 1).unwrap();
+    let current = store
+        .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     let path = root.join(format!("{}.json", durable::key(&current.key).unwrap()));
     let original = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"{").unwrap();
@@ -328,9 +379,15 @@ fn consent_absent_corrupt_newer_and_permissions_have_distinct_results() {
 fn consent_apply_result_from_older_accepted_card_keeps_later_custody_and_fifo() {
     let temporary = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(temporary.path().join("consents")));
-    let pending = store.hold(question("first"), 1).unwrap();
+    let pending = store
+        .hold(question("first"), 1)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     let accepted = store.decide(&pending, 1, true, 2).unwrap();
-    let appended = store.hold(question("second"), 3).unwrap();
+    let appended = store
+        .hold(question("second"), 3)
+        .map(QuestionResult::into_consent)
+        .unwrap();
     assert_eq!(appended.state, State::Accepted);
     assert_eq!(appended.nonce, accepted.nonce);
     assert_eq!(accepted.intents.len(), 1);
@@ -357,4 +414,59 @@ fn consent_apply_result_from_older_accepted_card_keeps_later_custody_and_fifo() 
         "consent_apply_cas_preserves_later_appended_fifo_contract"
     );
     assert_eq!(store.load(&applied.key).unwrap().unwrap(), applied);
+}
+
+#[test]
+fn consent_changed_revision_preserves_applied_decision_and_appends_custody_before_returning() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("consents");
+    let store = ConsentStore::new(Some(root.clone()));
+    let first = store.hold(question("first"), 1).unwrap().into_consent();
+    let accepted = store.decide(&first, 1, true, 2).unwrap();
+    let applied = store
+        .record_apply(
+            &accepted,
+            ApplyResult {
+                before: Some([1; 32]),
+                after: Some([4; 32]),
+                backup: Some("/fixture/backup".into()),
+                detail: None,
+            },
+        )
+        .unwrap();
+    let mut next = question("second");
+    next.preview.revision += 1;
+    next.preview.target_hash = [5; 32];
+    let result = store.hold(next, 4);
+    assert!(
+        matches!(&result, Ok(QuestionResult::RevisionChanged(value))
+        if value.nonce == applied.nonce && value.preview == applied.preview
+            && value.state == State::Applied && value.decision == applied.decision
+            && value.apply == applied.apply
+            && value.intents.iter().map(|intent| (intent.id.as_str(),intent.fifo))
+               .collect::<Vec<_>>() == [("first",10),("second",11)]),
+        "revision_changed_preserves_applied_decision_and_fifo_contract: {result:?}"
+    );
+    let value = result.unwrap().into_consent();
+    assert_eq!(
+        ConsentStore::new(Some(root)).load(&value.key).unwrap(),
+        Some(value),
+        "revision_changed_custody_is_durable_before_return_contract"
+    );
+}
+
+#[test]
+fn consent_original_schema_without_card_phase_remains_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
+    let value = store.hold(question("first"), 1).unwrap().into_consent();
+    let mut legacy = serde_json::to_value(&value).unwrap();
+    legacy.as_object_mut().unwrap().remove("card");
+    let decoded = store
+        .decode(&serde_json::to_vec(&legacy).unwrap(), &value.key)
+        .unwrap();
+    assert_eq!(
+        decoded, value,
+        "old_consent_card_identity_remains_bound_contract"
+    );
 }

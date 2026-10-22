@@ -1,10 +1,13 @@
 //! Async boot owns disk reads; mutation gates receive only restored memory evidence.
-use super::{Unverified, grant_store::FileGrantStore, permit::LaunchAdmissionGrant};
+use super::{
+    Unverified,
+    grant_store::{FileGrantStore, GrantRestoration},
+};
 use crate::config::session_hosts::{BootSessionHosts, EndpointMode};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use std::sync::OnceLock;
 
-static PREPARED: OnceLock<Result<Vec<LaunchAdmissionGrant>, Unverified>> = OnceLock::new();
+static PREPARED: OnceLock<Result<GrantRestoration, Unverified>> = OnceLock::new();
 
 pub(crate) fn store() -> FileGrantStore {
     FileGrantStore::new(
@@ -16,7 +19,7 @@ async fn load(
     config: &crate::config::session_hosts::SessionHostsConfig,
     local_node: Option<&str>,
     store: &FileGrantStore,
-) -> Result<Vec<LaunchAdmissionGrant>, Unverified> {
+) -> Result<GrantRestoration, Unverified> {
     let endpoints = config
         .herdr
         .endpoints
@@ -32,7 +35,7 @@ async fn load(
         })
         .collect::<Vec<_>>();
     if endpoints.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GrantRestoration::default());
     }
     tokio::time::timeout(std::time::Duration::from_secs(5), store.load_all(&endpoints)).await
         .map_err(|_| Unverified::Cache)?.map_err(|reason| {
@@ -46,8 +49,11 @@ pub(crate) async fn prepare(boot: &BootSessionHosts) {
     let _ = PREPARED.set(loaded);
 }
 #[cfg(unix)]
-pub(crate) fn prepared() -> Result<Vec<LaunchAdmissionGrant>, Unverified> {
-    PREPARED.get().cloned().unwrap_or_else(|| Ok(Vec::new()))
+pub(crate) fn prepared() -> Result<GrantRestoration, Unverified> {
+    PREPARED
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Ok(GrantRestoration::default()))
 }
 
 #[cfg(all(test, unix))]

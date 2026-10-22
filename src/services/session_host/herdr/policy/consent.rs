@@ -14,6 +14,7 @@ const TTL: u64 = 30 * 60;
 pub(crate) struct ConsentKey {
     pub node: String,
     pub user: u32,
+    // Use the registry endpoint's socket_path verbatim; do not introduce a second alias policy.
     pub socket: PathBuf,
     pub named_session: String,
     pub config: PathBuf,
@@ -86,6 +87,28 @@ pub(crate) enum State {
     ApplyFailed,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CardState {
+    #[default]
+    Bound,
+    Awaiting,
+    Reserved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QuestionResult {
+    Current(Consent),
+    RevisionChanged(Consent),
+}
+
+impl QuestionResult {
+    pub(crate) fn into_consent(self) -> Consent {
+        match self {
+            Self::Current(value) | Self::RevisionChanged(value) => value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ApplyResult {
@@ -106,6 +129,8 @@ pub(crate) struct Consent {
     pub provider: String,
     pub channel: u64,
     pub message: u64,
+    #[serde(default)]
+    pub card: CardState,
     pub nonce: String,
     pub expires: u64,
     pub state: State,
@@ -166,15 +191,35 @@ impl ConsentStore {
             .transpose()
     }
 
-    pub(crate) fn hold(&self, question: Question, now: u64) -> Result<Consent, String> {
-        self.question(question, now, false)
+    pub(crate) fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
+        self.question(question, now, false, false)
     }
 
     pub(crate) fn retry(&self, question: Question, now: u64) -> Result<Consent, String> {
-        self.question(question, now, true)
+        self.question(question, now, true, false)
+            .map(QuestionResult::into_consent)
     }
 
-    fn question(&self, question: Question, now: u64, retry: bool) -> Result<Consent, String> {
+    pub(crate) fn hold_unbound(
+        &self,
+        question: Question,
+        now: u64,
+    ) -> Result<QuestionResult, String> {
+        self.question(question, now, false, true)
+    }
+
+    pub(crate) fn retry_unbound(&self, question: Question, now: u64) -> Result<Consent, String> {
+        self.question(question, now, true, true)
+            .map(QuestionResult::into_consent)
+    }
+
+    fn question(
+        &self,
+        question: Question,
+        now: u64,
+        retry: bool,
+        unbound: bool,
+    ) -> Result<QuestionResult, String> {
         let Question {
             key,
             preview,
@@ -189,7 +234,7 @@ impl ConsentStore {
         if owner == 0
             || bot == 0
             || channel == 0
-            || message == 0
+            || (message == 0) != unbound
             || provider.is_empty()
             || intent.store.is_empty()
             || intent.id.is_empty()
@@ -199,15 +244,14 @@ impl ConsentStore {
                 "consent question requires owner, card and custody identities",
             ));
         }
+        let mut revision_changed = false;
         let bytes = self.0.change(&durable::key(&key)?, |previous| {
             let previous = previous
                 .map(|bytes| self.decode(&bytes, &key))
                 .transpose()?;
             let mut value = if let Some(mut current) = previous {
                 if !retry {
-                    if current.preview.revision != preview.revision {
-                        return Err("policy revision changed; explicit retry required".into());
-                    }
+                    revision_changed = current.preview.revision != preview.revision;
                     if current.state == State::Pending && now >= current.expires {
                         current.state = State::Expired;
                     }
@@ -225,6 +269,11 @@ impl ConsentStore {
                     current.provider = provider;
                     current.channel = channel;
                     current.message = message;
+                    current.card = if unbound {
+                        CardState::Awaiting
+                    } else {
+                        CardState::Bound
+                    };
                     current.nonce = uuid::Uuid::new_v4().to_string();
                     current.expires = now.saturating_add(TTL);
                     current.state = State::Pending;
@@ -243,6 +292,11 @@ impl ConsentStore {
                     provider,
                     channel,
                     message,
+                    card: if unbound {
+                        CardState::Awaiting
+                    } else {
+                        CardState::Bound
+                    },
                     nonce: uuid::Uuid::new_v4().to_string(),
                     expires: now.saturating_add(TTL),
                     state: State::Pending,
@@ -265,7 +319,40 @@ impl ConsentStore {
             }
             serde_json::to_vec(&value).map_err(|e| e.to_string())
         })?;
-        self.decode(&bytes, &key)
+        let value = self.decode(&bytes, &key)?;
+        Ok(if revision_changed {
+            QuestionResult::RevisionChanged(value)
+        } else {
+            QuestionResult::Current(value)
+        })
+    }
+
+    pub(crate) fn reserve_card(&self, expected: &Consent) -> Result<Consent, String> {
+        self.update(expected, |current| {
+            if current.state != State::Pending
+                || current.message != 0
+                || current.card != CardState::Awaiting
+            {
+                return Err("card is already reserved or no longer pending".into());
+            }
+            current.card = CardState::Reserved;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn bind_card(&self, expected: &Consent, message: u64) -> Result<Consent, String> {
+        self.update(expected, |current| {
+            if message == 0
+                || current.state != State::Pending
+                || current.message != 0
+                || current.card != CardState::Reserved
+            {
+                return Err("card binding requires its reserved unpublished decision".into());
+            }
+            current.message = message;
+            current.card = CardState::Bound;
+            Ok(())
+        })
     }
 
     fn update(
@@ -313,7 +400,12 @@ impl ConsentStore {
         now: u64,
     ) -> Result<Consent, String> {
         self.update(expected, |current| {
-            if actor != current.owner || current.state != State::Pending || now >= current.expires {
+            if actor != current.owner
+                || current.state != State::Pending
+                || now >= current.expires
+                || current.message == 0
+                || current.card != CardState::Bound
+            {
                 return Err("decision is not an active owner decision".into());
             }
             current.state = if yes { State::Accepted } else { State::Denied };
@@ -350,6 +442,8 @@ impl ConsentStore {
         })
     }
 }
+
+pub(crate) mod workflow;
 
 #[cfg(test)]
 #[path = "consent_tests.rs"]
