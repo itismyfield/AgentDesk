@@ -1445,7 +1445,7 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
     let source_before = fixture.source.clone();
     let hosted_before = fixture.hosted_json().await;
     assert!(
-        super::super::super::herdr_adoption::current(
+        crate::services::tui_prompt_dedupe::hosted_source::current_execution_for_adoption(
             &fixture.shared,
             "claude",
             channel,
