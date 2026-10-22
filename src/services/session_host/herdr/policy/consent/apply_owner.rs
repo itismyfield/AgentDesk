@@ -46,5 +46,6 @@ pub(crate) async fn apply(
     .map_err(|e| refused(format!("apply owner: {e}")))?
 }
 
+#[cfg(test)]
 #[path = "apply_owner_tests.rs"]
 mod tests;

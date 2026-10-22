@@ -75,5 +75,6 @@ pub(crate) async fn prepare(
     .map_err(|e| format!("preview owner: {e}"))?
 }
 
+#[cfg(test)]
 #[path = "preview_tests.rs"]
 pub(super) mod tests;

@@ -5,6 +5,7 @@ use super::{
     durable::{self, Directory},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
 
 const TTL: u64 = 30 * 60;
@@ -142,9 +143,41 @@ pub(crate) struct Consent {
     pub apply: Option<ApplyResult>,
     pub launch: Option<String>,
     #[serde(default)]
+    pub history: Vec<Generation>,
+    #[serde(default)]
     pub settlements: Vec<settlement::Settlement>,
     #[serde(default)]
     intent_previews: Vec<IntentPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Generation {
+    pub nonce: String,
+    pub preview: Preview,
+    pub decision: Option<(u64, u64)>,
+    pub apply: Option<ApplyResult>,
+    pub launch: Option<String>,
+}
+
+/// Re-observe the logical path after an interrupted apply; absence is an observed state.
+pub(super) fn observe_interrupted(consent: &Consent) -> Result<ApplyResult, String> {
+    let hash = match std::fs::read(&consent.key.config) {
+        Ok(bytes) => Some(Sha256::digest(bytes).into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "{}: cannot re-observe interrupted apply: {error}",
+                consent.key.config.display()
+            ));
+        }
+    };
+    Ok(ApplyResult {
+        before: hash,
+        after: hash,
+        backup: None,
+        detail: Some("apply interrupted; config state re-observed".into()),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,10 +341,6 @@ impl ConsentStore {
                         "apply in progress; preserve this decision and wait for its receipt".into(),
                     );
                 }
-                if current.state == State::Applied {
-                    already_applied = true;
-                    return previous.ok_or_else(|| "consent missing".to_string());
-                }
             }
             let previous = decoded;
             let mut value = if let Some(mut current) = previous {
@@ -325,6 +354,27 @@ impl ConsentStore {
                             preview: current.preview.clone(),
                         })
                         .collect();
+                }
+                if retry && current.state == State::Applied {
+                    Self::append_intent(&mut current, &intent, &question_preview)?;
+                    let changed = current.unresolved_intents().iter().any(|intent| {
+                        current.intent_previews.iter().any(|held| {
+                            held.store == intent.store
+                                && held.id == intent.id
+                                && held.preview != current.preview
+                        })
+                    });
+                    if !changed {
+                        already_applied = true;
+                        return serde_json::to_vec(&current).map_err(|e| e.to_string());
+                    }
+                    current.history.push(Generation {
+                        nonce: current.nonce.clone(),
+                        preview: current.preview.clone(),
+                        decision: current.decision,
+                        apply: current.apply.clone(),
+                        launch: current.launch.clone(),
+                    });
                 }
                 if !retry {
                     revision_changed = current.preview.revision != preview.revision;
@@ -360,7 +410,11 @@ impl ConsentStore {
                     current.apply = None;
                     current.launch = None;
                     for intent in &mut current.intent_previews {
-                        intent.preview = current.preview.clone();
+                        if !current.settlements.iter().any(|settled| {
+                            settled.key.store == intent.store && settled.key.id == intent.id
+                        }) {
+                            intent.preview = current.preview.clone();
+                        }
                     }
                     current
                 }
@@ -386,30 +440,17 @@ impl ConsentStore {
                     intents: Vec::new(),
                     apply: None,
                     launch: None,
+                    history: Vec::new(),
                     settlements: Vec::new(),
                     intent_previews: Vec::new(),
                 }
             };
-            if let Some(existing) = value
-                .intents
-                .iter()
-                .find(|i| i.store == intent.store && i.id == intent.id)
-            {
-                if existing != &intent {
-                    return Err("custody identity changed; preserve the original intent".into());
-                }
+            let intent_preview = if retry {
+                value.preview.clone()
             } else {
-                value.intent_previews.push(IntentPreview {
-                    store: intent.store.clone(),
-                    id: intent.id.clone(),
-                    preview: if retry {
-                        value.preview.clone()
-                    } else {
-                        question_preview
-                    },
-                });
-                value.intents.push(intent);
-            }
+                question_preview
+            };
+            Self::append_intent(&mut value, &intent, &intent_preview)?;
             serde_json::to_vec(&value).map_err(|e| e.to_string())
         })?;
         let value = self.decode(&bytes, &key)?;
@@ -419,6 +460,66 @@ impl ConsentStore {
             QuestionResult::RevisionChanged(value)
         } else {
             QuestionResult::Current(value)
+        })
+    }
+
+    fn append_intent(
+        value: &mut Consent,
+        intent: &IntentRef,
+        preview: &Preview,
+    ) -> Result<(), String> {
+        if let Some(existing) = value
+            .intents
+            .iter()
+            .find(|i| i.store == intent.store && i.id == intent.id)
+        {
+            if existing != intent {
+                return Err("custody identity changed; preserve the original intent".into());
+            }
+        } else {
+            value.intent_previews.push(IntentPreview {
+                store: intent.store.clone(),
+                id: intent.id.clone(),
+                preview: preview.clone(),
+            });
+            value.intents.push(intent.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unreserve_card(&self, expected: &Consent) -> Result<Consent, String> {
+        self.update(expected, |current| {
+            if expected.state != State::Pending
+                || expected.card != CardState::Reserved
+                || expected.message != 0
+                || current.state != State::Pending
+                || current.message != 0
+                || current.card != CardState::Reserved
+            {
+                return Err("only an unsent reserved card can be unreserved".into());
+            }
+            current.card = CardState::Awaiting;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn interrupt_accepted(
+        &self,
+        expected: &Consent,
+        mut observed: ApplyResult,
+    ) -> Result<Consent, String> {
+        self.update(expected, |current| {
+            if expected.state != State::Accepted
+                || current.state != State::Accepted
+                || current.decision != expected.decision
+            {
+                return Err("interruption requires the current accepted decision".into());
+            }
+            observed.backup = None;
+            observed.detail = Some("apply interrupted; config state re-observed".into());
+            current.state = State::ApplyFailed;
+            current.apply = Some(observed);
+            Ok(())
         })
     }
 

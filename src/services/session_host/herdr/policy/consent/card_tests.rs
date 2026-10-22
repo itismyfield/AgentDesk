@@ -34,6 +34,7 @@ fn consent() -> Consent {
         launch: None,
         settlements: Vec::new(),
         intent_previews: Vec::new(),
+        history: Vec::new(),
     }
 }
 
@@ -187,5 +188,35 @@ fn card_bounds_diagnostics_and_refuses_an_undisplayable_config_path() {
     assert!(
         render(&consent).is_err(),
         "card_undisplayable_path_refused_contract"
+    );
+}
+
+#[test]
+fn card_first_apply_and_duplicate_results_have_distinct_wording() {
+    let mut consent = consent();
+    consent.state = State::Applied;
+    let first = render_result(&consent, ResultKind::FirstApply).unwrap();
+    assert!(
+        first
+            .content
+            .contains("설정을 껐습니다. 보류한 입력을 다시 확인해 세션을 엽니다."),
+        "card_first_apply_design_wording_contract"
+    );
+    assert!(
+        !first.content.contains("이미 적용됨"),
+        "card_first_apply_not_duplicate_contract"
+    );
+    assert!(
+        render(&consent).unwrap().content.contains("이미 적용됨"),
+        "card_duplicate_result_wording_contract"
+    );
+    let failed = binding_failed(&consent).unwrap();
+    assert!(
+        failed.buttons.is_empty()
+            && failed.content.contains("카드 연결 실패")
+            && failed
+                .content
+                .contains("execution-node의 gateway에서 !herdr consent retry"),
+        "card_bind_failure_retry_guidance_contract"
     );
 }

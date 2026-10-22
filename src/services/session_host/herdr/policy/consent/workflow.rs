@@ -216,15 +216,25 @@ impl Workflow<'_> {
         })
     }
 
+    /// Boot recovery runs before this process admits any apply owner.
     pub(crate) fn recover(&self, key: &ConsentKey) -> Result<Option<Transition>, String> {
-        Ok(self.0.load(key)?.map(|consent| {
-            let effect = if consent.state == State::Applied {
-                Effect::ReleaseThenWake
-            } else {
-                Effect::KeepHeld
-            };
-            Transition { consent, effect }
-        }))
+        self.0
+            .load(key)?
+            .map(|consent| {
+                let consent = if consent.state == State::Accepted {
+                    let observed = super::observe_interrupted(&consent)?;
+                    self.0.interrupt_accepted(&consent, observed)?
+                } else {
+                    consent
+                };
+                let effect = if consent.state == State::Applied {
+                    Effect::ReleaseThenWake
+                } else {
+                    Effect::KeepHeld
+                };
+                Ok(Transition { consent, effect })
+            })
+            .transpose()
     }
 }
 

@@ -3,7 +3,7 @@ use super::super::{
     workflow::{Effect, Workflow},
 };
 use super::*;
-use std::{collections::BTreeSet, io::Write, path::PathBuf};
+use std::{io::Write, path::PathBuf};
 
 fn question(id: &str) -> super::super::Question {
     super::super::tests::question(id)
@@ -41,23 +41,23 @@ impl FakeSink {
             pending_on_wake: None,
         }
     }
-    fn effects(&self) -> BTreeSet<String> {
+    fn effects(&self) -> Vec<String> {
         match std::fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => panic!("read fake durable sink: {error}"),
         }
     }
     fn effect(&mut self, operation: &'static str, key: &SettlementKey) -> Result<(), String> {
         self.calls.push(operation);
-        if operation == "wake" && self.fail_wake {
+        if operation == "wake" && std::mem::take(&mut self.fail_wake) {
             return Err("crash after durable release, before wake/ack".into());
         }
         let mut effects = self.effects();
-        effects.insert(format!(
-            "{operation}:{}",
-            serde_json::to_string(key).unwrap()
-        ));
+        let effect = format!("{operation}:{}", serde_json::to_string(key).unwrap());
+        if !effects.contains(&effect) {
+            effects.push(effect);
+        }
         let mut file = std::fs::File::create(&self.path).map_err(|error| error.to_string())?;
         file.write_all(&serde_json::to_vec(&effects).unwrap())
             .map_err(|error| error.to_string())?;
@@ -374,4 +374,169 @@ fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
             "settlement_incomplete_receipt_preserves_snapshot_contract: {missing}"
         );
     }
+}
+
+impl CustodySinkFixture for FakeSink {
+    fn effect_counts(&self, key: &SettlementKey) -> (usize, usize) {
+        let encoded = serde_json::to_string(key).unwrap();
+        let effects = self.effects();
+        (
+            effects
+                .iter()
+                .filter(|effect| **effect == format!("release:{encoded}"))
+                .count(),
+            effects
+                .iter()
+                .filter(|effect| **effect == format!("wake:{encoded}"))
+                .count(),
+        )
+    }
+
+    fn fail_next_wake(&mut self) {
+        self.fail_wake = true;
+    }
+}
+
+#[test]
+fn custody_sink_durable_idempotence_conformance() {
+    let root = tempfile::tempdir().unwrap();
+    custody_sink_conformance(|| FakeSink::new(root.path().join("sink.json")));
+}
+
+// The factory reopens the same durable fixture, including after an injected failure.
+pub(crate) trait CustodySinkFixture: CustodySink {
+    /// Counts observable payload releases and wakes; calls suppressed by dedupe do not count.
+    fn effect_counts(&self, key: &SettlementKey) -> (usize, usize);
+    /// Injects one failure before the next wake has an observable effect.
+    fn fail_next_wake(&mut self);
+}
+
+pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() -> S) {
+    let intent = IntentRef {
+        store: "conformance-custody".into(),
+        id: "intent-1".into(),
+        provider: "conformance-provider".into(),
+        channel: 1,
+        source_message: 2,
+        fifo: 0,
+    };
+    let first = SettlementKey {
+        nonce: "generation-1".into(),
+        store: intent.store.clone(),
+        id: intent.id.clone(),
+    };
+    let mut sink = make();
+    for _ in 0..2 {
+        sink.release(&first, &intent)
+            .expect("conformance first release");
+        sink.wake(&first, &intent).expect("conformance first wake");
+    }
+    assert_eq!(
+        sink.effect_counts(&first),
+        (1, 1),
+        "custody_conformance_repeated_key_has_one_effect_contract"
+    );
+    drop(sink);
+
+    let mut sink = make();
+    assert_eq!(
+        sink.effect_counts(&first),
+        (1, 1),
+        "custody_conformance_effects_survive_recreation_contract"
+    );
+    sink.release(&first, &intent)
+        .expect("conformance release after recreation");
+    sink.wake(&first, &intent)
+        .expect("conformance wake after recreation");
+    assert_eq!(
+        sink.effect_counts(&first),
+        (1, 1),
+        "custody_conformance_recreated_sink_does_not_repeat_payload_contract"
+    );
+
+    let second = SettlementKey {
+        nonce: "generation-2".into(),
+        ..first.clone()
+    };
+    sink.fail_next_wake();
+    sink.release(&second, &intent)
+        .expect("conformance release before wake failure");
+    assert!(
+        sink.wake(&second, &intent).is_err(),
+        "custody_conformance_injected_wake_failure_is_real_contract"
+    );
+    assert_eq!(
+        sink.effect_counts(&second),
+        (1, 0),
+        "custody_conformance_nonce_is_part_of_identity_contract"
+    );
+    drop(sink);
+
+    let mut sink = make();
+    sink.release(&second, &intent)
+        .expect("conformance release replay after wake failure");
+    sink.wake(&second, &intent)
+        .expect("conformance wake replay after failure");
+    assert_eq!(
+        sink.effect_counts(&second),
+        (1, 1),
+        "custody_conformance_failure_replay_has_one_effect_contract"
+    );
+    assert_eq!(
+        sink.effect_counts(&first),
+        (1, 1),
+        "custody_conformance_generation_identity_is_separate_contract"
+    );
+}
+
+#[test]
+fn consent_bulk_waits_for_live_publication_but_not_an_abandoned_marker() {
+    use std::{sync::mpsc, time::Duration};
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let held = store
+        .hold(question("live-writer"), 100)
+        .unwrap()
+        .into_consent();
+    let name = durable::key(&held.key).unwrap();
+    let marker = directory.join(format!("{name}.pending"));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join(format!("{name}.lock")))
+        .unwrap();
+    lock.lock().unwrap();
+    std::fs::write(&marker, b"active publication").unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let reader_root = directory.clone();
+    let reader = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        result_tx
+            .send(ConsentStore::new(Some(reader_root)).load_all())
+            .unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(
+            result_rx.recv_timeout(Duration::from_millis(150)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "consent_bulk_live_marker_waits_for_writer_contract"
+    );
+    std::fs::remove_file(&marker).unwrap();
+    drop(lock);
+    let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    reader.join().unwrap();
+    assert_eq!(
+        result.unwrap(),
+        [held],
+        "consent_bulk_live_writer_finishes_without_failure_contract"
+    );
+    std::fs::write(marker, b"abandoned publication").unwrap();
+    assert!(
+        matches!(store.load_all(), Err(error) if error.contains("policy_publication_pending")),
+        "consent_bulk_abandoned_marker_remains_failure_contract"
+    );
 }

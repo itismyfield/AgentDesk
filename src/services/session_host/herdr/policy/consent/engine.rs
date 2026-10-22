@@ -38,15 +38,22 @@ pub(crate) trait Owner: Send {
     async fn current(&mut self, consent: &Consent) -> Result<Current, String>;
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum SendFailure {
+    Definitive(String),
+    Unknown(String),
+}
+
 #[async_trait::async_trait]
 pub(crate) trait Cards: Send {
-    async fn send(&mut self, card: &card::Card) -> Result<u64, String>;
+    async fn send(&mut self, card: &card::Card) -> Result<u64, SendFailure>;
     async fn replace(&mut self, message: u64, card: &card::Card) -> Result<(), String>;
     async fn disable(&mut self, message: u64) -> Result<(), String>;
 }
 
 pub(crate) struct Engine<'a, S: CustodySink> {
     pub store: &'a ConsentStore,
+    pub local_node: String,
     pub source: Arc<dyn PeerSource>,
     pub owner: &'a mut dyn Owner,
     pub cards: &'a mut dyn Cards,
@@ -59,6 +66,28 @@ impl<S: CustodySink> Engine<'_, S> {
             Ok(()) => original,
             Err(cleanup) => {
                 format!("{original}; disabling unbound consent card also failed: {cleanup}")
+            }
+        }
+    }
+
+    async fn replace_unbound_after(
+        &mut self,
+        consent: &Consent,
+        message: u64,
+        original: String,
+    ) -> String {
+        let replaced = match card::binding_failed(consent) {
+            Ok(card) => self.cards.replace(message, &card).await,
+            Err(error) => Err(error),
+        };
+        match replaced {
+            Ok(()) => original,
+            Err(cleanup) => {
+                self.disable_after(
+                    message,
+                    format!("{original}; replacing unbound consent card also failed: {cleanup}"),
+                )
+                .await
             }
         }
     }
@@ -79,7 +108,12 @@ impl<S: CustodySink> Engine<'_, S> {
                 reserved,
                 current,
                 message,
-            } => workflow.bind(&reserved, &current, message)?,
+            } => match workflow.bind(&reserved, &current, message) {
+                Ok(bound) => bound,
+                Err(error) => {
+                    return Err(self.replace_unbound_after(&reserved, message, error).await);
+                }
+            },
             Event::Decide {
                 expected,
                 current,
@@ -117,26 +151,59 @@ impl<S: CustodySink> Engine<'_, S> {
             },
         };
         if transition.effect == Effect::SendCard {
-            let message = self.cards.send(&card::render(&transition.consent)?).await?;
+            let message = match self.cards.send(&card::render(&transition.consent)?).await {
+                Ok(message) => message,
+                Err(SendFailure::Definitive(error)) => {
+                    return Err(match self.store.unreserve_card(&transition.consent) {
+                        Ok(_) => error,
+                        Err(cleanup) => format!(
+                            "{error}; clearing unsent card reservation also failed: {cleanup}"
+                        ),
+                    });
+                }
+                // The message may exist: retaining the reservation prevents duplicate cards.
+                Err(SendFailure::Unknown(error)) => {
+                    return Err(format!(
+                        "{error}; consent card delivery is unknown; preserve held inputs and use owner consent retry on execution node {}",
+                        transition.consent.key.node
+                    ));
+                }
+            };
             let bound = match self.owner.current(&transition.consent).await {
                 Ok(current) => workflow.bind(&transition.consent, &current, message),
                 Err(error) => Err(error),
             };
             transition = match bound {
                 Ok(bound) => bound,
-                Err(error) => return Err(self.disable_after(message, error).await),
+                Err(error) => {
+                    return Err(self
+                        .replace_unbound_after(&transition.consent, message, error)
+                        .await);
+                }
             };
         }
+        let mut result_kind = card::ResultKind::Existing;
         if transition.effect == Effect::Apply {
             let accepted = &transition.consent;
-            if self.store.load(&accepted.key)?.as_ref() != Some(accepted)
-                || accepted.state != State::Accepted
-            {
-                return Err("accepted consent changed before apply; preserve held inputs".into());
-            }
             let before = prepared.as_ref().and_then(Prepared::before_hash);
             let preflight = async {
                 self.owner.current(accepted).await?.check(accepted, true)?;
+                let latest = self.store.load(&accepted.key)?.ok_or("consent missing")?;
+                if (
+                    latest.nonce.as_str(),
+                    &latest.preview,
+                    &latest.decision,
+                    &latest.state,
+                ) != (
+                    accepted.nonce.as_str(),
+                    &accepted.preview,
+                    &accepted.decision,
+                    &State::Accepted,
+                ) {
+                    return Err(
+                        "accepted consent changed before apply; preserve held inputs".into(),
+                    );
+                }
                 let prepared =
                     prepared.ok_or("current consent preview is required before apply")?;
                 if !prepared.matches_key(&accepted.key) || prepared.token != accepted.preview {
@@ -175,6 +242,7 @@ impl<S: CustodySink> Engine<'_, S> {
             };
             // A failed receipt never reaches the custody sink, even after config publication.
             transition = workflow.receipt(accepted, result)?;
+            result_kind = card::ResultKind::FirstApply;
         }
         match transition.effect {
             Effect::EnableButtons => {
@@ -188,9 +256,7 @@ impl<S: CustodySink> Engine<'_, S> {
                 }
             }
             Effect::ReleaseThenWake => {
-                if self.owner.current(&transition.consent).await?.local_node
-                    != transition.consent.key.node
-                {
+                if self.local_node != transition.consent.key.node {
                     return Err(
                         "consent release requires the execution node; preserve held inputs".into(),
                     );
@@ -201,7 +267,7 @@ impl<S: CustodySink> Engine<'_, S> {
                     self.cards
                         .replace(
                             transition.consent.message,
-                            &card::render(&transition.consent)?,
+                            &card::render_result(&transition.consent, result_kind)?,
                         )
                         .await?;
                 }

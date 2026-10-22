@@ -35,7 +35,7 @@ struct FakeOwner {
     fail: bool,
     fail_after: Option<usize>,
     calls: usize,
-    local_node: Option<String>,
+    append_when_accepted: Option<(ConsentStore, Question)>,
 }
 #[async_trait::async_trait]
 impl Owner for FakeOwner {
@@ -44,11 +44,12 @@ impl Owner for FakeOwner {
         if self.fail || self.fail_after.is_some_and(|limit| self.calls > limit) {
             Err("current owner unavailable".into())
         } else {
-            let mut current = current(consent);
-            if let Some(local_node) = &self.local_node {
-                current.local_node = local_node.clone();
+            if consent.state == State::Accepted
+                && let Some((store, question)) = self.append_when_accepted.take()
+            {
+                store.hold_unbound(question, 102)?;
             }
-            Ok(current)
+            Ok(current(consent))
         }
     }
 }
@@ -58,20 +59,34 @@ struct FakeCards {
     sends: Vec<card::Card>,
     replacements: Vec<card::Card>,
     disabled: Vec<u64>,
+    fail_send: Option<SendFailure>,
+    fail_replace: bool,
+    fail_disable: bool,
 }
 #[async_trait::async_trait]
 impl Cards for FakeCards {
-    async fn send(&mut self, card: &card::Card) -> Result<u64, String> {
+    async fn send(&mut self, card: &card::Card) -> Result<u64, SendFailure> {
         self.sends.push(card.clone());
-        Ok(40)
+        match self.fail_send.take() {
+            Some(error) => Err(error),
+            None => Ok(40),
+        }
     }
     async fn replace(&mut self, _: u64, card: &card::Card) -> Result<(), String> {
         self.replacements.push(card.clone());
-        Ok(())
+        if self.fail_replace {
+            Err("replace cleanup failed".into())
+        } else {
+            Ok(())
+        }
     }
     async fn disable(&mut self, message: u64) -> Result<(), String> {
         self.disabled.push(message);
-        Ok(())
+        if self.fail_disable {
+            Err("disable cleanup failed".into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -121,6 +136,7 @@ struct Rig {
     cards: FakeCards,
     custody: FakeCustody,
     checker_baseline: usize,
+    local_node: String,
 }
 impl Rig {
     async fn new(diagnostics: bool, fail_receipt: bool) -> (Self, Prepared) {
@@ -184,6 +200,7 @@ impl Rig {
                 cards: FakeCards::default(),
                 custody,
                 checker_baseline,
+                local_node: "execution-node".into(),
             },
             prepared,
         )
@@ -221,6 +238,7 @@ impl Rig {
     ) -> Result<Option<Transition>, String> {
         Engine {
             store: &self.store,
+            local_node: self.local_node.clone(),
             source: self.source.clone(),
             owner: &mut self.owner,
             cards: &mut self.cards,
@@ -324,11 +342,16 @@ async fn engine_failed_bind_disables_the_sent_card_without_releasing_or_resendin
         .await
         .is_err()
     );
-    assert_eq!(
-        rig.cards.disabled,
-        vec![40],
-        "engine_failed_bind_disables_card_contract"
+    assert!(
+        rig.cards
+            .replacements
+            .last()
+            .is_some_and(|card| card.buttons.is_empty()
+                && card.content.contains("카드 연결 실패")
+                && card.content.contains("!herdr consent retry")),
+        "engine_failed_bind_replaces_card_with_retry_guidance_contract"
     );
+    assert!(rig.cards.disabled.is_empty());
     let reserved = rig.store.load(&key).unwrap().unwrap();
     assert_eq!(reserved.message, 0);
     rig.handle(Event::Recover(key), None).await.unwrap();
@@ -404,6 +427,45 @@ async fn engine_receipt_failure_after_publication_keeps_all_custody() {
         "engine_receipt_failure_release_zero_contract"
     );
     assert!(rig.custody.woken.is_empty());
+    // An operator repairs the abandoned marker before boot recovery reads the last receipt.
+    let marker = rig._root.path().join("consents").join(format!(
+        "{}.pending",
+        super::super::super::durable::key(&bound.key).unwrap()
+    ));
+    fs::remove_file(marker).unwrap();
+    let recovered = rig
+        .handle(Event::Recover(bound.key.clone()), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.consent.state,
+        State::ApplyFailed,
+        "engine_publication_receipt_failure_has_owner_exit_contract"
+    );
+    let receipt = recovered.consent.apply.as_ref().unwrap();
+    assert_eq!(
+        receipt.before, receipt.after,
+        "engine_interrupted_observes_current_config_contract"
+    );
+    assert!(receipt.backup.is_none());
+    assert_eq!(
+        receipt.detail.as_deref(),
+        Some("apply interrupted; config state re-observed")
+    );
+    let retry = Event::Retry {
+        question: Box::new(rig.question(&bound.preview)),
+        actor: 1,
+        owner: Some(1),
+        local_node: "execution-node".into(),
+        now: 103,
+    };
+    assert_eq!(
+        rig.handle(retry, None).await.unwrap().unwrap().effect,
+        Effect::EnableButtons,
+        "engine_publication_receipt_failure_retry_contract"
+    );
+    assert!(rig.custody.released.is_empty());
 }
 
 #[tokio::test]
@@ -599,7 +661,8 @@ async fn engine_remote_recovery_never_releases_a_durable_applied_receipt() {
         )
         .unwrap()
         .consent;
-    rig.owner.local_node = Some("other-node".into());
+    rig.local_node = "other-node".into();
+    rig.owner.fail = true;
     assert!(
         rig.handle(Event::Recover(bound.key.clone()), None)
             .await
@@ -616,8 +679,18 @@ async fn engine_remote_recovery_never_releases_a_durable_applied_receipt() {
         rig.custody.released.is_empty() && rig.custody.woken.is_empty(),
         "engine_remote_recovery_release_zero_contract"
     );
-    rig.owner.local_node = None;
-    rig.handle(Event::Recover(bound.key), None).await.unwrap();
+    rig.local_node = "execution-node".into();
+    let owner_calls = rig.owner.calls;
+    let recovered = rig.handle(Event::Recover(bound.key), None).await;
+    assert!(
+        recovered.is_ok(),
+        "engine_recovery_independent_of_discord_owner_contract"
+    );
+    recovered.unwrap();
+    assert_eq!(
+        rig.owner.calls, owner_calls,
+        "engine_recovery_does_not_query_discord_owner_contract"
+    );
     assert_eq!(rig.custody.released.len(), 1);
 }
 
@@ -694,5 +767,212 @@ async fn engine_bind_retry_revision_and_missing_recovery_effects_are_interpreted
     assert_eq!(retried.effect, Effect::EnableButtons);
     assert_eq!(rig.cards.sends.len(), 1);
     assert_eq!(rig.calls(), 0);
+    assert!(rig.custody.released.is_empty());
+}
+
+#[tokio::test]
+async fn engine_send_failure_unreserves_and_next_explicit_launch_sends_once() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    rig.cards.fail_send = Some(SendFailure::Definitive("definitive send rejection".into()));
+    let question = rig.question(&prepared.token);
+    let key = question.key.clone();
+    let failed = rig
+        .handle(
+            Event::Hold {
+                question: Box::new(question),
+                now: 100,
+                request: Request::ExplicitLaunch,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "engine_definitive_send_is_failure_contract"
+    );
+    let unsent = rig.store.load(&key).unwrap().unwrap();
+    assert_eq!(
+        unsent.card,
+        super::super::CardState::Awaiting,
+        "engine_definitive_send_unreserves_contract"
+    );
+    assert_eq!(unsent.message, 0);
+    let bound = rig.bound(&prepared.token).await;
+    assert_eq!(bound.card, super::super::CardState::Bound);
+    assert_eq!(
+        rig.cards.sends.len(),
+        2,
+        "engine_next_explicit_launch_sends_once_contract"
+    );
+    assert_eq!(rig.calls(), 0);
+    assert!(rig.custody.released.is_empty());
+}
+
+#[tokio::test]
+async fn engine_unknown_send_keeps_reservation_and_never_resends() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    rig.cards.fail_send = Some(SendFailure::Unknown("response lost".into()));
+    let question = rig.question(&prepared.token);
+    let key = question.key.clone();
+    let failed = rig
+        .handle(
+            Event::Hold {
+                question: Box::new(question),
+                now: 100,
+                request: Request::ExplicitLaunch,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "engine_unknown_send_is_not_success_contract"
+    );
+    assert_eq!(
+        rig.store.load(&key).unwrap().unwrap().card,
+        super::super::CardState::Reserved,
+        "engine_unknown_send_keeps_reservation_contract"
+    );
+    rig.handle(Event::Recover(key), None).await.unwrap();
+    let held = rig.bound(&prepared.token).await;
+    assert_eq!(held.message, 0);
+    assert_eq!(
+        rig.cards.sends.len(),
+        1,
+        "engine_unknown_send_never_resends_contract"
+    );
+    assert!(rig.custody.released.is_empty());
+}
+
+#[tokio::test]
+async fn engine_bind_failure_preserves_original_error_and_reports_cleanup() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    rig.owner.fail = true;
+    rig.cards.fail_replace = true;
+    rig.cards.fail_disable = true;
+    let question = rig.question(&prepared.token);
+    let failed = rig
+        .handle(
+            Event::Hold {
+                question: Box::new(question),
+                now: 100,
+                request: Request::ExplicitLaunch,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "engine_bind_failure_is_not_success_contract"
+    );
+    let error = failed.unwrap_err();
+    assert!(
+        error.starts_with("current owner unavailable")
+            && error.contains("replace cleanup failed")
+            && error.contains("disable cleanup failed"),
+        "engine_bind_failure_preserves_original_and_cleanup_contract"
+    );
+    assert!(rig.cards.replacements.last().unwrap().buttons.is_empty());
+    assert_eq!(rig.cards.disabled, vec![40]);
+}
+
+#[tokio::test]
+async fn engine_concurrent_append_between_decide_and_apply_records_receipt() {
+    for same_preview in [true, false] {
+        let (mut rig, prepared) = Rig::new(false, false).await;
+        let bound = rig.bound(&prepared.token).await;
+        let mut question = rig.question(&prepared.token);
+        question.intent.id = "concurrent".into();
+        question.intent.fifo = 11;
+        question.intent.channel = 4;
+        question.channel = 4;
+        if !same_preview {
+            question.preview.revision += 1;
+        }
+        rig.owner.append_when_accepted = Some((
+            ConsentStore::new(Some(rig._root.path().join("consents"))),
+            question,
+        ));
+        let applied = rig
+            .handle(Rig::decide(&bound, true), Some(prepared))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            applied.consent.state,
+            State::Applied,
+            "engine_concurrent_append_identity_not_full_consent_contract"
+        );
+        let current = rig.store.load(&bound.key).unwrap().unwrap();
+        assert_eq!(
+            current
+                .intents
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            ["original", "concurrent"],
+            "engine_concurrent_append_preserves_fifo_contract"
+        );
+        assert_eq!(
+            rig.calls(),
+            2,
+            "engine_concurrent_append_one_apply_contract"
+        );
+        assert!(current.apply.as_ref().unwrap().after.is_some());
+        assert_eq!(
+            rig.custody.released.len(),
+            if same_preview { 2 } else { 1 },
+            "engine_concurrent_append_release_matching_preview_only_contract"
+        );
+        assert!(
+            rig.cards
+                .replacements
+                .last()
+                .unwrap()
+                .content
+                .contains("설정을 껐습니다. 보류한 입력을 다시 확인해 세션을 엽니다.")
+        );
+        assert!(
+            !rig.cards
+                .replacements
+                .last()
+                .unwrap()
+                .content
+                .contains("이미 적용됨"),
+            "engine_fresh_apply_uses_first_result_contract"
+        );
+    }
+}
+
+#[tokio::test]
+async fn engine_explicit_bind_failure_also_replaces_the_unbound_card() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    let reserved = Workflow(&rig.store)
+        .hold(rig.question(&prepared.token), 100, Request::ExplicitLaunch)
+        .unwrap()
+        .consent;
+    let mut changed = current(&reserved);
+    changed.owner = None;
+    let failed = rig
+        .handle(
+            Event::Bind {
+                reserved: Box::new(reserved),
+                current: Box::new(changed),
+                message: 40,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        failed.is_err(),
+        "engine_explicit_bind_failure_is_not_success_contract"
+    );
+    assert!(
+        rig.cards
+            .replacements
+            .last()
+            .is_some_and(|card| card.buttons.is_empty() && card.content.contains("카드 연결 실패")),
+        "engine_explicit_bind_failure_replaces_card_contract"
+    );
     assert!(rig.custody.released.is_empty());
 }

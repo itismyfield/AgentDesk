@@ -57,8 +57,35 @@ impl Consent {
 }
 
 impl ConsentStore {
+    fn inventory_keys(&self) -> Result<Vec<String>, String> {
+        let initial = self.0.keys();
+        if !matches!(&initial, Err(error) if error.contains(": policy_publication_pending:")) {
+            return initial;
+        }
+        // Wait on an active publisher's existing lock; an abandoned marker still refuses the read.
+        let root = self
+            .0
+            .0
+            .as_deref()
+            .ok_or_else(|| self.0.failure("", "store root unavailable"))?;
+        for entry in std::fs::read_dir(root).map_err(|error| self.0.failure("", error))? {
+            let path = entry.map_err(|error| self.0.failure("", error))?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "pending")
+            {
+                let name = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| self.0.failure("", "invalid pending snapshot name"))?;
+                self.0.read_stable(name)?;
+            }
+        }
+        self.0.keys()
+    }
+
     pub(crate) fn load_all(&self) -> Result<Vec<Consent>, String> {
-        self.0.keys()?.into_iter().map(|name| {
+        self.inventory_keys()?.into_iter().map(|name| {
             let bytes = self.0.read_stable(&name)?.ok_or_else(|| self.0.failure(&name, "snapshot disappeared during inventory; retry the read"))?;
             let raw: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|error| self.0.failure(&name, format!("consent_snapshot_corrupt: {error}")))?;
@@ -171,4 +198,4 @@ pub(crate) fn release(
 
 #[cfg(test)]
 #[path = "settlement_tests.rs"]
-mod tests;
+pub(crate) mod tests;

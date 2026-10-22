@@ -281,7 +281,19 @@ fn workflow_denial_expiry_and_failed_apply_preserve_fifo_without_requestion() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("consents");
         let store = ConsentStore::new(Some(directory.clone()));
-        let bound = bound(&store);
+        let bound = if phase == "pending" {
+            Workflow(&store)
+                .hold(question("first"), 100, Request::Automatic)
+                .unwrap()
+                .consent
+        } else if phase == "reserved" {
+            Workflow(&store)
+                .hold(question("first"), 100, Request::ExplicitLaunch)
+                .unwrap()
+                .consent
+        } else {
+            bound(&store)
+        };
         let terminal = match phase {
             "denied" => Workflow(&store)
                 .decide(&bound, &current(&bound), 1, false, 110)
@@ -336,7 +348,14 @@ fn workflow_denial_expiry_and_failed_apply_preserve_fifo_without_requestion() {
             },
             "workflow_restart_only_applied_releases_contract: {phase}"
         );
-        assert_eq!(recovered.consent.state, terminal.consent.state);
+        assert_eq!(
+            recovered.consent.state,
+            if phase == "accepted" {
+                State::ApplyFailed
+            } else {
+                terminal.consent.state.clone()
+            }
+        );
         assert_eq!(
             recovered
                 .consent
@@ -591,7 +610,6 @@ fn workflow_retry_never_discards_an_in_flight_or_completed_apply() {
         .receipt(&accepted, result(true))
         .unwrap()
         .consent;
-    let before = std::fs::read(&path).unwrap();
     let retry = Workflow(&store)
         .retry(question("second"), 1, Some(1), "one", 130)
         .unwrap();
@@ -601,12 +619,300 @@ fn workflow_retry_never_discards_an_in_flight_or_completed_apply() {
         "workflow_applied_retry_already_applied_contract"
     );
     assert_eq!(
-        retry.consent, applied,
+        (
+            &retry.consent.nonce,
+            &retry.consent.preview,
+            &retry.consent.decision,
+            &retry.consent.apply
+        ),
+        (
+            &applied.nonce,
+            &applied.preview,
+            &applied.decision,
+            &applied.apply
+        ),
         "workflow_applied_retry_preserves_history_contract"
     );
     assert_eq!(
+        retry.consent.intents.len(),
+        2,
+        "workflow_applied_retry_records_its_intent_contract"
+    );
+    let before = std::fs::read(&path).unwrap();
+    Workflow(&store)
+        .retry(question("second"), 1, Some(1), "one", 131)
+        .unwrap();
+    assert_eq!(
         std::fs::read(&path).unwrap(),
         before,
-        "workflow_applied_retry_bytes_unchanged_contract"
+        "workflow_applied_duplicate_retry_bytes_unchanged_contract"
     );
+}
+
+#[test]
+fn workflow_interrupted_accept_has_an_owner_exit() {
+    use sha2::{Digest, Sha256};
+    for bytes in [
+        None,
+        Some(b"resume = true".as_slice()),
+        Some(b"resume = false".as_slice()),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("consents");
+        let store = ConsentStore::new(Some(directory.clone()));
+        let mut request = question("first");
+        request.key.config = root.path().join("config.toml");
+        if let Some(bytes) = bytes {
+            std::fs::write(&request.key.config, bytes).unwrap();
+        }
+        let reserved = Workflow(&store)
+            .hold(request, 100, Request::ExplicitLaunch)
+            .unwrap();
+        let bound = Workflow(&store)
+            .bind(&reserved.consent, &current(&reserved.consent), 40)
+            .unwrap()
+            .consent;
+        let accepted = Workflow(&store)
+            .decide(&bound, &current(&bound), 1, true, 110)
+            .unwrap()
+            .consent;
+        drop(store);
+        let reopened = ConsentStore::new(Some(directory));
+        let recovered = Workflow(&reopened).recover(&accepted.key).unwrap().unwrap();
+        assert_eq!(
+            recovered.consent.state,
+            State::ApplyFailed,
+            "workflow_interrupted_accept_has_owner_exit_contract"
+        );
+        assert_eq!(recovered.effect, Effect::KeepHeld);
+        let receipt = recovered.consent.apply.as_ref().unwrap();
+        let observed: Option<[u8; 32]> = bytes.map(|bytes| Sha256::digest(bytes).into());
+        assert_eq!(
+            (receipt.before, receipt.after),
+            (observed, observed),
+            "workflow_interrupted_receipt_reobserves_logical_config_contract"
+        );
+        assert_eq!(receipt.backup, None);
+        assert_eq!(
+            receipt.detail.as_deref(),
+            Some("apply interrupted; config state re-observed")
+        );
+        assert_eq!(
+            recovered.consent.intents, accepted.intents,
+            "workflow_interruption_preserves_fifo_contract"
+        );
+        let mut retry_request = question("second");
+        retry_request.key = accepted.key.clone();
+        let retry = Workflow(&reopened)
+            .retry(retry_request, 1, Some(1), "one", 120)
+            .unwrap();
+        assert_eq!(
+            retry.effect,
+            Effect::SendCard,
+            "workflow_interrupted_accept_retry_sends_card_contract"
+        );
+    }
+}
+
+#[test]
+fn workflow_applied_then_new_revision_retry_opens_a_new_generation_preserving_history() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let bound = bound(&store);
+    let accepted = Workflow(&store)
+        .decide(&bound, &current(&bound), 1, true, 110)
+        .unwrap();
+    let applied = Workflow(&store)
+        .receipt(&accepted.consent, result(true))
+        .unwrap()
+        .consent;
+    let settled = store
+        .acknowledge_discard(&applied, &applied.intents[0])
+        .unwrap();
+    let old_settlements = settled.settlements.clone();
+    let old_preview_entry = settled.intent_previews[0].clone();
+    let mut changed = question("second");
+    changed.preview.revision += 1;
+    changed.preview.target_hash = [9; 32];
+    let held = Workflow(&store)
+        .hold(changed, 120, Request::ExplicitLaunch)
+        .unwrap();
+    assert_eq!(held.effect, Effect::RevisionChanged);
+    let mut retry_request = question("retry");
+    retry_request.preview.revision += 1;
+    retry_request.preview.target_hash = [9; 32];
+    let retry = Workflow(&store)
+        .retry(retry_request, 1, Some(1), "one", 130)
+        .unwrap();
+    assert_eq!(
+        retry.effect,
+        Effect::SendCard,
+        "workflow_applied_new_revision_opens_generation_contract"
+    );
+    assert_eq!(retry.consent.state, State::Pending);
+    assert_ne!(retry.consent.nonce, applied.nonce);
+    assert_eq!(
+        retry.consent.history.len(),
+        1,
+        "workflow_applied_generation_preserves_prior_receipt_contract"
+    );
+    let previous = &retry.consent.history[0];
+    assert_eq!(
+        (
+            &previous.nonce,
+            &previous.preview,
+            previous.decision,
+            &previous.apply
+        ),
+        (
+            &applied.nonce,
+            &applied.preview,
+            applied.decision,
+            &applied.apply
+        )
+    );
+    assert_eq!(
+        previous.apply.as_ref().unwrap().backup,
+        Some("/backup/config".into())
+    );
+    assert_eq!(
+        retry.consent.settlements, old_settlements,
+        "workflow_generation_preserves_settled_refs_contract"
+    );
+    assert_eq!(
+        retry.consent.intent_previews[0], old_preview_entry,
+        "workflow_generation_never_rewrites_settled_preview_contract"
+    );
+    assert_eq!(retry.consent.intents[..2], held.consent.intents);
+    assert_eq!(
+        retry.consent.intents[2].id, "retry",
+        "workflow_generation_records_retry_intent_contract"
+    );
+    let reopened = ConsentStore::new(Some(directory));
+    assert_eq!(
+        reopened.load(&retry.consent.key).unwrap().unwrap(),
+        retry.consent,
+        "workflow_generation_history_survives_restart_contract"
+    );
+}
+
+#[test]
+fn workflow_old_schema_without_history_still_reads_and_retries() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let bound = bound(&store);
+    let key = crate::services::session_host::herdr::policy::durable::key(&bound.key).unwrap();
+    let path = directory.join(format!("{key}.json"));
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("history");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let loaded = store.load(&bound.key).unwrap().unwrap();
+    assert!(
+        loaded.history.is_empty(),
+        "workflow_old_schema_defaults_history_contract"
+    );
+    assert_eq!(loaded.intents, bound.intents);
+    let retry = Workflow(&store)
+        .retry(question("second"), 1, Some(1), "one", 120)
+        .unwrap();
+    assert_eq!(
+        retry.effect,
+        Effect::SendCard,
+        "workflow_old_schema_has_owner_exit_contract"
+    );
+}
+
+#[test]
+fn workflow_each_unfinished_state_has_a_retry_exit_after_boot_recovery() {
+    for phase in [
+        "pending",
+        "reserved",
+        "denied",
+        "expired",
+        "accepted",
+        "apply_failed",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let store = ConsentStore::new(Some(root.path().join("consents")));
+        let bound = if phase == "pending" {
+            Workflow(&store)
+                .hold(question("first"), 100, Request::Automatic)
+                .unwrap()
+                .consent
+        } else if phase == "reserved" {
+            Workflow(&store)
+                .hold(question("first"), 100, Request::ExplicitLaunch)
+                .unwrap()
+                .consent
+        } else {
+            bound(&store)
+        };
+        let terminal = match phase {
+            "denied" => {
+                Workflow(&store)
+                    .decide(&bound, &current(&bound), 1, false, 110)
+                    .unwrap()
+                    .consent
+            }
+            "expired" => store.expire(&bound, bound.expires).unwrap(),
+            "accepted" | "apply_failed" => {
+                let accepted = Workflow(&store)
+                    .decide(&bound, &current(&bound), 1, true, 110)
+                    .unwrap()
+                    .consent;
+                if phase == "apply_failed" {
+                    store.record_apply(&accepted, result(false)).unwrap()
+                } else {
+                    accepted
+                }
+            }
+            _ => bound,
+        };
+        let recovered = Workflow(&store).recover(&terminal.key).unwrap().unwrap();
+        assert_ne!(
+            recovered.consent.state,
+            State::Accepted,
+            "workflow_unfinished_state_recovers_to_owner_exit_contract: {phase}"
+        );
+        let retry = Workflow(&store)
+            .retry(question("second"), 1, Some(1), "one", 120)
+            .unwrap();
+        assert_eq!(
+            retry.effect,
+            Effect::SendCard,
+            "workflow_unfinished_state_owner_exit_contract: {phase}"
+        );
+        assert_eq!(retry.consent.intents.len(), 2);
+    }
+}
+
+#[test]
+fn workflow_interruption_cas_never_overwrites_a_receipt_or_new_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(root.path().join("consents")));
+    let bound = bound(&store);
+    let accepted = Workflow(&store)
+        .decide(&bound, &current(&bound), 1, true, 110)
+        .unwrap()
+        .consent;
+    let applied = store.record_apply(&accepted, result(true)).unwrap();
+    assert!(
+        store.interrupt_accepted(&accepted, result(false)).is_err(),
+        "workflow_interruption_never_overwrites_receipt_contract"
+    );
+    assert_eq!(store.load(&bound.key).unwrap().unwrap(), applied);
+    let mut changed = question("second");
+    changed.preview.revision += 1;
+    let retry = Workflow(&store)
+        .retry(changed, 1, Some(1), "one", 120)
+        .unwrap()
+        .consent;
+    assert!(
+        store.interrupt_accepted(&accepted, result(false)).is_err(),
+        "workflow_interruption_cas_rejects_old_generation_contract"
+    );
+    assert_eq!(store.load(&bound.key).unwrap().unwrap(), retry);
 }
