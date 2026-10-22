@@ -222,9 +222,8 @@ fn deploy_ready(body: &Value, jq: bool) -> bool {
     }
 }
 
-/// Deploy readiness refuses a stalled actor's public body with and without jq, which names no
-/// channel; the same node without that actor is ready, so the new reason is what refuses it. An
-/// actor that answers 1.2s into the request is still ready: its first read may use the deadline.
+/// With and without jq, readiness refuses a stalled actor's public body, which names no channel,
+/// and accepts the same node without that actor or with one answering 1.2s into the request.
 #[test]
 fn health_timeout_consumers_keep_existing_gates() {
     let _root = crate::config::TestRuntimeRootGuard::new();

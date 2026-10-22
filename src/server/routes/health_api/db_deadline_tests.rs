@@ -595,10 +595,8 @@ async fn health_handler_snapshot_delay_marks_bulk_unmeasured() {
     db.finish().await;
 }
 
-/// A cut or cancelled request leaves no probe in flight and starts nothing afterwards, and the
-/// next request after the stall clears reads correct values through the same pool. Before that,
-/// repeated requests on the warmed server add no connection or thread; on unix the test reruns
-/// alone in its own process, so the threads counted are its own.
+/// Repeated requests add no connection or thread; a cut or cancelled one leaves no probe in flight,
+/// and the next reads correctly. On unix it reruns alone, so the threads counted are its own.
 #[test]
 fn health_handler_timeout_drops_all_db_guards() {
     #[cfg(unix)]

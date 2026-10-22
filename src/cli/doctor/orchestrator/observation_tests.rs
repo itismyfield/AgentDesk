@@ -632,9 +632,8 @@ async fn doctor_session_lookup_timeout_never_posts_repair() {
     db.drop().await;
 }
 
-/// A snapshot read that did not answer leaves its row out of `mailboxes`, so the active count is
-/// withheld as a warning whatever its excess, and that warning repairs nothing; a complete
-/// reading's excess and every row's own finding and repair still stand.
+/// An unanswered snapshot read withholds the active count as a warning whatever its excess, and
+/// that warning repairs nothing; a complete count's excess and each row's own finding still stand.
 #[test]
 fn unanswered_snapshot_read_withholds_only_the_active_count() {
     let failure = |provider: &str, read: &str| {

@@ -263,9 +263,8 @@ async fn assert_answers_after_release(registry: &HealthRegistry, shared: &Arc<Sh
     assert_eq!(read_failures(&json), Vec::new(), "a new registry");
 }
 
-/// A build that starts 800ms after its request set the deadline still ends by that deadline: the
-/// reconfirm that never answers is cut there and the other channels keep their entries. Starting
-/// 350ms later still changes nothing, as the actor stops only once its first read is answered.
+/// A build that starts 800ms (or 350ms more) after its request set the deadline still ends by it:
+/// the reconfirm held at the barrier is cut there and the other channels keep their entries.
 #[test]
 fn health_snapshot_by_late_start_keeps_the_request_deadline() {
     let _root = crate::config::TestRuntimeRootGuard::new();
