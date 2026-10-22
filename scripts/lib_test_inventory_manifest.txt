@@ -10653,6 +10653,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_idle_refusal_logs_its_judged_inputs_once
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_shares_the_tmux_pane_evidence
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
@@ -14456,6 +14457,8 @@ services::tui_prompt_dedupe::tests::watcher_snapshot_generation_clear_preserves_
 services::tui_prompt_dedupe::tests::withdrawing_an_earlier_native_reservation_keeps_the_newer_one
 services::tui_steering::tests::legacy_prompt_never_enters_native_tui_route_or_probes_pane
 services::tui_steering::tests::unsafe_snapshots_fail_closed_before_injection
+services::tui_turn_state::claude_meta::tests::a_running_tool_reads_as_streaming_past_trailing_session_metadata
+services::tui_turn_state::claude_meta::tests::session_metadata_never_uncovers_an_idle_or_submitted_turn
 services::tui_turn_state::completion_scan::tests::a_turns_own_abort_ends_it_for_the_completion_scan
 services::tui_turn_state::tests::claude_assistant_after_permission_mode_is_streaming
 services::tui_turn_state::tests::claude_assistant_with_only_thinking_content_stays_streaming

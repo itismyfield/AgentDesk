@@ -3450,6 +3450,8 @@ src/
 │   │   ├── synthetic_prompt.rs
 │   │   └── tests.rs
 │   ├── tui_turn_state/
+│   │   ├── claude_meta.rs
+│   │   ├── claude_meta_tests.rs
 │   │   └── completion_scan.rs
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
