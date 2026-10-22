@@ -513,7 +513,7 @@ impl ConsentStore {
         })
     }
 
-    pub(in crate::services::session_host::herdr::policy::consent) fn interrupt_accepted(
+    fn interrupt_accepted(
         &self,
         expected: &Consent,
         mut observed: ApplyResult,

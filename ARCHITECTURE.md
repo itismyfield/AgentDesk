@@ -1624,7 +1624,8 @@ src/
 │   │   │   │   ├── service_tests.rs
 │   │   │   │   ├── startup.rs
 │   │   │   │   ├── startup_tests.rs
-│   │   │   │   └── transport.rs
+│   │   │   │   ├── transport.rs
+│   │   │   │   └── transport_tests.rs
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
