@@ -258,8 +258,11 @@ fn live_custody_replays_a_lost_response_and_wake_without_recreating_payload() {
             };
             let effects = Arc::new(Mutex::new(0usize));
             let counts = effects.clone();
+            let kicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let kick_calls = kicks.clone();
             let _kick = queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
                 move |shared, provider, channel, _| {
+                    kick_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let counts = counts.clone();
                     Box::pin(async move {
                         let taken = shared
@@ -305,6 +308,11 @@ fn live_custody_replays_a_lost_response_and_wake_without_recreating_payload() {
                 *effects.lock().unwrap(),
                 1,
                 "live_custody_replayed_wake_never_recreates_payload_contract"
+            );
+            assert_eq!(
+                kicks.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "live_custody_replay_never_kicks_an_absent_original_contract"
             );
             assert!(
                 shared
