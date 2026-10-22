@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "6e908fba7a75119d63ae0be5855ec1acf3333a61",
+  "measured_at_sha": "d19231a4d97e01a79bd78793d453e4e23477f7a9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -43830,24 +43830,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:1562aa66d5e81f7f07ec57991e1ad291eca6ad643ed64e20207b5240a83a4188"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:20cd6022cc60d033435ca16cc19c806576679265177153b5df36081945038d55"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:23f4b371c7c8e552ef31c164a507e5eb36910e15934f30052b5c59a9b77541b1"
     },
     {
@@ -43857,7 +43839,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:46d01b402ab64b885f78577477d72c6d3e986d7e71a49a1ae0b52fec5c77e097"
+      "fingerprint": "sha256:536e6f2c834745a6b01ed16dab0d0eced91ac9a661cec49e7796359922b9398e"
     },
     {
       "root": "src",
@@ -43867,24 +43849,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:69eac84b85e835af8f8caa51c12a8d9366ad34717d70872939e7620ad16bbd88"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:7c723fa797ed13f9279f815b1a423718f8f97087c6b3f3f2c6792ae4c423c155"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:7eaa6b316c1fe2c515bb6794ec40e454ab690d4a74aa84261d39e01c5ece9285"
     },
     {
       "root": "src",
@@ -43911,16 +43875,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d47bbf199f091e713ab09fc38d9cc02dfd45b66f86dd5e8e21a5147590477751"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:8e5cfb09e18091ae1eb23fce4e879a437e29e6b435fd9362d88775afed27de8a"
+      "fingerprint": "sha256:e762d7d632dd7786ae4ad6075185023b989207eba3ebd6195be008f46cfa23af"
     },
     {
       "root": "src",
@@ -43956,15 +43911,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:049d803b7e76426b60679c4f0ce7f3d83aa612a51ffe6eb032af213353a26d8f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:21db218fb5aa7c91f496b6fcf2e7f811a84fac950e69d003f745dcbc6e9be10c"
     },
     {
@@ -43992,34 +43938,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:61de24c5bec78f2356db261e98616556570092b25d42d98b2b06ee08d607ad24"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:70cc0ddc43d91e1c9147241544672df19882e4958d57e5f0bb84edcecf9bb329"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:786a4d8919be4360d34e7a8f404d9704b49ad1cbfd35bcd47eacf0347443dae5"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:7a5ab8f1ca31463a8eb142ca628d67f5777f4cae2230b301e60780412da807c1"
     },
     {
       "root": "src",
@@ -44043,10 +43962,10 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/tui_o/exact_pg_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
       "classification": "STATIC",
-      "fingerprint": "sha256:c9b2c1b6d2bef66018750929bdd7787f70344bae16655ef2bf06b67b77dfb360"
+      "fingerprint": "sha256:c5b0eb69a17b61f8de34e0f80be53557d9bc80667c3b71e5c964b75e3b094259"
     },
     {
       "root": "src",
