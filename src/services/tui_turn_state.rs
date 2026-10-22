@@ -7,6 +7,8 @@ use crate::services::provider::ProviderKind;
 
 const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
 
+#[path = "tui_turn_state/claude_meta.rs"]
+mod claude_meta;
 #[path = "tui_turn_state/completion_scan.rs"]
 mod completion_scan;
 #[cfg(test)]
@@ -273,13 +275,7 @@ pub(crate) fn runtime_binding_turn_state(
 }
 
 pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
-    observe_jsonl_turn_state(
-        path,
-        claude_envelope_turn_state,
-        claude_partial_turn_state,
-        MalformedJsonlLinePolicy::FallbackToPrevious,
-        false,
-    )
+    claude_meta::observe(path)
 }
 
 pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
