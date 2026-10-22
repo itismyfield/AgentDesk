@@ -444,7 +444,15 @@ async fn legacy_launch_fresh_and_pending_keep_e7_order_and_never_require_policy_
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     seed_row(&pool, None).await;
-    let host = Arc::new(PolicyHost::new(&pool, EndpointMode::LegacyDedicated));
+    let temporary = tempfile::tempdir().unwrap();
+    let directory = temporary.path().join("grants");
+    let mut fixture = PolicyHost::new(&pool, EndpointMode::LegacyDedicated);
+    fixture.grants.invalid_file_store = Some(
+        crate::services::session_host::policy::grant_store::FileGrantStore::new(Some(
+            directory.clone(),
+        )),
+    );
+    let host = Arc::new(fixture);
     *host.inner.evidence.lock().unwrap() = Err(EvidenceGap::NoneYet);
     let first = launch_herdr_session(
         &pool,
@@ -507,6 +515,10 @@ async fn legacy_launch_fresh_and_pending_keep_e7_order_and_never_require_policy_
             })
         ),
         "legacy_pending_result_unchanged_contract: {retry:?}"
+    );
+    assert!(
+        !directory.exists(),
+        "legacy_launch_policy_file_creation_zero_contract"
     );
     pool.close().await;
     db.drop().await;
