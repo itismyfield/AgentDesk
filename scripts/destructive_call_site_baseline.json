@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "ae5422a7693ec9b688d1c0e24bd17d426d15fa1a",
+  "measured_at_sha": "fbaf9df3544f6ed08ad23f4c18c1c9491a87478c",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -52,7 +52,6 @@
         "src/services/discord/runtime_bootstrap/gateway_lease.rs": 1,
         "src/services/discord/task_supervisor/watcher_completion_tests.rs": 1,
         "src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs": 1,
-        "src/services/discord/tmux_watcher/codex_replacement_tests.rs": 1,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
         "src/services/discord/tmux_watcher/streaming_harness_tests.rs": 1,
         "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 2,

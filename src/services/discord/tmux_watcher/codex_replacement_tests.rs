@@ -393,6 +393,7 @@ async fn run_replacement_case(case: ReplacementCase, name: &str) {
     let mut current = managed_row(&native, 102);
     current.turn_nonce = token.turn_nonce().map(str::to_owned);
     inflight::save_inflight_state(&current).unwrap();
+    // The failure bridge receives this exact token registered for the current mailbox episode.
     if case == ReplacementCase::WatcherExitThenCreateFailure {
         assert!(
             discord::mailbox_try_start_turn(
@@ -629,7 +630,7 @@ async fn run_replacement_case(case: ReplacementCase, name: &str) {
         .await;
     }
     if !watcher_joined {
-        flags.0.store(true, Ordering::Release);
+        crate::services::discord::tmux::tmux_watcher::cancel_for_test(&flags.0, Ordering::Release);
         tokio::time::timeout(Duration::from_secs(10), &mut watcher)
             .await
             .expect("watcher did not stop")
@@ -852,7 +853,10 @@ async fn cancel_incumbent_in_replacement_for_test(
         exit_before, 0,
         "the real incumbent must still be running at the create gap"
     );
-    watcher_cancel.store(true, Ordering::Release);
+    crate::services::discord::tmux::tmux_watcher::cancel_for_test(
+        watcher_cancel,
+        Ordering::Release,
+    );
     tokio::time::timeout(Duration::from_secs(10), watcher)
         .await
         .expect("watcher-only cancellation did not finish")
