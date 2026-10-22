@@ -545,6 +545,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/effect_read_defer_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs'

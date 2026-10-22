@@ -166,6 +166,9 @@ impl Drop for FailureLogs {
         let bytes = self.0.0.lock().unwrap_or_else(|error| error.into_inner());
         let markers = [
             "[turn_presence] dequeue_held",
+            "[turn_presence] unbound observation superseded",
+            "[turn_presence] superseded reading not published",
+            "unbound activity observation",
             "[turn_presence] unbound hold leaf",
             "Deferred drain: one-shot kick for channel",
             "Deferred drain: kickoff already active for channel; coalescing duplicate request",
