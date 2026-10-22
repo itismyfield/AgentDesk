@@ -54,7 +54,10 @@ impl FakeSink {
             return Err("crash after durable release, before wake/ack".into());
         }
         let mut effects = self.effects();
-        let effect = format!("{operation}:{}", serde_json::to_string(key).unwrap());
+        let effect = format!(
+            "{operation}:{}",
+            serde_json::to_string(&(&key.store, &key.id)).unwrap()
+        );
         if !effects.contains(&effect) {
             effects.push(effect);
         }
@@ -223,7 +226,7 @@ fn consent_bulk_inventory_distinguishes_absence_unknown_newer_and_corruption() {
     for (bytes, expected) in [
         (b"{".to_vec(), "consent_snapshot_corrupt"),
         (
-            br#"{"schema":2,"future":true}"#.to_vec(),
+            br#"{"schema":3,"future":true}"#.to_vec(),
             "consent_snapshot_newer",
         ),
     ] {
@@ -378,7 +381,7 @@ fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
 
 impl CustodySinkFixture for FakeSink {
     fn effect_counts(&self, key: &SettlementKey) -> (usize, usize) {
-        let encoded = serde_json::to_string(key).unwrap();
+        let encoded = serde_json::to_string(&(&key.store, &key.id)).unwrap();
         let effects = self.effects();
         (
             effects
@@ -405,7 +408,7 @@ fn custody_sink_durable_idempotence_conformance() {
 
 // The factory reopens the same durable fixture, including after an injected failure.
 pub(crate) trait CustodySinkFixture: CustodySink {
-    /// Counts observable payload releases and wakes; calls suppressed by dedupe do not count.
+    /// Counts total observable effects by (store, id) across all nonces; deduped calls do not count.
     fn effect_counts(&self, key: &SettlementKey) -> (usize, usize);
     /// Injects one failure before the next wake has an observable effect.
     fn fail_next_wake(&mut self);
@@ -454,38 +457,54 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
         "custody_conformance_recreated_sink_does_not_repeat_payload_contract"
     );
 
-    let second = SettlementKey {
+    let another_nonce = SettlementKey {
         nonce: "generation-2".into(),
         ..first.clone()
     };
+    // The receipt may change, but a custody reference still names the same payload.
+    let _ = sink.release(&another_nonce, &intent);
+    let _ = sink.wake(&another_nonce, &intent);
+    assert_eq!(
+        sink.effect_counts(&another_nonce),
+        (1, 1),
+        "custody_conformance_same_reference_never_repeats_across_nonces_contract"
+    );
+
+    let failed_intent = IntentRef {
+        id: "intent-2".into(),
+        ..intent.clone()
+    };
+    let failed = SettlementKey {
+        id: failed_intent.id.clone(),
+        ..first.clone()
+    };
     sink.fail_next_wake();
-    sink.release(&second, &intent)
-        .expect("conformance release before wake failure");
+    sink.release(&failed, &failed_intent)
+        .expect("release before failure");
     assert!(
-        sink.wake(&second, &intent).is_err(),
+        sink.wake(&failed, &failed_intent).is_err(),
         "custody_conformance_injected_wake_failure_is_real_contract"
     );
     assert_eq!(
-        sink.effect_counts(&second),
+        sink.effect_counts(&failed),
         (1, 0),
-        "custody_conformance_nonce_is_part_of_identity_contract"
+        "custody_conformance_release_survives_lost_wake_contract"
     );
     drop(sink);
-
     let mut sink = make();
-    sink.release(&second, &intent)
-        .expect("conformance release replay after wake failure");
-    sink.wake(&second, &intent)
-        .expect("conformance wake replay after failure");
+    sink.release(&failed, &failed_intent)
+        .expect("failure replay release");
+    sink.wake(&failed, &failed_intent)
+        .expect("failure replay wake");
     assert_eq!(
-        sink.effect_counts(&second),
+        sink.effect_counts(&failed),
         (1, 1),
         "custody_conformance_failure_replay_has_one_effect_contract"
     );
     assert_eq!(
         sink.effect_counts(&first),
         (1, 1),
-        "custody_conformance_generation_identity_is_separate_contract"
+        "custody_conformance_distinct_reference_is_independent_contract"
     );
 }
 
@@ -539,4 +558,89 @@ fn consent_bulk_waits_for_live_publication_but_not_an_abandoned_marker() {
         matches!(store.load_all(), Err(error) if error.contains("policy_publication_pending")),
         "consent_bulk_abandoned_marker_remains_failure_contract"
     );
+}
+
+#[test]
+fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
+    for fail_ack in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("consents");
+        let store = ConsentStore::new(Some(directory.clone()));
+        let applied = applied(&store);
+        let marker = directory.join(format!("{}.pending", durable::key(&applied.key).unwrap()));
+        let mut sink = FakeSink::new(root.path().join("sink.json"));
+        if fail_ack {
+            sink.pending_on_wake = Some(marker.clone());
+        } else {
+            sink.fail_wake = true;
+        }
+        assert!(release(&store, &applied, &mut sink).is_err());
+        if fail_ack {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        let mut changed = question("changed");
+        changed.preview.revision += 1;
+        changed.preview.target_hash = [9; 32];
+        let next_preview = changed.preview.clone();
+        store.hold(changed, 120).unwrap();
+        let mut retry_request = question("retry");
+        retry_request.preview = next_preview.clone();
+        retry_request.message = 0;
+        let retry = Workflow(&store)
+            .retry(retry_request, 1, Some(1), "one", 130)
+            .unwrap();
+        assert_eq!(
+            retry.consent.nonce, applied.nonce,
+            "workflow_unacknowledged_release_keeps_original_nonce_contract"
+        );
+        assert_eq!(
+            retry.effect,
+            Effect::ReleaseThenWake,
+            "workflow_unacknowledged_release_replays_before_generation_contract"
+        );
+        assert!(retry.consent.history.is_empty());
+        let settled = release(&store, &retry.consent, &mut sink).unwrap();
+        let first = SettlementKey {
+            nonce: applied.nonce.clone(),
+            store: applied.intents[0].store.clone(),
+            id: applied.intents[0].id.clone(),
+        };
+        assert_eq!(
+            sink.effect_counts(&first),
+            (1, 1),
+            "workflow_gen1_replay_payload_once_contract"
+        );
+        assert!(settled.releasable_intents().is_empty());
+        let mut open = question("open-generation");
+        open.preview = next_preview;
+        open.message = 0;
+        let next = Workflow(&store)
+            .retry(open, 1, Some(1), "one", 140)
+            .unwrap()
+            .consent;
+        assert_ne!(
+            next.nonce, applied.nonce,
+            "workflow_generation_opens_after_old_release_ack_contract"
+        );
+        assert_eq!(next.history.len(), 1);
+        let bound = store.bind_card(&next, 42).unwrap();
+        let accepted = store.decide(&bound, 1, true, 141).unwrap();
+        let applied_next = store
+            .record_apply(
+                &accepted,
+                ApplyResult {
+                    before: Some([9; 32]),
+                    after: Some([8; 32]),
+                    backup: None,
+                    detail: None,
+                },
+            )
+            .unwrap();
+        release(&store, &applied_next, &mut sink).unwrap();
+        assert_eq!(
+            sink.effect_counts(&first),
+            (1, 1),
+            "workflow_old_intent_not_released_by_new_generation_contract"
+        );
+    }
 }

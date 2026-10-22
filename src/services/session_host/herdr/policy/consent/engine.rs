@@ -2,10 +2,14 @@ use super::super::{PeerSource, apply};
 use super::settlement::{self, CustodySink};
 use super::workflow::{Current, Effect, Request, Transition, Workflow};
 use super::{ApplyResult, Consent, ConsentKey, ConsentStore, Question, State, card};
-use super::{apply_owner, preview::Prepared};
+use super::{
+    apply_owner,
+    boot_recovery::{BootRecovery, BootState},
+    preview::Prepared,
+};
 use std::sync::Arc;
 
-pub(crate) enum Event {
+pub(crate) enum Event<'a> {
     Hold {
         question: Box<Question>,
         now: u64,
@@ -31,6 +35,19 @@ pub(crate) enum Event {
         now: u64,
     },
     Recover(ConsentKey),
+    BootRecover(ConsentKey, &'a BootRecovery<'a>),
+}
+
+/// Startup uses the same typed recovery dispatch without interpreting card or custody effects.
+pub(crate) fn recover(
+    store: &ConsentStore,
+    event: Event<'_>,
+) -> Result<Option<Transition>, String> {
+    match event {
+        Event::Recover(key) => Workflow(store).recover(&key),
+        Event::BootRecover(key, authority) => Workflow(store).boot_recover(&key, authority),
+        _ => Err("metadata recovery requires a recovery event".into()),
+    }
 }
 
 #[async_trait::async_trait]
@@ -53,6 +70,7 @@ pub(crate) trait Cards: Send {
 
 pub(crate) struct Engine<'a, S: CustodySink> {
     pub store: &'a ConsentStore,
+    pub boot: &'a BootState,
     pub local_node: String,
     pub source: Arc<dyn PeerSource>,
     pub owner: &'a mut dyn Owner,
@@ -94,7 +112,7 @@ impl<S: CustodySink> Engine<'_, S> {
 
     pub(crate) async fn handle(
         &mut self,
-        event: Event,
+        event: Event<'_>,
         prepared: Option<Prepared>,
     ) -> Result<Option<Transition>, String> {
         let workflow = Workflow(self.store);
@@ -111,7 +129,19 @@ impl<S: CustodySink> Engine<'_, S> {
             } => match workflow.bind(&reserved, &current, message) {
                 Ok(bound) => bound,
                 Err(error) => {
-                    return Err(self.replace_unbound_after(&reserved, message, error).await);
+                    if let Some(latest) = self.store.load(&reserved.key)?
+                        && latest.nonce == reserved.nonce
+                        && latest.message == message
+                        && latest.card == super::CardState::Bound
+                        && latest.state == State::Pending
+                    {
+                        Transition {
+                            consent: latest,
+                            effect: Effect::KeepHeld,
+                        }
+                    } else {
+                        return Err(self.replace_unbound_after(&reserved, message, error).await);
+                    }
                 }
             },
             Event::Decide {
@@ -127,6 +157,7 @@ impl<S: CustodySink> Engine<'_, S> {
                     .await?
                     .check(&latest, latest.state == State::Pending)?;
                 if yes && latest.state == State::Pending {
+                    self.boot.require_ready()?;
                     let preview = prepared
                         .as_ref()
                         .ok_or("current consent preview is required before apply")?;
@@ -145,7 +176,18 @@ impl<S: CustodySink> Engine<'_, S> {
                 local_node,
                 now,
             } => workflow.retry(*question, actor, owner, &local_node, now)?,
-            Event::Recover(key) => match workflow.recover(&key)? {
+            Event::BootRecover(key, authority) => {
+                if !authority.authorizes(self.boot) {
+                    return Err(
+                        "consent boot recovery authority belongs to another process scope".into(),
+                    );
+                }
+                match recover(self.store, Event::BootRecover(key, authority))? {
+                    Some(transition) => transition,
+                    None => return Ok(None),
+                }
+            }
+            Event::Recover(key) => match recover(self.store, Event::Recover(key))? {
                 Some(transition) => transition,
                 None => return Ok(None),
             },
@@ -184,6 +226,7 @@ impl<S: CustodySink> Engine<'_, S> {
         }
         let mut result_kind = card::ResultKind::Existing;
         if transition.effect == Effect::Apply {
+            self.boot.require_ready()?;
             let accepted = &transition.consent;
             let before = prepared.as_ref().and_then(Prepared::before_hash);
             let preflight = async {

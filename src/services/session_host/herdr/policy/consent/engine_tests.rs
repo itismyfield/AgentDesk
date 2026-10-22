@@ -137,6 +137,7 @@ struct Rig {
     custody: FakeCustody,
     checker_baseline: usize,
     local_node: String,
+    boot: Arc<BootState>,
 }
 impl Rig {
     async fn new(diagnostics: bool, fail_receipt: bool) -> (Self, Prepared) {
@@ -191,6 +192,8 @@ impl Rig {
             woken: Vec::new(),
             events: Arc::new(Mutex::new(Vec::new())),
         };
+        let boot = Arc::new(BootState::new());
+        boot.try_claim().unwrap().complete();
         (
             Self {
                 _root: root,
@@ -201,6 +204,7 @@ impl Rig {
                 custody,
                 checker_baseline,
                 local_node: "execution-node".into(),
+                boot,
             },
             prepared,
         )
@@ -233,11 +237,12 @@ impl Rig {
     }
     async fn handle(
         &mut self,
-        event: Event,
+        event: Event<'_>,
         prepared: Option<Prepared>,
     ) -> Result<Option<Transition>, String> {
         Engine {
             store: &self.store,
+            boot: &self.boot,
             local_node: self.local_node.clone(),
             source: self.source.clone(),
             owner: &mut self.owner,
@@ -261,7 +266,7 @@ impl Rig {
         .unwrap()
         .consent
     }
-    fn decide(consent: &Consent, yes: bool) -> Event {
+    fn decide(consent: &Consent, yes: bool) -> Event<'_> {
         Event::Decide {
             expected: Box::new(consent.clone()),
             current: Box::new(current(consent)),
@@ -433,11 +438,15 @@ async fn engine_receipt_failure_after_publication_keeps_all_custody() {
         super::super::super::durable::key(&bound.key).unwrap()
     ));
     fs::remove_file(marker).unwrap();
+    rig.boot = Arc::new(BootState::new());
+    let boot = rig.boot.clone();
+    let authority = boot.try_claim().unwrap();
     let recovered = rig
-        .handle(Event::Recover(bound.key.clone()), None)
+        .handle(Event::BootRecover(bound.key.clone(), &authority), None)
         .await
         .unwrap()
         .unwrap();
+    authority.complete();
     assert_eq!(
         recovered.consent.state,
         State::ApplyFailed,
@@ -975,4 +984,204 @@ async fn engine_explicit_bind_failure_also_replaces_the_unbound_card() {
         "engine_explicit_bind_failure_replaces_card_contract"
     );
     assert!(rig.custody.released.is_empty());
+}
+
+#[tokio::test]
+async fn engine_duplicate_bind_is_idempotent_and_keeps_live_buttons() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    let reserved = Workflow(&rig.store)
+        .hold(rig.question(&prepared.token), 100, Request::ExplicitLaunch)
+        .unwrap()
+        .consent;
+    let first = rig
+        .handle(
+            Event::Bind {
+                reserved: Box::new(reserved.clone()),
+                current: Box::new(current(&reserved)),
+                message: 40,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let replacements = rig.cards.replacements.len();
+    let duplicate = rig
+        .handle(
+            Event::Bind {
+                reserved: Box::new(reserved.clone()),
+                current: Box::new(current(&reserved)),
+                message: 40,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        duplicate.is_ok(),
+        "engine_duplicate_bind_keeps_live_card_contract: {duplicate:?}"
+    );
+    let duplicate = duplicate.unwrap().unwrap();
+    assert_eq!(
+        duplicate.effect,
+        Effect::KeepHeld,
+        "engine_duplicate_bind_keeps_live_card_contract"
+    );
+    assert_eq!(duplicate.consent, first.consent);
+    assert_eq!(
+        rig.cards.replacements.len(),
+        replacements,
+        "engine_duplicate_bind_does_not_replace_buttons_contract"
+    );
+    assert!(
+        rig.cards
+            .replacements
+            .iter()
+            .all(|card| !card.buttons.is_empty())
+    );
+    assert!(rig.cards.disabled.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_non_boot_recover_never_interrupts_an_in_flight_apply() {
+    use std::time::Duration;
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    let checker = &rig.source.0.checker;
+    let body = fs::read_to_string(checker).unwrap();
+    let barrier = "if [ -f \"$HOME/engine-ready\" ]; then case \"$HERDR_CONFIG_PATH\" in \"$HOME/config.toml\") ;; *) touch \"$HOME/barrier-entered\"; while [ ! -f \"$HOME/barrier-release\" ]; do sleep 0.01; done;; esac; fi\n";
+    fs::write(
+        checker,
+        body.replace(
+            "printf 'config: ok\\n'",
+            &format!("{barrier}printf 'config: ok\\n'"),
+        ),
+    )
+    .unwrap();
+    // Refresh only the prepared executable fingerprint after changing the fake checker.
+    let mut snapshot = rig.source.0.clone();
+    snapshot.image = file::image(checker).unwrap();
+    rig.source = Arc::new(Source(snapshot));
+    fs::remove_file(rig.source.0.home.join("engine-ready")).unwrap();
+    let prepared = preview::prepare(rig.source.clone(), prepared.token.revision)
+        .await
+        .unwrap();
+    fs::write(rig.source.0.home.join("engine-ready"), "ready").unwrap();
+    let bound = rig.bound(&prepared.token).await;
+    let path = rig.source.0.home.clone();
+    let directory = path.join("consents");
+    let source = rig.source.clone();
+    let boot = rig.boot.clone();
+    let key = bound.key.clone();
+    let handle = tokio::spawn(async move {
+        let applied = rig.handle(Rig::decide(&bound, true), Some(prepared)).await;
+        (rig, applied)
+    });
+    let entered = tokio::time::timeout(Duration::from_secs(1), async {
+        while !path.join("barrier-entered").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        entered.is_ok(),
+        "engine_nonboot_recovery_checker_barrier_is_reached_contract"
+    );
+    let store = ConsentStore::new(Some(directory.clone()));
+    let mut owner = FakeOwner::default();
+    let mut cards = FakeCards::default();
+    let mut custody = FakeCustody {
+        store: ConsentStore::new(Some(directory)),
+        released: Vec::new(),
+        woken: Vec::new(),
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let recovered = Engine {
+        store: &store,
+        boot: &boot,
+        local_node: key.node.clone(),
+        source,
+        owner: &mut owner,
+        cards: &mut cards,
+        custody: &mut custody,
+    }
+    .handle(Event::Recover(key.clone()), None)
+    .await
+    .unwrap()
+    .unwrap();
+    fs::write(path.join("barrier-release"), "release").unwrap();
+    let (rig, applied) = handle.await.unwrap();
+    assert_eq!(
+        recovered.consent.state,
+        State::Accepted,
+        "engine_nonboot_recover_never_interrupts_accepted_contract"
+    );
+    assert_eq!(recovered.effect, Effect::KeepHeld);
+    let applied = applied.unwrap().unwrap();
+    assert_eq!(
+        applied.consent.state,
+        State::Applied,
+        "engine_nonboot_recovery_keeps_apply_receipt_contract"
+    );
+    assert_eq!(
+        rig.custody.released.len(),
+        1,
+        "engine_nonboot_recovery_releases_once_contract"
+    );
+}
+
+#[test]
+fn engine_boot_authority_is_single_use_and_failed_boot_never_admits_apply() {
+    let boot = BootState::new();
+    assert!(boot.require_ready().is_err());
+    let authority = boot.try_claim().unwrap();
+    assert!(
+        boot.try_claim().is_none(),
+        "engine_boot_authority_claim_once_contract"
+    );
+    assert!(
+        boot.require_ready().is_err(),
+        "engine_boot_authority_blocks_apply_until_complete_contract"
+    );
+    authority.complete();
+    assert!(boot.is_ready());
+    assert!(boot.try_claim().is_none());
+    let failed = BootState::new();
+    drop(failed.try_claim().unwrap());
+    assert!(
+        failed.require_ready().is_err(),
+        "engine_failed_boot_keeps_apply_refused_contract"
+    );
+    assert!(failed.try_claim().is_none());
+}
+
+#[tokio::test]
+async fn engine_apply_waits_for_completed_boot_authority() {
+    let (mut rig, prepared) = Rig::new(false, false).await;
+    let bound = rig.bound(&prepared.token).await;
+    rig.boot = Arc::new(BootState::new());
+    let boot = rig.boot.clone();
+    let authority = boot.try_claim().unwrap();
+    let refused = rig
+        .handle(Rig::decide(&bound, true), Some(prepared.clone()))
+        .await;
+    assert!(
+        matches!(refused, Err(ref error) if error.contains("boot recovery is not complete")),
+        "engine_boot_recovery_precedes_apply_contract"
+    );
+    assert_eq!(
+        rig.store.load(&bound.key).unwrap().unwrap().state,
+        State::Pending
+    );
+    assert_eq!(
+        rig.calls(),
+        0,
+        "engine_boot_recovery_before_checker_contract"
+    );
+    assert!(rig.custody.released.is_empty());
+    authority.complete();
+    let applied = rig
+        .handle(Rig::decide(&bound, true), Some(prepared))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.consent.state, State::Applied);
 }

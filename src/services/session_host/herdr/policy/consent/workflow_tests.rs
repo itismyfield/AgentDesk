@@ -338,7 +338,13 @@ fn workflow_denial_expiry_and_failed_apply_preserve_fifo_without_requestion() {
             "workflow_terminal_input_never_requestions_contract: {phase}"
         );
         let reopened = ConsentStore::new(Some(directory));
-        let recovered = Workflow(&reopened).recover(&bound.key).unwrap().unwrap();
+        let boot = super::super::boot_recovery::BootState::new();
+        let authority = boot.try_claim().unwrap();
+        let recovered = Workflow(&reopened)
+            .boot_recover(&bound.key, &authority)
+            .unwrap()
+            .unwrap();
+        authority.complete();
         assert_eq!(
             recovered.effect,
             if phase == "applied" {
@@ -615,8 +621,8 @@ fn workflow_retry_never_discards_an_in_flight_or_completed_apply() {
         .unwrap();
     assert_eq!(
         retry.effect,
-        Effect::ShowResult,
-        "workflow_applied_retry_already_applied_contract"
+        Effect::ReleaseThenWake,
+        "workflow_applied_retry_releases_releasable_intents_contract"
     );
     assert_eq!(
         (
@@ -678,7 +684,13 @@ fn workflow_interrupted_accept_has_an_owner_exit() {
             .consent;
         drop(store);
         let reopened = ConsentStore::new(Some(directory));
-        let recovered = Workflow(&reopened).recover(&accepted.key).unwrap().unwrap();
+        let boot = super::super::boot_recovery::BootState::new();
+        let authority = boot.try_claim().unwrap();
+        let recovered = Workflow(&reopened)
+            .boot_recover(&accepted.key, &authority)
+            .unwrap()
+            .unwrap();
+        authority.complete();
         assert_eq!(
             recovered.consent.state,
             State::ApplyFailed,
@@ -808,6 +820,7 @@ fn workflow_old_schema_without_history_still_reads_and_retries() {
     let mut old: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     old.as_object_mut().unwrap().remove("history");
+    old["schema"] = 1.into();
     std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     let loaded = store.load(&bound.key).unwrap().unwrap();
     assert!(
@@ -871,7 +884,13 @@ fn workflow_each_unfinished_state_has_a_retry_exit_after_boot_recovery() {
             }
             _ => bound,
         };
-        let recovered = Workflow(&store).recover(&terminal.key).unwrap().unwrap();
+        let boot = super::super::boot_recovery::BootState::new();
+        let authority = boot.try_claim().unwrap();
+        let recovered = Workflow(&store)
+            .boot_recover(&terminal.key, &authority)
+            .unwrap()
+            .unwrap();
+        authority.complete();
         assert_ne!(
             recovered.consent.state,
             State::Accepted,
@@ -915,4 +934,66 @@ fn workflow_interruption_cas_never_overwrites_a_receipt_or_new_generation() {
         "workflow_interruption_cas_rejects_old_generation_contract"
     );
     assert_eq!(store.load(&bound.key).unwrap().unwrap(), retry);
+}
+
+#[test]
+fn workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let bound = bound(&store);
+    let accepted = Workflow(&store)
+        .decide(&bound, &current(&bound), 1, true, 110)
+        .unwrap()
+        .consent;
+    let applied = Workflow(&store)
+        .receipt(&accepted, result(true))
+        .unwrap()
+        .consent;
+    store
+        .acknowledge_discard(&applied, &applied.intents[0])
+        .unwrap();
+    let mut changed = question("next-generation");
+    changed.preview.revision += 1;
+    changed.preview.target_hash = [9; 32];
+    let reopened = Workflow(&store)
+        .retry(changed, 1, Some(1), "one", 120)
+        .unwrap()
+        .consent;
+    assert_eq!(reopened.history.len(), 1);
+    let path = directory.join(format!(
+        "{}.json",
+        crate::services::session_host::herdr::policy::durable::key(&bound.key).unwrap()
+    ));
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(raw["schema"], 2, "consent_schema_two_writer_contract");
+    // The r1 reader checks the version before deserializing its deny_unknown_fields record.
+    fn r1_decode(bytes: &[u8]) -> Result<(), &'static str> {
+        let raw: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| "consent_snapshot_corrupt")?;
+        if raw
+            .get("schema")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|schema| schema > 1)
+        {
+            return Err("consent_snapshot_newer");
+        }
+        Ok(())
+    }
+    assert_eq!(
+        r1_decode(&std::fs::read(&path).unwrap()),
+        Err("consent_snapshot_newer"),
+        "consent_schema_two_r1_reader_reports_newer_contract"
+    );
+    let mut old = raw;
+    old["schema"] = 1.into();
+    old.as_object_mut().unwrap().remove("history");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let loaded = store.load(&bound.key).unwrap().unwrap();
+    assert_eq!(
+        loaded.schema, 1,
+        "consent_schema_one_reader_compatibility_contract"
+    );
+    assert_eq!(loaded.intents, reopened.intents);
+    assert_eq!(store.load_all().unwrap(), [loaded]);
 }

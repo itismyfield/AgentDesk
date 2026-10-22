@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
 
 const TTL: u64 = 30 * 60;
+const SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,13 +214,16 @@ impl ConsentStore {
             if raw
                 .get("schema")
                 .and_then(|v| v.as_u64())
-                .is_some_and(|s| s > 1)
+                .is_some_and(|s| s > u64::from(SCHEMA))
             {
                 return Err("consent_snapshot_newer: preserve this file and use a matching AgentDesk version".into());
             }
             let value: Consent = serde_json::from_value(raw)
                 .map_err(|e| format!("consent_snapshot_corrupt: {e}"))?;
-            if value.schema != 1 || &value.key != key || value.nonce.is_empty() || value.owner == 0
+            if !(1..=SCHEMA).contains(&value.schema)
+                || &value.key != key
+                || value.nonce.is_empty()
+                || value.owner == 0
             {
                 return Err("consent_snapshot_corrupt: incompatible or mismatched consent".into());
             }
@@ -331,10 +335,13 @@ impl ConsentStore {
         let mut revision_changed = false;
         let mut already_applied = false;
         let bytes = self.0.change(&durable::key(&key)?, |previous| {
-            let decoded = previous
+            let mut decoded = previous
                 .as_ref()
                 .map(|bytes| self.decode(bytes, &key))
                 .transpose()?;
+            if let Some(current) = &mut decoded {
+                current.schema = SCHEMA;
+            }
             if retry && let Some(current) = &decoded {
                 if current.state == State::Accepted {
                     return Err(
@@ -364,7 +371,7 @@ impl ConsentStore {
                                 && held.preview != current.preview
                         })
                     });
-                    if !changed {
+                    if !current.releasable_intents().is_empty() || !changed {
                         already_applied = true;
                         return serde_json::to_vec(&current).map_err(|e| e.to_string());
                     }
@@ -420,7 +427,7 @@ impl ConsentStore {
                 }
             } else {
                 Consent {
-                    schema: 1,
+                    schema: SCHEMA,
                     key: key.clone(),
                     preview,
                     owner,
@@ -584,6 +591,7 @@ impl ConsentStore {
                 return Err("stale consent decision".into());
             }
             apply(&mut current)?;
+            current.schema = SCHEMA;
             serde_json::to_vec(&current).map_err(|e| e.to_string())
         })?;
         self.decode(&bytes, &key)
@@ -651,6 +659,7 @@ pub(crate) mod workflow;
 mod tests;
 
 pub(crate) mod apply_owner;
+pub(crate) mod boot_recovery;
 pub(crate) mod card;
 pub(crate) mod engine;
 pub(crate) mod preview;

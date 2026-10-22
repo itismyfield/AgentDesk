@@ -89,7 +89,7 @@ impl ConsentStore {
             let bytes = self.0.read_stable(&name)?.ok_or_else(|| self.0.failure(&name, "snapshot disappeared during inventory; retry the read"))?;
             let raw: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|error| self.0.failure(&name, format!("consent_snapshot_corrupt: {error}")))?;
-            if raw.get("schema").and_then(|value| value.as_u64()).is_some_and(|schema| schema > 1) {
+            if raw.get("schema").and_then(|value| value.as_u64()).is_some_and(|schema| schema > u64::from(super::SCHEMA)) {
                 return Err(self.0.failure(&name, "consent_snapshot_newer: preserve this file and use a matching AgentDesk version"));
             }
             let key = serde_json::from_value::<super::ConsentKey>(raw.get("key").cloned().unwrap_or_default())
@@ -162,7 +162,8 @@ impl ConsentStore {
     }
 }
 
-/// Both operations must be durable and idempotent by the full key, including after a process restart.
+/// Both operations are durable and idempotent by (store, id), including after a process restart.
+/// Nonce identifies the authorizing receipt; changing it must never repeat a payload.
 /// A release may succeed before consent acknowledgement fails; replay must never duplicate its payload.
 pub(crate) trait CustodySink {
     fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;

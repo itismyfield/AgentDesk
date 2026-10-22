@@ -204,10 +204,12 @@ impl Workflow<'_> {
         }
         let consent = self.0.retry_unbound(question, now)?;
         if consent.state == State::Applied {
-            return Ok(Transition {
-                consent,
-                effect: Effect::ShowResult,
-            });
+            let effect = if consent.releasable_intents().is_empty() {
+                Effect::ShowResult
+            } else {
+                Effect::ReleaseThenWake
+            };
+            return Ok(Transition { consent, effect });
         }
         let consent = self.0.reserve_card(&consent, now)?;
         Ok(Transition {
@@ -216,17 +218,10 @@ impl Workflow<'_> {
         })
     }
 
-    /// Boot recovery runs before this process admits any apply owner.
     pub(crate) fn recover(&self, key: &ConsentKey) -> Result<Option<Transition>, String> {
         self.0
             .load(key)?
             .map(|consent| {
-                let consent = if consent.state == State::Accepted {
-                    let observed = super::observe_interrupted(&consent)?;
-                    self.0.interrupt_accepted(&consent, observed)?
-                } else {
-                    consent
-                };
                 let effect = if consent.state == State::Applied {
                     Effect::ReleaseThenWake
                 } else {
@@ -235,6 +230,22 @@ impl Workflow<'_> {
                 Ok(Transition { consent, effect })
             })
             .transpose()
+    }
+
+    pub(crate) fn boot_recover(
+        &self,
+        key: &ConsentKey,
+        authority: &super::boot_recovery::BootRecovery<'_>,
+    ) -> Result<Option<Transition>, String> {
+        authority.check()?;
+        let Some(mut transition) = self.recover(key)? else {
+            return Ok(None);
+        };
+        if transition.consent.state == State::Accepted {
+            let observed = super::observe_interrupted(&transition.consent)?;
+            transition.consent = self.0.interrupt_accepted(&transition.consent, observed)?;
+        }
+        Ok(Some(transition))
     }
 }
 
