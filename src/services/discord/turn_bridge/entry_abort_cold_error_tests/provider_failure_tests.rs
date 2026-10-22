@@ -185,9 +185,14 @@ async fn bridge_on(turn: &Cold, board: &Arc<Board>, frames: Vec<StreamMessage>) 
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     bridge.completion_tx = Some(completion_tx);
     let (tx, rx) = mpsc::channel();
+    let entry = turn.durable().expect("the turn has its admitted row");
     spawn_turn_bridge(turn.shared.clone(), turn.cancel.clone(), rx, bridge);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let entered = |row: InflightTurnState| row.status_message_id.is_some() || !separate_panel();
+    let entered = |row: InflightTurnState| {
+        row.user_msg_id == turn.row.user_msg_id
+            && row.turn_nonce == turn.row.turn_nonce
+            && row.save_generation > entry.save_generation
+    };
     while !turn.durable().is_some_and(entered) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -205,10 +210,6 @@ async fn bridge_on(turn: &Cold, board: &Arc<Board>, frames: Vec<StreamMessage>) 
         .unwrap();
 }
 
-fn separate_panel() -> bool {
-    SEPARATE_PANEL_FOR_TESTS.get()
-}
-
 /// Reactions the bridge added to the user's message.
 fn added(turn: &Cold) -> Vec<char> {
     let ops = turn.shared.turn_view_reconciler.ops();
@@ -218,18 +219,7 @@ fn added(turn: &Cold) -> Vec<char> {
         .collect()
 }
 
-/// The terminal reconcile the finalizer may queue for the panel either was purged or would find
-/// a delivered card it consumes without editing.
-fn reconcile_leaves_panel(turn: &Cold, panel_id: u64, panel: &str) -> bool {
-    let pending = abandon::load_pending(&turn.provider, &turn.shared.token_hash);
-    let queued = pending
-        .iter()
-        .any(|(channel, record)| *channel == turn.channel.get() && record.msg_id == panel_id);
-    !queued || !crate::services::discord::placeholder_sweeper::is_message_still_placeholder(panel)
-}
-
-/// The executor's launch-host `Err` reaches the bridge with no attach or prompt: O or Legacy, panel
-/// or footer, the notice and its detail stay shown, nothing reads `✅ 완료`, and the request is `⚠`.
+/// A launch error keeps one detailed notice and warning reaction; only Legacy gets an error summary.
 #[tokio::test(flavor = "current_thread")]
 async fn cold_launch_error_without_stop_shows_failure_not_completion() {
     let root = tempfile::tempdir().unwrap();
@@ -268,17 +258,21 @@ async fn cold_launch_error_without_stop_shows_failure_not_completion() {
         );
         let completed = finals.values().any(|text| text.contains("✅ 완료"));
         assert!(!completed, "{case}: {finals:?}");
-        if separate {
-            let failed: Vec<_> = finals
-                .iter()
-                .filter(|(_, t)| t.starts_with("⚠️ 실패"))
-                .collect();
-            let [(panel_id, panel)] = failed[..] else {
-                panic!("{case}: one failed panel: {finals:?}");
-            };
-            assert!(!panel.contains(&error), "{case}: the detail shows once");
-            assert!(reconcile_leaves_panel(&turn, *panel_id, panel), "{case}");
-        }
+        assert_eq!(notice.matches(&error).count(), 1, "{case}: detail once");
+        assert!(
+            !crate::services::discord::placeholder_sweeper::is_message_still_placeholder(notice),
+            "{case}: the finalizer cannot rewrite the failure notice"
+        );
+        assert!(
+            !finals.values().any(|text| text.starts_with("⚠️ 실패")),
+            "{case}: no new failure panel: {finals:?}"
+        );
+        let summaries = finals
+            .values()
+            .filter(|text| text.starts_with("-# ⚠️ 오류"))
+            .count();
+        assert_eq!(summaries, usize::from(!o), "{case}: {finals:?}");
+        assert_eq!(finals.len(), 1 + usize::from(!o), "{case}: {finals:?}");
         assert_eq!(added(&turn), ['⚠'], "{case}");
     }
 }
@@ -300,10 +294,19 @@ async fn unproven_launch_evidence_error_is_shown_on_an_o_channel() {
     let board = Arc::new(Board::default());
     bridge_on(&turn, &board, frame.into_iter().collect()).await;
     let finals = board.finals();
-    assert!(finals.values().any(|t| t.contains(error)), "{finals:?}");
-    assert!(
-        finals.values().any(|t| t.starts_with("⚠️ 실패")),
-        "{finals:?}"
+    let notices: Vec<_> = finals
+        .iter()
+        .filter(|(_, text)| text.contains(SUMMARY))
+        .collect();
+    let [(answer, notice)] = notices[..] else {
+        panic!("one detailed failure notice: {finals:?}");
+    };
+    assert_eq!(notice.matches(error).count(), 1, "{finals:?}");
+    assert!(!board.deleted().contains(answer), "{:?}", board.deleted());
+    assert_eq!(
+        finals.len(),
+        1,
+        "no new panel or Legacy summary on O: {finals:?}"
     );
     assert!(
         !finals.values().any(|t| t.contains("✅ 완료")),
@@ -312,8 +315,7 @@ async fn unproven_launch_evidence_error_is_shown_on_an_o_channel() {
     assert_eq!(added(&turn), ['⚠']);
 }
 
-/// An answered turn keeps its completion: the panel ends `✅ 완료`, a Legacy body is posted once
-/// and marked done, and O's body is not posted by the bridge.
+/// An answered turn keeps its body ownership and gets only a separate Legacy completion summary.
 #[tokio::test(flavor = "current_thread")]
 async fn answered_turn_keeps_its_completed_panel() {
     let root = tempfile::tempdir().unwrap();
@@ -337,10 +339,18 @@ async fn answered_turn_keeps_its_completed_panel() {
         let board = Arc::new(Board::default());
         bridge_on(&turn, &board, frames).await;
         let finals = board.finals();
-        let completed = finals.values().any(|t| t.contains("✅ 완료"));
-        assert!(completed, "o={o}: {finals:?}");
-        let posted = board.finals().values().filter(|t| t.contains(BODY)).count();
-        assert_eq!(posted, usize::from(!o), "o={o}: {:?}", board.finals());
+        assert!(
+            !finals.values().any(|text| text.contains("✅ 완료")),
+            "o={o}: no new completion panel: {finals:?}"
+        );
+        let posted = finals.values().filter(|text| text.as_str() == BODY).count();
+        assert_eq!(posted, usize::from(!o), "o={o}: {finals:?}");
+        let summaries = finals
+            .values()
+            .filter(|text| text.starts_with("-# ✅ "))
+            .count();
+        assert_eq!(summaries, usize::from(!o), "o={o}: {finals:?}");
+        assert_eq!(finals.len(), 2 * usize::from(!o), "o={o}: {finals:?}");
         assert!(!added(&turn).contains(&'⚠'), "o={o}");
     }
 }

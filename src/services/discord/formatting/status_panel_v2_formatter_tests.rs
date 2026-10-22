@@ -23,14 +23,14 @@ fn plan_streaming_rollover_strips_liveness_footer_from_frozen_chunk_s0() {
     assert_eq!(super::char_count(&plan.frozen_chunk), body_budget);
     assert_eq!(plan.frozen_chunk, &current_portion[..plan.split_at]);
     assert!(!plan.frozen_chunk.contains(LIVENESS_FOOTER));
-    assert!(plan.display_snapshot.ends_with(&footer));
+    assert!(!plan.display_snapshot.ends_with(&footer));
 }
 
 #[test]
 fn rollover_seed_starts_as_liveness_footer_only_s0() {
     let seed = build_streaming_placeholder_text("", LIVENESS_FOOTER);
 
-    assert_eq!(seed, LIVENESS_FOOTER);
+    assert_eq!(seed, "⠋ 계속 처리 중");
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn plan_streaming_rollover_reserves_footer_length_before_2000_char_limit_s0() {
 
     assert_eq!(plan.split_at, body_budget);
     assert!(super::char_count(&plan.display_snapshot) <= super::DISCORD_MSG_LIMIT);
-    assert!(plan.display_snapshot.ends_with(&footer));
+    assert!(!plan.display_snapshot.ends_with(&footer));
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn no_rollover_body_and_footer_under_limit_stays_single_message_s0() {
     let rendered = build_streaming_placeholder_text(current_portion, LIVENESS_FOOTER);
 
     assert!(plan_streaming_rollover(current_portion, LIVENESS_FOOTER).is_none());
-    assert_eq!(rendered, format!("{current_portion}\n\n{LIVENESS_FOOTER}"));
+    assert_eq!(rendered, current_portion);
     assert!(super::char_count(&rendered) < super::DISCORD_MSG_LIMIT);
 }
 
@@ -67,7 +67,7 @@ fn empty_body_with_near_limit_footer_stays_footer_only_s0() {
 
     assert!(plan_streaming_rollover("", &oversized_footer).is_none());
     assert!(super::char_count(&rendered) <= super::DISCORD_MSG_LIMIT);
-    assert!(rendered.starts_with('⠸'));
+    assert_eq!(rendered, "⠋ 계속 처리 중");
     assert!(!rendered.contains("\n\n"));
 }
 
@@ -78,7 +78,7 @@ fn single_message_panel_s0_streaming_footer_present_and_final_body_absent() {
         LIVENESS_FOOTER,
         &ProviderKind::Codex,
     );
-    assert_eq!(streamed, "Final answer\n\n⠸ 계속 처리 중");
+    assert_eq!(streamed, "Final answer");
 
     let finalized = format_for_discord_with_status_panel(&streamed, &ProviderKind::Codex);
     assert_eq!(finalized, "Final answer");

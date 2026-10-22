@@ -2,19 +2,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::services::tui_o::repost::config::RepostConfig;
 
-/// The `tui_o:` config section; absent means every output-track feature is off.
+/// The `tui_o:` config section; writer selection is opt-in, while cards default on.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuiOConfig {
     pub writer: WriterChannelsConfig,
+    pub tool_cards: ToolCardsConfig,
     pub turn: crate::services::tui_o::turn_mode::TurnConfig,
     /// Operator channel for writer alarms; absent keeps them to health and logs.
     pub alert_channel_id: Option<u64>,
     #[serde(skip_serializing_if = "RepostConfig::is_default")]
     pub repost: RepostConfig,
-    /// Codex history adoption at boot. Off (the default) installs no observation runtime.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub codex_history_adoption: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolCardsConfig {
+    pub enabled: bool,
+}
+
+impl Default for ToolCardsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

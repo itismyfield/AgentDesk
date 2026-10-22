@@ -1,5 +1,6 @@
 //! Registered runtime ownership through the real Codex restore producer and live readings.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_presence::activity::{activity_now, reading_now};
@@ -58,7 +59,8 @@ pub(super) fn isolated(test: &str) -> bool {
     if std::env::var(CHILD).ok().as_deref() == Some(test) {
         return true;
     }
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    use std::io::Read;
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture", "--test-threads=1"])
         .env(CHILD, test)
         .env(
@@ -72,15 +74,48 @@ pub(super) fn isolated(test: &str) -> bool {
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("AGENTDESK_CONFIG")
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    let collect = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = collect(Box::new(child.stdout.take().unwrap()));
+    let stderr = collect(Box::new(child.stderr.take().unwrap()));
+    let began = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if began.elapsed() >= Duration::from_secs(300) {
+            timed_out = true;
+            child.kill().unwrap();
+            break child.wait().unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
     let logs = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     eprintln!("{logs}");
-    assert!(result.status.success(), "{logs}");
+    if timed_out {
+        eprintln!("A2_ISOLATED_BOUND timed_out=true limit_ms=300000 test={test}");
+    }
+    assert!(
+        !timed_out,
+        "isolated owner test exceeded its OS bound: {logs}"
+    );
+    assert!(status.success(), "{logs}");
     assert!(
         logs.contains("1 passed; 0 failed; 0 ignored;"),
         "child did not execute exactly one test: {logs}"
@@ -153,7 +188,29 @@ impl Drop for PrivateHost {
     }
 }
 
+struct WatcherRuntime(Option<tokio::runtime::Runtime>);
+
+impl WatcherRuntime {
+    fn new() -> Self {
+        Self(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap(),
+        ))
+    }
+}
+impl Drop for WatcherRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 pub(super) struct Fixture {
+    watcher_runtime: WatcherRuntime,
     // Restore process overrides before Rig releases the shared environment lock.
     _env: Vec<crate::config::TestEnvVarGuard>,
     pub(super) rig: Rig,
@@ -172,7 +229,17 @@ pub(super) struct Fixture {
     _turn: TestConfirmation,
 }
 impl Fixture {
+    pub(super) fn spawn_watcher<F>(&self, future: F) -> tokio::task::JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if crate::services::claude_tui::source_verify::n2b_mutant("a2-watcher-current-thread") {
+            return tokio::spawn(future);
+        }
+        self.watcher_runtime.0.as_ref().unwrap().spawn(future)
+    }
     pub(super) async fn connect_and_migrate_fixture(id: u64, provider: ProviderKind) -> Self {
+        eprintln!("A2_PREP fixture_start channel={id}");
         let _ = tracing_subscriber::fmt()
             .without_time()
             .with_ansi(false)
@@ -181,7 +248,15 @@ impl Fixture {
         let live = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
         );
+        eprintln!("A2_PREP migrate_start channel={id}");
         let mut rig = Rig::with_live_guard(id, false, false, live).await;
+        eprintln!("A2_PREP migrate_done channel={id}");
+        if crate::services::claude_tui::source_verify::n2b_mutant("a2-prep-stall") {
+            eprintln!("A2_PREP forced_stall channel={id}");
+            loop {
+                std::thread::park();
+            }
+        }
         let registry = Arc::new(HealthRegistry::new());
         let root = rig.root.path();
         let config_path = crate::runtime_layout::config_file_path(root);
@@ -189,10 +264,11 @@ impl Fixture {
         let claude_home = root.join("claude-home");
         std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
         std::fs::create_dir_all(claude_home.join("projects")).unwrap();
+        let tmpdir = crate::config::test_env::kept_test_tmpdir("cross-runtime-owner");
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let env = vec![
             set("AGENTDESK_CONFIG", &config_path),
-            set("TMPDIR", root),
+            set("TMPDIR", &tmpdir),
             set("CODEX_HOME", &codex_home),
             set("CLAUDE_CONFIG_DIR", &claude_home),
             set("AGENTDESK_CLAUDE_PATH", &root.join("provider-must-not-run")),
@@ -342,6 +418,7 @@ impl Fixture {
             }
         });
         Self {
+            watcher_runtime: WatcherRuntime::new(),
             rig,
             registry,
             foreign,
@@ -379,7 +456,12 @@ impl Fixture {
         );
     }
     pub(super) async fn observed(&self) -> Observed {
-        let answer = activity_now(&self.rig.shared, &self.provider, self.rig.channel).await;
+        let answer = settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || activity_now(&self.rig.shared, &self.provider, self.rig.channel),
+            |sample| sample.reason == "superseded",
+        )
+        .await;
         if answer.activity == Activity::Unknown {
             let ports = Arc::new(LivePorts {
                 root: Some(self.rig.root.path().to_owned()),
@@ -471,7 +553,12 @@ async fn a2_actual_reading_rejects_owner_aba_and_new_runtime_pg() {
     }
     let fixture = Fixture::connect_and_migrate_fixture(69_184_102, ProviderKind::Claude).await;
     fixture.produce_owners();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     assert!(reading.publish_if_current(|| ()).await.is_some());
     fixture.foreign[1]
@@ -502,7 +589,12 @@ async fn a2_actual_reading_rejects_owner_aba_and_new_runtime_pg() {
         ),
         Some(fixture.foreign_channel.get())
     );
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed.activity, Activity::Idle);
     fixture.registry.register("codex".into(), replacement).await;
     assert!(
@@ -524,7 +616,12 @@ async fn a2_final_publication_rejects_unrelated_owner_epoch_change_pg() {
     }
     let fixture = Fixture::connect_and_migrate_fixture(69_184_103, ProviderKind::Claude).await;
     fixture.produce_owners();
-    let reading = reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel).await;
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || reading_now(&fixture.rig.shared, &fixture.provider, fixture.rig.channel),
+        |sample| sample.observed.reason == "superseded",
+    )
+    .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
     let changed = Arc::new(AtomicUsize::new(0));
     let changed_hook = changed.clone();

@@ -408,8 +408,8 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
         assert!(mock.unhandled.lock().unwrap().is_empty());
         assert_eq!(
             mock.local_note_posts.load(Ordering::Acquire),
-            8,
-            "two idle turns, four refusals, pending and child must reply"
+            9,
+            "delivered stop, two idle turns, four refusals, pending and child must reply"
         );
         server.abort();
     });
@@ -696,6 +696,10 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
         let expected = match case {
             OwnerCase::Multiple | OwnerCase::ForeignProvider => HOST_REFUSED_STOP_RESPONSE,
             OwnerCase::Nonowner | OwnerCase::Mirror => NO_ACTIVE_TURN_RESPONSE,
+            OwnerCase::Slash => super::super::NativeStop::observed_text(true),
+            OwnerCase::OwnerChanged | OwnerCase::SourceChanged => {
+                super::super::NativeStop::observed_text(false)
+            }
             _ => STOPPING_RESPONSE,
         };
         if matches!(case, OwnerCase::CodexText) {
@@ -718,26 +722,67 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             assert!(mock.unhandled.lock().unwrap().is_empty());
             server.abort();
         } else {
-            let reply = run_slash_stop(&shared, &provider, channel).await;
+            let raced = matches!(case, OwnerCase::OwnerChanged | OwnerCase::SourceChanged);
+            let (release, held, worker) = if raced {
+                let (holding, held) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
+                        session,
+                        || {
+                            holding.send(()).unwrap();
+                            released.recv().unwrap();
+                        },
+                    );
+                });
+                (Some(release), Some(held), Some(worker))
+            } else {
+                (None, None, None)
+            };
+            if let Some(held) = held {
+                held.recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            }
+            let request = run_slash_stop(&shared, &provider, channel);
+            let change = async {
+                let Some(release) = release else {
+                    return;
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        if fx
+                            .calls()
+                            .iter()
+                            .any(|call| call.starts_with("capture-pane"))
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if matches!(case, OwnerCase::OwnerChanged) {
+                    shared
+                        .tmux_watchers
+                        .clear_restored_owner_for_tmux_session(session);
+                    shared.tmux_watchers.restore_owner_channel_for_tmux_session(
+                        session,
+                        ChannelId::new(channel.get() + 10),
+                    );
+                } else {
+                    let replacement = root.path().join("replacement.jsonl");
+                    open(&replacement, "parent");
+                    write_binding_event(&provider, channel, session, &replacement, 2);
+                }
+                release.send(()).unwrap();
+            };
+            let (reply, ()) = tokio::join!(request, change);
+            if let Some(worker) = worker {
+                worker.join().unwrap();
+            }
             assert_eq!(reply.text(), expected);
-            assert!(
-                fx.take_calls().is_empty(),
-                "slash acknowledgement precedes provider I/O"
-            );
-            if matches!(case, OwnerCase::OwnerChanged) {
-                shared
-                    .tmux_watchers
-                    .clear_restored_owner_for_tmux_session(session);
-                shared.tmux_watchers.restore_owner_channel_for_tmux_session(
-                    session,
-                    ChannelId::new(channel.get() + 10),
-                );
-            }
-            if matches!(case, OwnerCase::SourceChanged) {
-                let replacement = root.path().join("replacement.jsonl");
-                open(&replacement, "parent");
-                write_binding_event(&provider, channel, session, &replacement, 2);
-            }
             reply.finish(&shared, &provider, channel).await;
         }
         let calls = fx.take_calls();
@@ -745,10 +790,15 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             let writes = escapes(&calls);
             assert_eq!(writes.len(), 1, "unique owner-only parent: {calls:?}");
             assert!(writes[0].contains(session) && writes[0].contains("Escape"));
+        } else if matches!(case, OwnerCase::OwnerChanged | OwnerCase::SourceChanged) {
+            assert!(
+                escapes(&calls).is_empty(),
+                "changed observation must send no Escape: {calls:?}"
+            );
         } else {
             assert!(
                 calls.is_empty(),
-                "refusal or changed authority must perform no provider I/O: {calls:?}"
+                "refusal must perform no provider I/O: {calls:?}"
             );
         }
         assert_eq!(generation_owner.claude_interrupt_generation(), generation);
@@ -936,4 +986,39 @@ pub(super) fn mutate_candidates(candidates: &mut Vec<(String, SourceBinding)>) {
     if owner_stop_mutant("2a-first-candidate-wins") {
         candidates.truncate(1);
     }
+}
+
+#[test]
+fn preserve_stop_forwarded_session_skip_reports_unconfirmed_without_mailbox() {
+    let fx = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding_root = TestBindingRoot::enter(Some(root.path()));
+    fx.pane("Allow\nDeny\nEnter to confirm\n❯");
+    run(async {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(7_193_090);
+        let _confirmed = TestConfirmation::new(channel.get());
+        let session = "native-stop-session-skip";
+        let path = root.path().join("session.jsonl");
+        open(&path, "first");
+        bind_live(&shared, &ProviderKind::Claude, channel, session, &path);
+        let reply = crate::services::discord::commands::stop::run_holder_stop_on(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+        )
+        .await;
+        assert_eq!(reply["outcome"], "unconfirmed");
+        assert_eq!(reply["effect_started"], false);
+        assert!(
+            crate::services::discord::commands::stop::remote_cancel_reply(&reply)
+                .contains("중단 미확인")
+        );
+        assert!(shared.mailbox_peek(channel).is_none());
+        assert!(
+            !fx.take_calls()
+                .iter()
+                .any(|call| call.starts_with("send-keys"))
+        );
+    });
 }

@@ -17,6 +17,7 @@ fn watcher_rollback_incomplete_error(message: impl std::fmt::Display) -> Error {
     )
 }
 
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 pub(in crate::services::discord) enum RequiredReferenceRollbackError {
     #[error("required task-card reference is no longer valid: {detail}")]
@@ -118,6 +119,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_rollback_re
 /// Task responses must remain visibly attached to their durable completion
 /// card. Unlike the general-purpose optional-reference sender, a rejected
 /// reference is a delivery failure and never degrades to an unthreaded POST.
+#[cfg(test)]
 pub(in crate::services::discord) async fn send_long_message_raw_with_required_reference_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -151,6 +153,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_required_re
     }
 }
 
+#[cfg(test)]
 pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -174,10 +177,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     )
 }
 
-/// Receipt-preserving sibling of
-/// [`send_long_message_raw_with_reference_rollback`]. #5071 T1 S3a: the watcher's
-/// placeholderless fresh-send arm consumes the real POST receipts here so its
-/// journal `T` carries Discord's returned channel instead of the requested one.
+/// Keeps the actual POST receipts so the watcher's journal records the returned channel.
 pub(in crate::services::discord) async fn send_long_message_raw_with_reference_rollback_returning_receipts(
     http: &serenity::Http,
     channel_id: ChannelId,

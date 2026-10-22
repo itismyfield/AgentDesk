@@ -331,6 +331,7 @@ inflight_state: durable.clone(), };
             bridge.adk_session_key = Some("isolated-routine-attempt".into());
             bridge.inflight_state.user_msg_id = 9001;
             bridge.inflight_state.session_key = Some("isolated-routine-attempt".into());
+            let token = Arc::new(CancelToken::from_persisted_turn_nonce(bridge.inflight_state.turn_nonce.clone()));
             super::super::inflight::save_inflight_state(&bridge.inflight_state).unwrap();
             let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
             bridge.completion_tx = Some(completed_tx);
@@ -341,7 +342,7 @@ inflight_state: durable.clone(), };
             *WRONG_CAPTURE_CHANNEL.lock().unwrap() = (case == "bridge_channel").then_some(owner);
             let (tx, rx) = mpsc::channel();
             let start_bridge = super::spawn_turn_bridge;
-            start_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+            start_bridge(shared.clone(), token, rx, bridge);
             tokio::time::timeout(std::time::Duration::from_secs(10), captured_rx).await.unwrap().unwrap();
             if case == "bridge_clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
             resume_tx.send(()).unwrap();

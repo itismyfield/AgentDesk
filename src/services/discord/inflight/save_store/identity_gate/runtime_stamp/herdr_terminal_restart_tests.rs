@@ -1,5 +1,5 @@
-//! Restart recovery keeps durable Herdr evidence without inventing a provider terminal, and settles
-//! an admitted terminal from its persisted kind.
+//! Restart settles an admitted Herdr terminal from its persisted kind without inventing one; a prior
+//! process's unadmitted turn ends as a restart without settlement ends it.
 use super::*;
 use crate::services::discord::host_teardown_gate::test_support::{
     busy_turn, channel_key, shared_on,
@@ -16,12 +16,14 @@ use serenity::all::ChannelId;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-const FILTER: &str = "a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg";
+const FILTER: &str = "a_restart_settles_admitted_kinds_and_leaves_other_turns_as_before_pg";
 const ACK_FILTER: &str = "an_admitted_ack_outlives_a_stop_before_cleanup_pg";
 const HOLD_FILTER: &str = "restart_preserves_execution_nonce_input_hold_pg";
 const BASE: u64 = 1_479_671_301_387_160_000;
 const ACK_BASE: u64 = 1_479_671_301_387_180_000;
 const HOLD_BASE: u64 = 1_479_671_301_387_190_000;
+/// Set on a reference restart: it restores with settlement off, as production did before it.
+const REFERENCE: &str = "ADK_ACT7_REFERENCE";
 
 /// Case `n`'s canonical execution nonce: its own, and never its inflight turn nonce.
 fn execution_nonce(n: usize) -> String {
@@ -71,6 +73,71 @@ fn run_phase(filter: &str, phase: &str, marker: &str, env: &[(&str, &std::ffi::O
     pid
 }
 
+/// A prior process and its restart, each in a new process of `filter`; a `reference` restart runs
+/// without settlement. Returns the root the restart wrote each case's outcome under.
+async fn restart_run(filter: &str, reference: bool) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    db.connect_and_migrate().await.close().await;
+    let mut env = vec![
+        ("ADK_ACT7_ROOT", root.path().as_os_str()),
+        ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
+    ];
+    env.extend(reference.then_some((REFERENCE, std::ffi::OsStr::new("1"))));
+    let persist = run_phase(filter, "PERSIST", "ACT7_PHASE PERSIST", &env);
+    let restore = run_phase(filter, "RESTORE", "ACT7_RESTORE_RETURNED", &env);
+    assert_ne!(persist, restore);
+    db.drop().await;
+    root
+}
+
+/// A restarted turn this process never started is no turn of its own: each case whose outcome the
+/// reference restart wrote ended the same way, and exactly `legacy` of them did.
+async fn legacy_matches_reference(filter: &str, cases: usize, legacy: usize) {
+    let restarted = restart_run(filter, false).await;
+    let reference = restart_run(filter, true).await;
+    let outcome = |root: &tempfile::TempDir, n| {
+        std::fs::read_to_string(root.path().join(format!("{n}.outcome"))).ok()
+    };
+    let mut compared = 0;
+    for n in 0..cases {
+        if let Some(expected) = outcome(&reference, n) {
+            assert_eq!(outcome(&restarted, n), Some(expected), "case={n}");
+            compared += 1;
+        }
+    }
+    assert_eq!(
+        compared, legacy,
+        "every restarted turn of a prior process was compared"
+    );
+}
+
+/// What a restart left of case `n` that a reference restart must leave the same.
+async fn write_outcome(
+    phase: &Phase,
+    n: usize,
+    channel: ChannelId,
+    shown: &[String],
+    before: &[u8],
+) {
+    let row = std::fs::read(phase.path(channel)).ok();
+    let session = phase
+        .shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .contains_key(&channel);
+    let outcome = format!(
+        "shown={shown:?} row={} unchanged={} session={session} mailbox={}",
+        row.is_some(),
+        row.as_deref() == Some(before),
+        phase.shared.mailbox_peek(channel).is_some(),
+    );
+    std::fs::write(phase.root.join(format!("{n}.outcome")), outcome).unwrap();
+}
+
 /// One child phase's runtime: the shared root and database the parent made.
 struct Phase {
     name: String,
@@ -88,7 +155,9 @@ impl Phase {
         let root = std::path::PathBuf::from(std::env::var_os("ADK_ACT7_ROOT").unwrap());
         let root_guard = crate::config::set_agentdesk_root_for_test(&root);
         let legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        // A reference restart runs as production did before settlement existed.
+        let reference = name == "RESTORE" && std::env::var_os(REFERENCE).is_some();
+        HERDR_SETTLEMENT_OVERRIDE.set(!reference);
         let pool = crate::db::postgres::connect_test_pool_with_max_connections(
             &std::env::var("ADK_ACT7_DB").unwrap(),
             "act7 restart",
@@ -200,8 +269,8 @@ fn written(discord: &DiscordRecorder, channel: ChannelId) -> Vec<String> {
 /// What restart must leave for each admitted case.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Expect {
-    /// Unadmitted: the held row stays byte-for-byte.
-    Held,
+    /// Unadmitted: no turn of this process, so restart takes it as a reference restart does.
+    Legacy,
     /// Shows `text` on its channel, never the transcript body, and its row is cleared.
     Settled(&'static str),
     /// Its delivery was already recorded: nothing written, row cleared.
@@ -210,23 +279,12 @@ enum Expect {
     Kept,
 }
 
-/// The two phases run in different processes; the persisted bytes outlive token and registry state.
+/// The two phases run in different processes; the persisted bytes outlive token and registry state,
+/// and a reference pair restores without settlement for the turns no process here started.
 #[tokio::test(flavor = "current_thread")]
-async fn a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg() {
+async fn a_restart_settles_admitted_kinds_and_leaves_other_turns_as_before_pg() {
     if std::env::var("ADK_ACT7_PHASE").is_err() {
-        let root = tempfile::tempdir().unwrap();
-        let _root = crate::config::set_agentdesk_root_for_test(root.path());
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        pool.close().await;
-        let env = [
-            ("ADK_ACT7_ROOT", root.path().as_os_str()),
-            ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
-        ];
-        let persist = run_phase(FILTER, "PERSIST", "ACT7_PHASE PERSIST", &env);
-        let restore = run_phase(FILTER, "RESTORE", "ACT7_RESTORE_RETURNED", &env);
-        assert_ne!(persist, restore);
-        db.drop().await;
+        legacy_matches_reference(FILTER, RESTART_CASES, 9).await;
         return;
     }
     let phase = Phase::open().await.unwrap();
@@ -241,23 +299,23 @@ async fn restart_cases(phase: &Phase) {
     use NativeTerminalKind::{Aborted, Completed};
     let stored_body = |n| -> &'static str { Box::leak(stored(n).into_boxed_str()) };
     // (kind, expectation): 3 Aborted, 4 Completed with a stored body, 7 a recorded delivery,
-    // 8 a completion with no stored body, 9 a planned restart, 10 an un-anchored Aborted.
+    // 8 a completion with no stored body, 9 a drain restart's body, 10 an un-anchored Aborted.
     let cases = [
-        (None, Expect::Held),
-        (None, Expect::Held),
-        (None, Expect::Held),
+        (None, Expect::Legacy),
+        (None, Expect::Legacy),
+        (None, Expect::Legacy),
         (Some(Aborted), Expect::Settled(ADMITTED_ABORT_NOTICE)),
         (Some(Completed), Expect::Settled(stored_body(4))),
-        (None, Expect::Held),
-        (None, Expect::Held),
+        (None, Expect::Legacy),
+        (None, Expect::Legacy),
         (Some(Completed), Expect::CleanupOnly),
         (Some(Completed), Expect::Kept),
-        (Some(Aborted), Expect::Kept),
+        (Some(Completed), Expect::Settled(stored_body(9))),
         (Some(Aborted), Expect::Settled(ADMITTED_ABORT_NOTICE)),
-        (None, Expect::Held), // Cold intent before any input or own-start.
-        (None, Expect::Held), // Source inode replaced after persistence.
-        (None, Expect::Held), // No source baseline was admitted.
-        (None, Expect::Held), // Source absent and mailbox not reconstructed.
+        (None, Expect::Legacy), // Cold intent before any input or own-start.
+        (None, Expect::Legacy), // Source inode replaced after persistence.
+        (None, Expect::Legacy), // No source baseline was admitted.
+        (None, Expect::Legacy), // Source absent and mailbox not reconstructed.
     ];
     assert_eq!(cases.len(), RESTART_CASES);
     let (mut guards, mut warm) = (Vec::new(), Vec::new());
@@ -383,17 +441,17 @@ async fn restart_cases(phase: &Phase) {
             rig.sends().is_empty(),
             "restart must not replay Escape or another input"
         );
-        let mut lost_holds = Vec::new();
+        let reference = std::env::var_os(REFERENCE).is_some();
         for (n, (kind, expect)) in cases.into_iter().enumerate() {
             let channel = ChannelId::new(BASE + n as u64);
             let shown = written(&discord, channel);
             let before = std::fs::read(phase.root.join(format!("{n}.before"))).unwrap();
             let case = format!("case={n} kind={kind:?} expect={expect:?} shown={shown:?}");
-            if expect == Expect::Held
-                && (!shown.is_empty()
-                    || std::fs::read(phase.path(channel)).ok().as_ref() != Some(&before))
-            {
-                lost_holds.push(case.clone());
+            if expect == Expect::Legacy {
+                write_outcome(phase, n, channel, &shown, &before).await;
+                continue;
+            }
+            if reference {
                 continue;
             }
             assert!(
@@ -402,14 +460,19 @@ async fn restart_cases(phase: &Phase) {
             );
             match expect {
                 Expect::Settled(text) => {
-                    assert!(shown.iter().any(|c| c.contains(text)), "{case}");
+                    assert_eq!(
+                        shown.iter().filter(|c| c.contains(text)).count(),
+                        1,
+                        "{case}"
+                    );
                     assert!(phase.durable(channel).is_none(), "{case}");
                 }
                 Expect::CleanupOnly => {
                     assert!(shown.is_empty(), "{case}");
                     assert!(phase.durable(channel).is_none(), "{case}");
                 }
-                Expect::Kept | Expect::Held => {
+                Expect::Legacy => unreachable!("written as an outcome above"),
+                Expect::Kept => {
                     assert!(shown.is_empty(), "{case}");
                     let row = phase
                         .durable(channel)
@@ -429,24 +492,7 @@ async fn restart_cases(phase: &Phase) {
                 std::fs::read(source_before).ok(),
                 "{case}: source cursor evidence stays unchanged"
             );
-            if expect != Expect::Held {
-                continue;
-            }
-            assert!(
-                !phase
-                    .shared
-                    .core
-                    .lock()
-                    .await
-                    .sessions
-                    .contains_key(&channel)
-            );
-            assert!(phase.shared.mailbox_peek(channel).is_none());
         }
-        assert!(
-            lost_holds.is_empty(),
-            "restart lost hold effects: {lost_holds:?}"
-        );
         assert!(warm.is_empty(), "a process restart has no warm mailbox");
     }
     drop(guards);
@@ -544,26 +590,14 @@ async fn canonical_execution(
 
 const HOLD_CASES: usize = 3;
 
-/// A held turn's input hold names its canonical execution nonce, the key the executor checks; a
-/// restart keeps that hold as it was, and no hold is ever keyed by the inflight turn nonce.
+/// A turn's input hold names its canonical execution nonce, the key the executor checks; a restart
+/// keeps that hold, never keys one by the turn nonce, and ends the row as a reference restart does.
 #[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn restart_preserves_execution_nonce_input_hold_pg() {
     use crate::services::claude::herdr_turn::{hold, input_holds, not_held};
     if std::env::var("ADK_ACT7_PHASE").is_err() {
-        let root = tempfile::tempdir().unwrap();
-        let _root = crate::config::set_agentdesk_root_for_test(root.path());
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        pool.close().await;
-        let env = [
-            ("ADK_ACT7_ROOT", root.path().as_os_str()),
-            ("ADK_ACT7_DB", std::ffi::OsStr::new(&db.database_url)),
-        ];
-        let persist = run_phase(HOLD_FILTER, "PERSIST", "ACT7_PHASE PERSIST", &env);
-        let restore = run_phase(HOLD_FILTER, "RESTORE", "ACT7_RESTORE_RETURNED", &env);
-        assert_ne!(persist, restore);
-        db.drop().await;
+        legacy_matches_reference(HOLD_FILTER, HOLD_CASES, HOLD_CASES).await;
         return;
     }
     let phase = Phase::open().await.unwrap();
@@ -630,18 +664,14 @@ async fn restart_preserves_execution_nonce_input_hold_pg() {
                 .provider
                 .build_tmux_session_name(&format!("act7-hold-{n}"));
             let before = std::fs::read(phase.root.join(format!("hold-{n}.before"))).unwrap();
-            assert!(written(&discord, channel).is_empty(), "case={n}");
-            assert_eq!(
-                std::fs::read(phase.path(channel)).unwrap(),
-                before,
-                "case={n}"
-            );
+            write_outcome(&phase, n, channel, &written(&discord, channel), &before).await;
             let nonce = canonical_execution(&phase, &name).await.execution_nonce;
             assert!(
                 not_held(&nonce).is_err(),
                 "case={n}: the executor's check of {nonce} still refuses input after restart"
             );
-            let turn = phase.durable(channel).unwrap().turn_nonce.unwrap();
+            let row: InflightTurnState = serde_json::from_slice(&before).unwrap();
+            let turn = row.turn_nonce.unwrap();
             assert_eq!(not_held(&turn), Ok(()), "case={n}: no hold names the turn");
         }
         let holds = serde_json::to_vec(&input_holds().unwrap()).unwrap();

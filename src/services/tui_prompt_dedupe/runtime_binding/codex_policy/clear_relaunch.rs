@@ -7,6 +7,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Read, path::PathBuf};
 
+#[path = "absent_open.rs"]
+mod absent_open;
+#[path = "fresh_admission.rs"]
+mod fresh_admission;
+#[cfg(test)]
+pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
+pub(crate) use fresh_admission::{
+    fresh_scope_eligible, fresh_scope_pending, input_hold_reason_for_channel,
+    input_reason_for_channel, successor_unproved_for_channel, with_current_scope_nonce,
+    with_fresh_scope,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Captured {
     pub seq: u64,
@@ -141,6 +153,53 @@ pub(crate) fn relaunch_open(tmux: &str) -> bool {
 
 pub(crate) fn launch_blocked(tmux: &str) -> bool {
     codex_verified_input_blocked(tmux) && !relaunch_open(tmux)
+}
+
+pub(crate) fn launch_blocked_observed(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+) -> bool {
+    tc::with_tmux_source_authority(tmux, absence_custody_pending_under)
+        || (absent_capture(tmux, observation).is_none() && launch_blocked(tmux))
+}
+
+pub(crate) fn absent_capture(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+) -> Option<Captured> {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        absent_open::capture_under(authority, observation)
+    })
+}
+
+pub(crate) fn absent_matches(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+    captured: &Captured,
+) -> bool {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        absent_matches_under(authority, observation, captured)
+    })
+}
+
+pub(crate) fn absent_matches_under(
+    authority: &TmuxSourceAuthority<'_>,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+    captured: &Captured,
+) -> bool {
+    absent_open::capture_under(authority, observation).as_ref() == Some(captured)
+}
+
+pub(super) fn absence_custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool {
+    !open_under(authority) && absent_open::custody_pending_under(authority)
+}
+
+pub(super) fn successor_unproved_under(
+    authority: &TmuxSourceAuthority<'_>,
+    nonce: &str,
+    context: &BindingContext,
+) -> bool {
+    absent_open::successor_unproved_under(authority, nonce, context)
 }
 
 pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {

@@ -6,6 +6,7 @@
 //! With `dry_run = true` every DELETE becomes a `SELECT COUNT(*)` and no archive or
 //! aggregate write runs, so the DB is untouched.
 
+mod image_retention;
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -19,8 +20,7 @@ pub struct TableReport {
     pub rows_affected: i64,
 }
 
-/// Full report for one run of [`db_retention_job`]: one entry per table plus
-/// aggregate/archive writes and the `intake_outbox` `candidates` counts.
+/// Retention outcomes and the separate intake candidate counts.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct RetentionReport {
     pub dry_run: bool,
@@ -98,7 +98,7 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_turn_lifecycle_events(pool, dry_run, &mut report).await?;
     retain_skill_usage(pool, dry_run, &mut report).await?;
     retain_turns(pool, dry_run, &mut report).await?;
-    retain_context_snapshots(pool, dry_run, &mut report).await?;
+    image_retention::retain(pool, dry_run, &mut report).await?;
     count_intake_outbox_candidates_bounded(
         pool,
         INTAKE_OUTBOX_COUNT_STATEMENT_TIMEOUT,

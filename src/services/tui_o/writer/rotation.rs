@@ -52,6 +52,7 @@ mod owe;
 pub(crate) mod provenance;
 #[path = "rotation/readers.rs"]
 mod readers;
+mod scoped;
 pub(crate) mod transition;
 use fork_lineage::Lineage;
 pub use owe::Owe;
@@ -131,6 +132,7 @@ pub struct Sources<B> {
     rotation: Rotation,
     /// Every attached source, in bind order.
     readers: Vec<Reader>,
+    suspension: super::suspension::Suspension,
     /// Parent identities by spool key, kept at the parent's durable cursor.
     lineage: HashMap<String, Lineage>,
     /// Undecided sources that have shown at least one inherited row.
@@ -300,6 +302,7 @@ impl<B: BindingEvents> Sources<B> {
             checkpoint: None,
             rotation: Rotation::default(),
             readers: Vec::new(),
+            suspension: super::suspension::Suspension::default(),
             lineage: HashMap::new(),
             prefix_seen: HashSet::new(),
             refined: Vec::new(),
@@ -337,9 +340,10 @@ impl<B: BindingEvents> Sources<B> {
         checkpoint: u64,
     ) -> Result<(), WriterAlarm> {
         super::historical_hops::validate(events, checkpoint, self.channel)?;
+        let suspension = self.suspension.clone();
         let changed =
             super::historical_hops::restore(&mut self.rotation, events, checkpoint, |source| {
-                writer.store().cursor(source).is_some()
+                !suspension.contains(source) && writer.store().cursor(source).is_some()
             });
         if changed {
             writer
@@ -534,39 +538,6 @@ impl<B: BindingEvents> Sources<B> {
         Ok(Some(seq))
     }
 
-    /// Marks each unproven hop of the record's pane that it shows was left, durably before the
-    /// checkpoint passes the record.
-    fn prove<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        event: &BindingEvent,
-    ) -> Result<(), WriterAlarm> {
-        let Some(session) = proving_session(event) else {
-            return Ok(());
-        };
-        let mut proved = Vec::new();
-        for (key, next) in &mut self.rotation.successors {
-            let made = match (next.seq, next.tmux_session.as_deref()) {
-                (Some(seq), Some(tmux)) => Some((seq, tmux)),
-                _ => (self.legacy_hops.get(key)).map(|(seq, tmux)| (*seq, tmux.as_str())),
-            };
-            let old = self.readers.iter().find(|r| source_key(&r.source) == *key);
-            let left = old.is_some_and(|old| self.names.session(&old.source) != session);
-            let ours =
-                made.is_some_and(|(seq, tmux)| seq <= event.seq && tmux == event.tmux_session);
-            if next.proof.is_none() && ours && left {
-                next.proof = Some(event.seq);
-                proved.push(key.clone());
-            }
-        }
-        if !proved.is_empty() {
-            let written = writer.store().write_rotation(&self.rotation);
-            written.map_err(halted("rotation"))?;
-            self.wake_proven(writer, proved)?;
-        }
-        Ok(())
-    }
-
     fn wait_resolution<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &ChannelWriter<P, L, A>,
@@ -590,6 +561,9 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        for source in old.into_iter().chain(parent_hint).chain([&new]) {
+            self.guard_selected_reference(writer.store(), source)?;
+        }
         let verified = crate::services::tui_prompt_dedupe::codex_verified::historical_source_proven(
             event, &new,
         );
@@ -808,6 +782,22 @@ impl<B: BindingEvents> Sources<B> {
         }
         self.raised.drain(..).for_each(|alarm| writer.alarm(alarm));
         Ok(())
+    }
+
+    fn reconcile_boundary_pending<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &self,
+        writer: &ChannelWriter<P, L, A>,
+    ) {
+        let count = self
+            .rotation
+            .links
+            .values()
+            .filter(|link| {
+                matches!(link.boundary, Boundary::Pending { .. })
+                    && self.resume_selected(&link.source)
+            })
+            .count();
+        writer.reconcile_boundary_pending(count);
     }
 
     /// Sources whose segments may be collected, with how many to keep; undecided and pending

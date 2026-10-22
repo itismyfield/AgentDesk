@@ -30,6 +30,14 @@ mod idle_phase_split;
 // The literal test gate keeps the source censuses from reading this file as production.
 #[cfg(test)]
 #[cfg(unix)]
+#[path = "herdr_stop_activation_e2e_tests.rs"]
+mod herdr_stop_activation_e2e;
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "herdr_stop_activation_http_e2e_tests.rs"]
+mod herdr_stop_activation_http_e2e;
+#[cfg(test)]
+#[cfg(unix)]
 #[path = "herdr_terminate_e2e_tests.rs"]
 mod herdr_terminate_e2e;
 #[cfg(test)]

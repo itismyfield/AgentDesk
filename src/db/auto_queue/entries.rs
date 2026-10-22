@@ -2,6 +2,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
+use super::run_admission::admit_entry_transition_on_pg_tx;
 use super::run_status::is_live_run_status;
 use super::runs::{
     acquire_run_advisory_xact_lock_on_pg_tx, acquire_run_advisory_xact_locks_on_pg_tx,
@@ -503,8 +504,15 @@ pub async fn update_entry_status_on_pg(
             .await
             .map_err(|error| format!("open postgres entry transition transaction: {error}"))?;
 
+        admit_entry_transition_on_pg_tx(
+            &mut tx,
+            &current.run_id,
+            entry_id,
+            &current.status,
+            normalized,
+        )
+        .await?;
         if normalized == ENTRY_STATUS_DISPATCHED {
-            gate_dispatched_entry_run_on_pg_tx(&mut tx, &current.run_id).await?;
             validate_new_dispatch_attachment_on_pg_tx(
                 &mut tx,
                 entry_id,
@@ -850,8 +858,9 @@ pub async fn update_entry_status_on_pg_tx(
         });
     }
 
+    admit_entry_transition_on_pg_tx(tx, &current.run_id, entry_id, &current.status, normalized)
+        .await?;
     if normalized == ENTRY_STATUS_DISPATCHED {
-        gate_dispatched_entry_run_on_pg_tx(tx, &current.run_id).await?;
         validate_new_dispatch_attachment_on_pg_tx(
             tx,
             entry_id,
@@ -1015,38 +1024,6 @@ pub async fn update_entry_status_on_pg_tx(
         to_status: normalized.to_string(),
         changed: true,
     })
-}
-
-/// Serializes a live attachment with terminal run writers, then derives the
-/// run predicate from a fresh READ COMMITTED statement under that token.
-///
-/// Call sites invoke this only for the dispatched arm, before its entry write.
-/// That arm does not call `maybe_finalize_run_if_ready_pg`; its non-blocking
-/// finalizer protocol and the participant lock-order summary are documented by
-/// that symbol in `runs`.
-async fn gate_dispatched_entry_run_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-) -> Result<(), String> {
-    acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await?;
-    let run_status = sqlx::query_scalar::<_, String>(
-        "SELECT status
-         FROM auto_queue_runs
-         WHERE id = $1",
-    )
-    .bind(run_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| format!("reload auto-queue run {run_id} before entry dispatch: {error}"))?
-    .ok_or_else(|| format!("auto-queue run not found before entry dispatch: {run_id}"))?;
-
-    if !is_live_run_status(&run_status) {
-        return Err(format!(
-            "auto-queue run {run_id} is {run_status}: refusing to dispatch an entry"
-        ));
-    }
-
-    Ok(())
 }
 
 /// Acquire every run token before a caller-owned transaction writes any row.
@@ -1682,9 +1659,7 @@ mod tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sqlx::{Connection, PgConnection, PgPool};
 
-    /// This module's own source, read by the declaration-site lock on the
-    /// pinned dispatch identity.
-    const MODULE_SOURCE: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()));
+    mod source_guard_tests;
 
     async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
@@ -2277,51 +2252,10 @@ mod tests {
         assert!(terminal_dispatch.dispatch_history.is_empty());
     }
 
-    fn pool_status_update_body(source: &str) -> &str {
-        source
-            .split_once("pub async fn update_entry_status_on_pg(")
-            .expect("module must declare update_entry_status_on_pg")
-            .1
-            .split_once("\n}\n")
-            .expect("update_entry_status_on_pg must close at column zero")
-            .0
-    }
-
-    fn pins_declared_before_retry_loop(source: &str) -> bool {
-        let body = pool_status_update_body(source);
-        let Some(retry_loop) = body.find("\n    loop {") else {
-            return false;
-        };
-        let declarations: Vec<_> = body.match_indices("let pinned_").collect();
-        declarations.len() == 2 && declarations.iter().all(|(offset, _)| *offset < retry_loop)
-    }
-
     #[test]
     fn pinned_dispatch_identity_is_declared_before_the_stale_retry_loop() {
-        assert!(
-            pins_declared_before_retry_loop(MODULE_SOURCE),
-            "both pinned_* bindings must be declared before the stale-retry loop"
-        );
-
-        // The shape this lock rejects: the pin recomputed per iteration. It is
-        // behaviorally indistinguishable from the hoist, because the drift
-        // branch only lets an iteration `continue` while the reloaded identity
-        // still equals the observed one — so the recomputed value would always
-        // match. The declaration site is therefore the only checkable surface.
-        const RECOMPUTED_INSIDE_LOOP: &str = "\
-pub async fn update_entry_status_on_pg(
-) -> Result<EntryStatusUpdateResult, String> {
-    let mut current = load_entry_status_row_pg(pool, entry_id).await?;
-    loop {
-        let pinned_dispatch_id = options.dispatch_id.clone();
-        let pinned_slot_index = options.slot_index;
-    }
-}
-";
-        assert!(
-            !pins_declared_before_retry_loop(RECOMPUTED_INSIDE_LOOP),
-            "the lock must reject pins recomputed inside the retry loop"
-        );
+        let gaps = source_guard_tests::pinned_identity_gaps(source_guard_tests::ENTRIES);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[tokio::test]

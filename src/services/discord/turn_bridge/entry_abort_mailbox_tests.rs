@@ -4,7 +4,10 @@ use crate::services::discord::{
     health::mailbox::{ResidualOccupancy, mailbox_agent_turn_status},
 };
 
-fn seed_context(seed: &str, row: InflightTurnState) -> TurnBridgeContext {
+pub(in crate::services::discord::turn_bridge) fn seed_context(
+    seed: &str,
+    row: InflightTurnState,
+) -> TurnBridgeContext {
     let gateway: std::sync::Arc<dyn TurnGateway> =
         std::sync::Arc::new(crate::services::discord::gateway::HeadlessGateway);
     TurnBridgeContext {
@@ -715,7 +718,7 @@ async fn herdr_cold_case(
         }
         Cold::StopWithoutEvidence => intent.user_stop.store(true, Ordering::Release),
         Cold::StopAfterSeal => {
-            crate::services::provider::herdr_before_start::finish_execution(Some(&cancel));
+            crate::services::provider::herdr_before_start::finish_execution(Some(&cancel), false);
             crate::services::provider::herdr_before_start::EXIT_OBSERVED
                 .set(Some(|state| state.user_stop.store(true, Ordering::Release)));
         }
@@ -770,7 +773,7 @@ async fn herdr_cold_case(
 
 #[cfg(unix)]
 #[path = "entry_abort_cold_error_tests.rs"]
-mod cold_error;
+pub(in crate::services::discord::turn_bridge) mod cold_error;
 
 /// A Herdr Codex turn from the real rollout reader through admission, the bridge and the finalizer.
 #[cfg(unix)]

@@ -1,5 +1,5 @@
-//! Restart settles a prior process's before-start receipt: one stop notice on the turn's message,
-//! ack, then clear of that row. An unreadable or foreign receipt keeps the row off other recovery.
+//! Restart settles a prior process's before-start receipt: one stop notice (a reply where O owns
+//! the body), ack, then clear. An unreadable or foreign receipt keeps the row off other recovery.
 
 use super::herdr_admitted_restart::ADMITTED_ABORT_NOTICE;
 use super::*;
@@ -36,10 +36,15 @@ pub(super) fn herdr_turn_held(
     ) {
         return false;
     }
-    crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+    use crate::services::provider::cancel_token_claude_interrupt as interrupt;
+    let nonce = state.turn_nonce.as_deref().unwrap_or_default();
+    interrupt::herdr_stop_settlement_available()
         && state.tui_terminal_kind.is_none()
-        && recovery_tmux_session_name(provider, state)
-            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name))
+        // Only a turn this process indexed is held; a prior process's row takes ordinary recovery.
+        && recovery_tmux_session_name(provider, state).is_some_and(|name| {
+            interrupt::herdr_turn_indexed(&name, nonce)
+                && crate::services::discord::turn_bridge::herdr_marked(&name)
+        })
 }
 
 /// A row that carries a policy receipt; a row without one never gets here.
@@ -115,9 +120,11 @@ impl BeforeStartRestart {
         if state.restart_mode.is_some() && !inflight::receipt_mutant("mode-bypass") {
             return kept(state, "planned restart owns the row");
         }
-        if o_owns(state) {
-            return kept(state, "O owns the destination body");
-        }
+        let Some(o_body) =
+            crate::services::discord::turn_bridge::before_start_stop::o_owns_body(state)
+        else {
+            return kept(state, "O ownership is unreadable");
+        };
         // A prior process's turn has no actor here; one present now is another turn's.
         if super::mailbox_snapshot(shared, channel)
             .await
@@ -138,12 +145,20 @@ impl BeforeStartRestart {
             .is_some_and(|receipt| receipt.notice_pending())
             || inflight::receipt_mutant("delivered-resend")
         {
-            let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
-            let anchor = MessageId::new(row.current_msg_id);
-            let sent = gateway
-                .replace_message_with_outcome(channel, anchor, ADMITTED_ABORT_NOTICE)
-                .await;
-            let Some(acked) = row.ack_before_start_notice(&sent).await else {
+            // Where O owns the body the stop is a reply to the turn's message, never an edit of it.
+            let acked = if o_body {
+                let notice =
+                    crate::services::discord::turn_bridge::before_start_stop::reply_and_ack_stop;
+                notice(http, shared, &row).await
+            } else {
+                let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
+                let anchor = MessageId::new(row.current_msg_id);
+                let sent = gateway
+                    .replace_message_with_outcome(channel, anchor, ADMITTED_ABORT_NOTICE)
+                    .await;
+                row.ack_before_start_notice(&sent).await
+            };
+            let Some(acked) = acked else {
                 return kept(state, "the notice was not shown and acked");
             };
             row = acked;
@@ -176,15 +191,6 @@ fn kept(state: &inflight::InflightTurnState, why: &'static str) -> BeforeStartRe
         "recovery kept a before-start policy receipt"
     );
     BeforeStartRestartReport::Retained(why)
-}
-
-/// Whether O owns this row's destination body; an unreadable answer counts as owned.
-fn o_owns(state: &inflight::InflightTurnState) -> bool {
-    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-        state.channel_id,
-        state.runtime_kind,
-    )
-    .unwrap_or(true)
 }
 
 #[cfg(test)]

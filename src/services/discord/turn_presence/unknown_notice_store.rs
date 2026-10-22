@@ -113,7 +113,7 @@ impl Scope {
             .provider(&self.provider)
             .token_hash(&self.token_hash)
             .channel_id(self.channel);
-        runtime_store::critical_atomic_write(&path, &json, context)?;
-        runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())
+        // Flushes the parent and its ancestors; only a failure before the rename is an error.
+        runtime_store::critical_publish(&path, &json, context)
     }
 }

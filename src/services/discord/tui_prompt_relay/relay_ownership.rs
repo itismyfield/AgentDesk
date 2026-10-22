@@ -187,6 +187,7 @@ pub(super) fn record_observed_external_turn_lease(
         runtime_kind,
         generation:
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        hosted_source: prompt.hosted_source.clone(),
     };
     // Capture the RECORDED lease (with its stamped generation) so the caller's
     // later `clear_observed_external_turn_lease_if_current` matches the exact
@@ -414,6 +415,35 @@ pub(super) fn record_external_turn_lease_for_output(
     output_path: &Path,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> ExternalInputRelayLease {
+    let pin = crate::services::tui_prompt_dedupe::hosted_source::capture(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+        output_path,
+        None,
+    );
+    record_source_external_turn_lease_for_output(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        runtime_kind,
+        (output_path, observed_at, pin),
+    )
+}
+
+pub(super) fn record_source_external_turn_lease_for_output(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    runtime_kind: RuntimeHandoffKind,
+    (output_path, observed_at, hosted_source): (
+        &Path,
+        chrono::DateTime<chrono::Utc>,
+        Option<crate::services::tui_prompt_dedupe::hosted_source::HostedSourcePin>,
+    ),
+) -> ExternalInputRelayLease {
     let relay_owner =
         external_input_relay_owner_for_output(shared, tmux_session_name, Some(output_path));
     let lease = ExternalInputRelayLease {
@@ -433,6 +463,7 @@ pub(super) fn record_external_turn_lease_for_output(
         runtime_kind: Some(runtime_kind),
         generation:
             crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        hosted_source,
     };
     // Return the RECORDED lease (with its stamped generation) so a later
     // exact-match clear targets the precise stored identity.
@@ -571,3 +602,7 @@ pub(super) fn parse_external_input_relay_owner(value: &str) -> ExternalInputRela
         _ => ExternalInputRelayOwner::Unassigned,
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "relay_ownership/hosted_source_tests.rs"]
+mod hosted_source_tests;

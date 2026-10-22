@@ -14,8 +14,11 @@ use tracing_subscriber::fmt::MakeWriter;
 #[path = "native_collector_tests.rs"]
 mod native_collector_tests;
 
-#[path = "retired_transport_tests.rs"]
-mod retired_transport_tests;
+#[path = "footer_retirement_raw_tests.rs"]
+mod footer_retirement_raw_tests;
+
+#[path = "source_guard_tests.rs"]
+mod source_guard_tests;
 
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
@@ -310,19 +313,6 @@ async fn run_tick_body(
     delivered: bool,
     body: &str,
 ) -> StreamingStatusTickOutcome {
-    run_tick_mode(locals, rec, shared, fx, delivered, body, WatcherLegacyMode::Legacy).await
-}
-
-#[rustfmt::skip]
-async fn run_tick_mode(
-    locals: &mut TickLocals,
-    rec: &Recorder,
-    shared: &Arc<SharedData>,
-    fx: &Fixture,
-    delivered: bool,
-    body: &str,
-    legacy_mode: WatcherLegacyMode,
-) -> StreamingStatusTickOutcome {
     locals.last = tokio::time::Instant::now()
         - crate::services::discord::status_update_interval()
         - Duration::from_millis(1);
@@ -332,7 +322,7 @@ async fn run_tick_mode(
     let ctx = StreamingStatusTickContext {
         http: &rec.http, shared, channel_id: fx.channel, watcher_provider: &fx.provider,
         tmux_session_name: &fx.tmux, output_path: &fx.output_path,
-        turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy), legacy_mode,
+        turn_delivered: &delivered_flag, host: &HostSnapshot::new(WatchHost::Legacy),
     };
     let turn = StreamingStatusTickTurn {
         data_start_offset: 0, current_offset: full.len() as u64, full_response: &full,
@@ -405,11 +395,11 @@ fn committed_progress_preserves_exact_row() {
 }
 
 #[test]
-fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
+fn legacy_tick_observes_actual_progress() {
     const CHILD: &str = "AGENTDESK_N4D1_TICK_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let name = format!(
-            "{}::retired_o_tick_preserves_row_and_observes_actual_legacy_control",
+            "{}::legacy_tick_observes_actual_progress",
             module_path!().split_once("::").unwrap().1
         );
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -425,7 +415,6 @@ fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
     let (_lock, guard) = isolate_root();
     let fx = seed_row(guard.root.path(), 6_325, false, true);
     let before = fx.row_bytes();
-    let mtime = std::fs::metadata(fx.path()).unwrap().modified().unwrap();
     capture_warns(async {
         let mut shared = crate::services::discord::make_shared_data_for_tests();
         Arc::get_mut(&mut shared)
@@ -438,61 +427,7 @@ fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
             &fx.provider,
             fx.channel.get(),
         );
-        run_tick_mode(
-            &mut locals,
-            &rec,
-            &shared,
-            &fx,
-            false,
-            TRAILING_BODY,
-            WatcherLegacyMode::RetiredO,
-        )
-        .await;
-        let seen = observation.raw_process_snapshot();
-        assert_eq!(
-            seen,
-            observation.snapshot(),
-            "raw tick events must be keyed without exclusions"
-        );
-        assert_eq!(
-            seen.event_count("streaming_tick"),
-            1,
-            "actual expired interval reached"
-        );
-        assert_eq!(seen.event_count("stream_progress_call"), 0, "{seen:?}");
-        assert_eq!(
-            (
-                seen.writable_inflight_load_calls,
-                seen.readonly_inflight_load_calls,
-                seen.compatibility_backfill_attempts
-            ),
-            (0, 0, 0),
-            "{seen:?}"
-        );
-        assert_eq!(fx.row_bytes(), before);
-        assert_eq!(
-            std::fs::metadata(fx.path()).unwrap().modified().unwrap(),
-            mtime
-        );
-        assert_eq!(
-            locals.spin, 1,
-            "tick state advances without Legacy persistence"
-        );
-        drop(observation);
-        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
-            &fx.provider,
-            fx.channel.get(),
-        );
-        run_tick_mode(
-            &mut locals,
-            &rec,
-            &shared,
-            &fx,
-            false,
-            TRAILING_BODY,
-            WatcherLegacyMode::Legacy,
-        )
-        .await;
+        run_tick_body(&mut locals, &rec, &shared, &fx, false, TRAILING_BODY).await;
         let seen = observation.raw_process_snapshot();
         assert!(
             seen.writable_inflight_load_calls > 0,
@@ -507,7 +442,75 @@ fn retired_o_tick_preserves_row_and_observes_actual_legacy_control() {
             before,
             "Legacy active progress still persists"
         );
-        println!("RetiredO and Legacy tick raw observations: {seen:?}");
+        println!("Legacy tick raw observations: {seen:?}");
+    });
+}
+
+#[test]
+fn legacy_tick_with_legacy_ownership_emits_long_body() {
+    const CHILD: &str = "AGENTDESK_N4D1B_LEGACY_TICK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = format!(
+            "{}::legacy_tick_with_legacy_ownership_emits_long_body",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
+            .env(
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            )
+            .env(
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[]",
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "legacy tick child: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    let (_lock, guard) = isolate_root();
+    let fx = seed_row(guard.root.path(), 63_251, false, false);
+    capture_warns(async {
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
+        ui.status_panel_v2_enabled = true;
+        ui.two_message_panel_enabled = true;
+        assert_eq!(
+            crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel_tmux(
+                fx.channel.get(),
+                Some(&fx.tmux),
+            ),
+            Ok(false),
+            "the real ownership decision permits Legacy"
+        );
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, Some(PLACEHOLDER_MSG));
+        locals.panel_id = msg(PANEL_MSG);
+        let body = "native observed body ".repeat(300);
+        let observation = crate::services::discord::inflight::o_seed_observation::Guard::new(
+            &fx.provider,
+            fx.channel.get(),
+        );
+        run_tick_body(&mut locals, &rec, &shared, &fx, false, &body).await;
+        assert!(
+            rec.total() > 0,
+            "the same Legacy transport fixture emits real HTTP"
+        );
+        assert!(
+            observation
+                .raw_process_snapshot()
+                .writable_inflight_load_calls
+                > 0,
+            "the Legacy control executes its actual loader"
+        );
+        rec.server.abort();
+        while !rec.server.is_finished() {
+            tokio::task::yield_now().await;
+        }
     });
 }
 
@@ -604,22 +607,7 @@ fn terminal_outcome_logged_at_wrapper() {
 #[test]
 fn progress_caller_uses_actual_terminal_outcome() {
     // The runtime tick tests are authoritative; this only pins the wiring.
-    assert!(include_str!("../turn_stream_collector.rs").contains("update_streaming_status_tick("));
-    let tick = include_str!("../streaming_status_tick.rs");
-    let at = |needle: &str| {
-        tick.find(needle)
-            .unwrap_or_else(|| panic!("missing {needle}"))
-    };
-    let persist = at("let progress_outcome = ctx.legacy_mode.is_legacy()");
-    assert!(
-        persist < at("if ctx.legacy_mode.is_legacy() && !terminal_progress_rejected {"),
-        "gate the panel helper"
-    );
-    let cleanup = at("watcher_streaming_recent_stop_cleanup");
-    assert!(
-        cleanup < at("if terminal_progress_rejected {"),
-        "cleanup precedes the stop"
-    );
+    source_guard_tests::assert_progress_wiring();
 }
 
 /// Two expired ticks on a terminal-committed row: no republication at all.

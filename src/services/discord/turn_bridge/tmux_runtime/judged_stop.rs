@@ -201,6 +201,21 @@ impl ChannelStop {
         }
     }
 
+    pub(in crate::services::discord) async fn native(
+        &self,
+        reason: &str,
+    ) -> Option<super::NativeStop> {
+        super::NativeStop::begin(
+            &self.shared,
+            &self.provider,
+            self.channel,
+            &self.token,
+            self.legacy_name()?,
+            reason,
+        )
+        .await
+    }
+
     /// Stops the judged token on the judged target.
     pub(in crate::services::discord) async fn stop(
         &self,
@@ -258,6 +273,8 @@ fn unobserved(channel: ChannelId, error: String) -> StopUnobserved {
 
 pub(in crate::services::discord) enum CommandStop {
     NoActiveTurn,
+    Native(super::NativeStop),
+    Observed(bool),
     /// The turn's host is not a confirmed legacy tmux, or could not be read: nothing was cancelled.
     HostRefused,
     AlreadyStopping,
@@ -288,6 +305,40 @@ pub(in crate::services::discord) async fn begin_user_stop(
     reason: &str,
 ) -> CommandStop {
     begin_stop(shared, provider, channel, bind_unbound, Some(reason)).await
+}
+
+impl ChannelStop {
+    /// A user stop judged once: only a live Herdr turn takes its `/stop`, on the token judged
+    /// here; any other turn is left to the caller with nothing done.
+    pub(in crate::services::discord) async fn herdr_user_stop(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+    ) -> Option<CommandStop> {
+        let judgement = Self::judge(shared, provider, channel, None, false).await;
+        #[cfg(unix)]
+        if let Some(token) = herdr_turn(&judgement) {
+            #[cfg(test)]
+            if let Some(step) = AFTER_HERDR_JUDGE.with_borrow_mut(Option::take) {
+                step.await;
+            }
+            let stop = super::codex_stop_delivery::herdr_command_stop;
+            return Some(CommandStop::Herdr(
+                stop(shared, provider, channel, token, "/stop").await,
+            ));
+        }
+        let _ = judgement;
+        None
+    }
+}
+
+#[cfg(all(test, unix))]
+type JudgedStep = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step the next Herdr user stop on this thread runs between its judge and its stop.
+    pub(in crate::services::discord) static AFTER_HERDR_JUDGE: std::cell::RefCell<Option<JudgedStep>> = const { std::cell::RefCell::new(None) };
 }
 
 async fn begin_stop(
@@ -329,7 +380,13 @@ async fn begin_stop(
     if matches!(judgement, Ok(None))
         && crate::services::tui_o::turn_mode::transcript_turns(channel.get())
     {
-        return super::SessionStop::judge(shared, provider, channel).await;
+        let session = super::SessionStop::judge(shared, provider, channel).await;
+        return match (reason, session) {
+            (Some(reason), CommandStop::Session(stop)) if *provider == ProviderKind::Claude => {
+                CommandStop::Observed(stop.interrupt(reason).await.sent_keys)
+            }
+            (_, other) => other,
+        };
     }
     if keeps_turn(&judgement) {
         // A dormant stop must not acquire legacy tombstone effects.
@@ -347,6 +404,11 @@ async fn begin_stop(
     let Ok(Some(stop)) = judgement else {
         return CommandStop::NoActiveTurn;
     };
+    if let Some(reason) = reason
+        && let Some(native) = stop.native(reason).await
+    {
+        return CommandStop::Native(native);
+    }
     #[cfg(all(test, unix))]
     tests::before_stop_cancel();
     let decision = stop.cancel_user().await;

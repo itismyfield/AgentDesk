@@ -1,5 +1,6 @@
 pub(crate) mod binding_context;
 pub(crate) mod binding_events;
+pub(crate) mod hosted_source;
 pub(crate) mod pending;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -125,6 +126,7 @@ pub struct ObservedTuiPrompt {
     pub(crate) native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.
     pub(crate) steer_echo: bool,
+    pub(crate) hosted_source: Option<hosted_source::HostedSourcePin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +173,7 @@ pub(crate) struct ExternalInputRelayLease {
     /// captures the RECORDED lease (via the value returned from the record call)
     /// and clears only its OWN generation, so it can never clobber a newer lease.
     pub generation: u64,
+    pub hosted_source: Option<hosted_source::HostedSourcePin>,
 }
 
 impl ExternalInputRelayLease {
@@ -182,6 +185,7 @@ impl ExternalInputRelayLease {
             relay_owner: ExternalInputRelayOwner::Unassigned,
             runtime_kind: None,
             generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            hosted_source: None,
         }
     }
 }
@@ -341,7 +345,7 @@ mod state;
 pub(crate) use session_rotation::*;
 #[cfg(test)]
 pub(crate) use shadow_peek::hold_binding_peek_lock_for_tests;
-pub(crate) use shadow_peek::{peek_tmux_runtime_binding, try_peek_tmux_runtime_binding};
+pub(crate) use shadow_peek::peek_tmux_runtime_binding;
 
 #[cfg(test)]
 use extract::native_turn_is_open;

@@ -432,9 +432,9 @@ fn writer(f: &Fixture, row: &InflightTurnState, op: &str) -> String {
             "save" => format!("{:?}", save_inflight_state(row)),
             "create" => format!("{:?}", save_inflight_state_create_new(row)),
             "if_absent" => format!("{:?}", save_inflight_state_if_absent(row)),
-            "identity_anchor" => format!("{:?}", bind_recovery_anchor_if_matches_identity(&ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset, row.current_msg_id, Some(row.current_msg_len), 13, 1, None, None)),
+            "identity_anchor" => format!("{:?}", bind_recovery_anchor_if_matches_identity(&ProviderKind::Claude, CHANNEL, (&id, row.turn_start_offset, row.turn_nonce.as_deref()), row.current_msg_id, Some(row.current_msg_len), 13, 1, None, None)),
             "identity_rebind" => format!("{:?}", save_store::identity_gate::save_existing_inflight_rebind_adoption_if_matches_identity_in_root(&f.dir, &row, &id, row.turn_start_offset)),
-            "rewind" => format!("{:?}", save_inflight_delivery_rewind_if_matches_identity(&row, StreamRelayAuthority::from_state(row), store::InflightDeliveryRewindReason::TerminalErrorReset)),
+            "rewind" => format!("{:?}", save_inflight_delivery_rewind_if_matches_identity(&row, row.turn_nonce.as_deref(), StreamRelayAuthority::from_state(row), store::InflightDeliveryRewindReason::TerminalErrorReset)),
             "anchor_repost" => format!("{:?}", anchor_repost::mark_anchor_reposted_if_matches_identity_in_root(&f.dir, &ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset)),
             "budget" => format!("{:?}", budget::bump_recovery_relay_attempts_if_matches_identity_in_root(&f.dir, &ProviderKind::Claude, CHANNEL, &id, row.turn_start_offset)),
             "clear" => format!("{:?}", clear_inflight_state_if_matches(&ProviderKind::Claude, CHANNEL, row.user_msg_id)),
@@ -621,6 +621,7 @@ async fn s3act_b3b_clear_entrypoint_matrix_pg() {
                     &row,
                     "receipt-boundary",
                     9,
+                    false,
                 ),
             };
             assert!(guard_reads() > 0, "raw guard really read {op}");

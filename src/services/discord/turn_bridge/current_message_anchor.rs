@@ -64,6 +64,7 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
     token_hash: &str,
     channel_id: ChannelId,
     expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
+    captured_nonce: Option<&str>,
     current_msg_id: &mut MessageId,
     bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
     inflight_state: &mut InflightTurnState,
@@ -71,6 +72,9 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
 ) -> bool {
     if durable_current_msg_id_from_detached(*current_msg_id) != 0 {
         return true;
+    }
+    if !inflight_state.owned_by_turn_nonce(captured_nonce) {
+        return false;
     }
     let expected_current_message = (
         inflight_state.current_msg_id,
@@ -104,8 +108,11 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
     let bind = crate::services::discord::inflight::bind_recovery_anchor_if_matches_identity(
         provider,
         channel_id.get(),
-        expected_identity,
-        expected_turn_start_offset,
+        (
+            expected_identity,
+            expected_turn_start_offset,
+            captured_nonce,
+        ),
         expected_current_message.0,
         Some(expected_current_message.1),
         candidate.get(),
@@ -126,8 +133,11 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
         crate::services::discord::inflight::recovery_anchor_message_if_matches_identity(
             provider,
             channel_id.get(),
-            expected_identity,
-            expected_turn_start_offset,
+            (
+                expected_identity,
+                expected_turn_start_offset,
+                captured_nonce,
+            ),
             Some(expected_current_message),
             Some(expected_relay_authority),
             Some(inflight_state),
@@ -428,6 +438,7 @@ mod tests {
                     "anchor-r7",
                     ChannelId::new(channel_id),
                     &expected,
+                    local.turn_nonce.clone().as_deref(),
                     &mut detached,
                     &mut bridge_candidate,
                     &mut local,

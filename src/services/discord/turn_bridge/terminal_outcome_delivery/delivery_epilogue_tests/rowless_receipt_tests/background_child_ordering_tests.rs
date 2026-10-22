@@ -171,7 +171,9 @@ async fn start_bridge(
     std::sync::mpsc::Sender<StreamMessage>,
     tokio::sync::oneshot::Receiver<BridgeCompletionSignal>,
 ) {
-    let cancel = Arc::new(CancelToken::new());
+    let cancel = Arc::new(CancelToken::from_persisted_turn_nonce(
+        driver.inflight.turn_nonce.clone(),
+    ));
     let channel = ChannelId::new(DRIVER_CHANNEL_ID);
     let user = MessageId::new(DRIVER_USER_MSG_ID);
     assert!(

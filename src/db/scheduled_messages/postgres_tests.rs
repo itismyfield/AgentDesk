@@ -4,6 +4,8 @@ use serde_json::{Value as JsonValue, json};
 use sqlx::Row;
 use uuid::Uuid;
 
+type OptionalTimestamp = Option<DateTime<Utc>>;
+
 async fn create_test_pool(
     prefix: &str,
     label: &str,
@@ -33,6 +35,7 @@ async fn insert_due_message(pool: &PgPool, delivery_kind: &str) -> ScheduledMess
     insert_scheduled_message_pg(
         pool,
         &NewScheduledMessage {
+            image_attachment: None,
             content: "scheduled test message".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -78,6 +81,7 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
     let message = insert_scheduled_message_pg(
         &pool,
         &NewScheduledMessage {
+            image_attachment: None,
             content: "scheduled Kakao message".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -601,10 +605,10 @@ async fn postgres_scheduled_message_stale_claim_is_fenced_and_current_claim_rene
     );
     let (turn_id, turn_intent_at, launch_committed_at, turn_started_at, lease_after_intent): (
         Option<String>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
+        OptionalTimestamp,
+        OptionalTimestamp,
+        OptionalTimestamp,
+        OptionalTimestamp,
     ) = sqlx::query_as(
         "SELECT turn_id, turn_intent_at, launch_committed_at,
                 turn_started_at, lease_expires_at
@@ -741,6 +745,7 @@ async fn postgres_running_agent_poll_rotates_before_renewed_rows() {
         insert_scheduled_message_pg(
             &pool,
             &NewScheduledMessage {
+                image_attachment: None,
                 content: format!("scheduled poll {label}"),
                 discord_mention_user_ids: Vec::new(),
                 title: None,
@@ -1036,9 +1041,9 @@ async fn postgres_agent_launch_intent_crash_rearms_without_phantom_lease_renewal
     assert_eq!(retry.retry_count, 1);
     let (turn_id, turn_intent_at, launch_committed_at, turn_started_at): (
         Option<String>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
+        OptionalTimestamp,
+        OptionalTimestamp,
+        OptionalTimestamp,
     ) = sqlx::query_as(
         "SELECT turn_id, turn_intent_at, launch_committed_at, turn_started_at
          FROM scheduled_message_deliveries
@@ -1436,6 +1441,7 @@ async fn postgres_cancel_reports_committed_agent_handoff_not_intent() {
     let launched_message = insert_scheduled_message_pg(
         &pool,
         &NewScheduledMessage {
+            image_attachment: None,
             content: "already launched agent delivery".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,

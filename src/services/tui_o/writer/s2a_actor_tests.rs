@@ -866,9 +866,9 @@ async fn actual_driver_case(mode: &'static str) {
     }
     let expected: Vec<_> = if expects_enter {
         if mode == "two" {
-            vec!["first body", "second body"]
+            vec!["first body", "-# ✅ 완료", "second body", "-# ✅ 완료"]
         } else {
-            vec!["first body"]
+            vec!["first body", "-# ✅ 완료"]
         }
     } else {
         vec![]

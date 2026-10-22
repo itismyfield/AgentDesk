@@ -80,7 +80,7 @@ async fn discord_http(State(state): State<HttpState>, request: Request<Body>) ->
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
-        if body["content"] == "..." {
+        if matches!(body["content"].as_str(), Some("..." | "⠋ 계속 처리 중")) {
             return (
                 StatusCode::FORBIDDEN,
                 axum::Json(json!({"message": "fixture refuses provider start", "code": 50001})),

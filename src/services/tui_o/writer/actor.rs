@@ -178,6 +178,8 @@ struct Actor<P, L, A, B> {
     notice: Option<watch::Receiver<u64>>,
     waiting: Waiting,
     clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
+    scope_hold: Option<&'static str>,
+    boot_previous_nonce: Option<String>,
 }
 
 #[derive(Default)]
@@ -186,8 +188,7 @@ struct Waiting {
     incident: Option<String>,
 }
 
-/// Returns when the channel stops, with why, or when `stop` turns true or closes. `resumed` turns
-/// true once the spool and sources are recovered, and closes when the actor returns.
+/// Runs until stopped; `resumed` means every non-suspended source was restored.
 pub async fn run_channel<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
@@ -252,9 +253,11 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let writer = writer.with_repost_stop(stop.clone());
-    let deriver = UnitDeriver::new(writer.channel(), provider);
-    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
+    let mut writer = writer.with_repost_stop(stop.clone());
+    let deriver =
+        fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
+    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
+        .with_suspension(writer.suspension.clone());
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
@@ -271,13 +274,52 @@ where
         transitions: transition::Transitions::new(transitions, stop.clone()),
         notice: None,
         waiting: Waiting::default(),
+        scope_hold: None,
+        boot_previous_nonce: None,
         clock: (
             tokio::time::Instant::now(),
             utc.unwrap_or_else(chrono::Utc::now),
         ),
     };
+    let selection = actor.writer.suspension.clone();
+    let restore = provider == ShadowProvider::Codex;
+    #[cfg(test)]
+    let restore =
+        restore && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-selection-restore");
+    if restore {
+        match selection.restore_current(actor.writer.store()) {
+            Ok(restored) => {
+                if !restored
+                    && crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_eligible(
+                        actor.writer.channel(),
+                    )
+                {
+                    actor.boot_previous_nonce = actor
+                        .writer
+                        .store()
+                        .fresh_selection()
+                        .ok()
+                        .flatten()
+                        .map(|record| record.nonce);
+                }
+            }
+            Err(error) => {
+                actor.writer.stop(WriterAlarm::Halted {
+                    detail: format!("fresh selection restore: {error:?}"),
+                });
+                return actor.writer.stop_cause().cloned();
+            }
+        }
+    }
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
+        if actor.rescope() {
+            sources_resumed = false;
+            resumed.send_replace(false);
+        }
+        if actor.writer.is_stopped() {
+            break;
+        }
         if !sources_resumed && actor.sources_allowed() {
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
@@ -289,6 +331,7 @@ where
             }
             sources_resumed = true;
             if !actor.writer.is_stopped() {
+                actor.boot_previous_nonce = None;
                 actor.project_operator_resumes();
                 resumed.send_replace(true);
             }
@@ -314,6 +357,8 @@ where
         actor.read_sources();
         actor.poll_transition(sources_resumed, &unsettled);
         actor.observe_waiting(sources_resumed);
+        #[cfg(test)]
+        fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
             break;
@@ -375,6 +420,9 @@ where
     .await
 }
 
+mod fresh_resume;
+#[cfg(test)]
+pub(crate) use fresh_resume::work_for_tests;
 mod transition;
 mod transition_snapshot;
 
@@ -431,7 +479,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn observe_waiting(&mut self, restored: bool) {
-        if self.writer.is_stopped() {
+        let scope_waiting = self.scope_hold == Some("new_root_waiting");
+        #[cfg(test)]
+        let scope_waiting = scope_waiting
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-scope-hold");
+        if self.writer.is_stopped() || scope_waiting {
             return;
         }
         let now = tokio::time::Instant::now();
@@ -479,8 +531,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         });
         if ready == 0 && prepared.is_none() {
             // A fresh actor's empty queue is evidence only after its durable sources were restored.
-            if self.waiting.incident.take().is_some()
-                || (restored && self.waiting.ready.is_empty() && open.is_none())
+            let incident = self.waiting.incident.take().is_some();
+            #[cfg(test)]
+            let incident = incident
+                && (self.writer.suspension.is_empty()
+                    || !crate::services::claude_tui::source_verify::n2b_mutant("b1b-own-clear"));
+            if incident
+                || (restored
+                    && self.waiting.ready.is_empty()
+                    && open.is_none()
+                    && self.writer.suspension.is_empty())
             {
                 self.writer.waiting_cleared();
             }
@@ -512,10 +572,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return self.delivery_allowed();
         }
         let channel = self.writer.channel();
+        let suspension = self.writer.suspension.clone();
         self.writer
             .store()
             .cursors()
-            .filter(|cursor| !cursor.retired)
+            .filter(|cursor| !cursor.retired && !suspension.contains(&cursor.source))
             .all(|cursor| {
                 crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
                     channel,
@@ -551,6 +612,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
     /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
     fn collect_settled(&mut self) {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-gc")
+            && !self.writer.suspension.is_empty()
+        {
+            return;
+        }
         if !self.delivery_allowed() {
             return;
         }
@@ -668,6 +735,8 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
+#[cfg(all(test, unix))]
+pub(crate) use transition::scoped_tests::exercise_scope_waiting_job_for_tests;
 #[cfg(test)]
 pub(crate) use transition::test_hooks as transition_hooks;
 #[cfg(test)]
@@ -702,6 +771,8 @@ mod test_support {
             notice: None,
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),
+            scope_hold: None,
+            boot_previous_nonce: None,
         };
         actor
             .sources

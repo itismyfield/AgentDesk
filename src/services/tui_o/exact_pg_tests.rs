@@ -110,179 +110,73 @@ fn recursive_files(
 #[tokio::test]
 async fn exact_off_pg_statement_trace_and_files_zero() {
     if let Ok(url) = std::env::var("C2A_OFF_DATABASE") {
-        let pool =
-            crate::db::postgres::connect_test_pool_with_max_connections(&url, "exact off child", 1)
-                .await
-                .unwrap();
+        let proxy = crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy::start(
+            &url,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let pool = proxy.pool(1);
         let root = crate::config::runtime_root().expect("actual runtime root");
         let before = recursive_files(&root);
-        let mut connection = pool.acquire().await.unwrap();
-        let _pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        let oid: i64 = sqlx::query_scalar(
-            "SELECT oid::bigint FROM pg_database WHERE datname=current_database()",
-        )
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
+        let connection = pool.acquire().await.unwrap();
         drop(connection);
-        let admin = crate::db::postgres::connect_test_pool(
-            &std::env::var("C2A_OFF_OBSERVER").unwrap(),
-            "off observer",
+        proxy.reset_executions();
+
+        sqlx::query("SELECT 1").execute(&pool).await.unwrap();
+        assert_eq!(proxy.executions(), ["SELECT 1"], "prepared SELECT control");
+        proxy.reset_executions();
+        sqlx::raw_sql("SELECT 2").execute(&pool).await.unwrap();
+        assert_eq!(proxy.executions(), ["SELECT 2"], "simple SELECT control");
+        proxy.reset_executions();
+        let cloned = pool.clone();
+        tokio::spawn(async move {
+            sqlx::query("SELECT 3").execute(&cloned).await.unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            proxy.executions(),
+            ["SELECT 3"],
+            "spawned pool-clone control"
+        );
+        proxy.reset_executions();
+
+        // Other backends in this database must not change the observed pool's SQL count.
+        let noise = crate::db::postgres::connect_test_pool_with_max_connections(
+            &url,
+            "independent database activity",
+            1,
         )
         .await
         .unwrap();
-        let count = || async {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT (xact_commit+xact_rollback)::bigint FROM pg_stat_database WHERE datid=$1::oid",
-            )
-            .bind(oid)
-            .fetch_one(&admin)
-            .await
-            .unwrap()
-        };
-        pool.close().await;
-        let flushed = || async {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                let active: i64 =
-                    sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datid=$1::oid")
-                        .bind(oid)
-                        .fetch_one(&admin)
-                        .await
-                        .unwrap();
-                if active == 0 {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    let states: Vec<(String,String,String)> = sqlx::query_as("SELECT backend_type,coalesce(state,''),query FROM pg_stat_activity WHERE datid=$1::oid")
-                        .bind(oid).fetch_all(&admin).await.unwrap();
-                    panic!("target backends and autovacuum workers stopped: {states:?}");
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let noise = tokio::spawn(async move {
+            for _ in 0..31 {
+                sqlx::query("SELECT 1").execute(&noise).await.unwrap();
             }
-            let mut previous = -1;
-            let mut same = 0;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                sqlx::query("SELECT pg_stat_clear_snapshot()")
-                    .execute(&admin)
-                    .await
-                    .unwrap();
-                let value = count().await;
-                same = if value == previous { same + 1 } else { 0 };
-                if same >= 20 {
-                    return value;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "server statistics reached stable flush"
-                );
-                previous = value;
-            }
-        };
-        let _migration_flush = flushed().await;
-        let vacuum_count = || async {
-            let observer = crate::db::postgres::connect_test_pool_with_max_connections(
-                &url,
-                "vacuum observation",
-                1,
-            )
-            .await
-            .unwrap();
-            let value: i64 = sqlx::query_scalar("SELECT coalesce(sum(autovacuum_count+autoanalyze_count),0)::bigint FROM pg_stat_user_tables")
-                .fetch_one(&observer).await.unwrap();
-            observer.close().await;
-            value
-        };
-        let mut stable = false;
-        for _ in 0..5 {
-            let open = || async {
-                crate::db::postgres::connect_test_pool_with_max_connections(
-                    &url,
-                    "off calibrated backend",
-                    1,
-                )
+            noise.close().await;
+        });
+        let records = super::super::exact_episode::tests::fixture();
+        assert_eq!(
+            record_episode_evidence(false, &pool, &records[0])
                 .await
-                .unwrap()
-            };
-            let vacuum_before = vacuum_count().await;
-            let initial = flushed().await;
-            let control_pool = open().await;
-            sqlx::query("SELECT pg_stat_force_next_flush()")
-                .execute(&control_pool)
-                .await
-                .unwrap();
-            control_pool.close().await;
-            let vacuum_after = vacuum_count().await;
-            let control = flushed().await;
-            if vacuum_after != vacuum_before {
-                continue;
-            }
-            let observation_cost = control - initial;
-            assert!(
-                observation_cost > 0,
-                "connection/flush control must be counted"
-            );
-            let vacuum_before = vacuum_count().await;
-            let control = flushed().await;
-            let positive = open().await;
-            sqlx::query("SELECT 1").execute(&positive).await.unwrap();
-            sqlx::query("SELECT pg_stat_force_next_flush()")
-                .execute(&positive)
-                .await
-                .unwrap();
-            positive.close().await;
-            let vacuum_after = vacuum_count().await;
-            let selected = flushed().await;
-            if vacuum_after != vacuum_before {
-                continue;
-            }
-            assert!(
-                selected - control > observation_cost,
-                "server sees SELECT control: delta={} base={}",
-                selected - control,
-                observation_cost
-            );
-            let vacuum_before = vacuum_count().await;
-            let initial = flushed().await;
-            let pool = open().await;
-            let records = super::super::exact_episode::tests::fixture();
-            assert_eq!(
-                record_episode_evidence(false, &pool, &records[0])
-                    .await
-                    .unwrap(),
-                None
-            );
-            let returned = tokio::task::spawn_blocking(|| {
-                crate::services::tui_o::exact_submission::dispatch(|| {
-                    Err::<(), _>("original OFF result".into())
-                })
+                .unwrap(),
+            None
+        );
+        let returned = tokio::task::spawn_blocking(|| {
+            crate::services::tui_o::exact_submission::dispatch(|| {
+                Err::<(), _>("original OFF result".into())
             })
-            .await
-            .unwrap();
-            assert_eq!(returned, Err("original OFF result".into()));
-            sqlx::query("SELECT pg_stat_force_next_flush()")
-                .execute(&pool)
-                .await
-                .unwrap();
-            pool.close().await;
-            let vacuum_after = vacuum_count().await;
-            let final_count = flushed().await;
-            if vacuum_after != vacuum_before {
-                continue;
-            }
-            assert_eq!(
-                final_count - initial,
-                observation_cost,
-                "OFF issued server statements including spawned tasks"
-            );
-            stable = true;
-            break;
-        }
-        assert!(stable, "autovacuum-free measurement window required");
+        })
+        .await
+        .unwrap();
+        assert_eq!(returned, Err("original OFF result".into()));
+        noise.await.unwrap();
+        pool.close().await;
+        assert!(
+            proxy.executions().is_empty(),
+            "OFF issued SQL through its pool or clones: {:?}",
+            proxy.executions()
+        );
         assert_eq!(
             recursive_files(&root),
             before,
@@ -292,14 +186,7 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
     }
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    sqlx::query("VACUUM ANALYZE").execute(&pool).await.unwrap();
-    sqlx::query("DO $$ DECLARE r record; BEGIN FOR r IN SELECT n.nspname,c.relname,c.reltoastrelid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='r' AND n.nspname='public' LOOP IF r.reltoastrelid<>0 THEN EXECUTE format('ALTER TABLE %I.%I SET (autovacuum_enabled=false, toast.autovacuum_enabled=false)',r.nspname,r.relname); ELSE EXECUTE format('ALTER TABLE %I.%I SET (autovacuum_enabled=false)',r.nspname,r.relname); END IF; END LOOP; END $$").execute(&pool).await.unwrap();
     pool.close().await;
-
-    let observer_url = format!(
-        "{}/postgres",
-        crate::db::postgres::postgres_test_database_url_base().unwrap()
-    );
 
     let runtime = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(runtime.path().join("runtime/nested")).unwrap();
@@ -317,7 +204,6 @@ async fn exact_off_pg_statement_trace_and_files_zero() {
             "--nocapture",
         ])
         .env("C2A_OFF_DATABASE", &db.database_url)
-        .env("C2A_OFF_OBSERVER", &observer_url)
         .env("AGENTDESK_ROOT_DIR", runtime.path());
     let child = tokio::task::spawn_blocking(move || command.output().unwrap())
         .await

@@ -21,6 +21,8 @@ pub(in crate::services::discord) struct Call {
     /// The request's method and path, so a test can tell which channel a call wrote.
     #[cfg(unix)]
     pub(in crate::services::discord) route: String,
+    /// The message a send replied to, from its `message_reference`.
+    pub(in crate::services::discord) reply_to: Option<String>,
 }
 
 pub(in crate::services::discord) struct DiscordRecorder {
@@ -87,8 +89,10 @@ async fn serve(
             if let (Some(check), Some(content)) = (&check, &content) {
                 check.sink_request(method.as_str(), uri.path(), content);
             }
+            let reply_to = payload["message_reference"]["message_id"].as_str();
             recorded.lock().unwrap().push(Call {
                 content: content.clone(),
+                reply_to: reply_to.map(str::to_owned),
                 #[cfg(unix)]
                 route: format!("{method} {}", uri.path()),
             });

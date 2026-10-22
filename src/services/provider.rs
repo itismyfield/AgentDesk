@@ -1,6 +1,5 @@
 use crate::services::platform::BinaryResolution;
 use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
-use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -11,6 +10,7 @@ mod cancel_token_codex_owed;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
 pub(crate) mod herdr_before_start;
+pub(crate) mod native_stop;
 mod output_reader;
 mod registry;
 pub(crate) mod session_probe;
@@ -22,8 +22,7 @@ pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
     ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,
-    frozen_first_counterpart_id, intern_provider_id, provider_registry, public_provider_catalog,
-    supported_provider_ids,
+    intern_provider_id, provider_registry, public_provider_catalog, supported_provider_ids,
 };
 pub(crate) use session_probe::SessionProbe;
 
@@ -722,6 +721,7 @@ pub struct CancelToken {
     replay_attempt: std::sync::OnceLock<
         std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
     >,
+    pub(crate) native_stop: native_stop::State,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
@@ -761,15 +761,12 @@ impl CancelToken {
             claude_interrupt_submit_pending: AtomicBool::new(false),
             herdr_interrupt: Mutex::new(None),
             replay_attempt: std::sync::OnceLock::new(),
+            native_stop: Default::default(),
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),
             codex_owed: std::sync::OnceLock::new(),
         }
-    }
-
-    pub fn turn_nonce(&self) -> Option<&str> {
-        self.turn_nonce.as_deref()
     }
 
     pub(crate) fn replay_attempt(
@@ -1823,133 +1820,5 @@ mod cancel_token_tests {
 }
 
 #[cfg(test)]
-mod poll_output_file_tests {
-    use super::{CancelToken, ReadOutputResult, poll_output_file_until_result};
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-
-    #[test]
-    fn missing_output_file_reports_session_died_when_process_already_exited() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing_path = dir.path().join("missing.jsonl");
-        let mut state = ();
-
-        let result = poll_output_file_until_result(
-            missing_path.to_str().unwrap(),
-            12,
-            None,
-            &mut state,
-            || false,
-            || false,
-            |_| {},
-            |_, _| true,
-            |_| false,
-            |_| true,
-            |_| {},
-            |_| {},
-        )
-        .unwrap();
-
-        assert_eq!(result, ReadOutputResult::SessionDied { offset: 12 });
-    }
-
-    #[test]
-    fn existing_output_file_emits_start_offset_before_new_bytes() {
-        #[derive(Default)]
-        struct TestState {
-            saw_done: bool,
-            lines: Vec<String>,
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let output_path = dir.path().join("stream.jsonl");
-        let previous = "old\n";
-        std::fs::write(&output_path, format!("{previous}DONE\n")).unwrap();
-        let start_offset = previous.len() as u64;
-
-        let mut state = TestState::default();
-        let mut offsets = Vec::new();
-        let result = poll_output_file_until_result(
-            output_path.to_str().unwrap(),
-            start_offset,
-            None,
-            &mut state,
-            || true,
-            || false,
-            |offset| offsets.push(offset),
-            |line: &str, state| {
-                state.lines.push(line.to_string());
-                state.saw_done = line == "DONE";
-                true
-            },
-            |state| state.saw_done,
-            |_| true,
-            |_| {},
-            |file| {
-                assert_eq!(
-                    file.metadata().unwrap().len(),
-                    (previous.len() + "DONE\n".len()) as u64
-                );
-                // The reader must keep the descriptor it reported even when
-                // another producer replaces the pathname before the first read.
-                std::fs::rename(&output_path, output_path.with_extension("captured")).unwrap();
-                std::fs::write(&output_path, "FOREIGN\n").unwrap();
-            },
-        )
-        .unwrap();
-
-        let file_len = std::fs::metadata(output_path.with_extension("captured"))
-            .unwrap()
-            .len();
-        assert_eq!(result, ReadOutputResult::Completed { offset: file_len });
-        assert_eq!(state.lines, vec!["DONE".to_string()]);
-        assert_eq!(offsets, vec![start_offset, file_len]);
-    }
-
-    #[test]
-    fn unterminated_tail_bytes_do_not_advance_committed_offset() {
-        #[derive(Default)]
-        struct TestState {
-            lines: Vec<String>,
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let output_path = dir.path().join("stream.jsonl");
-        let complete = "complete\n";
-        std::fs::write(&output_path, format!("{complete}unterminated")).unwrap();
-        let safe_offset = complete.len() as u64;
-        let cancel_token = Arc::new(CancelToken::new());
-        let cancel_from_line = cancel_token.clone();
-
-        let mut state = TestState::default();
-        let mut offsets = Vec::new();
-        let result = poll_output_file_until_result(
-            output_path.to_str().unwrap(),
-            0,
-            Some(cancel_token),
-            &mut state,
-            || true,
-            || false,
-            |offset| offsets.push(offset),
-            |line: &str, state| {
-                state.lines.push(line.to_string());
-                cancel_from_line.cancelled.store(true, Ordering::Relaxed);
-                true
-            },
-            |_| false,
-            |_| true,
-            |_| {},
-            |_| {},
-        )
-        .unwrap();
-
-        assert_eq!(
-            result,
-            ReadOutputResult::Cancelled {
-                offset: safe_offset
-            }
-        );
-        assert_eq!(state.lines, vec!["complete".to_string()]);
-        assert_eq!(offsets, vec![safe_offset]);
-    }
-}
+#[path = "provider_poll_output_file_tests.rs"]
+mod poll_output_file_tests;

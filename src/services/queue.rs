@@ -1,46 +1,4 @@
-#[cfg(test)]
-use crate::services::turn_orchestrator::{
-    ChannelMailboxHandle, Intervention, QueuePersistenceContext,
-};
-#[cfg(test)]
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, Mutex},
-};
-
-#[cfg(test)]
-static PRE_PURGE_HOOK_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, (Vec<Intervention>, String)>>> =
-    LazyLock::new(Default::default);
-
-#[cfg(test)]
-pub(crate) fn set_pre_purge_hook_for_test(
-    channel: ChannelId,
-    items: Vec<Intervention>,
-    token: &str,
-) {
-    PRE_PURGE_HOOK_FOR_TESTS
-        .lock()
-        .unwrap()
-        .insert(channel, (items, token.into()));
-}
-
-#[cfg(test)]
-async fn run_pre_purge_hook_for_test(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    handle: &ChannelMailboxHandle,
-) {
-    let entry = PRE_PURGE_HOOK_FOR_TESTS.lock().unwrap().remove(&channel);
-    if let Some((items, token)) = entry {
-        handle
-            .replace_queue(items, QueuePersistenceContext::new(provider, &token, None))
-            .await;
-    }
-}
-
-use crate::services::turn_cancel_queue_guard::{
-    CancelRemovalWitness, PurgeCounts, disk_queue_lost,
-};
+use crate::services::turn_cancel_queue_guard::{CancelRemovalWitness, disk_queue_lost};
 use std::sync::Arc;
 
 use axum::{Json, http::HeaderMap};
@@ -48,7 +6,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::session_identity::{SessionIdentity, tmux_name_from_session_key};
+use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
@@ -57,108 +15,17 @@ use crate::services::turn_lifecycle::{
 };
 use poise::serenity_prelude::ChannelId;
 
-/// Schedule preserved work and return only the depth observed after the drain attempt.
-async fn schedule_post_cancel_queue_drain(
-    health_registry: Option<&Arc<HealthRegistry>>,
-    target: &TurnLifecycleTarget,
-    reason: &'static str,
-) -> Option<usize> {
-    let registry = health_registry?;
-    let provider = target.provider.as_ref()?;
-    let channel_id = target.channel_id?;
-    let outcome = crate::services::discord::health::schedule_pending_queue_drain_after_cancel(
-        registry.as_ref(),
-        provider.as_str(),
-        channel_id,
-        reason,
-    )
-    .await;
-    outcome.queue_depth_after
-}
+mod cancel_effects;
+mod herdr_stop;
+#[cfg(unix)]
+mod http_force;
 
-/// Purge through the actor and retain its measured removal counts and post-rollback depth.
-/// Without a global mirror, sweep files only; another registry's actor may still hold a queue.
-pub(super) async fn force_purge_channel_mailbox(
-    health_registry: Option<&Arc<HealthRegistry>>,
-    target: &TurnLifecycleTarget,
-    session_key: Option<&str>,
-) -> Option<PurgeCounts> {
-    let provider = target.provider.as_ref()?;
-    let channel_id = target.channel_id?;
-    let Some(handle) =
-        crate::services::turn_orchestrator::ChannelMailboxRegistry::global_handle(channel_id)
-    else {
-        let disk_files_removed =
-            crate::services::turn_orchestrator::remove_channel_pending_queue_files_all_tokens(
-                provider, channel_id,
-            );
-        tracing::info!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            disk_files_removed,
-            "force purge found no live mailbox handle"
-        );
-        return Some(PurgeCounts {
-            drained: 0,
-            disk_files_removed,
-            own_files_removed: Some(0),
-            queue_len_after: None,
-        });
-    };
-    let token_hash = session_key
-        .and_then(SessionIdentity::parse)
-        .and_then(|identity| identity.token_hash)
-        .unwrap_or_default();
-    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
-        provider,
-        &token_hash,
-        None,
-    );
-    // #3029(D): force purge must also release the active-turn anchor so the
-    // next dispatch is not blocked by a stale `cancel_token` /
-    // `active_user_message_id`. The handler only clears an anchor whose token
-    // is already `cancelled` (the force-kill above flipped it), so a fresh
-    // turn that raced in after the kill keeps its anchor (#2706).
-    #[cfg(test)]
-    run_pre_purge_hook_for_test(provider, channel_id, &handle).await;
-    let purge = handle.try_purge_queue(persistence, true).await.ok()?;
-    if purge.queued_head_refused {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            "force purge refused; mailbox preserved"
-        );
-        return None;
-    }
-    let purged = purge.drained;
-    tracing::info!(
-        provider = provider.as_str(),
-        channel_id = channel_id.get(),
-        purged,
-        disk_files_removed = purge.disk_files_removed,
-        cleared_active_anchor = purge.cleared_active_anchor,
-        session_key,
-        "force purged channel mailbox queue"
-    );
-    let finish = crate::services::discord::health::finish_cancelled_provider_channel_mailbox(
-        health_registry.map(Arc::as_ref),
-        Some(provider.as_str()),
-        Some(channel_id.get()),
-        "queue_api_force_cancel_post_purge",
-        Some(&handle),
-    )
-    .await;
-    if finish.cleared_active_turn {
-        tracing::info!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            global_active_decremented = finish.global_active_decremented,
-            runtime_session_cleared = finish.runtime_session_cleared,
-            "force purge finalized cancelled active mailbox turn"
-        );
-    }
-    Some(purge.into())
-}
+pub(super) use cancel_effects::force_purge_channel_mailbox;
+pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
+#[cfg(test)]
+pub(crate) use cancel_effects::set_pre_purge_hook_for_test;
+#[cfg(all(test, unix))]
+pub(crate) use cancel_effects::set_pre_purge_probe_for_test;
 
 #[derive(Clone)]
 pub struct QueueService {
@@ -475,19 +342,8 @@ impl QueueService {
         Ok(json!({"ok": true, "cancelled": count}))
     }
 
-    /// Cancel an in-flight turn for `channel_id`.
-    ///
-    /// When `force == false` (the default for the public REST surface) the
-    /// active provider session and watcher are *preserved*: the queue gets
-    /// drained but any tool/process subtree under the live turn keeps
-    /// running. This matches what an operator usually means by "remove queue
-    /// item" / "cancel queue" — they are reorganising the channel's mailbox,
-    /// not asking us to SIGKILL the cargo build that is currently running.
-    ///
-    /// When `force == true` we fall back to the historical hard-kill path
-    /// (`force_kill_turn` → `kill_pid_tree` → SIGTERM/SIGKILL on the process
-    /// group). Reserve this for explicit recovery scenarios where the live
-    /// turn has to be torn down (#1196).
+    /// Cancels `channel_id`'s turn: `force` hard-kills it or, with terminate on, retires its Herdr
+    /// execution; otherwise session and queue stay, and a live Herdr turn takes `/stop`.
     pub async fn cancel_turn(
         &self,
         health_registry: Option<&Arc<HealthRegistry>>,
@@ -608,6 +464,19 @@ impl QueueService {
             channel_id: parsed_channel_id,
             tmux_name: tmux_name.clone(),
         };
+        #[cfg(unix)]
+        {
+            let pool = self.pg_pool.as_ref();
+            let selected = (session_key.as_deref(), dispatch_id.as_deref());
+            let forced = http_force::herdr_force(force, health_registry, pool, channel_id, selected);
+            if let Some(answer) = forced.await {
+                return answer;
+            }
+        }
+        let herdr = herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
+        if let Some(stopped) = herdr.await {
+            return Ok(stopped);
+        }
         // Capture identifies discarded sources for durable reporting; it does not restore them.
         let queue_capture =
             crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;

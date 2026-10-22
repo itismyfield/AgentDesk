@@ -10,6 +10,7 @@ mod operator_resume;
 pub use operator_resume::{OPERATOR_RESUME_FLOOR, ResumeRecord};
 pub mod rotation;
 pub mod spool;
+pub(crate) mod tool_card_switch;
 
 use std::collections::BTreeMap;
 use std::io;

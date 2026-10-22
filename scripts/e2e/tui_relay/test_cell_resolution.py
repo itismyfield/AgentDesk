@@ -317,9 +317,9 @@ class ScenarioFilter(unittest.TestCase):
             self.assertIn({"provider_hold_marker_seen": "[E2E:E22:PRE]"}, e22["assertions"])
             self.assertIn(
                 {
-                    "completion_chrome_after_body": {
-                        "body_marker": "[E2E:E22:TAIL]",
-                        "required": True,
+                    "completion_per_turn": {
+                        "marker": "[E2E:E22:TAIL]",
+                        "exact": 1,
                     }
                 },
                 e22["assertions"],
@@ -337,9 +337,9 @@ class ScenarioFilter(unittest.TestCase):
             self.assertNotIn("skip_reason", e23)
             self.assertIn(
                 {
-                    "completion_chrome_after_body": {
-                        "body_marker": "[E2E:E23:BODY-END]",
-                        "required": True,
+                    "completion_per_turn": {
+                        "marker": "[E2E:E23:BODY-END]",
+                        "exact": 1,
                     }
                 },
                 e23["assertions"],

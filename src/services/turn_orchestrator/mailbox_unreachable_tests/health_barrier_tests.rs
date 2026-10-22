@@ -1,0 +1,112 @@
+//! A test actor in front of a live mailbox actor: it answers the first Snapshot through the live
+//! actor, then reads nothing more until the test releases it, so later reads wait at a known point.
+
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use poise::serenity_prelude::ChannelId;
+use tokio::sync::{mpsc, oneshot};
+
+use super::super::{
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, GLOBAL_CHANNEL_MAILBOXES,
+};
+
+/// The installed barrier. Dropping it ends the test actor and puts the live actor back.
+pub(crate) struct HealthBarrier {
+    handles: Arc<DashMap<ChannelId, ChannelMailboxHandle>>,
+    channel: ChannelId,
+    actor: ChannelMailboxHandle,
+    front: ChannelMailboxHandle,
+    answered: Option<oneshot::Receiver<()>>,
+    release: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ChannelMailboxRegistry {
+    /// Puts a barrier in front of `channel`'s live actor; it must be called inside a runtime.
+    pub(crate) fn install_health_barrier_for_test(&self, channel: ChannelId) -> HealthBarrier {
+        let actor = self
+            .peek(channel)
+            .expect("a live actor to put the barrier in front of");
+        let (answered_tx, answered) = oneshot::channel();
+        let (release, released) = oneshot::channel::<()>();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let live = actor.clone();
+        let task = tokio::spawn(async move {
+            let mut answered_tx = Some(answered_tx);
+            while let Some(msg) = receiver.recv().await {
+                let ChannelMailboxMsg::Snapshot { reply } = msg else {
+                    let _ = live.sender.send(msg);
+                    continue;
+                };
+                if let Ok(snapshot) = live.try_snapshot().await {
+                    let _ = reply.send(snapshot);
+                }
+                if let Some(answered_tx) = answered_tx.take() {
+                    let _ = answered_tx.send(());
+                    // Only the permit moves the actor on; a dropped permit also releases it.
+                    let _ = released.await;
+                    break;
+                }
+            }
+            while let Some(msg) = receiver.recv().await {
+                let _ = live.sender.send(msg);
+            }
+        });
+        let front = ChannelMailboxHandle {
+            sender,
+            recovery_done: actor.recovery_done.clone(),
+        };
+        self.handles.insert(channel, front.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel, front.clone());
+        HealthBarrier {
+            handles: self.handles.clone(),
+            channel,
+            actor,
+            front,
+            answered: Some(answered),
+            release: Some(release),
+            task,
+        }
+    }
+}
+
+impl HealthBarrier {
+    /// The live actor itself, which the barrier does not hold.
+    pub(crate) fn actor(&self) -> &ChannelMailboxHandle {
+        &self.actor
+    }
+
+    /// Waits until the test actor has answered its first Snapshot and stopped reading.
+    pub(crate) async fn first_answered(&mut self) {
+        let answered = self.answered.take().expect("first_answered awaited once");
+        answered
+            .await
+            .expect("the test actor ended before answering");
+    }
+
+    /// Lets the test actor read again; every later message goes straight to the live actor.
+    pub(crate) fn release(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl Drop for HealthBarrier {
+    fn drop(&mut self) {
+        self.release();
+        self.task.abort();
+        let restore = |slot: &mut ChannelMailboxHandle| {
+            if slot.same_actor(&self.front) {
+                *slot = self.actor.clone();
+            }
+        };
+        if let Some(mut slot) = self.handles.get_mut(&self.channel) {
+            restore(&mut slot);
+        }
+        if let Some(mut slot) = GLOBAL_CHANNEL_MAILBOXES.get_mut(&self.channel) {
+            restore(&mut slot);
+        }
+    }
+}

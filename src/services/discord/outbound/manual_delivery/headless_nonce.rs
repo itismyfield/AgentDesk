@@ -2,7 +2,6 @@ use super::ManualOutboundDeliveryId;
 use crate::services::discord::outbound::outbound_fingerprint;
 
 const HEADLESS_TURN_SOURCE: &str = "headless_turn";
-const MESSAGE_OUTBOX_CORRELATION_PREFIX: &str = "message_outbox:headless_turn:";
 const MESSAGE_OUTBOX_SEMANTIC_PREFIX: &str = "message_outbox:";
 const MESSAGE_OUTBOX_SEMANTIC_SUFFIX: &str = ":deliver";
 const HEADLESS_DISCORD_NONCE_FLAG: &str = "AGENTDESK_HEADLESS_DISCORD_NONCE";
@@ -42,6 +41,20 @@ pub(super) fn resolve_headless_delivery_nonce(
     ]))
 }
 
+pub(super) fn image_delivery_nonce(
+    source: &str,
+    delivery_id: ManualOutboundDeliveryId<'_>,
+) -> Option<String> {
+    if source != "scheduled_message" {
+        return None;
+    }
+    let row_id = durable_outbox_row_id(source, delivery_id)?;
+    Some(outbound_fingerprint(&[
+        "scheduled-image-message-outbox-delivery",
+        &row_id.to_string(),
+    ]))
+}
+
 fn resolve_opt_in_flag(raw: Option<&str>) -> bool {
     raw.is_some_and(|value| {
         let value = value.trim();
@@ -53,12 +66,18 @@ fn durable_headless_outbox_row_id(
     source: &str,
     delivery_id: ManualOutboundDeliveryId<'_>,
 ) -> Option<i64> {
+    if source != HEADLESS_TURN_SOURCE {
+        return None;
+    }
+    durable_outbox_row_id(source, delivery_id)
+}
+
+fn durable_outbox_row_id(source: &str, delivery_id: ManualOutboundDeliveryId<'_>) -> Option<i64> {
     // `PendingMessageOutboxRow::delivery_ids` owns both shapes. The caller
     // authority gate is resolved separately before this shape validation.
-    if source != HEADLESS_TURN_SOURCE
-        || !delivery_id
-            .correlation_id
-            .starts_with(MESSAGE_OUTBOX_CORRELATION_PREFIX)
+    if !delivery_id
+        .correlation_id
+        .starts_with(&format!("message_outbox:{source}:"))
     {
         return None;
     }

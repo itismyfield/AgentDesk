@@ -24,6 +24,7 @@ use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
 use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
+use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::herdr_launch::{
     EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
     HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
@@ -319,7 +320,7 @@ fn logged_session(target: &BindingTarget) -> Option<&str> {
 }
 
 /// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
-fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+pub(crate) fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
@@ -346,17 +347,26 @@ pub(crate) enum HoldRelease {
 /// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
 /// as does a Codex cold start once its launch's own source is bound.
 pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
-    let path = match hold_path(nonce) {
-        Ok(path) => path,
+    let (path, removed) = match unlink_hold(nonce) {
+        Ok(unlinked) => unlinked,
         Err(error) => return HoldRelease::Kept(error),
     };
+    if !removed {
+        return HoldRelease::Released;
+    }
+    match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
+        Ok(()) => HoldRelease::Released,
+        Err(error) => HoldRelease::NotDurable(error.to_string()),
+    }
+}
+
+/// Unlinks the same validated nonce path for ordinary and durable hold release.
+pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
+    let path = hold_path(nonce)?;
     match std::fs::remove_file(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HoldRelease::Released,
-        Err(error) => HoldRelease::Kept(error.to_string()),
-        Ok(()) => match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
-            Ok(()) => HoldRelease::Released,
-            Err(error) => HoldRelease::NotDurable(error.to_string()),
-        },
+        Ok(()) => Ok((path, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, false)),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -626,7 +636,7 @@ fn prompt_and_read(
         tracing::warn!(logical = %turn.owner.logical_key, %error, "herdr turn: input hold kept");
     }
     run.into_legacy()?;
-    let start = super::claude_tui_turn_start_offset_after_timestamp(path, started_at, before);
+    let start = before;
     let logical = turn.owner.logical_key.as_str();
     let unread = || PromptReadinessSnapshot {
         prompt_marker_detected: false,
@@ -654,9 +664,10 @@ fn prompt_and_read(
         if let Some(token) = cancel.as_ref()
             && herdr_provider_terminal_only(Some(token)).is_some()
         {
-            let read =
-                read_to_provider_terminal(&transcript, start, &sender, token, probe.is_alive);
-            terminal = read?.map(|terminal| (terminal, token.clone(), start));
+            let ended =
+                |at| terminal_replay::ended_tail(&transcript, at, started_at, &attached.target);
+            let read = read_to_provider_terminal(&transcript, start, &sender, token, ended);
+            terminal = read?.map(|terminal| (terminal, token.clone()));
             unconfirmed = terminal.is_none();
         } else {
             read_output_file_until_result_with_harvest(
@@ -668,6 +679,14 @@ fn prompt_and_read(
             )
             .map_err(|failure| failure.error)?;
         }
+    }
+    // A read the row pass woke after settling the turn elsewhere binds nothing to its execution.
+    let woken = turn
+        .cancel
+        .as_deref()
+        .is_some_and(CancelToken::is_completion_cleanup);
+    if unconfirmed && woken && !before_start::mutant("prb_woken_read_binds") {
+        return Ok(());
     }
     // A Herdr turn hands off exactly where its terminal record ends, never past it.
     let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
@@ -687,8 +706,8 @@ fn prompt_and_read(
     if !attached.bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
-    if let Some((read, token, start)) = terminal.take() {
-        let _ = sender.send(read.frame(&transcript, logical, start, &token));
+    if let Some((read, token)) = terminal.take() {
+        let _ = sender.send(read.frame(&transcript, logical, &token));
     }
     // A read that ended without this turn's terminal hands no runtime to a watcher to finish.
     if unconfirmed {
@@ -707,6 +726,7 @@ fn prompt_and_read(
 /// A Herdr Claude turn's provider terminal and the record end the read stopped at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeTurnTerminal {
+    pub(crate) start: u64,
     pub(crate) kind: NativeTerminalKind,
     pub(crate) end: u64,
     pub(crate) result: String,
@@ -717,20 +737,14 @@ pub(crate) struct ClaudeTurnTerminal {
 
 impl ClaudeTurnTerminal {
     /// The typed frame only bridge admission turns into a terminal; no tmux generation names it.
-    fn frame(
-        self,
-        transcript: &str,
-        logical: &str,
-        start: u64,
-        token: &Arc<CancelToken>,
-    ) -> StreamMessage {
+    fn frame(self, transcript: &str, logical: &str, token: &Arc<CancelToken>) -> StreamMessage {
         StreamMessage::ClaudeTuiTerminalDone {
             result: self.result,
             session_id: self.session_id,
             transcript_path: transcript.to_owned(),
             tmux_session_name: logical.to_owned(),
             turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
-            source_start: start,
+            source_start: self.start,
             complete_record_end: self.end,
             generation_mtime_ns: 0,
             source_file_dev: self.file.0,
@@ -797,9 +811,9 @@ pub(crate) fn herdr_terminal_frame(
 ) -> Option<StreamMessage> {
     let (tx, _rx) = std::sync::mpsc::channel();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let alive = move || std::time::Instant::now() < deadline;
+    let alive = move |_| (std::time::Instant::now() >= deadline).then(String::new);
     let read = read_to_provider_terminal(transcript, start, &tx, token, alive).ok()??;
-    Some(read.frame(transcript, logical, start, token))
+    Some(read.frame(transcript, logical, token))
 }
 
 /// An assistant or result record: a turn's own output, never metadata.
@@ -838,76 +852,6 @@ fn is_turn_prompt(line: &str) -> bool {
     }
 }
 
-/// Under settlement the transcript is read to this turn's own turn-end record, returned unsent;
-/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn.
-fn read_to_provider_terminal(
-    transcript: &str,
-    start: u64,
-    sender: &Sender<StreamMessage>,
-    token: &Arc<CancelToken>,
-    is_alive: impl FnMut() -> bool,
-) -> Result<Option<ClaudeTurnTerminal>, String> {
-    use crate::services::cluster::stream_relay::SourceFileIdentity;
-    let mut lines = HerdrTurnLines::default();
-    let mut opened = SourceFileIdentity::Unavailable;
-    // A buffer's raw end is sent only once a later read shows all its records were processed.
-    let pending = std::cell::Cell::new(None::<u64>);
-    let (offsets, relay) = (sender.clone(), sender.clone());
-    let (local, local_rx) = std::sync::mpsc::channel();
-    let read = poll_output_file_until_result(
-        transcript,
-        start,
-        Some(token.clone()),
-        &mut lines,
-        is_alive,
-        || false,
-        |raw_end| {
-            if let Some(processed) = pending.replace(Some(raw_end)) {
-                let _ = offsets.send(StreamMessage::OutputOffset { offset: processed });
-            }
-        },
-        move |line, lines: &mut HerdrTurnLines| {
-            let processed = lines.process(line, &local);
-            // The turn's Done is the typed frame sent after the read, never the stream's own.
-            for message in local_rx.try_iter() {
-                if !matches!(message, StreamMessage::Done { .. }) {
-                    let _ = relay.send(message);
-                }
-            }
-            processed
-        },
-        |lines| lines.terminal().is_some(),
-        |_| false,
-        |_| {},
-        |file| opened = SourceFileIdentity::from_open_file(file),
-    )
-    .map_err(|failure| failure.error)?;
-    let end = match read {
-        ReadOutputResult::Completed { offset }
-        | ReadOutputResult::Cancelled { offset }
-        | ReadOutputResult::SessionDied { offset } => offset,
-    };
-    if let Some(raw_end) = pending.get() {
-        let _ = sender.send(StreamMessage::OutputOffset {
-            offset: raw_end.min(end),
-        });
-    }
-    let (ReadOutputResult::Completed { .. }, Some(kind)) = (read, lines.terminal()) else {
-        return Ok(None);
-    };
-    let (result, session_id) = lines.result();
-    let file = crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
-        Some(&opened),
-    );
-    Ok(Some(ClaudeTurnTerminal {
-        kind,
-        end,
-        result,
-        session_id,
-        file,
-    }))
-}
-
 /// The row turns Bound once the pane's latest logged source is this execution's; until then it
 /// stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
@@ -930,104 +874,18 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
     }
 }
 
+mod live_reader;
 mod never_attached;
+use live_reader::read_to_provider_terminal;
+pub(crate) mod start_offset;
 mod terminal_replay;
-pub(crate) use terminal_replay::{Terminal, TurnOutput, closed_turn, replay_herdr_turn};
+pub(crate) use terminal_replay::{
+    EndedTurn, Terminal, TurnOutput, closed_turn, ended_turn, replay_herdr_turn,
+};
 
 #[cfg(test)]
 mod provider_terminal_tests;
 
 #[cfg(test)]
 #[cfg(unix)]
-mod coldstop_input_tests {
-    use super::*;
-    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
-    use crate::services::provider::herdr_before_start::InputPhase;
-    #[test]
-    fn coldstop_claude_closed_never_begins_input_or_mutation() {
-        let root = tempfile::tempdir().unwrap();
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let owner = HostedOwner {
-            provider: "claude".into(),
-            discord_token_hash: "hash".into(),
-            channel_id: "911".into(),
-            logical_key: "AgentDesk-claude-coldinput".into(),
-            owner_node: "node".into(),
-            runtime_root: "root".into(),
-        };
-        for kind in ["fresh", "pending", "bound"] {
-            let token = CancelToken::new();
-            let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
-            state
-                .user_stop
-                .store(true, std::sync::atomic::Ordering::Release);
-            let held = hold(kind).unwrap();
-            let calls = std::cell::Cell::new(0);
-            let run = observed_input(
-                Some(&token),
-                || {
-                    calls.set(calls.get() + 1);
-                    HerdrTurnStart::at_end_of(kind, Path::new("missing"), None)
-                },
-                || {
-                    calls.set(calls.get() + 1);
-                    InputRun::Applied
-                },
-            )
-            .unwrap();
-            assert!(matches!(run, HerdrInputRun::Closed));
-            assert_eq!(calls.get(), 0);
-            before_start::release_claude_hold(&owner.logical_key, &held);
-            assert!(not_held(kind).is_ok());
-        }
-        for (run, untouched) in [
-            (
-                InputRun::Refused(crate::services::claude_tui::host_input::InputRefusal::Unknown),
-                true,
-            ),
-            (InputRun::Cancelled { confirmed: 0 }, true),
-            (
-                InputRun::Indeterminate {
-                    confirmed: 0,
-                    cause: crate::services::claude_tui::host_input::StopCause::Send(
-                        "unclear paste".into(),
-                    ),
-                },
-                false,
-            ),
-        ] {
-            let token = CancelToken::new();
-            let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
-            observed_input(
-                Some(&token),
-                || HerdrTurnStart::at_end_of("nonce", Path::new("missing"), None),
-                || run,
-            )
-            .unwrap();
-            assert_eq!(
-                state.submission.lock().unwrap().phase,
-                if untouched {
-                    InputPhase::FinishedUntouched
-                } else {
-                    InputPhase::MayHaveWritten
-                }
-            );
-        }
-        HERDR_SETTLEMENT_OVERRIDE.set(false);
-        let token = CancelToken::new();
-        let state = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
-        state
-            .user_stop
-            .store(true, std::sync::atomic::Ordering::Release);
-        assert!(matches!(
-            observed_input(
-                Some(&token),
-                || panic!("off does not record start"),
-                || InputRun::Applied
-            )
-            .unwrap(),
-            HerdrInputRun::Ran(InputRun::Applied)
-        ));
-        HERDR_SETTLEMENT_OVERRIDE.set(true);
-    }
-}
+mod coldstop_input_tests;

@@ -284,33 +284,108 @@ async fn grace_opened_after_readiness_read_blocks_completion_pg() {
     pg_db.drop().await;
 }
 
-// Phase-gate saves use a different token and can commit after the readiness reads.
-#[tokio::test]
+// The policy grace writer commits on the run row after the finalizer read it; the final
+// UPDATE re-reads grace and refuses, and completion follows once the window lapses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grace_writer_committed_after_grace_read_blocks_completion_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db).await;
+    seed_entry(&pool, "entry-done", "failed").await;
+    let engine = super::run_admission_pg_tests::policy_engine(&pool);
+    let (completion, resume) = paused_completion(&pool, "grace_read").await;
+    let opened = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::run_admission_pg_tests::begin_grace(&engine, "run-1"),
+    )
+    .await
+    .expect("grace writer commits while the finalizer is paused")
+    .expect("join grace writer");
+    assert_eq!(opened, "true");
+    let graced: bool = sqlx::query_scalar(
+        "SELECT phase_gate_grace_until > NOW() FROM auto_queue_runs WHERE id = 'run-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read grace window");
+    assert!(graced, "grace writer left no open window");
+    assert_completion_blocked(
+        &pool,
+        completion,
+        resume,
+        RunCompletionBlockedReason::PhaseGateGraceWindow,
+    )
+    .await;
+
+    set_grace(&pool, -1.0).await;
+    assert_eq!(
+        finalize_run_if_ready_pg(&pool, "run-1")
+            .await
+            .expect("completion after grace lapses"),
+        RunCompletionOutcome::Completed
+    );
+    assert_eq!(run_status(&pool, "run-1").await, "completed");
+    assert_eq!(slot_run(&pool).await, None);
+    assert_eq!(outbox_count(&pool).await, 1);
+    // Like the other policy-engine PG tests, drop the database without closing the pool.
+    drop(engine);
+    pg_db.drop().await;
+}
+
+/// Let a completion paused at `point` finish once `writer` waits on the run token.
+async fn completion_after_writer_waits<T>(
+    pool: &PgPool,
+    point: &'static str,
+    start_writer: impl FnOnce(PgPool) -> tokio::task::JoinHandle<T>,
+) -> (RunCompletionOutcome, T, bool) {
+    let (completion, resume) = paused_completion(pool, point).await;
+    let writer = start_writer(pool.clone());
+    let waited = super::run_admission_pg_tests::wait_for_lock_waiter(pool, &writer).await;
+    resume.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+        .await
+        .expect("completion finishes after the barrier opens")
+        .expect("join completion")
+        .expect("completion result");
+    let written = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+        .await
+        .expect("writer finishes after the completion commits")
+        .expect("join writer");
+    (outcome, written, waited)
+}
+
+// A gate save started while the finalizer holds the run token waits for the completion and
+// then refuses the completed run, so no gate commits between readiness read and UPDATE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gate_saved_after_readiness_read_blocks_completion_pg() {
     for status in ["pending", "failed"] {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         seed_entry(&pool, "entry-done", "failed").await;
-        let (writer, resume) = paused_completion(&pool, "readiness_read").await;
-        super::phase_gates::save_phase_gate_state_on_pg(
-            &pool,
-            "run-1",
-            0,
-            &super::phase_gates::PhaseGateStateWrite {
-                status: status.to_string(),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("commit phase gate through its writer");
-        assert_completion_blocked(
-            &pool,
-            writer,
-            resume,
-            RunCompletionBlockedReason::BlockingPhaseGate,
-        )
-        .await;
-        assert_eq!(gate_count(&pool).await, 1);
+        let (outcome, saved, waited) =
+            completion_after_writer_waits(&pool, "readiness_read", |pool| {
+                tokio::spawn(async move {
+                    super::phase_gates::save_phase_gate_state_on_pg(
+                        &pool,
+                        "run-1",
+                        0,
+                        &super::phase_gates::PhaseGateStateWrite {
+                            status: status.to_string(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                })
+            })
+            .await;
+        assert_eq!(outcome, RunCompletionOutcome::Completed);
+        let error = saved.expect_err("gate save after the completion is refused");
+        assert!(
+            error.contains("run is completed: refusing to save"),
+            "{error}"
+        );
+        assert_eq!(gate_count(&pool).await, 0);
+        assert_eq!(run_status(&pool, "run-1").await, "completed");
+        assert!(waited, "{status} gate save did not wait for the run token");
         pool.close().await;
         pg_db.drop().await;
     }
@@ -325,17 +400,13 @@ async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
     seed_entry(&pool, "entry-done", "failed").await;
     let (writer, resume) = paused_completion(&pool, "readiness_read").await;
     set_grace(&pool, 30.0).await;
-    super::phase_gates::save_phase_gate_state_on_pg(
-        &pool,
-        "run-1",
-        0,
-        &super::phase_gates::PhaseGateStateWrite {
-            status: "pending".to_string(),
-            ..Default::default()
-        },
+    // Gate saves now wait for the run token; a raw insert stands in for a token-free writer.
+    sqlx::query(
+        "INSERT INTO auto_queue_phase_gates (run_id, phase, status) VALUES ('run-1', 0, 'pending')",
     )
+    .execute(&pool)
     .await
-    .expect("commit phase gate through its writer");
+    .expect("commit phase gate outside the token");
     assert_completion_blocked(
         &pool,
         writer,
@@ -359,30 +430,36 @@ async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
     pg_db.drop().await;
 }
 
-// Reopening a terminal entry does not take the run token; UPDATE must see it.
-#[tokio::test]
+// Reopening a terminal entry waits for the run token held by the finalizer, then refuses
+// the completed run instead of leaving a pending entry behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn entry_reopened_after_readiness_read_blocks_completion_pg() {
     let pg_db = TestPostgresDb::create().await;
     let pool = setup_pool(&pg_db).await;
     seed_entry(&pool, "entry-done", "failed").await;
-    let (writer, resume) = paused_completion(&pool, "readiness_read").await;
-    let change = update_entry_status_on_pg(
-        &pool,
-        "entry-done",
-        super::ENTRY_STATUS_PENDING,
-        "test_reopen",
-        &EntryStatusUpdateOptions::default(),
-    )
-    .await
-    .expect("reopen through the entry writer");
-    assert!(change.changed);
-    assert_completion_blocked(
-        &pool,
-        writer,
-        resume,
-        RunCompletionBlockedReason::RunnableEntry,
-    )
-    .await;
+    let (outcome, reopened, waited) =
+        completion_after_writer_waits(&pool, "readiness_read", |pool| {
+            tokio::spawn(async move {
+                update_entry_status_on_pg(
+                    &pool,
+                    "entry-done",
+                    super::ENTRY_STATUS_PENDING,
+                    "test_reopen",
+                    &EntryStatusUpdateOptions::default(),
+                )
+                .await
+            })
+        })
+        .await;
+    assert_eq!(outcome, RunCompletionOutcome::Completed);
+    let error = reopened.expect_err("reopen after the completion is refused");
+    assert!(
+        error.contains("run is completed: refusing to reopen"),
+        "{error}"
+    );
+    assert_eq!(run_status(&pool, "run-1").await, "completed");
+    assert_eq!(slot_run(&pool).await, None);
+    assert!(waited, "reopen did not wait for the run token");
     pool.close().await;
     pg_db.drop().await;
 }

@@ -487,7 +487,6 @@ pub(super) async fn establish_tui_direct_synthetic_lifecycle_anchor(
 ///
 pub(super) async fn wire_tui_direct_synthetic_turn_start(
     shared: &Arc<SharedData>,
-    provider_str: &str,
     channel_id: ChannelId,
     prompt: &ObservedTuiPrompt,
     anchor_message_id: MessageId,
@@ -513,7 +512,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
     // original bug). The worker owns the relay-owner handoff.
     let mut deferred_synthetic_start = false;
     let mut claimed = false;
-    if let Some(provider) = ProviderKind::from_str(provider_str) {
+    if let Some(provider) = ProviderKind::from_str(&prompt.provider) {
         // #3154 — TEMPORAL fix for turn-interleaving. An INLINE claim while the
         // PRIOR turn's tail still drains seeds `turn_start_offset` from the prior
         // cursor (duplicate relay), and an inline wait starves OTHER channels. So
@@ -574,11 +573,9 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                     &provider,
                     channel_id,
                     &prompt.tmux_session_name,
-                    &prompt.prompt,
-                    anchor_message_id,
+                    (&prompt.prompt, anchor_message_id),
                     &*lease,
-                    None,
-                    prompt.native_turn_id.as_deref(),
+                    (None, prompt.native_turn_id.as_deref()),
                 )
                 .await;
             claimed = claim.claimed;

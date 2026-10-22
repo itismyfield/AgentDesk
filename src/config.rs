@@ -10,6 +10,8 @@ mod runtime_settings;
 mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
+mod agent_memory;
+pub use agent_memory::AgentDef;
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 pub(crate) mod runtime_profile;
@@ -360,42 +362,6 @@ where
                 .collect::<Vec<_>>()
         }),
     )
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct AgentDef {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub name_ko: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_word: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub voice_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitivity_mode: Option<BargeInSensitivity>,
-    #[serde(default, skip_serializing_if = "AgentVoiceConfig::is_default")]
-    pub voice: AgentVoiceConfig,
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
-    pub channels: AgentChannels,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[serde(default)]
-    pub department: Option<String>,
-    #[serde(default)]
-    pub avatar_emoji: Option<String>,
-    /// Cluster intake node-affinity labels (#3667). When set and non-empty,
-    /// intake for this agent's channels is routed to an online worker node whose
-    /// labels satisfy this list; `Some([])` means no preference (intake stays on
-    /// the leader). `None` (key absent from yaml) leaves any existing DB value
-    /// untouched on sync, so an out-of-band label is never wiped. Maps to the
-    /// `agents.preferred_intake_node_labels` JSONB column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_intake_node_labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -2867,7 +2833,7 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
-    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
+    /// Retired `tui_o` keys (the shadow block, Codex history adoption) still load; the rest is kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -2875,10 +2841,10 @@ mod secret_bearing_config_file_tests {
         let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
              turn: {channels: [41], all_owned: true}\n\
              repost: {enabled: true, channels: [41]}\n\
-             alert_channel_id: 42\n\
-             codex_history_adoption: false\n";
-        let settings =
-            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
+             alert_channel_id: 42\n";
+        let settings = format!(
+            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\ncodex_history_adoption: {enabled}\n{live}"
+        );
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
             serde_yaml::from_str(live).unwrap();
         let indented = settings

@@ -30,6 +30,29 @@ async fn acknowledge(
     StatusCode::NO_CONTENT
 }
 
+async fn followup(
+    State(state): State<ActionProxyState>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::Json<Value> {
+    state
+        .replies
+        .lock()
+        .expect("slash responses")
+        .push(json!({"type":"followup", "data":body}));
+    let response = state
+        .client
+        .post(format!(
+            "{}/api/v10/channels/{}/messages",
+            state.backend,
+            discord_mock::CHANNEL_ID
+        ))
+        .json(&body)
+        .send()
+        .await
+        .expect("followup response");
+    axum::Json(response.json().await.expect("followup message"))
+}
+
 async fn relay(State(state): State<ActionProxyState>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let suffix = parts.uri.path_and_query().expect("mock request path");
@@ -84,6 +107,7 @@ impl ActionTransport {
                 "/api/v10/interactions/{id}/{token}/callback",
                 post(acknowledge),
             )
+            .route("/api/v10/webhooks/{application}/{token}", post(followup))
             .fallback(relay)
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -125,6 +149,9 @@ pub(super) async fn invoke_real_slash_action(
     command: poise::Command<Data, Error>,
     name: &str,
 ) -> bool {
+    ctx.http.set_application_id(serenity::ApplicationId::new(
+        ctx.cache.current_user().id.get(),
+    ));
     let options = poise::FrameworkOptions::<Data, Error>::default();
     let (manager, _) =
         serenity::gateway::ShardManager::new(serenity::gateway::ShardManagerOptions {
@@ -182,10 +209,12 @@ pub(super) async fn invoke_real_slash_action(
         invocation_data: &invocation_data,
         __non_exhaustive: (),
     };
+    let result = command.slash_action.expect("production slash action")(app).await;
+    if let Err(poise::FrameworkError::Command { error, .. }) = &result {
+        eprintln!("slash action failed: {error}");
+    }
     assert!(
-        command.slash_action.expect("production slash action")(app)
-            .await
-            .is_ok(),
+        result.is_ok(),
         "the actual {name} body must finish successfully"
     );
     has_sent_initial_response.load(Ordering::SeqCst)
@@ -298,9 +327,13 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
         invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
         {
             let replies = transport.replies.lock().expect("command responses");
-            assert_eq!(replies.len(), 1);
-            assert_eq!(replies[0]["type"], 4);
-            assert_eq!(replies[0]["data"]["content"], super::STOPPING_RESPONSE);
+            assert_eq!(replies.len(), 2);
+            assert_eq!(
+                replies[0]["type"], 5,
+                "defer precedes asynchronous stop confirmation"
+            );
+            assert_eq!(replies[1]["type"], "followup");
+            assert_eq!(replies[1]["data"]["content"], super::STOPPING_RESPONSE);
         }
         assert!(
             token.cancelled.load(Ordering::SeqCst),
@@ -334,4 +367,138 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
         pool.close().await;
         db.drop().await;
     });
+}
+
+fn native_idle_slash_recovery(missing: bool, completed: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let _tmux = missing_tmux(&root);
+    if !missing {
+        std::fs::write(root.path().join("tmux"), "#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in capture-pane) printf 'Ready for input (type message + Enter)\\n❯\\n' ;; esac\nexit 0\n").unwrap();
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(Box::pin(async {
+    let db=crate::dispatch::test_support::DispatchPostgresTestDb::create("native_slash_recovery","native slash recovery").await;
+    let pool=db.connect_and_migrate_with_max_connections(4).await;
+    let shared=crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
+    let author = serenity::UserId::new(42);
+    shared.settings.write().await.owner_user_id = Some(author.get());
+    let session = "native-idle-slash-recovery";
+    assert_eq!(crate::config::runtime_root().as_deref(),Some(root.path()));
+    let transcript=std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(session,"jsonl"));
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(session,crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui).unwrap();
+    let mut content = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n".to_string();
+    if !missing {
+        content.push_str("{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n");
+    }
+    std::fs::write(&transcript, content).unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let token = Arc::new(CancelToken::new());
+    token.bind_claude_tmux_session(session);
+    if completed { token.native_stop.completed(); }
+    if missing { let failed=token.native_stop.attempt("before_session_death".into(),Arc::new(||false)).unwrap();failed.complete(false); }
+    assert!(
+        shared
+            .mailbox(channel)
+            .try_start_turn(token.clone(), author, serenity::MessageId::new(71930001))
+            .await
+    );
+    shared
+        .mailbox(channel)
+        .replace_queue(
+            vec![pending(author, serenity::MessageId::new(71930002))],
+            crate::services::discord::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                channel,
+            ),
+        )
+        .await;
+    let evidence=crate::services::discord::zombie_foreground_release::collect_zombie_foreground_evidence(&ProviderKind::Claude,channel,Some(&token));
+    eprintln!("native zombie fixture missing={missing} evidence={evidence:?}");
+    assert!(evidence.mailbox_holds_active_turn && !evidence.active_turn_cancelled && !evidence.inflight_state_present);
+    assert_eq!(evidence.tui_structurally_idle,Some(true),"the launch-shaped fixture is independently terminal");
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |_, _, at, _| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                if at != channel {
+                    return None;
+                }
+                seen.fetch_add(1, Ordering::SeqCst);
+                Some(crate::services::discord::IdleQueueKickoffChannelOutcome { started: true })
+            })
+        },
+    ));
+    let mut events = shared.turn_completion_events.subscribe();
+    let transport = ActionTransport::new(discord_mock::DiscordMockState::new()).await;
+    let voice_config = crate::voice::VoiceConfig::default();
+    let data = Data {
+        shared: shared.clone(),
+        token: "test-token".into(),
+        provider: ProviderKind::Claude,
+        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+        voice_config,
+        ingress_shadow: None,
+    };
+    invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
+    assert!(
+        shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none(),
+        "idle native slash must release the zombie foreground: cancelled={} replies={:?}", token.cancelled.load(Ordering::Acquire), transport.replies.lock().unwrap()
+    );
+    assert_eq!(crate::services::discord::zombie_foreground_release::cancel_backstop_test_support::finish_status(channel), Some("finished"));
+    // Judged zombie recovery uses main's QueueEligible completion; MailboxReleased is finalizer-only.
+    let mut releases = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.channel_id == channel && event.phase==crate::services::discord::turn_completion_events::TurnCompletionPhase::QueueEligible {releases+=1;}
+    }
+    assert_eq!(releases, 1, "one completion for the removed zombie token");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while count.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "zombie release schedules one queue kickoff"
+    );
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    drop(data);drop(shared);drop(transport);pool.close().await;db.drop().await;
+    }));
+}
+
+#[test]
+fn preserve_stop_idle_native_slash_recovers_zombie_and_queue_pg() {
+    native_idle_slash_recovery(false, false);
+}
+
+#[test]
+fn preserve_stop_missing_native_slash_recovers_zombie_and_queue_pg() {
+    native_idle_slash_recovery(true, false);
+}
+
+#[test]
+fn preserve_stop_completed_native_zombie_slash_recovers_queue_pg() {
+    native_idle_slash_recovery(false, true);
 }

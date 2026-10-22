@@ -46,3 +46,4 @@ assertions:
   - completion_per_turn:
       exact: 1
       marker: "[E2E:E52:TURN-3]"
+  - no_status_chrome: true

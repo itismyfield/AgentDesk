@@ -444,6 +444,20 @@ def _job_sources(
             )
             if lane is not None:
                 source = LaneSource(origin, job, location, "lib", lane.positives, lane, "replay")
+        elif origin == "main" and job == "full_non_pg" and words == [
+            "python3", "scripts/ci/test-selection.py", "run", "--lane", "sweep",
+            "--full", "--shard", "${{ matrix.shard }}",
+        ]:
+            # The hardening gate pins the complete validated matrix and its aggregate;
+            # their union has the same canonical skips and replay as the former full lane.
+            for command, selection in (
+                ('cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"', "sweep"),
+                ("run_non_pg_filter_replay", "replay"),
+            ):
+                lane = coverage.cargo_test_filter(coverage.expand_lane_command(command, *expansions))
+                if lane is not None:
+                    sources.append(LaneSource(origin, job, location, "lib", lane.positives,
+                                              lane, selection))
         elif words[:1] == ["just"] and len(words) == 2:
             sources.extend(
                 replace(recipe_source, origin=origin, owner=job)

@@ -45,6 +45,7 @@ async fn actual_reader_122_retries_keep_the_first_grace_and_one_success_at_3661(
     let channel = 6_218_711;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let reader = Arc::new(NoticeReaderProbe::new(channel));
     install_reader(&fake, &reader);
     let inner = manual(&fake, channel);
@@ -82,6 +83,7 @@ async fn fresh_reader_supervisor_and_owner_preserve_the_receipt_through_initial_
     let channel = 6_218_712;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let reader = Arc::new(NoticeReaderProbe::new(channel));
     install_reader(&fake, &reader);
     let inner = manual(&fake, channel);
@@ -132,6 +134,7 @@ async fn long_initial_rebuild_notices_then_first_actual_cause_enriches_and_later
     let channel = 6_218_713;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let reader = Arc::new(NoticeReaderProbe::new(channel));
     install_reader(&fake, &reader);
     let inner = manual(&fake, channel);
@@ -184,6 +187,7 @@ async fn settled_failure_survives_rebuild_progress_but_actual_pending_opens_a_ne
     let channel = 6_218_714;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let reader = Arc::new(NoticeReaderProbe::new(channel));
     install_reader(&fake, &reader);
     let inner = manual(&fake, channel);

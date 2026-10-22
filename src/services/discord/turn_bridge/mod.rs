@@ -1,5 +1,5 @@
 mod activity_heartbeat;
-mod before_start_stop;
+pub(in crate::services::discord) mod before_start_stop;
 mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
@@ -98,9 +98,9 @@ pub(super) use cancel_finalize_policy::{
 };
 pub(crate) use completion_guard::build_work_dispatch_completion_result;
 pub(super) use completion_guard::{
-    fail_dispatch_auth_expired, fail_dispatch_tmux_session_died, fail_dispatch_with_retry,
-    guard_review_dispatch_completion, queue_dispatch_followup_with_handles,
-    runtime_db_fallback_complete_with_result, streaming_final_complete_dispatch_with_result,
+    fail_dispatch_tmux_session_died, fail_dispatch_with_retry, guard_review_dispatch_completion,
+    queue_dispatch_followup_with_handles, runtime_db_fallback_complete_with_result,
+    streaming_final_complete_dispatch_with_result,
 };
 pub(super) use recovery_text::{
     auto_retry_with_history, release_retry_pending, take_session_retry_context_for_turn_with_audit,
@@ -140,7 +140,8 @@ pub(super) use tmux_runtime::herdr_marked;
 pub(super) use tmux_runtime::stale_inflight_message;
 pub(super) use tmux_runtime::tmux_generation_file_mtime_ns;
 pub(super) use tmux_runtime::{
-    ChannelJudgement, ChannelStop, CommandStop, begin_user_stop, keeps_turn,
+    ChannelJudgement, ChannelStop, CommandStop, NativeStop, begin_user_stop, empty_native_stop,
+    keeps_turn, native_preserve_stop,
 };
 pub(super) use tmux_runtime::{
     stop_active_turn, stop_active_turn_with_outcome, stop_approved_turn,
@@ -161,10 +162,7 @@ use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use bridge_entry_persist::unwind_and_notify;
 use completion_guard::complete_work_dispatch_on_turn_end;
-use context_window::{
-    apply_context_token_update, compact_lower_bound, persisted_context_tokens,
-    resolve_done_response,
-};
+use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use current_message_anchor::{
     cleanup_unbound_bridge_anchor, detached_current_msg_id_from_durable,
     durable_current_msg_id_from_detached, edit_bound_current_message,
@@ -298,7 +296,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let voice_progress_playback_channel_id =
             bridge_entry_persist::voice_progress_playback_channel(&shared_owned, &bridge, &turn_id).await;
         let mut full_response = bridge_entry_persist::seed_bridge_local_body(&bridge);
-        let mut terminal_empty_response_notice: Option<String> = None;
+        let terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
@@ -311,8 +309,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut accumulated_cache_create_tokens: u64 = 0;
         let mut accumulated_cache_read_tokens: u64 = 0;
         let mut accumulated_output_tokens: u64 = 0;
-        let mut accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
-        let mut accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
+        let accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
+        let accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
         let mut spin_idx: usize = 0;
         let mut restart_followup_pending: Option<RestartAttempt> = None;
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
@@ -373,7 +371,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let single_message_panel_footer_mode =
             bridge_single_message_panel_footer_enabled(shared_owned.ui.status_panel_v2_enabled);
         let mut transport_error = false;
-        let mut api_friction_reports = Vec::new();
+        let api_friction_reports = Vec::new();
         let mut transcript_events = Vec::<SessionTranscriptEvent>::new();
         let mut resume_failure_detected = false;
         // #2451: Init is the authoritative resume-success witness; elapsed
@@ -451,8 +449,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         // #3805: pinned panel epoch; create bumps it and completion proves it.
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
-        let mut resumed_placeholder_clear_applied = false;
-        let mut entry_was_rowless = false;
+        let (mut resumed_placeholder_clear_applied, mut entry_was_rowless) = (false, false);
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority(
@@ -463,6 +460,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 bridge_created_placeholder: &mut bridge_created_response_placeholder_msg_id,
                 last_edit_text: &mut last_edit_text,
                 resumed_placeholder_clear_applied: &mut resumed_placeholder_clear_applied,
+                captured_nonce: cancel_token.turn_nonce(),
             },
             bridge_entry_persist::BridgeEntryRuntimeState {
                 inflight_state: &mut inflight_state,
@@ -874,13 +872,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let new_raw_provider_session_id =
             terminal_outcome_delivery_output.new_raw_provider_session_id;
         let full_response = terminal_outcome_delivery_output.full_response;
-        let active_background_child_session_ids =
+        let _active_background_child_session_ids =
             terminal_outcome_delivery_output.active_background_child_session_ids;
-        let pending_long_running_open_after_state_save =
+        let _pending_long_running_open_after_state_save =
             terminal_outcome_delivery_output.pending_long_running_open_after_state_save;
-        let pending_long_running_retarget_after_state_save =
+        let _pending_long_running_retarget_after_state_save =
             terminal_outcome_delivery_output.pending_long_running_retarget_after_state_save;
-        let long_running_placeholder_active =
+        let _long_running_placeholder_active =
             terminal_outcome_delivery_output.long_running_placeholder_active;
         let inflight_state = terminal_outcome_delivery_output.inflight_state;
         let api_friction_reports = terminal_outcome_delivery_output.api_friction_reports;
@@ -987,11 +985,10 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     resume_pin_tests::observe_bridge_completion(probe_channel, _bridge_task);
 }
 
-#[cfg(test)]
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
-
+#[cfg(test)]
+pub(in crate::services::discord) use terminal_outcome_delivery::custody_test_adapter;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod resume_pin_tests;
-
 pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_terminal_custody;

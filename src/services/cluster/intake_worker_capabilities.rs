@@ -124,6 +124,18 @@ pub(crate) fn capabilities_with_runtime_state(base: &Value) -> Value {
             Value::Bool(true),
         );
     }
+    if let Some(features) = scheduled_messages.as_object_mut() {
+        features.insert("image_consumer_v1".to_string(), Value::Bool(true));
+    }
+    let outbox = capabilities
+        .entry("message_outbox".to_string())
+        .or_insert_with(|| json!({}));
+    if !outbox.is_object() {
+        *outbox = json!({});
+    }
+    if let Some(features) = outbox.as_object_mut() {
+        features.insert("image_consumer_v1".to_string(), Value::Bool(true));
+    }
     let [group, flag] = crate::services::pipeline_routes::STAGE_LOCK_CAPABILITY;
     let pipeline = capabilities
         .entry(group.to_string())
@@ -231,7 +243,8 @@ mod tests {
     #[test]
     fn runtime_capability_advertises_preservation_protocol() {
         register_intake_worker_provider("claude");
-        let capabilities = capabilities_with_runtime_state(&json!({}));
+        let capabilities =
+            capabilities_with_runtime_state(&json!({"message_outbox":{"existing_feature":true}}));
         assert_eq!(
             capabilities
                 .pointer("/intake_worker/features/0")
@@ -244,6 +257,14 @@ mod tests {
         );
         assert_eq!(
             capabilities.pointer("/pipeline/stage_lock_v1"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/message_outbox/existing_feature"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            capabilities.pointer("/message_outbox/image_consumer_v1"),
             Some(&Value::Bool(true))
         );
     }

@@ -14,6 +14,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 mod active_source_dedup;
 mod claim_observation;
 mod clear_channel;
+mod clear_fence;
 mod closed_verdict;
 mod dispatch_cleanup;
 mod dispatch_reservation;
@@ -52,7 +53,6 @@ use active_source_dedup::{
 pub(crate) use claim_observation::ClaimObservation;
 #[cfg(test)]
 pub(crate) use claim_observation::RECENT_CLAIMS_CAP;
-use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE, is_queue_unread,
 };
@@ -288,8 +288,7 @@ pub(crate) fn load_channel_pending_queue_for_tests(
     load_channel_pending_queue(provider, token_hash, channel_id)
 }
 
-#[derive(Debug)]
-pub(crate) struct DispatchLease;
+pub(crate) use clear_fence::DispatchLease;
 
 #[derive(Clone, Default)]
 pub(crate) struct ChannelMailboxSnapshot {
@@ -373,6 +372,8 @@ pub(crate) enum EnqueueRefusalReason {
     /// A front-restored source is already reserved for dispatch or active.
     /// Re-inserting it would execute the same message again after that turn.
     SourceIdPendingOrActive,
+    /// An explicit clear discarded at least one of this input's original sources.
+    SupersededByClear,
     /// The queue's last entry matches the incoming intervention on
     /// `(author_id, text, reply_context, has_reply_boundary)` within
     /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
@@ -393,6 +394,7 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::ClaimedSinceObservation => "claimed_since_observation",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
+            EnqueueRefusalReason::SupersededByClear => "superseded_by_clear",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
@@ -1385,6 +1387,7 @@ enum ChannelMailboxMsg {
     },
     Clear {
         persistence: QueuePersistenceContext,
+        active: clear_channel::ActivePolicy,
         reply: closed_verdict::VerdictReply<ClearChannelResult>,
     },
     /// #2706: drain the intervention queue without touching the active
@@ -1919,7 +1922,9 @@ fn input_mailbox_step(
             let fence = &state.remint_fence;
             let refused_released_episode = fence_episode
                 .is_some_and(|episode| fence.refuses(user_message_id, episode.as_deref()));
-            let idle = state.cancel_token.is_none() && !refused_released_episode;
+            let idle = state.cancel_token.is_none()
+                && !refused_released_episode
+                && !state.remint_fence.refuses_discarded(&[user_message_id]);
             let yields = idle
                 && (queued_head::blocks_claims(&mut state, channel_id, persistence.as_ref())
                     || claim_yields(&mut state, turn_kind, user_message_id, admission_order));
@@ -1983,6 +1988,10 @@ fn input_mailbox_step(
             turn_kind,
             reply,
         } => {
+            if state.remint_fence.refuses_discarded(&[user_message_id]) {
+                let _ = reply.send(());
+                return state;
+            }
             reset_turn_finished_signal(channel_id);
             let was_idle = state.cancel_token.is_none();
             state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
@@ -2266,64 +2275,13 @@ fn input_mailbox_step(
             dispatch_lease,
             reply,
         } => {
-            state.last_persistence = Some(persistence.clone());
-            if let Some(error) = absorb_disk_queue_error(&mut state, channel_id, &persistence) {
-                let _ = reply.send(RequeueInterventionResult::absorb_failed(error));
-                return state;
-            }
-            let identity_ids = front_requeue::intervention_identity_ids(&intervention);
-            let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
-                let pending = state.pending_user_dispatch?;
-                let stored = state.pending_user_dispatch_lease.as_ref()?;
-                (identity_ids.contains(&pending) && Arc::ptr_eq(lease, stored)).then_some(pending)
-            });
-            let previous_queue = state.intervention_queue.clone();
-            let requeue_result = requeue_intervention_front(
-                &mut state.intervention_queue,
-                intervention,
-                state.pending_user_dispatch,
-                state.active_user_message_id,
-                authorized_pending_restore,
-            );
-            let result = if !requeue_result.enqueued {
-                RequeueInterventionResult {
-                    enqueued: false,
-                    refusal_reason: requeue_result.refusal_reason,
-                    queue_exit_events: requeue_result.queue_exit_events,
-                    persistence_error: None,
-                }
-            } else if let Err(error) = persist_queue_or_restore(
+            let result = front_requeue::restore_dequeued(
                 &mut state,
                 channel_id,
-                &persistence,
-                previous_queue,
-                "requeue_front",
-            ) {
-                RequeueInterventionResult {
-                    enqueued: false,
-                    refusal_reason: None,
-                    queue_exit_events: Vec::new(),
-                    persistence_error: Some(error),
-                }
-            } else {
-                if let Some(pending) = authorized_pending_restore {
-                    consume_pending_dispatch_marker_if_matches(
-                        &mut state,
-                        channel_id,
-                        pending,
-                        "restore_dequeued_head",
-                    );
-                    clear_pending_user_dispatch(&mut state);
-                }
-                // A restore ends a drain round, up to a cap of unclaimed returns per head.
-                inbound_order::discount_restored_head(&mut state, &identity_ids);
-                RequeueInterventionResult {
-                    enqueued: true,
-                    refusal_reason: None,
-                    queue_exit_events: requeue_result.queue_exit_events,
-                    persistence_error: None,
-                }
-            };
+                intervention,
+                persistence,
+                dispatch_lease,
+            );
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::AbandonPendingDispatch {
@@ -2476,10 +2434,12 @@ fn input_mailbox_step(
                 });
             }
         }
-        ChannelMailboxMsg::Clear { persistence, reply } => {
-            let result = clear_channel_state(&mut state, channel_id, persistence);
-            mark_turn_finished_signal_done(channel_id);
-            let _ = reply.send(result);
+        ChannelMailboxMsg::Clear {
+            persistence,
+            active,
+            reply,
+        } => {
+            clear_channel::dispatch(&mut state, channel_id, persistence, active, reply);
         }
         ChannelMailboxMsg::PurgeQueue {
             persistence,

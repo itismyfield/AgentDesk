@@ -1,6 +1,7 @@
 //! Restored binding-only state reads durable identity without starting or clearing a session.
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
 use crate::services::platform::tmux::session_inventory::tests::{
     ChannelCommand, ChannelProbeTrace,
@@ -35,10 +36,11 @@ impl RecoveryFixture {
         );
         let root = tempfile::tempdir().unwrap();
         let config_path = crate::runtime_layout::config_file_path(root.path());
+        let tmpdir = crate::config::test_env::kept_test_tmpdir("stale-binding");
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let env = vec![
             set("AGENTDESK_ROOT_DIR", root.path()),
-            set("TMPDIR", root.path()),
+            set("TMPDIR", &tmpdir),
             set("AGENTDESK_CONFIG", &config_path),
             set("CODEX_HOME", &root.path().join("codex-home")),
             set("CLAUDE_CONFIG_DIR", &root.path().join("claude-home")),
@@ -154,11 +156,17 @@ impl RecoveryFixture {
 
     async fn read(&self) -> (Observed, Stamp, Arc<Mutex<Watch>>) {
         let watch = Arc::new(Mutex::new(Watch::default()));
-        let (answer, stamp) = read(
-            &self.shared,
-            &ProviderKind::Claude,
-            self.channel,
-            watch.clone(),
+        let (answer, stamp) = settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || {
+                read(
+                    &self.shared,
+                    &ProviderKind::Claude,
+                    self.channel,
+                    watch.clone(),
+                )
+            },
+            |sample| sample.0.reason == "superseded",
         )
         .await;
         (answer, stamp, watch)

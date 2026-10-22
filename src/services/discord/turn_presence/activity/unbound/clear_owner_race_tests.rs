@@ -1,5 +1,8 @@
 //! Actual clear, watcher exit and automatic kickoff; provider entry is a deterministic stand-in.
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::{
+    owner_epoch_error, settled_owner_observation,
+};
 use crate::services::discord::queue_dispatch::kickoff::{
     install_owner_race_pause, owner_race_kick_attempts,
 };
@@ -10,6 +13,8 @@ use std::sync::mpsc;
 
 #[path = "midread_owner_tests.rs"]
 mod midread_owner_tests;
+#[path = "watcher_runtime_tests.rs"]
+mod watcher_runtime_tests;
 
 const DRAIN_LIMIT: Duration = Duration::from_secs(3 * 6);
 
@@ -71,46 +76,15 @@ impl ProviderTurn {
     async fn wait_with_limit(&mut self, fixture: &Fixture, expected: u64, limit: Duration) -> u64 {
         let entry = tokio::time::timeout(limit, &mut self.entered).await;
         if !matches!(&entry, Ok(Ok(_))) {
-            let mailbox = tokio::time::timeout(
-                Duration::from_secs(1),
-                fixture.rig.shared.mailbox(fixture.rig.channel).snapshot(),
-            )
-            .await;
-            if let Ok(state) = mailbox {
-                let ids = state
-                    .intervention_queue
-                    .iter()
-                    .map(|item| item.message_id.get())
-                    .collect::<Vec<_>>();
-                eprintln!(
-                    "A2_FIFO_TIMEOUT expected={expected} queue_ids={ids:?} disk_ids={:?} token_present={} active_user_message_id={:?} pending_user_dispatch={:?}",
-                    fixture.disk_ids(),
-                    state.cancel_token.is_some(),
-                    state.active_user_message_id.map(|id| id.get()),
-                    state.pending_user_dispatch.map(|id| id.get()),
-                );
-            } else {
-                eprintln!("A2_FIFO_TIMEOUT expected={expected} mailbox_snapshot=timeout");
-            }
-            match inflight::load_inflight_state_read_only_result(
-                &fixture.provider,
-                fixture.rig.channel.get(),
-            ) {
-                Ok(Some(row)) => eprintln!(
-                    "A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=present user_msg_id={} runtime_kind={:?} runtime_unknown={}",
-                    row.user_msg_id, row.runtime_kind, row.runtime_kind_unknown_on_disk
-                ),
-                Ok(None) => eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=absent"),
-                Err(_) => {
-                    eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=unreadable")
-                }
-            }
+            self.trace_wait_state(fixture, expected).await;
         }
         assert!(
             matches!(&entry, Ok(Ok(_))),
             "queued FIFO source {expected} must enter provider within {limit:?}: {entry:?}"
         );
-        let thread = entry.unwrap().unwrap();
+        self.verify_entry(fixture, expected, entry.unwrap().unwrap())
+    }
+    fn verify_entry(&self, fixture: &Fixture, expected: u64, thread: std::thread::ThreadId) -> u64 {
         assert_ne!(thread, std::thread::current().id());
         assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
         let row =
@@ -120,6 +94,62 @@ impl ProviderTurn {
             "the entered provider must own the FIFO source"
         );
         row.user_msg_id
+    }
+    async fn trace_wait_state(&self, fixture: &Fixture, expected: u64) {
+        let mailbox = tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture.rig.shared.mailbox(fixture.rig.channel).snapshot(),
+        )
+        .await;
+        if let Ok(state) = mailbox {
+            let ids = state
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id.get())
+                .collect::<Vec<_>>();
+            eprintln!(
+                "A2_FIFO_TIMEOUT expected={expected} queue_ids={ids:?} disk_ids={:?} token_present={} active_user_message_id={:?} pending_user_dispatch={:?}",
+                fixture.disk_ids(),
+                state.cancel_token.is_some(),
+                state.active_user_message_id.map(|id| id.get()),
+                state.pending_user_dispatch.map(|id| id.get()),
+            );
+        } else {
+            eprintln!("A2_FIFO_TIMEOUT expected={expected} mailbox_snapshot=timeout");
+        }
+        match inflight::load_inflight_state_read_only_result(
+            &fixture.provider,
+            fixture.rig.channel.get(),
+        ) {
+            Ok(Some(row)) => eprintln!(
+                "A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=present user_msg_id={} runtime_kind={:?} runtime_unknown={}",
+                row.user_msg_id, row.runtime_kind, row.runtime_kind_unknown_on_disk
+            ),
+            Ok(None) => eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=absent"),
+            Err(_) => {
+                eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=unreadable")
+            }
+        }
+    }
+    async fn diagnose_missed_entry(
+        &mut self,
+        fixture: &Fixture,
+        expected: u64,
+        anchor: tokio::time::Instant,
+        context: &str,
+    ) {
+        self.trace_wait_state(fixture, expected).await;
+        // Observe the native receiver after a missed boundary; the caller retains its failure.
+        match tokio::time::timeout(Duration::from_secs(30), &mut self.entered).await {
+            Ok(Ok(thread)) => {
+                self.verify_entry(fixture, expected, thread);
+                eprintln!(
+                    "A2_FIFO_LATE_ENTRY ms={} context={context}",
+                    anchor.elapsed().as_millis()
+                );
+            }
+            Ok(Err(_)) | Err(_) => eprintln!("A2_FIFO_NO_ENTRY context={context}"),
+        }
     }
     fn finish(self) {
         self.release.send(()).unwrap();
@@ -140,7 +170,9 @@ async fn until(mut ready: impl AsyncFnMut() -> bool) {
 }
 
 impl Fixture {
-    async fn attach_old_watcher(&self) -> tokio::task::JoinHandle<()> {
+    async fn prepare_old_watcher(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
         let name = self.rig.shared.core.lock().await.sessions[&self.rig.channel]
             .channel_name
             .clone()
@@ -187,7 +219,7 @@ impl Fixture {
             handle.last_heartbeat_ts_ms.clone(),
         );
         drop(handle);
-        let task = tokio::spawn(
+        Box::pin(
             crate::services::discord::tmux::tmux_output_watcher_with_restore(
                 self.rig.channel,
                 self.ctx.http.clone(),
@@ -203,11 +235,19 @@ impl Fixture {
                 flags.5,
                 None,
             ),
-        );
+        )
+    }
+    async fn attach_old_watcher(&self) -> tokio::task::JoinHandle<()> {
+        let task = self.spawn_watcher(self.prepare_old_watcher().await);
         assert!(!task.is_finished(), "actual watcher must run before clear");
+        eprintln!(
+            "A2_PREP watcher_attached channel={}",
+            self.rig.channel.get()
+        );
         task
     }
     async fn clear(&self) {
+        eprintln!("A2_PREP clear_entered channel={}", self.rig.channel.get());
         use poise::serenity_prelude::{Message, UserId};
         let mut message = Message::default();
         message.id = MessageId::new(self.rig.channel.get() + 1);
@@ -257,6 +297,7 @@ impl Fixture {
                 .intervention_queue
                 .is_empty()
         );
+        eprintln!("A2_PREP clear_done channel={}", self.rig.channel.get());
     }
     async fn enqueue_pair(&self, a: u64, b: u64) {
         let context =
@@ -670,11 +711,17 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool, failed_
         let ports = Arc::new(LivePorts {
             root: Some(fixture.rig.root.path().to_owned()),
         });
-        let (snapshot, namespace, next) = Snapshot::collect_pair(
-            &fixture.rig.shared,
-            &fixture.provider,
-            fixture.rig.channel,
-            ports,
+        let (snapshot, namespace, next) = settled_owner_observation(
+            "A2_STABLE_PAIR owner_epoch_retries",
+            || {
+                Snapshot::collect_pair(
+                    &fixture.rig.shared,
+                    &fixture.provider,
+                    fixture.rig.channel,
+                    ports.clone(),
+                )
+            },
+            owner_epoch_error,
         )
         .await
         .unwrap();

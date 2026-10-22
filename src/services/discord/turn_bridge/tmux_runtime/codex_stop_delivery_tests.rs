@@ -1142,16 +1142,7 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         );
         assert!(fx.take_calls().is_empty());
     });
-    let source = include_str!("../../commands/control.rs");
-    let body = source
-        .split("async fn cmd_stop")
-        .nth(1)
-        .unwrap()
-        .split("pub(super) fn parse_queued_message_id")
-        .next()
-        .unwrap();
-    assert_eq!(body.matches("run_slash_stop(").count(), 1);
-    assert!(!body.contains("begin_command_stop(") && !body.contains("begin_user_stop("));
+    source_guard_tests::act7_slash_stop_enters_through_run_slash_stop();
 }
 
 /// A cold stop alone is no proof and holds; after the executor's no-attempt exit the exit seal
@@ -1182,7 +1173,7 @@ fn cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit() {
             &current_token(case, runtime).unwrap(),
             &case.token
         ));
-        finish_execution(Some(&case.token));
+        finish_execution(Some(&case.token), false);
         assert_eq!(state.closed_probe(), Some(true));
         let ExitDecision::PolicyClose(proof) = seal_exit(&case.token, false, false) else {
             panic!("a no-attempt exit with a cold stop is a before-start proof");
@@ -1324,8 +1315,14 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
     );
 }
 
+#[path = "codex_stop_source_guard_tests.rs"]
+mod source_guard_tests;
+
 #[path = "codex_stop_delivery_home_stop_tests.rs"]
 mod home_stop;
 
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;
+
+#[path = "herdr_stop_pane_tests.rs"]
+mod herdr_stop_pane;

@@ -1,6 +1,7 @@
 //! A session-less turn-mode channel on a host that also runs unrelated tmux sessions.
 use super::review_tests::Rig;
 use super::*;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::{
     HealthRegistry, HumanInputDelivery, HumanInputRequest, deliver_human_input,
     external_turn_hold_for_start, start_without_gateway,
@@ -29,7 +30,19 @@ impl HostSessions {
                 rig.root.path().join("host.sock"),
             );
         let watch = Arc::new(Mutex::new(Watch::default()));
-        let (_, stamp) = read(&rig.shared, &ProviderKind::Claude, rig.channel, watch).await;
+        let (_, stamp) = settled_owner_observation(
+            "A2_STABLE_OBSERVATION superseded_retries",
+            || {
+                read(
+                    &rig.shared,
+                    &ProviderKind::Claude,
+                    rig.channel,
+                    watch.clone(),
+                )
+            },
+            |sample| sample.0.reason == "superseded",
+        )
+        .await;
         let socket = match &stamp.namespace.as_ref().unwrap().inventory {
             Inventory::Empty(EmptyReason::MissingSocket(path)) => path.clone(),
             other => panic!("fresh private namespace expected: {other:?}"),
@@ -104,11 +117,17 @@ async fn unbound(rig: &Rig) -> (Observed, Stamp, Arc<Mutex<Watch>>) {
             .is_none()
     );
     let watch = Arc::new(Mutex::new(Watch::default()));
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     let live = match &stamp.namespace.as_ref().unwrap().inventory {

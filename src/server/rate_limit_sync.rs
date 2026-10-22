@@ -374,6 +374,7 @@ mod tests {
         claude_usage_rate_limited_error,
     };
     use crate::services::dispatch_gate as gate;
+    use crate::test_support::{braced_item_span, rust_code_mask, strip_rust_comments};
     use reqwest::{StatusCode, header::HeaderMap};
     use std::time::{Duration, Instant};
 
@@ -553,20 +554,7 @@ mod tests {
             .connect_lazy("postgres://agentdesk:agentdesk@127.0.0.1:1/agentdesk")
             .expect("a lazy pool never dials on construction");
         // None defers for every provider; pin the tick's provider wiring separately.
-        let tick_source = include_str!("rate_limit_sync.rs")
-            .split("pub(super) async fn rate_limit_sync_loop")
-            .next()
-            .unwrap();
-        assert!(tick_source.contains("dispatch_gate::is_deferring(\"claude\", danger, now_unix)"));
-        let (_, loop_source) = include_str!("rate_limit_sync.rs")
-            .split_once("pub(super) async fn rate_limit_sync_loop")
-            .unwrap();
-        let (loop_source, _) = loop_source
-            .split_once("async fn sync_claude_rate_limit_cache_once_serialized")
-            .unwrap();
-        assert!(loop_source.contains(
-            "claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix)"
-        ));
+        assert_eq!(tick_wiring_gaps(MODULE_SOURCE), Vec::<String>::new());
         // The real resolver must fail to None, not supply the YAML threshold.
         let (attempt, resolved_danger) =
             claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, now).await;
@@ -582,6 +570,56 @@ mod tests {
         // input: a row older than 300 s — or than the 600 s default — still has
         // to be re-observed, so it must not switch the base cadence off.
         assert!(defers(&cached(100, now + 3600, now - 900), Some(100)));
+    }
+
+    const MODULE_SOURCE: &str = include_str!("rate_limit_sync.rs");
+    const TICK: &str = "async fn claude_tick_should_attempt(";
+    const LOOP: &str = "pub(super) async fn rate_limit_sync_loop(";
+    const GATE_CALL: &str = "dispatch_gate::is_deferring(\"claude\", danger, now_unix)";
+    const TICK_CALL: &str =
+        "claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix)";
+
+    /// Classification 2: inside the real tick and loop items, a call counts only as written
+    /// (code as code, the `"claude"` literal as a literal). A lexical tripwire.
+    fn tick_wiring_gaps(source: &str) -> Vec<String> {
+        let text = strip_rust_comments(source).expect("rate-limit source lexes");
+        let mask = rust_code_mask(source).expect("rate-limit source lexes");
+        let calls = |item: &str, call: &str| {
+            let span = braced_item_span(&mask, item)?;
+            let shape = rust_code_mask(call).expect("call lexes");
+            let found = text[span.clone()].match_indices(call).any(|(at, _)| {
+                let at = span.start + at;
+                mask[at..at + call.len()] == shape
+            });
+            Some(found)
+        };
+        [(TICK, GATE_CALL), (LOOP, TICK_CALL)]
+            .into_iter()
+            .filter(|(item, call)| calls(item, call) != Some(true))
+            .map(|(item, call)| format!("{item} does not call {call}"))
+            .collect()
+    }
+
+    #[test]
+    fn tick_wiring_guard_rejects_commented_calls() {
+        for needle in [TICK, LOOP, GATE_CALL, TICK_CALL] {
+            for (open, close) in [("// ", "\n"), ("/* outer /* ", " */ */")] {
+                let forged = MODULE_SOURCE.replacen(needle, &format!("{open}{needle}{close}"), 1);
+                assert!(forged.contains(needle));
+                assert!(
+                    !tick_wiring_gaps(&forged).is_empty(),
+                    "commented `{needle}` still passes"
+                );
+            }
+        }
+        let quoted = MODULE_SOURCE.replacen(GATE_CALL, "is_deferring(\"claude\")", 1);
+        let copy = format!("\n    let _ = r#\"{GATE_CALL}\"#;\n    (backoff.");
+        let quoted = quoted.replacen("\n    (backoff.", &copy, 1);
+        assert!(quoted.contains(GATE_CALL));
+        assert!(
+            !tick_wiring_gaps(&quoted).is_empty(),
+            "a quoted copy counted"
+        );
     }
 
     /// An unreadable runtime-config yields None, which polling treats as pressure.

@@ -3,7 +3,9 @@ use super::authority::{
     stream_tool_outcome_after_restart_authority, terminal_tool_result_transition_permission,
 };
 use super::*;
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
 use crate::services::discord::turn_bridge::stream_tick::guarded_persist::visible_mutation_authority_after_guarded_save;
+use crate::test_support::CommentForgery;
 
 fn bridge_state(channel_id: u64) -> InflightTurnState {
     InflightTurnState::new(
@@ -92,6 +94,7 @@ fn a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm() {
         .is_none(),
         "the fixture needs a VANISHED row, not a reowned one",
     );
+    let actor_nonce = baseline.turn_nonce.clone();
     let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
         shared_owned: &shared,
         gateway: &gateway,
@@ -105,6 +108,7 @@ fn a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm() {
         confirmed_offset: &mut confirmed_offset,
         any_tool_used: &mut any_tool_used,
         has_post_tool_text: &mut has_post_tool_text,
+        captured_nonce: actor_nonce.as_deref(),
     });
     assert_eq!(
         authority,
@@ -189,47 +193,84 @@ fn transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front() {
 /// `watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick`).
 #[test]
 fn tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences() {
-    let arms = include_str!("../tool_arms.rs");
-    let find = |needle: &str| {
-        arms.find(needle)
-            .unwrap_or_else(|| panic!("tool_arms.rs must still contain `{needle}`"))
+    assert_eq!(tool_projection_gaps(TOOL_ARMS), Vec::<String>::new());
+}
+
+const TOOL_ARMS: &str = include_str!("../tool_arms.rs");
+const HANDLER: &str = "pub(super) async fn handle_stream_tool_message(";
+const TOOL_USE: &str = "StreamToolArmMessage::ToolUse {";
+const TOOL_RESULT: &str = "StreamToolArmMessage::ToolResult {";
+const RESTART_FENCE: &str = "fence_restart_visible_mutation(";
+const RESULT_FENCE: &str = "fence_terminal_tool_result_transition(";
+const PRESERVE: &str = "preserve_previous_tool_status(";
+const USE_LOCALS: [&str; 4] = [
+    PRESERVE,
+    "current_tool_line = Some(display.clone());",
+    "last_tool_name = Some(name.clone());",
+    "last_tool_summary = Some(display_summary.clone());",
+];
+const RESULT_LINE: &str = "current_tool_line = Some(detail);";
+
+/// Classification 2, per real tool arm, comments excluded: ToolUse derives four display locals
+/// before its fence; ToolResult fences before re-deriving two. A lexical tripwire.
+fn tool_projection_gaps(source: &str) -> Vec<String> {
+    let Some(handler) = Lexed::new(source).block(HANDLER) else {
+        return vec![format!("missing {HANDLER}")];
     };
-
-    let restart_fence = find("fence_restart_visible_mutation(");
-    let result_fence = find("fence_terminal_tool_result_transition(");
-    assert!(
-        restart_fence < result_fence,
-        "the ToolUse arm and its restart fence precede the ToolResult arm",
-    );
-
-    // `current_tool_line` / `prev_tool_status` / `last_tool_name` /
-    // `last_tool_summary`: all four are assigned from the ToolUse frame before
-    // the restart fence in that same arm.
-    for needle in [
-        "preserve_previous_tool_status(",
-        "current_tool_line = Some(display.clone());",
-        "last_tool_name = Some(name.clone());",
-        "last_tool_summary = Some(display_summary.clone());",
-    ] {
-        assert!(
-            find(needle) < restart_fence,
-            "`{needle}` must stay ahead of the restart fence, or the loop's tool \
-             projection becomes older than the durable row",
-        );
+    let mut gaps = Vec::new();
+    if !matches!((handler.find(TOOL_USE), handler.find(TOOL_RESULT)), (Some(a), Some(b)) if a < b) {
+        gaps.push("the ToolUse arm must precede the ToolResult arm".to_string());
     }
+    match handler.arm(TOOL_USE) {
+        Some(arm) => {
+            let fence = arm.find(RESTART_FENCE);
+            for local in USE_LOCALS {
+                if !matches!((arm.find(local), fence), (Some(at), Some(fence)) if at < fence) {
+                    gaps.push(format!("`{local}` must stay ahead of the restart fence"));
+                }
+            }
+        }
+        None => gaps.push(format!("missing the {TOOL_USE} arm")),
+    }
+    let result = handler
+        .arm(TOOL_RESULT)
+        .map(|arm| [RESULT_FENCE, PRESERVE, RESULT_LINE].map(|step| arm.find(step)));
+    if !matches!(result, Some([Some(a), Some(b), Some(c)]) if a < b && b < c) {
+        gaps.push(format!(
+            "the ToolResult arm must fence, then re-derive: {result:?}"
+        ));
+    }
+    gaps
+}
 
-    // The ToolResult arm fences FIRST and only then re-derives its two display
-    // fields, so a re-seed there would be overwritten anyway.
-    let result_arm_tool_line = arms
-        .rfind("current_tool_line = Some(detail);")
-        .expect("the ToolResult arm must still re-derive current_tool_line");
-    let result_arm_preserve = arms
-        .rfind("preserve_previous_tool_status(")
-        .expect("the ToolResult arm must still re-derive prev_tool_status");
-    assert!(
-        result_fence < result_arm_preserve && result_arm_preserve < result_arm_tool_line,
-        "the ToolResult arm must re-derive its tool projection after its fence",
-    );
+#[test]
+fn tool_projection_guard_rejects_commented_and_reordered_steps_per_arm() {
+    for forgery in CommentForgery::ALL {
+        for needle in [
+            HANDLER,
+            TOOL_USE,
+            TOOL_RESULT,
+            RESTART_FENCE,
+            RESULT_FENCE,
+            RESULT_LINE,
+        ]
+        .into_iter()
+        .chain(USE_LOCALS)
+        {
+            let forged = forge(TOOL_ARMS, needle, forgery);
+            assert!(
+                !tool_projection_gaps(&forged).is_empty(),
+                "{forgery:?} `{needle}`"
+            );
+        }
+    }
+    // Each arm is judged on its own: the ToolResult re-derivation cannot stand in for ToolUse.
+    let at = TOOL_ARMS.find(TOOL_RESULT).expect("ToolResult arm");
+    let (use_arm, result_arm) = TOOL_ARMS.split_at(at);
+    let late_use = swap(use_arm, USE_LOCALS[1], RESTART_FENCE);
+    assert!(!tool_projection_gaps(&[late_use.as_str(), result_arm].concat()).is_empty());
+    let early_result = swap(result_arm, RESULT_FENCE, PRESERVE);
+    assert!(!tool_projection_gaps(&[use_arm, early_result.as_str()].concat()).is_empty());
 }
 
 /// The tool arms consume `current_msg_id` and `full_response` as loop locals and
@@ -397,6 +438,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut any_tool_used = false;
     let mut has_post_tool_text = false;
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
         shared_owned: &shared,
         gateway: &gateway,
@@ -410,6 +452,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         confirmed_offset: &mut confirmed_offset,
         any_tool_used: &mut any_tool_used,
         has_post_tool_text: &mut has_post_tool_text,
+        captured_nonce: actor_nonce.as_deref(),
     });
     assert_eq!(
         authority,
@@ -481,6 +524,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut last_adk_heartbeat = std::time::Instant::now();
     let mut last_inflight_long_run_heartbeat = std::time::Instant::now();
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let tick_outcome = crate::services::discord::turn_bridge::stream_tick::run_bridge_stream_tick(
         crate::services::discord::turn_bridge::stream_tick::BridgeStreamTickContext {
             shared_owned: shared.clone(),
@@ -489,6 +533,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             provider: &ProviderKind::Codex,
             turn_id: "tool-flag-reseed-turn",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:
@@ -733,6 +778,7 @@ async fn the_watcher_self_handoff_fence_records_the_durable_body_it_adopts() {
     let mut has_post_tool_text = false;
 
     let logs = captured_logs(|| {
+        let actor_nonce = baseline.turn_nonce.clone();
         let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
             shared_owned: &shared,
             gateway: &gateway,
@@ -746,6 +792,7 @@ async fn the_watcher_self_handoff_fence_records_the_durable_body_it_adopts() {
             confirmed_offset: &mut confirmed_offset,
             any_tool_used: &mut any_tool_used,
             has_post_tool_text: &mut has_post_tool_text,
+            captured_nonce: actor_nonce.as_deref(),
         });
         // Not the claim under test, but pinned so a future authority change that
         // silently stops reaching the fence cannot make this test vacuous.

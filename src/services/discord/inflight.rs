@@ -16,14 +16,13 @@ pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
     seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
-    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup, tmux_marker_is_known,
+    KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup,
 };
 #[cfg(unix)]
 pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_inflight_row};
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
-#[cfg(test)]
 pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // Re-export the domain model at its existing visibility for root and sibling callers.

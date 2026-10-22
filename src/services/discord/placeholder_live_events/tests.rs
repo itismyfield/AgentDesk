@@ -527,11 +527,8 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
         .expect("representative relay body should roll over");
     let rollover_seed = build_streaming_placeholder_text("", &status_block);
 
-    assert_eq!(rollover_seed, status_block);
-    assert!(
-        plan.display_snapshot
-            .ends_with(&format!("\n\n{status_block}"))
-    );
+    assert_eq!(rollover_seed, "⠋ 계속 처리 중");
+    assert!(!plan.display_snapshot.contains(&status_block));
     for status_panel_fragment in [
         "마지막 도구",
         "[Bash]",
@@ -9058,15 +9055,9 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
     push_background_bash_task(&events, channel_id, "Still running", "toolu_3404_run");
 
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(
-        !panel.contains("completed)"),
-        "no compaction summary when completed tasks are hidden: {panel}"
-    );
+    assert!(!panel.contains("completed)"), "{panel}");
     assert!(panel.contains("Tasks"), "Tasks header survives: {panel}");
-    assert!(
-        panel.contains("Still running"),
-        "the running entry is always shown: {panel}"
-    );
+    assert!(panel.contains("Still running"), "{panel}");
     assert!(
         panel
             .lines()
@@ -9074,10 +9065,11 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
             .all(|line| line.starts_with("-# ")),
         "separate live-panel output must keep every Tasks line in subtext: {panel}"
     );
-    assert!(
-        !panel.contains("Completed job"),
-        "no completed task line renders in the live panel: {panel}"
-    );
+    let tasks = panel
+        .split("\n\n")
+        .find(|section| section.contains("Tasks"))
+        .unwrap_or("");
+    assert!(!tasks.contains("Completed job"), "{panel}");
 }
 
 // #4367 (supersedes #3404 for the Subagents section, mirroring #4093 for Tasks):
@@ -9201,15 +9193,13 @@ fn live_panel_hides_completed_tasks_even_under_cap() {
         complete_background_bash_task(&events, channel_id, &id);
     }
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert_eq!(
-        panel.matches("Job ").count(),
-        0,
-        "completed tasks are hidden from the live panel: {panel}"
-    );
-    assert!(
-        !panel.contains("completed)"),
-        "no summary when completed tasks are hidden: {panel}"
-    );
+    let tasks = panel
+        .split("\n\n")
+        .find(|section| section.contains("Tasks"))
+        .unwrap_or("");
+    assert!(!tasks.contains("Job "), "{panel}");
+    assert!(panel.contains("✓ Bash  Job 00"), "{panel}");
+    assert!(!panel.contains("completed)"), "{panel}");
 }
 
 // ===========================================================================

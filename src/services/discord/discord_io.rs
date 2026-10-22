@@ -316,7 +316,7 @@ async fn consume_pending_dm_reply(
 }
 
 /// Rate limit helper — ensures minimum 1s gap between API calls per channel
-pub(super) async fn rate_limit_wait(shared: &Arc<SharedData>, channel_id: ChannelId) {
+pub(super) async fn rate_limit_wait(shared: &SharedData, channel_id: ChannelId) {
     let min_gap = tokio::time::Duration::from_millis(1000);
     let sleep_until = {
         let now = tokio::time::Instant::now();

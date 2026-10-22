@@ -180,6 +180,7 @@ async fn run_skill_slash_command(
             if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
                 return Ok(());
             }
+            ctx.defer().await?;
             let permit = crate::services::cluster::channel_home::admit_command(
                 &ctx.channel_id().get().to_string(),
                 ctx.data().provider.as_str(),
@@ -189,6 +190,14 @@ async fn run_skill_slash_command(
                 let begin = super::super::turn_bridge::begin_user_stop;
                 let reason = format!("{invoked_as} stop");
                 match begin(shared, provider, ctx.channel_id(), false, &reason).await {
+                    CommandStop::Native(stop) => {
+                        ctx.say(stop.text()).await?;
+                        stop.finish().await;
+                    }
+                    CommandStop::Observed(sent) => {
+                        ctx.say(super::super::turn_bridge::NativeStop::observed_text(sent))
+                            .await?;
+                    }
                     CommandStop::Session(stop) => {
                         ctx.say(super::STOPPING_RESPONSE).await?;
                         stop.interrupt(&format!("{invoked_as} stop")).await;

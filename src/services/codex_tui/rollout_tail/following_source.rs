@@ -566,6 +566,12 @@ fn tail_source<L: Into<PaneLiveness>>(
                 std::thread::sleep(Duration::from_millis(100));
             }
             Ok(n) => {
+                #[cfg(all(test, unix))]
+                crate::services::codex::actual_submit_tests::source_io::read(
+                    &file,
+                    "rollout_tail",
+                    n as u64,
+                );
                 death.reset();
                 current_offset += n as u64;
                 partial_line.extend_from_slice(&buf[..n]);

@@ -112,7 +112,8 @@ async fn assert_wedge_graded_once(
     assert_eq!(watcher_state.relay_health.tmux_alive, tmux_alive);
 
     for _ in 0..2 {
-        super::run_orphan_token_auto_heal_pass(&registry, &provider, &[shared.clone()]).await;
+        super::run_orphan_token_auto_heal_pass(&registry, &provider, std::slice::from_ref(&shared))
+            .await;
     }
 
     assert_anchor_and_queue_kept(&shared, channel, anchor, &token).await;
@@ -164,10 +165,7 @@ async fn agentdesk_session_probe_failure_is_graded_as_unmeasured() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confirmed_dead_rowless_orphan_token_still_needs_a_warrant() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    if !crate::services::platform::tmux::is_available() {
-        eprintln!("skipping confirmed-dead orphan sweep: tmux unavailable");
-        return;
-    }
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let root = tempfile::tempdir().expect("runtime root");
     let _env =
         TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());

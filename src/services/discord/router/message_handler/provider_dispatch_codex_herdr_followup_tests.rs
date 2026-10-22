@@ -533,3 +533,6 @@ fn a_settled_herdr_reconnect_is_not_attached_again_pg() {
     }
     assert_eq!(attaches(), 1);
 }
+
+#[path = "provider_dispatch_codex_herdr_activation_tests.rs"]
+mod activation;

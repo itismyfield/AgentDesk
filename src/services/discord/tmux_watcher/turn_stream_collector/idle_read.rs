@@ -2,7 +2,6 @@ use super::*;
 
 pub(super) enum IdleReadOutcome {
     Break,
-    Continue,
     Fallthrough,
 }
 
@@ -80,15 +79,8 @@ pub(super) async fn process_idle_read(phase: IdleReadState<'_>, off: u64) -> Idl
             Some(tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
                 shared.restart.shutting_down.load(Ordering::Relaxed),
-                host_gate::tmux_alive_for_mode(
-                    shared,
-                    tmux_session_name,
-                    channel_id,
-                    &ctx.host,
-                    ctx.legacy_mode,
-                    output_path,
-                )
-                .await,
+                host_gate::tmux_alive_for_watcher(shared, tmux_session_name, channel_id, &ctx.host)
+                    .await,
             )),
         ) {
             WatcherOutputPollDecision::DrainOutput => {}
@@ -180,20 +172,12 @@ pub(super) async fn process_idle_read(phase: IdleReadState<'_>, off: u64) -> Idl
             crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                 #[cfg(test)]
                 o_test::post_work_idle(watcher_provider.clone(), channel_id);
-                if !ctx.legacy_mode.is_legacy() {
-                    return IdleReadOutcome::Continue;
-                }
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                let stall_inflight_snapshot = ctx
-                    .legacy_mode
-                    .is_legacy()
-                    .then(|| {
-                        crate::services::discord::inflight::load_inflight_state(
-                            watcher_provider,
-                            channel_id.get(),
-                        )
-                    })
-                    .flatten();
+                let stall_inflight_snapshot =
+                    crate::services::discord::inflight::load_inflight_state(
+                        watcher_provider,
+                        channel_id.get(),
+                    );
                 let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
                     shared.pg_pool.as_ref(),
                     watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),

@@ -179,6 +179,7 @@ struct HostReads<'a> {
     exact_key: &'a str,
     exact: &'a HostedLookup,
     canonical: &'a HostedLookup,
+    legacy_absence: bool,
     evidence: Result<SessionTargetEvidence, String>,
     marker: HostKindMarker,
     inflight: &'a Result<Option<InflightTurnState>, String>,
@@ -236,7 +237,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
     {
         return hold("key_witness_mismatch");
     }
-    if reads.exact != reads.canonical {
+    if reads.exact != reads.canonical && !reads.legacy_absence {
         return hold("exact_canonical_mismatch");
     }
     evidence.session_key = Some(key.clone());
@@ -535,6 +536,7 @@ mod dormancy_tests;
 #[path = "unbound/unit_tests.rs"]
 mod tests;
 
+mod binding_metadata;
 mod cross_runtime_owners;
 pub(super) mod herdr_bound;
 pub(super) mod hold_leaf;

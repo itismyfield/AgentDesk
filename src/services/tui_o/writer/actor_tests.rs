@@ -1,10 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
-use tokio::sync::watch;
-
+#[path = "tool_card_actor_tests.rs"]
+mod tool_cards;
 use super::super::actor::{POLL_INTERVAL, run_channel, spawn_if_enabled};
 use super::super::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
@@ -15,7 +12,9 @@ use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
-
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 fn row(id: &str, text: &str) -> Vec<u8> {
     let row = serde_json::json!({
         "type": "assistant", "uuid": format!("u-{id}"), "apiBlockIndex": 0,
@@ -25,17 +24,14 @@ fn row(id: &str, text: &str) -> Vec<u8> {
     line.push(b'\n');
     line
 }
-
 fn append(path: &Path, bytes: &[u8]) {
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(bytes).unwrap();
 }
-
 /// A harness whose channel was switched over a transcript already holding `body`.
 fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
     switched_over_on(CHANNEL, body)
 }
-
 fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
     let mut bound = None;
     let harness = Harness::build_channel(channel, |runtime| {
@@ -53,23 +49,18 @@ fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
     let (path, source) = bound.unwrap();
     (harness, path, source)
 }
-
 async fn polls(count: u32) {
     tokio::time::sleep(POLL_INTERVAL * count).await;
 }
-
 /// A spawned actor; it returns why it stopped.
 type Actor = tokio::task::JoinHandle<Option<super::super::deliver::StopCause>>;
-
 fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
     spawn_as(writer, ShadowProvider::Claude)
 }
-
 fn spawn_as(mut writer: Writer, provider: ShadowProvider) -> (watch::Sender<bool>, Actor) {
     let bindings = startup_log(&mut writer);
     spawn_with(writer, provider, bindings)
 }
-
 fn spawn_with(
     writer: Writer,
     provider: ShadowProvider,
@@ -80,7 +71,6 @@ fn spawn_with(
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
     (stop, task)
 }
-
 fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
     BindingEvent {
         seq,
@@ -92,7 +82,6 @@ fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> Bindin
         committed_at,
     }
 }
-
 fn bound(
     seq: u64,
     old: Option<&SourceId>,
@@ -114,7 +103,6 @@ fn bound(
     };
     event(seq, record, Utc::now())
 }
-
 /// A binding log whose startup binds name every source the channel was switched over.
 fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
     let bindings = Arc::new(FakeBindings::new());
@@ -125,7 +113,6 @@ fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
     }
     bindings
 }
-
 /// An in-memory binding log with the channel's seq notice.
 struct FakeBindings {
     events: Mutex<Vec<BindingEvent>>,
@@ -133,7 +120,6 @@ struct FakeBindings {
     /// Set while every read of the log fails with this error.
     failing: Mutex<Option<String>>,
 }
-
 impl FakeBindings {
     fn new() -> Self {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
@@ -144,11 +130,9 @@ impl FakeBindings {
             failing,
         }
     }
-
     fn fail(&self, error: Option<&str>) {
         *self.failing.lock().unwrap() = error.map(str::to_string);
     }
-
     /// Commits `event` and moves the notice to its seq.
     fn commit(&self, event: BindingEvent) {
         let seq = event.seq;
@@ -306,9 +290,16 @@ async fn a_whole_message_row_posts_each_block_once_without_stopping() {
     assert!(!task.is_finished(), "the actor keeps running");
     assert_eq!(
         harness.port.posts(),
-        ["first", "third a", "third b", "fourth"]
+        [
+            "first",
+            "-# ▸ Bash  ?",
+            "third a",
+            "-# ▸ Read  ?",
+            "third b",
+            "fourth"
+        ]
     );
-    assert_eq!(excluded_keys(&harness), ["m2:2", "m3:1"]);
+    assert_eq!(excluded_keys(&harness), ["m1:0#turn", "m2:2", "m3:1"]);
     assert_eq!(harness.alarms.taken(), []);
     halt(stop, task).await;
 }
@@ -342,12 +333,18 @@ async fn a_channel_stopped_on_a_whole_message_row_resumes_from_its_spool_once() 
     let (stop, task) = spawn(harness.writer());
     append(&path, &row("m4", "live"));
     polls(3).await;
-    assert_eq!(harness.port.posts(), ["first", "after", "live"]);
-    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    assert_eq!(
+        harness.port.posts(),
+        ["first", "-# ▸ Bash  ?", "after", "live"]
+    );
+    assert_eq!(excluded_keys(&harness), ["m1:0#turn", "m2:2"]);
     halt(stop, task).await;
     let (stop, task) = spawn(harness.writer());
     polls(3).await;
-    assert_eq!(harness.port.posts(), ["first", "after", "live"]);
+    assert_eq!(
+        harness.port.posts(),
+        ["first", "-# ▸ Bash  ?", "after", "live"]
+    );
     assert_eq!(harness.alarms.taken(), []);
     halt(stop, task).await;
 }
@@ -390,10 +387,13 @@ async fn a_resumed_sessions_synthetic_chrome_is_excluded_and_the_next_answer_pos
         .collect();
     assert_eq!(
         excluded,
-        [(
-            "u-synthetic".into(),
-            "claude_synthetic_resume_chrome".into()
-        )]
+        [
+            (
+                "u-synthetic".into(),
+                "claude_synthetic_resume_chrome".into()
+            ),
+            ("msg_e1:0#turn".into(), "turn_summary_open".into())
+        ]
     );
 }
 
@@ -739,7 +739,7 @@ async fn a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes() {
     polls(3).await;
     assert_eq!(
         harness.port.posts(),
-        ["first", "second"],
+        ["first", "-# ✅ 완료", "second", "-# ⏹ 중단"],
         "a Stop, an abort or EOF is not a delivery"
     );
     assert_eq!(harness.alarms.taken(), [WriterAlarm::PausedNoGateway]);

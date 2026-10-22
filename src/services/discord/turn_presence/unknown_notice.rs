@@ -42,6 +42,7 @@ struct State {
     retry_at: Option<Instant>,
     log_at: Option<Instant>,
     store_error: Option<String>,
+    affects_input: bool,
 }
 
 fn key(observed: &NoticeObservation) -> Key {
@@ -221,19 +222,24 @@ impl Owner {
         owner
     }
 
+    /// `affects_input` gates only the Discord post; the cause clock, receipt, log and health
+    /// follow every Unknown whether or not a token or waiting input is held.
     pub fn observe(
         &self,
         observed: Option<NoticeObservation>,
+        affects_input: bool,
         agent: Option<String>,
         now: Instant,
     ) -> bool {
         let mut state = lock(&self.state);
         state.observe(observed, agent, now);
+        state.affects_input = affects_input;
         let due = state
             .cause_at
             .is_some_and(|at| now.duration_since(at) >= GRACE)
             && state.receipt.is_none()
-            && state.key.is_some();
+            && state.key.is_some()
+            && state.affects_input;
         if state.driving
             || state.retry_at.is_some_and(|at| at > now)
             || (state.loaded && !state.dirty && !due)
@@ -291,7 +297,9 @@ impl Owner {
         let ticket = {
             let state = lock(&self.state);
             match state.key.as_ref().filter(|_| {
-                state.receipt.is_none() && state.cause_at.is_some_and(|at| at.elapsed() >= GRACE)
+                state.affects_input
+                    && state.receipt.is_none()
+                    && state.cause_at.is_some_and(|at| at.elapsed() >= GRACE)
             }) {
                 Some(key) => Some((
                     state.epoch,

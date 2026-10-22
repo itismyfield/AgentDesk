@@ -6,7 +6,7 @@ use crate::services::provider::ProviderKind;
 
 use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
-use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::inflight::{RelayOwnerKind, clear_inflight_state_if_matches};
 
 pub(in crate::services::discord) mod terminal_release;
 pub(in crate::services::discord) use terminal_release::rearm_queue_backstop_after_mailbox_release;
@@ -416,33 +416,35 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(
 }
 
 /// Late `AlreadyFinalized` losers still perform guarded active-state cleanup.
-/// This is intentionally narrower than `do_finalize`: only the same real turn id
-/// can lose mailbox/inflight state, so a newer active turn is preserved.
+/// This is narrower than `do_finalize`: only the same real turn id, or a row its own
+/// release proves is that episode's, can lose mailbox/inflight state.
 pub(super) async fn already_finalized_active_state(
     key: TurnKey,
     provider: &ProviderKind,
     event: &TerminalEvent,
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
-    submit_snapshot: Option<&SyntheticClaimSnapshot>,
+    witness: super::episode::RuntimeWitness<'_>,
 ) {
     if key.user_msg_id == 0 {
         return;
     }
 
-    let Ok(expected_actor) = captured_recovery_actor(submit_snapshot) else {
+    let Ok(expected_actor) = captured_recovery_actor(witness.claim_snapshot) else {
         return;
     };
     // Recovery owns row retirement with its exact committed snapshot. A ledger
-    // duplicate must not adopt the currently loaded row as cleanup authority.
+    // duplicate must not adopt the currently loaded row as cleanup authority;
+    // only this call's own proven release may retire its episode's drifted row.
     let clear_inflight = expected_actor.is_none();
     let owned_role_override = snapshot_role_override(shared, key.channel_id);
-    let captured = match super::episode::claim_normal_episode(
+    let captured = match super::episode::claim_episode(
         shared,
         provider,
         key,
         clear_inflight,
         expected_actor,
+        Some(witness),
     )
     .await
     {
@@ -453,12 +455,8 @@ pub(super) async fn already_finalized_active_state(
         capture.publish_release(shared, key);
         capture.finish
     } else {
-        let _ = crate::services::discord::inflight::clear_inflight_state_if_matches(
-            provider,
-            key.channel_id.get(),
-            key.user_msg_id,
-        );
-
+        let kept = clear_inflight_state_if_matches(provider, key.channel_id.get(), key.user_msg_id);
+        super::episode::warn_same_id_row_kept(provider, key, kept);
         super::super::mailbox_finish_turn_if_matches(
             shared,
             provider,

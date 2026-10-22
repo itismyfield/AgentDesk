@@ -20,7 +20,6 @@ pub(super) struct NoResultExitContext<'a> {
     pub(super) shared: &'a Arc<SharedData>,
     pub(super) channel_id: serenity::ChannelId,
     pub(super) watcher_provider: &'a ProviderKind,
-    pub(super) legacy_mode: entry::WatcherLegacyMode,
     pub(super) tmux_session_name: &'a String,
     pub(super) output_path: &'a String,
     pub(super) paused: &'a Arc<AtomicBool>,
@@ -105,7 +104,7 @@ pub(super) async fn handle_no_result_exits(
                 "fresh_idle_no_result",
             );
         }
-        if fresh_ready_for_input_idle && context.legacy_mode.is_legacy() {
+        if fresh_ready_for_input_idle {
             // #3016 S3: the STRUCTURAL completion signal — the authority that
             // finally distinguishes "turn done" from "paused-live" (which the
             // old flag-only path could not). Resolve the runtime kind exactly
@@ -551,32 +550,30 @@ pub(super) async fn handle_no_result_exits(
         }
 
         if tmux_death_observed {
-            if context.legacy_mode.is_legacy() {
-                handle_tmux_watcher_observed_death(
-                    channel_id,
-                    &http,
-                    &shared,
-                    &tmux_session_name,
-                    &output_path,
-                    &watcher_provider,
-                    prompt_too_long_killed,
-                    watcher_lifecycle_terminal_delivery_observed(
-                        terminal_delivery_observed,
-                        turn_delivered.load(Ordering::Acquire),
-                    ),
-                )
-                .await;
-                finish_monitor_auto_turn_if_claimed(
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    &mut *state.monitor_auto_turn_claimed,
-                    &mut *state.monitor_auto_turn_finished,
-                    &mut *state.monitor_auto_turn_synthetic_msg_id,
-                    &mut *state.monitor_auto_turn_ledger_generation,
-                )
-                .await;
-            }
+            handle_tmux_watcher_observed_death(
+                channel_id,
+                &http,
+                &shared,
+                &tmux_session_name,
+                &output_path,
+                &watcher_provider,
+                prompt_too_long_killed,
+                watcher_lifecycle_terminal_delivery_observed(
+                    terminal_delivery_observed,
+                    turn_delivered.load(Ordering::Acquire),
+                ),
+            )
+            .await;
+            finish_monitor_auto_turn_if_claimed(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &mut *state.monitor_auto_turn_claimed,
+                &mut *state.monitor_auto_turn_finished,
+                &mut *state.monitor_auto_turn_synthetic_msg_id,
+                &mut *state.monitor_auto_turn_ledger_generation,
+            )
+            .await;
             return NoResultExitOutcome::BreakWatcherLoop;
         }
 
@@ -590,7 +587,7 @@ pub(super) async fn handle_no_result_exits(
             );
             // Cooperative cancellation transfers custody, not actor completion.
             // Keep the existing global-shutdown behavior when no replacement is requested.
-            if context.legacy_mode.is_legacy() && !cancel.load(Ordering::Acquire) {
+            if !cancel.load(Ordering::Acquire) {
                 finish_monitor_auto_turn_if_claimed(
                     &shared,
                     &watcher_provider,
@@ -605,15 +602,7 @@ pub(super) async fn handle_no_result_exits(
             return NoResultExitOutcome::BreakWatcherLoop;
         }
 
-        // Idle observation keeps O's source carry; only the writer can confirm delivery.
-        if fresh_ready_for_input_idle {
-            return NoResultExitOutcome::ContinueWatcherLoop;
-        }
-
         if let Some(notice) = ready_for_input_failure_notice {
-            if !context.legacy_mode.is_legacy() {
-                return NoResultExitOutcome::ContinueWatcherLoop;
-            }
             let notice_ok = match *state.placeholder_msg_id {
                 Some(msg_id) => {
                     rate_limit_wait(&shared, channel_id).await;

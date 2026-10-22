@@ -275,6 +275,7 @@ async fn post_aliased_hook(hooks: &HookServerState, command: &str, session: &str
 
 fn hook_event(session: &str) -> HookEvent {
     HookEvent {
+        original_context: None,
         provider: PROVIDER_KEY.to_string(),
         session_id: session.to_string(),
         kind: HookEventKind::UserPromptSubmit,
@@ -293,7 +294,9 @@ fn announcements_of(harness: &RelayE2eHarness, prompt: &str) -> usize {
     harness
         .messages()
         .iter()
-        .filter(|(_, content)| content != "..." && content.contains(prompt))
+        .filter(|(_, content)| {
+            !matches!(content.as_str(), "..." | "⠋ 계속 처리 중") && content.contains(prompt)
+        })
         .count()
 }
 
@@ -312,7 +315,10 @@ async fn wait_for_announcement_of(harness: &RelayE2eHarness, prompt: &str, place
                 .lock()
                 .expect("mock messages")
                 .values()
-                .any(|(_, content)| content != "..." && content.contains(&wanted))
+                .any(|(_, content)| {
+                    !matches!(content.as_str(), "..." | "⠋ 계속 처리 중")
+                        && content.contains(&wanted)
+                })
         })
     })
     .await;
@@ -520,7 +526,9 @@ async fn an_http_alias_keeps_its_distinct_pane_channel() {
         assert_eq!(
             posts
                 .iter()
-                .filter(|(id, text)| *id == target && text == "...")
+                .filter(
+                    |(id, text)| *id == target && matches!(text.as_str(), "..." | "⠋ 계속 처리 중")
+                )
                 .count(),
             1
         );

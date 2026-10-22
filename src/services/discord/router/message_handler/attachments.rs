@@ -4,6 +4,11 @@ use crate::services::cluster::attachment_transfer::{
     uploads::{PendingUploads, Upload},
 };
 
+mod busy_inject;
+pub(in crate::services::discord::router) use busy_inject::prepare_busy_inject_uploads;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::router) use busy_inject::retain_busy_uploads;
+
 const FILE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const BUNDLE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const MAX_CONCURRENT_BUNDLE_DOWNLOADS: usize = 4;
@@ -283,29 +288,64 @@ mod attachment_tests {
         );
     }
 
+    const INTAKE_GATE: &str = include_str!("../intake_gate.rs");
+    const HANDLE_EVENT: &str = "pub(in crate::services::discord) async fn handle_event(";
+    const PREPARE: &str = "prepare_admitted_live_attachments(";
+    const ATTACHMENT_ORDER: [&str; 4] = [
+        "let attachments = super::message_handler::describe_attachments(new_message);",
+        "super::admit_text_intake(&deps, &submission).await",
+        "if deferred_attachment_unbound_check",
+        "super::prepare_admitted_live_attachments(",
+    ];
+
+    /// Classification 2: descriptor → admission → deferred restore → materialization is
+    /// matched as written in `handle_event`, comments excluded; a lexical tripwire.
+    fn attachment_order_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let lexed = Lexed::new(source);
+        let event = lexed.block(HANDLE_EVENT);
+        let found = ATTACHMENT_ORDER.map(|step| event.as_ref().and_then(|body| body.find(step)));
+        let mut gaps = Vec::new();
+        if !found
+            .windows(2)
+            .all(|pair| matches!(pair, [Some(a), Some(b)] if a < b))
+        {
+            gaps.push(format!("attachment ownership order broken: {found:?}"));
+        }
+        if lexed.count(PREPARE) != 1 {
+            gaps.push("live attachment materialization has one admitted gate site".into());
+        }
+        gaps
+    }
+
     #[test]
     fn attachment_materialization_requires_post_admission_opaque_permit() {
-        let source = include_str!("../intake_gate.rs");
-        let descriptor = source
-            .find("let attachments = super::message_handler::describe_attachments(new_message);")
-            .expect("descriptor capture");
-        let admission = source
-            .find("super::admit_text_intake(&deps, &submission).await")
-            .expect("attachment central admission call");
-        let deferred_restore = source
-            .find("if deferred_attachment_unbound_check")
-            .expect("unbound attachment restore guard");
-        let prepare = source
-            .find("super::prepare_admitted_live_attachments(")
-            .expect("post-admission materialization boundary");
+        assert_eq!(attachment_order_gaps(INTAKE_GATE), Vec::<String>::new());
+    }
 
-        assert!(
-            descriptor < admission && admission < deferred_restore && deferred_restore < prepare
-        );
-        assert_eq!(
-            source.matches("prepare_admitted_live_attachments(").count(),
+    #[test]
+    fn attachment_order_guard_rejects_commented_and_reordered_steps() {
+        use crate::services::discord::router::source_guard_support::{forge, swap};
+        use crate::test_support::CommentForgery;
+        for needle in [HANDLE_EVENT].into_iter().chain(ATTACHMENT_ORDER) {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(INTAKE_GATE, needle, forgery);
+                assert!(forged.contains(needle));
+                assert!(
+                    !attachment_order_gaps(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        let late_admission = swap(INTAKE_GATE, ATTACHMENT_ORDER[1], ATTACHMENT_ORDER[2]);
+        assert!(!attachment_order_gaps(&late_admission).is_empty());
+        let second = INTAKE_GATE.replacen(
+            ATTACHMENT_ORDER[3],
+            &format!("// {PREPARE}\n{}", ATTACHMENT_ORDER[3]),
             1,
-            "live attachment materialization has one admitted gate site"
         );
+        assert_eq!(attachment_order_gaps(&second), Vec::<String>::new());
+        let coded = format!("{INTAKE_GATE}\nfn forged() {{ {PREPARE}); }}\n");
+        assert_eq!(attachment_order_gaps(&coded).len(), 1);
     }
 }

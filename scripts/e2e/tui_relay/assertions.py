@@ -14,6 +14,9 @@ import os
 import re
 from typing import Any, Sequence
 
+from .tool_cards import is_tool_card, tool_card_body
+from .turn_summary import TURN_SUMMARY_PATTERN, is_turn_summary, turn_summary_body
+from .status_chrome import no_status_chrome, turn_summary_after_body
 # Discord author ids:
 #   - Our driver uses the "명령봇" account to push prompts via /api/discord/send.
 #     We must exclude this id from the relay window so prompts are not counted
@@ -118,7 +121,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"진행 중"),
     _IDLE_RECAP_COMPLETION_PATTERN,
     _SESSION_PANEL_CHROME_PATTERN,
-    _COMPLETION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
     re.compile(r"세션 초기화"),
     re.compile(r"\[Stopped\]"),
 )
@@ -126,7 +129,7 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
     _IDLE_RECAP_COMPLETION_PATTERN,
-    _COMPLETION_PANEL_CHROME_PATTERN,
+    _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
 )
 
 _SUPPRESSED_LABEL_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -191,29 +194,21 @@ def is_relay_response(message: dict[str, Any]) -> bool:
 def relay_body(message: dict[str, Any]) -> str | None:
     """Return the body used by relay-marker assertions for one message.
 
-    A first answer may carry a session banner and body in one Discord post,
-    joined by the product's exact ``<banner>\n\n<body>`` contract.  Marker
-    assertions must search only the body: a marker in the banner is not
-    evidence that the answer was delivered.  A banner-shaped post with any
-    other separator is treated as bodyless (fail closed for malformed relay
-    output).  Messages without a banner retain their historical full-content
-    behavior.  The product may append a completion/status footer to that same
-    post; only a recognized footer at the message tail is removed.  A
-    banner-shaped prefix without the required blank separator remains
-    fail-closed as a malformed boundary, while provider prose itself is allowed
-    to be arbitrary.
+    Strip recognized footer tails and complete tool cards before matching
+    answer markers; preserve arbitrary prose and interior card examples.
     """
 
     if not is_relay_response(message):
         return None
     content = message.get("content") or ""
     prefix = _SESSION_BANNER_PREFIX_PATTERN.match(content)
-    if prefix is None:
-        return _strip_relay_body_chrome(content)
-    remainder = content[prefix.end() :]
-    if not remainder.startswith("\n\n"):
-        return None
-    return _strip_relay_body_chrome(remainder[2:])
+    if prefix is not None:
+        remainder = content[prefix.end() :]
+        if not remainder.startswith("\n\n"):
+            return None
+        content = remainder[2:]
+    body = _strip_relay_body_chrome(content)
+    return None if is_tool_card(body) or is_turn_summary(body) else body
 
 
 def _is_completion_footer_head(line: str) -> bool:
@@ -875,20 +870,12 @@ _RESUME_PROMPT_CHROME: tuple[str, ...] = (
 
 
 def no_resume_prompt_chrome(window: Window) -> None:
-    """Fail if any relay body contains Claude CLI auto-resume chrome.
+    """Reject CLI auto-resume chrome in relay bodies and tool-card payloads."""
 
-    Pinned in #2718 after the PY6 (`Continue from where you left off.`)
-    auto-prompt was still being prepended every turn — the assistant would
-    answer the meta prompt with \"No response requested.\" and glue the real
-    marker onto the same Discord message. Substring `text_present` still
-    passed, masking the regression.  Unlike control-byte scanning, this stays
-    body-scoped: the CLI chrome is emitted after the session-banner separator
-    and is exactly the answer-surface leak the marker contract is meant to
-    reject.
-    """
-
-    for message in window.messages:
-        body = relay_body(message) or ""
+    for message in _raw_assertion_messages(window):
+        if not (message.get("author") or {}).get("bot"):
+            continue
+        body = relay_body(message) or tool_card_body(message) or turn_summary_body(message) or ""
         for chrome in _RESUME_PROMPT_CHROME:
             if chrome in body:
                 raise AssertionError(

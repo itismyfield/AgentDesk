@@ -570,18 +570,23 @@ function runHasBlockingPhaseGate(runId) {
   return rows.length > 0 && rows[0].cnt > 0;
 }
 
+// False only when the write matched no run that may still gain a gate (it completed meanwhile);
+// a failed write returns true so a transient error never skips the phase gate.
 function beginPhaseGateGraceWindow(runId) {
-  if (!runId) return;
+  if (!runId) return false;
   var until = new Date(Date.now() + PHASE_GATE_GRACE_WINDOW_MS).toISOString();
   try {
-    agentdesk.db.execute(
-      "UPDATE auto_queue_runs SET phase_gate_grace_until = ? WHERE id = ?",
+    var result = agentdesk.db.execute(
+      "UPDATE auto_queue_runs SET phase_gate_grace_until = CAST(? AS TIMESTAMPTZ) WHERE id = ? " +
+      "AND status IN ('active', 'paused', 'restoring', 'generated', 'pending', 'cancelled')",
       [until, runId]
     );
+    return !(result && result.changes === 0);
   } catch (e) {
     autoQueueLog("warn", "Failed to begin phase-gate grace window for run " + runId + ": " + e, {
       run_id: runId
     });
+    return true;
   }
 }
 

@@ -105,6 +105,8 @@ async fn check_reclaim(site: &'static str, channel_id: u64, pending_start: bool)
     }
     let before = discord::health::test_support::fingerprint(&path);
     let record = TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id,
         tmux_session_name: "n4a-p2-reclaim-fixture".to_string(),

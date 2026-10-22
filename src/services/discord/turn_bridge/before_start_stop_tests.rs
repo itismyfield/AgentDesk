@@ -77,7 +77,7 @@ fn coldstop_phases_require_positive_untouched_and_preserve_base_hold() {
             }
         }
         let (actor, _) = prepared(provider.clone(), 903);
-        finish_execution(Some(&actor));
+        finish_execution(Some(&actor), false);
         assert_eq!(
             actor
                 .herdr_interrupt_state()
@@ -304,7 +304,7 @@ fn coldstop_closed_drops_callback_and_own_start_is_negative_evidence() {
     let (actor, _) = prepared(ProviderKind::Codex, 915);
     let state = actor.herdr_interrupt_state().unwrap();
     state.own_start_observed(1, "own");
-    finish_execution(Some(&actor));
+    finish_execution(Some(&actor), false);
     state.user_stop.store(true, Ordering::Release);
     assert_eq!(seal_exit(&actor, false, false), ExitDecision::Hold);
 }
@@ -843,6 +843,8 @@ impl Close {
 mod clear_order;
 #[path = "before_start_stop_disk_gate_tests.rs"]
 mod disk_gate;
+#[path = "before_start_stop_o_reply_tests.rs"]
+mod o_reply;
 
 #[path = "before_start_stop_policy_tests.rs"]
 mod policy;
@@ -998,8 +1000,8 @@ async fn coldstop_receipt_admission_spares_successor_row() {
     }
 }
 
-/// The bridge shows the stop only where it owns the body: an O-owned destination or a message
-/// anchor that moved keeps the receipt pending, sends nothing and holds the turn.
+/// The bridge shows the stop only on the durable row's own message: an anchor that moved keeps the
+/// receipt pending, sends nothing and holds the turn. An O-owned body is in `o_reply`.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_bridge_shows_the_stop_only_on_its_own_body() {
     let close = Close::open(924, |row| {
@@ -1007,16 +1009,11 @@ async fn coldstop_bridge_shows_the_stop_only_on_its_own_body() {
     })
     .await;
     let polled = std::sync::atomic::AtomicBool::new(false);
-    {
-        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
-            924,
-            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-        )]);
-        assert!(!close.consume(recorded(&polled)).await);
-    }
-    assert!(!polled.load(Ordering::Acquire), "O owns the body");
-    assert_eq!(close.receipt_pending(), Some(true));
-    assert!(close.held().await);
+    let (proof, generation) = (&close.proof, close.shared.restart.current_generation);
+    let admitted = close
+        .row
+        .admit_before_start_receipt(&proof.turn_nonce, proof.basis, generation);
+    assert!(admitted.await.is_some());
     let mut moved = close.durable().unwrap();
     moved.current_msg_id += 1;
     discord::inflight::save_inflight_state(&moved).unwrap();

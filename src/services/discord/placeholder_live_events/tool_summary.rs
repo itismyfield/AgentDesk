@@ -10,10 +10,10 @@ fn tool_key(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(super) fn class(name: &str) -> &'static str {
+pub(crate) fn class(name: &str) -> String {
     let key = tool_key(name);
     if key.starts_with("mcp__") {
-        return "MCP";
+        return "MCP".into();
     }
     match key.as_str() {
         "bash" | "shell" | "shell_command" | "command_execution" | "exec" | "exec_command"
@@ -26,8 +26,29 @@ pub(super) fn class(name: &str) -> &'static str {
         "task" | "agent" => "Task",
         "webfetch" | "web_fetch" => "WebFetch",
         "websearch" | "web_search" => "WebSearch",
-        _ => "Tool",
+        _ => {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+                || name.split(['.', ':']).any(|part| {
+                    std::iter::once(part)
+                        .chain(part.match_indices('_').map(|(at, _)| &part[at + 1..]))
+                        .any(|suffix| redact_token_prefixes(suffix).starts_with("***"))
+                })
+                || crate::utils::redact::contains_registered_secret(name)
+            {
+                return "Tool".into();
+            }
+            return name
+                .strip_prefix("functions.")
+                .unwrap_or(name)
+                .chars()
+                .take(40)
+                .collect();
+        }
     }
+    .into()
 }
 
 fn field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -44,7 +65,7 @@ fn credential_command(input: &str) -> bool {
         Regex::new(r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>()])+|[;&|()\r\n]"#).expect("command words")
     });
     static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*=").expect("command environment assignment")
+        Regex::new(r"^[(\{]*[A-Za-z_][A-Za-z0-9_]*\+?=").expect("command environment assignment")
     });
     if input
         .replace(['\'', '"'], "")
@@ -446,6 +467,48 @@ fn shell_text(raw: &str) -> Option<String> {
     text_masked(&shell_masked(raw, 0)?, 80)
 }
 
+fn shell_assignment_key(word: &str) -> Option<&str> {
+    static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[(\{]*[A-Za-z_][A-Za-z0-9_]*\+?=").expect("shell assignment key")
+    });
+    ASSIGNMENT.find(word).map(|key| key.as_str())
+}
+
+fn mask_shell_assignments(input: &str) -> Option<String> {
+    static WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(WORD).expect("shell words"));
+    if WORDS.find_iter(input).any(|word| {
+        shell_assignment_key(word.as_str())
+            .is_some_and(|key| word.as_str()[key.len()..].starts_with('('))
+    }) {
+        return None;
+    }
+    Some(
+        WORDS
+            .replace_all(input, |captures: &regex::Captures<'_>| {
+                let word = &captures[0];
+                match shell_assignment_key(word) {
+                    Some(key) => format!("{key}***"),
+                    None => word.to_owned(),
+                }
+            })
+            .into_owned(),
+    )
+}
+
+fn credential_assignment(input: &str) -> bool {
+    static WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(WORD).expect("shell words"));
+    static KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)\b(?:[a-z0-9_]*(?:token|secret)[a-z0-9_]*|[a-z0-9_]+_key|api_?key|private_?key)['"]?[ \t]*="#)
+            .expect("secret shell assignment")
+    });
+    WORDS.find_iter(input).any(|word| {
+        shell_assignment_key(word.as_str()).is_some_and(|key| {
+            let key = key.trim_start_matches(['(', '{']).replace("+=", "=");
+            credential_env_key(&key).is_some() || KEY.is_match(&key)
+        })
+    })
+}
+
 fn shell_masked(raw: &str, depth: usize) -> Option<String> {
     if depth > 8 || raw.contains('\\') || raw.contains("<<") || !balanced_quotes(raw) {
         return None;
@@ -511,9 +574,14 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
         masked.push(ch);
         cursor += ch.len_utf8();
     }
-    if credential_command(&masked) {
+    let probe = masked.replace(['\'', '"'], "");
+    if credential_command(&masked)
+        || credential_assignment(&probe)
+        || redact_token_prefixes(&probe) != probe
+    {
         return None;
     }
+    let masked = mask_shell_assignments(&masked)?;
     static REFERENCES: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
             .expect("visible variable references")
@@ -657,7 +725,18 @@ fn patch_summary(input: &str, cwd: Option<&str>) -> Option<String> {
     Some(format!("{path} (+{added} −{removed})"))
 }
 
-pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
+fn description_text(description: &str, reject_credentials: bool) -> Option<String> {
+    if description.lines().any(credential_executable_line) {
+        return None;
+    }
+    let masked = sanitized(description)?;
+    if reject_credentials && masked != suppress_links(&anonymize_home(description)) {
+        return None;
+    }
+    text_masked(&masked, 60)
+}
+
+pub(crate) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
     if input.len() > 262_144 {
         return None;
     }
@@ -687,8 +766,11 @@ pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
         return None;
     }
     let cwd = field(&value, &["workdir", "cwd"]).or(cwd);
-    match class(name) {
-        "Bash" => shell_text(field(&value, &["command", "cmd"])?),
+    match class(name).as_str() {
+        "Bash" => match field(&value, &["description"]) {
+            Some(description) => description_text(description, true),
+            None => shell_text(field(&value, &["command", "cmd"])?),
+        },
         "Read" | "Edit" | "Write" => {
             let path = path_summary(field(&value, &["file_path", "path", "notebook_path"])?, cwd)?;
             Some(match edit_counts(&value) {
@@ -703,13 +785,7 @@ pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
                 None => Some(format!("\"{pattern}\"")),
             }
         }
-        "Task" => {
-            let description = field(&value, &["description"])?;
-            if description.lines().any(credential_executable_line) {
-                return None;
-            }
-            text(description, 60)
-        }
+        "Task" => description_text(field(&value, &["description"])?, false),
         "WebSearch" => text(field(&value, &["query", "search_term"])?, 60),
         "WebFetch" => {
             let url = url::Url::parse(field(&value, &["url"])?).ok()?;
@@ -725,3 +801,7 @@ pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
 #[cfg(test)]
 #[path = "tool_summary_tests.rs"]
 mod tool_summary_tests;
+
+#[cfg(test)]
+#[path = "tool_summary_label_tests.rs"]
+mod tool_summary_label_tests;

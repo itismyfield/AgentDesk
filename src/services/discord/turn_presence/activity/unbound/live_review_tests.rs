@@ -1,5 +1,6 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
 use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace;
 use std::path::PathBuf;
@@ -126,11 +127,17 @@ async fn changed_publication(kind: Changed, id: u64) {
     let rig = Rig::new(id, false, false).await;
     let count = ChannelProbeTrace::new(id);
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(
@@ -494,11 +501,17 @@ async fn s1e_publication_rechecks_new_related_tmux_session_pg() {
     let rig = Rig::new(69_182_009, false, false).await;
     let watch = rig.watch();
     let counter = ChannelProbeTrace::new(rig.channel.get());
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -546,20 +559,32 @@ async fn s1e_publication_rechecks_new_related_tmux_session_pg() {
 async fn s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg() {
     let rig = Rig::new(69_182_007, false, false).await;
     let trace = ChannelProbeTrace::new(rig.channel.get());
-    let first = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let first = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(first.observed, observed(Activity::Idle, "no_session"));
     assert!(trace.calls() > 0);
     assert!(first.session().is_none() && first.source().is_none());
     assert!(first.publish_if_current(|| ()).await.is_some());
-    let second = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let second = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(second.observed.activity, Activity::Idle);
@@ -581,10 +606,16 @@ async fn s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg() {
 async fn s1e_herdr_first_create_keeps_legacy_runtime_trace_pg() {
     let rig = Rig::new(69_182_008, true, false).await;
     let count = ChannelProbeTrace::new(rig.channel.get());
-    let read = crate::services::discord::turn_presence::activity::activity_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let read = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::activity_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.reason == "superseded",
     )
     .await;
     assert_eq!(read, observed(Activity::Idle, "no_session"));
@@ -599,10 +630,16 @@ async fn s1e_herdr_first_create_keeps_legacy_runtime_trace_pg() {
         "fixture name collided with another legacy marker"
     );
     std::fs::write(&legacy.0, "claude_tui").unwrap();
-    let read = crate::services::discord::turn_presence::activity::activity_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let read = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::activity_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.reason == "superseded",
     )
     .await;
     assert_eq!(
@@ -640,10 +677,16 @@ async fn s1e_successful_unbound_reads_complete_in_reverse_order_pg() {
         counter.calls() > 0,
         "first observation never reached its successful probe"
     );
-    let second = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let second = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(second.observed, observed(Activity::Idle, "no_session"));
@@ -668,11 +711,17 @@ async fn s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg() {
     use crate::services::tui_prompt_dedupe::binding_events as p5;
     let rig = Rig::new(69_182_011, false, false).await;
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -710,11 +759,17 @@ async fn s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg() {
 async fn s1e_marker_change_during_publication_db_await_pg() {
     let rig = Rig::new(69_182_012, false, false).await;
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -827,10 +882,16 @@ async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
     let pause = InventoryPause::new(rig.root.path());
     let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(id);
     let trace = ChannelProbeTrace::new(id);
-    let reading = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
@@ -966,10 +1027,16 @@ async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
         0,
         "stale publication callback ran"
     );
-    let next = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let next = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(next.observed.activity, Activity::Unknown);

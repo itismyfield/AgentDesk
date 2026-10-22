@@ -7,6 +7,9 @@ use std::sync::Mutex;
 use serde_json::{Value, json};
 
 use super::*;
+
+#[path = "herdr_host_tests/teardown_census_tests.rs"]
+mod teardown_census_tests;
 use crate::services::session_host::herdr::contract::{
     HerdrTransportError, ServerWitness, Witnessed,
 };
@@ -405,6 +408,7 @@ fn herdr_capture_maps_scroll_back_and_rejects_truncation() {
             source,
             lines,
             strip_ansi: true,
+            format: None,
         };
         let herdr = host(vec![(request, read(wire_source, false))]);
         assert_eq!(
@@ -418,6 +422,7 @@ fn herdr_capture_maps_scroll_back_and_rejects_truncation() {
         source: Visible,
         lines: None,
         strip_ansi: true,
+        format: None,
     };
     let truncated = host(vec![(visible(), read("visible", true))]);
     assert!(
@@ -1898,6 +1903,7 @@ const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
 fn herdr_items_have_no_production_caller() {
     const ESCAPE_DELIVERY: &str =
         "src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs";
+    const HOSTED_SOURCE_OBSERVER: &str = "src/services/tui_prompt_dedupe/hosted_source.rs";
     const OWNERS: &[(&str, usize)] = &[
         ("src/services/session_host.rs", 0),
         // Dormant Escape uses the registered target; no host is constructed or stop path wired.
@@ -1943,6 +1949,8 @@ fn herdr_items_have_no_production_caller() {
         ),
         // Watcher host snapshot: reads the marker beside the admission map and row, never a host.
         (WATCH_HOST, 1),
+        // The shared synthetic evidence reader names Herdr but never builds a host.
+        (HOSTED_SOURCE_OBSERVER, 1),
         // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
         // Operator transition context: checks the row sits on a registered endpoint, never a host.
@@ -2020,6 +2028,7 @@ fn herdr_items_have_no_production_caller() {
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
                 UNBOUND_ADAPTER,
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         (
@@ -2037,6 +2046,7 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         (
@@ -2054,6 +2064,7 @@ fn herdr_items_have_no_production_caller() {
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
+                HOSTED_SOURCE_OBSERVER,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
@@ -2614,236 +2625,10 @@ fn caller_scan_follows_aliases_scopes_and_lexer_edges() {
     }
 }
 
-// The name-only teardown entries run without a host guard. Each production call is
-// listed with why it keeps the name; a new call, or a moved caller going back, fails.
+// Keep the existing exact test ID while its inventory lives in a small child.
 #[test]
 fn name_only_teardown_calls_stay_on_the_reviewed_list() {
-    const SWEEP: &str = "a spawn-time sweep; each site's reason is checked below";
-    const BEFORE_WRITER: &str = "behind the turn-key host check, before the writer posts the row";
-    const UNKEYED: &str = "a turn with no session key keeps the main teardown";
-    const OWNED: &str = "owned by another piece";
-    const MISSING: &str = "a Missing row path keeps it name-only";
-    const ENTRY: &str = "forwarded by the guarded entry";
-    const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
-    const CLEAR: &str = "a user clear of a channel with no Herdr endpoint";
-    const CALLS: &[(&str, Listed)] = &[
-        (
-            "record_termination_for_tmux",
-            &[
-                ("src/services/termination_audit.rs", 1, ENTRY),
-                ("src/engine/ops/exec_ops.rs", 1, MISSING),
-                (
-                    "src/services/discord/tmux_watcher/pre_emit_guard.rs",
-                    1,
-                    MISSING,
-                ),
-                (
-                    "src/services/discord/tmux_watcher/post_stream_exit.rs",
-                    1,
-                    MISSING,
-                ),
-                (
-                    "src/services/discord/tmux_watcher/terminal_abort_exits.rs",
-                    1,
-                    MISSING,
-                ),
-                (
-                    "src/services/discord/watchers/lifecycle/restore.rs",
-                    1,
-                    MISSING,
-                ),
-                (
-                    "src/services/discord/router/message_handler/provider_isolation.rs",
-                    1,
-                    BEFORE_WRITER,
-                ),
-                ("src/services/provider_teardown.rs", 1, UNKEYED),
-                ("src/services/codex.rs", 1, OWNED),
-                (
-                    "src/services/provider/cancel_token_cleanup/executor.rs",
-                    1,
-                    OWNED,
-                ),
-                ("src/services/claude_tui/host_input.rs", 1, OWNED),
-            ],
-        ),
-        (
-            "cleanup_session_temp_files",
-            &[
-                ("src/services/tmux_common.rs", 1, ENTRY),
-                ("src/services/claude/tui_session_launch.rs", 1, SWEEP),
-                ("src/services/claude.rs", 1, SWEEP),
-                ("src/services/codex.rs", 2, SWEEP),
-                ("src/services/qwen/session_lifecycle.rs", 1, SWEEP),
-                (
-                    "src/services/discord/router/message_handler/provider_isolation.rs",
-                    1,
-                    BEFORE_WRITER,
-                ),
-                ("src/services/discord/tmux_reaper.rs", 2, MISSING),
-                (
-                    "src/services/discord/commands/control/managed_reset.rs",
-                    1,
-                    MISSING,
-                ),
-                ("src/services/turn_lifecycle.rs", 1, MISSING),
-            ],
-        ),
-        (
-            "end_managed_process_session",
-            &[
-                (
-                    "src/services/discord/commands/control/managed_reset.rs",
-                    1,
-                    ENTRY,
-                ),
-                (
-                    "src/services/discord/commands/control/clear_teardown.rs",
-                    1,
-                    CLEAR,
-                ),
-            ],
-        ),
-        (
-            "reset_managed_process_session",
-            &[
-                ("src/services/discord/commands/control.rs", 0, ENTRY),
-                (
-                    "src/services/discord/commands/control/provider_reset.rs",
-                    1,
-                    MISSING,
-                ),
-                ("src/services/discord/commands/control/native.rs", 1, NATIVE),
-                ("src/services/discord/commands/mod.rs", 0, ENTRY),
-                ("src/services/discord/health/recovery.rs", 1, MISSING),
-                ("src/services/discord/admin_host_guard.rs", 1, MISSING),
-            ],
-        ),
-    ];
-    // Keeping Herdr sessions out of these launch paths belongs to launch admission; none
-    // of the reasons below claims more than its own function shows.
-    const SWEEPS: &[(&str, &str, Sweep)] = &[
-        (
-            "src/services/claude.rs",
-            "execute_streaming_local_tmux",
-            Sweep::C1Gated,
-        ),
-        (
-            "src/services/codex.rs",
-            "execute_streaming_local_tmux",
-            Sweep::C1Gated,
-        ),
-        (
-            "src/services/codex.rs",
-            "execute_streaming_local_tui_tmux",
-            Sweep::ExistingTuiPath,
-        ),
-        (
-            "src/services/claude/tui_session_launch.rs",
-            "prepare_and_create_claude_tui_session",
-            Sweep::ExistingTuiPath,
-        ),
-        (
-            "src/services/qwen/session_lifecycle.rs",
-            "execute_streaming_local_tmux",
-            Sweep::ExistingQwenPath,
-        ),
-    ];
-    let sources = production_sources();
-    let mut violations = listed_call_violations(&sources, CALLS);
-    violations.extend(sweep_site_violations(&sources, SWEEPS));
-    assert!(
-        violations.is_empty(),
-        "name-only teardown calls: {violations:?}"
-    );
-}
-
-/// Why a spawn-time sweep of a session's temp files keeps the name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Sweep {
-    /// A refused C1 host gate earlier in the function returns before the sweep.
-    C1Gated,
-    /// The existing D/P10 teardown of a TUI launch stays in front of it.
-    ExistingTuiPath,
-    /// The existing Qwen launch path, which no host gate covers yet.
-    ExistingQwenPath,
-}
-
-/// Direct `cleanup_session_temp_files` calls per (file, function) against the sweep list;
-/// each reason must hold in its function: a C1 gate before the call, or no C1 gate at all.
-fn sweep_site_violations(
-    sources: &BTreeMap<String, String>,
-    sweeps: &[(&str, &str, Sweep)],
-) -> Vec<String> {
-    let call = regex::Regex::new(r"\bcleanup_session_temp_files\s*\(").unwrap();
-    let mut found: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    let files: BTreeSet<&str> = sweeps.iter().map(|(file, ..)| *file).collect();
-    let mut violations = Vec::new();
-    for file in &files {
-        let code = code_tokens(&sources[*file]);
-        for at in call.find_iter(&code).map(|m| m.start()) {
-            let Some(function) = enclosing_fn(&code, at) else {
-                violations.push(format!("{file}: sweep outside any function"));
-                continue;
-            };
-            found
-                .entry((file.to_string(), function))
-                .or_default()
-                .push(at);
-        }
-    }
-    for (file, function, why) in sweeps {
-        let key = (file.to_string(), function.to_string());
-        let Some(calls) = found.remove(&key) else {
-            violations.push(format!("{file}#{function}: listed sweep not found"));
-            continue;
-        };
-        let code = code_tokens(&sources[*file]);
-        let body = fn_body(&code, &format!("fn {function}("));
-        let gated = |at: usize| code[body.start..at].contains("teardown_tmux(");
-        let holds = match why {
-            Sweep::C1Gated => calls.iter().all(|at| gated(*at)),
-            Sweep::ExistingTuiPath => {
-                !file.contains("/qwen/") && !code[body.clone()].contains("teardown_tmux(")
-            }
-            Sweep::ExistingQwenPath => {
-                file.contains("/qwen/") && !code[body.clone()].contains("teardown_tmux(")
-            }
-        };
-        if calls.len() != 1 || !holds {
-            violations.push(format!("{file}#{function}: x{} {why:?}", calls.len()));
-        }
-    }
-    violations.extend(
-        found
-            .into_keys()
-            .map(|(file, function)| format!("{file}#{function}: unlisted sweep")),
-    );
-    violations
-}
-
-/// Name of the innermost `fn` whose body holds byte `at` of token-only code.
-fn enclosing_fn(code: &str, at: usize) -> Option<String> {
-    let signature = regex::Regex::new(r"\bfn\s+(\w+)").unwrap();
-    signature
-        .captures_iter(code)
-        .filter(|found| found.get(0).unwrap().start() < at)
-        .filter_map(|found| {
-            let open =
-                found.get(0).unwrap().end() + code[found.get(0).unwrap().end()..].find('{')?;
-            let mut depth = 0usize;
-            let close = code[open..].char_indices().find_map(|(offset, ch)| {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-                (depth == 0).then_some(open + offset)
-            })?;
-            (open < at && at < close).then(|| (open, found[1].to_string()))
-        })
-        .max_by_key(|(open, _)| *open)
-        .map(|(_, name)| name)
+    teardown_census_tests::check_reviewed_calls();
 }
 
 /// (file, calls there, why the call keeps the name)
@@ -3485,6 +3270,14 @@ fn m0_close_variant_alias_fixture() {
 const TERMINATE_SERVICE: &str = "src/services/discord/herdr_terminate.rs";
 const TERMINATE_ROUTE: &str = "src/server/routes/herdr_terminate.rs";
 const HERDR_CLI: &str = "src/cli/herdr.rs";
+const HTTP_ADAPTER: &str = "src/services/discord/herdr_terminate/http_force.rs";
+const RETIRED_EXCLUSION: &str = "src/services/discord/herdr_terminate/retired_exclusion.rs";
+const E07_CANCEL: &str = "src/services/queue.rs";
+const E07_BRANCH: &str = "src/services/queue/http_force.rs";
+const E07_EFFECTS: &str = "src/services/queue/cancel_effects.rs";
+const E08_KILL: &str = "src/services/dispatched_sessions/force_kill.rs";
+const E08_BRANCH: &str = "src/services/dispatched_sessions/herdr_kill.rs";
+const E08_EFFECTS: &str = "src/services/dispatched_sessions/herdr_kill/effects.rs";
 
 /// The operator terminate chain's production names, each reached from its one caller only.
 fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
@@ -3499,6 +3292,16 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                     ("src/services/discord/commands/control/clear_teardown.rs", 1),
                 ],
             ),
+            (
+                "terminate_scoped",
+                &[(TERMINATE_SERVICE, 1), (HTTP_ADAPTER, 1)],
+            ),
+            ("terminate_for_http", &[(E07_BRANCH, 1), (E08_BRANCH, 1)]),
+            ("herdr_force", &[(E07_CANCEL, 1)]),
+            ("herdr_force_effects", &[(E07_BRANCH, 1)]),
+            ("herdr_force_kill", &[(E08_KILL, 1)]),
+            ("herdr_force_kill_effects", &[(E08_BRANCH, 1)]),
+            ("disconnect_retired_pg", &[(RETIRED_EXCLUSION, 1)]),
             ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
             (
                 "retire_pg",
@@ -3527,9 +3330,17 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
     ));
     // Each link of the chain is still made, exactly once: a lost call fails as an extra one does.
     let files = scan_files(sources, &mut Vec::new());
-    let required: [(&str, &str); 4] = [
+    let required = [
         ("terminate_registered_herdr", TERMINATE_ROUTE),
         ("terminate_explicit_herdr", TERMINATE_SERVICE),
+        ("terminate_scoped", TERMINATE_SERVICE),
+        ("terminate_scoped", HTTP_ADAPTER),
+        ("terminate_for_http", E07_BRANCH),
+        ("terminate_for_http", E08_BRANCH),
+        ("herdr_force", E07_CANCEL),
+        ("herdr_force_effects", E07_BRANCH),
+        ("herdr_force_kill", E08_KILL),
+        ("herdr_force_kill_effects", E08_BRANCH),
         ("host_terminated", TERMINATE_SERVICE),
         ("post_json_local_at", HERDR_CLI),
     ];
@@ -3549,6 +3360,155 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
             "{TERMINATE_SERVICE}: HostTerminated built x{built}, not exactly once"
         ));
     }
+    violations.extend(exclusion_built_violations(&files));
+    violations
+}
+
+/// A `RetiredExclusion` is built in one place, the scoped service, through its name or an alias.
+fn exclusion_built_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<String> {
+    let names = bindings(files, "RetiredExclusion");
+    let names = names.iter().map(|(name, _)| name.as_str());
+    let mut built = BTreeMap::new();
+    for name in names.chain(["RetiredExclusion"]) {
+        let new = regex::Regex::new(&format!(r"\b{}\s*::\s*new\b", regex::escape(name))).unwrap();
+        for (relative, file) in files {
+            let count = new.find_iter(&file.code).count();
+            if count > 0 {
+                *built.entry(relative.clone()).or_insert(0) += count;
+            }
+        }
+    }
+    if built == BTreeMap::from([(TERMINATE_SERVICE.to_string(), 1)]) {
+        return Vec::new();
+    }
+    vec![format!(
+        "RetiredExclusion built at {built:?}, not once in {TERMINATE_SERVICE}"
+    )]
+}
+
+/// Effects a forced Herdr cancel or session kill reaches only through the terminate service and
+/// its exclusion: lifecycle and raw kills, token cancels, SQL, queue purges, drains and wakes.
+const E07_FORBIDDEN: &[&str] = &[
+    "force_kill_turn",
+    "force_kill_turn_for_row",
+    "force_kill_turn_without_cancel_event",
+    "force_kill_turn_with_verdict",
+    "stop_turn_preserving_queue",
+    "stop_turn_preserving_queue_without_cancel_event",
+    "live_turn",
+    "publish_cancel",
+    "publish_cancel_if_source_absent",
+    "cancel_active_turn_with_reason",
+    "cancel_active_turn_if_current",
+    "cancel_active_turn_if_current_with_reason",
+    "cancel_active_turn_if_user_message_with_reason",
+    "cancel_active_turn_if_current_unless_herdr",
+    "terminate_herdr_once",
+    "kill_pid_tree",
+    "kill_pid_tree_if_identity_matches",
+    "request_cleanup",
+    "request_cleanup_expecting",
+    "query",
+    "query_as",
+    "query_scalar",
+    "raw_sql",
+    "execute",
+    "force_purge_channel_mailbox",
+    "try_purge_queue",
+    "purge_queue",
+    "purge_on",
+    "schedule_post_cancel_queue_drain",
+    "schedule_pending_queue_drain_after_cancel",
+    "remove_channel_pending_queue_files_all_tokens",
+    "finish_cancelled_provider_channel_mailbox",
+    "cancel_dispatch_and_reset_auto_queue_on_pg",
+    "disconnect_retired_pg",
+    "disconnect_session",
+    "capture_queue_before_cancel",
+    "record_queue_loss_after_cancel",
+    "capture_queue_before_cancel_on",
+    "record_queue_loss_after_cancel_on",
+    "disconnect_session_keeping_provider",
+    "disconnect_session_and_prepare_retry_pg",
+    "prepare_force_kill_retry_pg",
+    "fail_force_killed_dispatch_without_retry_pg",
+    "create_retry_dispatch_pg",
+    "fail_or_retry",
+    "spawn_auto_queue_activate_for_agent",
+    "record_termination_with_handles",
+];
+
+/// The macros the forced branch and its adapter may invoke; any other could hide a call.
+const E07_MACROS: &[&str] = &["json", "format", "matches"];
+
+/// The forced Herdr branch and the adapter reach no effect themselves: every one runs in the
+/// service or in the postlude that holds its exclusion.
+fn e07_effect_violations(sources: &BTreeMap<String, String>) -> Vec<String> {
+    let mut violations = terminate_entry_violations(sources);
+    let files = scan_files(sources, &mut violations);
+    for needle in E07_FORBIDDEN {
+        let uses = item_uses_by_file(&files, needle, &bindings(&files, needle));
+        for owner in [E07_BRANCH, E08_BRANCH, HTTP_ADAPTER] {
+            if let Some((used, _)) = uses.get(owner).filter(|(used, _)| *used > 0) {
+                violations.push(format!("{owner}: {needle} used x{used}"));
+            }
+        }
+    }
+    let invoked = regex::Regex::new(r"\b(\w+)\s*!\s*[\(\[\{]").unwrap();
+    for owner in [E07_BRANCH, E08_BRANCH, HTTP_ADAPTER] {
+        let Some(file) = files.get(owner) else {
+            violations.push(format!("{owner}: missing"));
+            continue;
+        };
+        for found in invoked.captures_iter(&file.code) {
+            if !E07_MACROS.contains(&&found[1]) {
+                violations.push(format!("{owner}: macro {}!", &found[1]));
+            }
+        }
+    }
+    // The postlude takes the exclusion, so its effects cannot run without one.
+    let postlude =
+        regex::Regex::new(r"fn\s+herdr_force_effects\s*\(\s*\w+\s*:\s*&\s*RetiredExclusion\b")
+            .unwrap();
+    if !files
+        .get(E07_EFFECTS)
+        .is_some_and(|file| postlude.is_match(&file.code))
+    {
+        violations.push(format!(
+            "{E07_EFFECTS}: herdr_force_effects takes no exclusion"
+        ));
+    }
+    violations.extend(e08_effect_violations(&files));
+    violations
+}
+
+/// The session kill's effects take the exclusion, and its drain and auto-queue wake are called
+/// only in the released step, which runs once the exclusion is gone.
+fn e08_effect_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<String> {
+    let Some(code) = files.get(E08_EFFECTS).map(|file| file.code.as_str()) else {
+        return vec![format!("{E08_EFFECTS}: missing")];
+    };
+    let mut violations = Vec::new();
+    let held =
+        regex::Regex::new(r"fn\s+herdr_force_kill_effects\s*\(\s*\w+\s*:\s*&\s*RetiredExclusion\b");
+    if !held.unwrap().is_match(code) {
+        violations.push(format!(
+            "{E08_EFFECTS}: herdr_force_kill_effects takes no exclusion"
+        ));
+    }
+    let released = fn_body(code, "fn released(");
+    for released_only in [
+        "schedule_post_cancel_queue_drain",
+        "spawn_auto_queue_activate_for_agent",
+    ] {
+        let call = regex::Regex::new(&format!(r"\b{released_only}\s*\(")).unwrap();
+        let inside = call.find_iter(&code[released.clone()]).count();
+        if call.find_iter(code).count() != 1 || inside != 1 {
+            violations.push(format!(
+                "{E08_EFFECTS}: {released_only} called outside the released step"
+            ));
+        }
+    }
     violations
 }
 
@@ -3559,4 +3519,140 @@ fn act_terminate_entry_census() {
     let violations = terminate_entry_violations(&sources);
     assert!(violations.is_empty(), "{violations:?}");
     assert!(close_owner_violations(&sources).is_empty());
+}
+
+#[test]
+fn e07_e08_herdr_effect_census() {
+    let sources = production_sources();
+    let violations = e07_effect_violations(&sources);
+    assert!(violations.is_empty(), "{violations:?}");
+    let mut extra = sources.clone();
+    extra.get_mut(TERMINATE_SERVICE).unwrap().push_str(
+        "\nasync fn again(r: OperatorTerminate, s: Arc<SharedData>, p: &PgPool) { let _ = terminate_scoped(r, s, p, None).await; }",
+    );
+    assert!(!e07_effect_violations(&extra).is_empty(), "a third caller");
+    let mut built = sources.clone();
+    built.get_mut(HTTP_ADAPTER).unwrap().push_str(
+        "\nfn forge(h: Held, r: HostedObservation) -> RetiredExclusion { RetiredExclusion::new(h, r, None, ProviderKind::Claude, ChannelId::new(1)) }",
+    );
+    assert!(
+        !e07_effect_violations(&built).is_empty(),
+        "a second builder"
+    );
+    // The session kill's drain moved under the exclusion, beside its other effects.
+    let early = edited(&sources, E08_EFFECTS, |text| {
+        text.replacen(
+            "let steps = kill_steps(",
+            "let _ = schedule_post_cancel_queue_drain(None, &t, \"x\"); let steps = kill_steps(",
+            1,
+        )
+    });
+    assert!(
+        !e07_effect_violations(&early).is_empty(),
+        "a drain under the exclusion"
+    );
+    let mut caller = sources.clone();
+    caller.get_mut(E08_KILL).unwrap().push_str(
+        "\nasync fn again(s: &AppState, p: &Prepared<'_>) { let _ = super::herdr_kill::herdr_force_kill(s, p, true, \"r\").await; }",
+    );
+    assert!(
+        !e07_effect_violations(&caller).is_empty(),
+        "a second session-kill caller"
+    );
+}
+
+/// `sources` with the forced branch's text replaced by `edit` of it.
+fn edited(
+    sources: &BTreeMap<String, String>,
+    file: &str,
+    edit: impl Fn(&str) -> String,
+) -> BTreeMap<String, String> {
+    let mut sources = sources.clone();
+    let text = edit(&sources[file]);
+    sources.insert(file.into(), text);
+    sources
+}
+
+#[test]
+fn e07_e08_census_comment_string_forgery() {
+    let sources = production_sources();
+    let call = "terminate_for_http(";
+    // The real call gone, its name left in a comment, a string or a raw string.
+    for (branch, forged) in [E07_BRANCH, E08_BRANCH].into_iter().flat_map(|branch| {
+        [
+            "/* terminate_for_http( */ drop(",
+            "{ let _ = \"terminate_for_http(\"; } drop(",
+            "{ let _ = r#\"terminate_for_http(\"#; } drop(",
+        ]
+        .map(|forged| (branch, forged))
+    }) {
+        assert!(sources[branch].contains(call));
+        let forged = edited(&sources, branch, |text| text.replacen(call, forged, 1));
+        let violations = e07_effect_violations(&forged);
+        let lost = format!("{branch}: terminate_for_http used x0");
+        assert!(
+            violations.iter().any(|v| v.contains(&lost)),
+            "{forged:?}: {violations:?}"
+        );
+    }
+    // A forbidden call written only in a comment or string is no use.
+    let quoted = edited(&sources, E07_BRANCH, |text| {
+        format!(
+            "{text}\n// force_kill_turn_without_cancel_event(None, &t, None);\nconst S: &str = \"try_purge_queue(p, true)\";"
+        )
+    });
+    assert!(e07_effect_violations(&quoted).is_empty());
+}
+
+#[test]
+fn e07_e08_census_alias_and_indirection() {
+    let sources = production_sources();
+    for (file, smuggled) in [
+        (
+            E07_BRANCH,
+            "use crate::services::queue::force_purge_channel_mailbox as sweep;\nfn f(t: &T) { let _ = sweep(None, t, None); }",
+        ),
+        (
+            E07_BRANCH,
+            "fn f() { let kill = crate::services::turn_lifecycle::force_kill_turn_without_cancel_event; drop(kill); }",
+        ),
+        (
+            E07_BRANCH,
+            "fn f(h: &H) { { use crate::services::turn_orchestrator::ChannelMailboxHandle as M; let _ = M::try_purge_queue(h, c, true); } }",
+        ),
+        (
+            HTTP_ADAPTER,
+            "fn f(p: &PgPool) { let _ = sqlx::query(\"UPDATE sessions SET status = 'x'\").execute(p); }",
+        ),
+        (
+            HTTP_ADAPTER,
+            "type Kill = fn(); fn f() { let k: Kill = crate::services::process::kill_pid_tree as _; drop(k); }",
+        ),
+        (
+            E07_BRANCH,
+            "macro_rules! hide { () => {} } fn f() { hide!(); }",
+        ),
+        (
+            E08_BRANCH,
+            "use super::spawn_auto_queue_activate_for_agent as wake;\nfn f(s: AppState) { wake(s, String::new()); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f(p: &PgPool) { let _ = sqlx::query(\"UPDATE sessions SET status = 'x'\").execute(p); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f() { let retry = crate::db::dispatched_sessions::create_retry_dispatch_pg; drop(retry); }",
+        ),
+        (
+            E08_BRANCH,
+            "fn f() { let kill = crate::services::turn_lifecycle::force_kill_turn_for_row; drop(kill); }",
+        ),
+    ] {
+        let smuggled = edited(&sources, file, |text| format!("{text}\n{smuggled}"));
+        assert!(
+            !e07_effect_violations(&smuggled).is_empty(),
+            "{file}: {smuggled:?}"
+        );
+    }
 }

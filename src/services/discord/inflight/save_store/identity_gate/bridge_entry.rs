@@ -75,6 +75,9 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
     {
         return GuardedSaveOutcome::AuthorityPinned;
     }
+    if !after.owned_by_turn_nonce(before.turn_nonce.as_deref()) {
+        return GuardedSaveOutcome::SuccessorOwned;
+    }
     let path = inflight_state_path(root, &provider, before.channel_id);
     if let Some(parent) = path.parent()
         && fs::create_dir_all(parent).is_err()
@@ -84,11 +87,12 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let mut on_disk = match super::read_inflight_state_for_guarded_write(
+    let mut on_disk = match super::read_owned_row_for_guarded_write(
         &path,
         &provider,
         before.channel_id,
         &expected,
+        before.turn_nonce.as_deref(),
         caller,
     ) {
         Ok(on_disk) => on_disk,

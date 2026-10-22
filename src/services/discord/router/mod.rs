@@ -6,6 +6,8 @@ mod intake_queue_transaction;
 pub(in crate::services::discord) mod message_handler;
 mod queue_status_presentation;
 mod response_format;
+#[cfg(test)]
+pub(in crate::services::discord) mod source_guard_support;
 mod thread_binding;
 mod turn_start;
 

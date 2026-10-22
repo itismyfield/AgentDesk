@@ -9,7 +9,7 @@ impl Stamp {
     ) -> Option<R> {
         self.publish_checked(watch, || ())?;
         if let Some(snapshot) = &self.snapshot {
-            if !snapshot.revalidate(self.namespace.as_ref()?).await {
+            if !Box::pin(snapshot.revalidate(self.namespace.as_ref()?)).await {
                 return None;
             }
         }

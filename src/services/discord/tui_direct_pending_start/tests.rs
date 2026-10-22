@@ -5,7 +5,7 @@ use super::*;
 /// / drives `run_worker` mutates them, so concurrent tests would stomp each
 /// other (e.g. one test's `reset_present_for_tests` clearing another's gate).
 /// Serialize all such tests on this module-local lock.
-fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn worker_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
 }
@@ -234,6 +234,8 @@ fn abandoned_presence_clear_keeps_durable_record() {
 #[test]
 fn record_roundtrips_through_json() {
     let record = TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id: 42,
         tmux_session_name: "tmux-abc".to_string(),
@@ -303,6 +305,8 @@ fn never_reclaim_orphan() -> ReclaimOrphanFn {
 
 fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart {
     TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: provider.to_string(),
         channel_id,
         tmux_session_name: format!("tmux-{channel_id}"),
@@ -1353,11 +1357,11 @@ fn enforce_mode_stale_foreign_demote_refuses_across_a_respawn() {
 enum DeliveryLeaseArm {
     /// This turn's own key, deadline in the future: a terminal delivery for
     /// the very turn being destroyed is in flight.
-    LiveMatchedKey,
+    LiveMatched,
     /// This turn's own key, deadline already elapsed: a DEAD holder.
-    ExpiredMatchedKey,
+    ExpiredMatched,
     /// A live lease under some OTHER turn's key.
-    LiveForeignKey,
+    LiveForeign,
 }
 
 /// What one run of [`stale_foreign_demote_under_delivery_lease`] left behind.
@@ -1432,16 +1436,16 @@ async fn stale_foreign_demote_under_delivery_lease(
         "s4_r2_tui_delivery_fence_test",
     );
     let (lease_key, deadline_ms) = match arm {
-        DeliveryLeaseArm::LiveMatchedKey => (
+        DeliveryLeaseArm::LiveMatched => (
             matched_key,
             super::super::lease_now_ms().saturating_add(super::super::DELIVERY_LEASE_DEADLINE_MS),
         ),
         // Strictly in the past on the same monotonic clock the fence reads,
         // which only moves forward from here.
-        DeliveryLeaseArm::ExpiredMatchedKey => {
+        DeliveryLeaseArm::ExpiredMatched => {
             (matched_key, super::super::lease_now_ms().saturating_sub(1))
         }
-        DeliveryLeaseArm::LiveForeignKey => {
+        DeliveryLeaseArm::LiveForeign => {
             let foreign = super::super::DeliveryLeaseKey::new_for_site(
                 channel,
                 shared.restart.current_generation,
@@ -1534,7 +1538,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_140,
             "lease-live",
-            DeliveryLeaseArm::LiveMatchedKey,
+            DeliveryLeaseArm::LiveMatched,
         )
         .await;
         assert!(!live.demoted);
@@ -1550,7 +1554,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_141,
             "lease-expired",
-            DeliveryLeaseArm::ExpiredMatchedKey,
+            DeliveryLeaseArm::ExpiredMatched,
         )
         .await;
         assert!(expired.demoted);
@@ -1565,7 +1569,7 @@ fn stale_foreign_demote_refuses_only_a_live_identity_matched_delivery_lease() {
             root.path(),
             4_030_142,
             "lease-foreign",
-            DeliveryLeaseArm::LiveForeignKey,
+            DeliveryLeaseArm::LiveForeign,
         )
         .await;
         assert!(foreign.demoted);

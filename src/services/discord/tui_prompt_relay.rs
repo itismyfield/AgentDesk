@@ -74,7 +74,7 @@ pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
 mod anchor_completion;
 mod bridge_completion;
-mod bridge_gateway;
+pub(in crate::services::discord) mod bridge_gateway;
 use self::anchor_completion::{
     DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
 };
@@ -654,7 +654,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // neutral note cannot claim the mailbox if this seam is called accidentally.
         deferred_synthetic_start = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
             shared,
-            &prompt.provider,
             channel_id,
             &prompt,
             anchor_message_id,

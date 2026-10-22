@@ -318,37 +318,72 @@ mod tests {
         assert_eq!(left, [(0, kept.clone(), text.clone()), (1, kept, text)]);
     }
 
-    #[test]
-    fn intake_judges_its_row_create_before_any_provider_or_bridge_spawn() {
-        let compact = |source: &str| source.split_whitespace().collect::<String>();
-        let src = compact(include_str!("intake_turn.rs"));
-        let create = compact(
-            "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);",
-        );
-        let admit = compact(
-            "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }",
-        );
-        // The provider spawn follows the teardown verdict; the bridge spawn comes after it.
+    const INTAKE_TURN: &str = include_str!("intake_turn.rs");
+    const CREATE: &str =
+        "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);";
+    const ADMIT: &str = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }";
+
+    fn compact(text: &str) -> String {
+        text.split_whitespace().collect()
+    }
+
+    /// Classification 2: create → admit → verdict → provider → bridge, as written without
+    /// whitespace or comments; the count spans the production create and the builder test.
+    fn row_admission_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let src = Lexed::new(source).compact();
         // Split so the bridge entry-site census does not count this file as a caller.
         let bridge = ["spawn_turn_", "bridge("].concat();
-        let anchors = [
+        let (create, admit) = (compact(CREATE), compact(ADMIT));
+        let chain = [
             create.as_str(),
             admit.as_str(),
-            "for_turn(",
+            "turn_teardown_clearance::for_turn(",
             "spawn_blocking(move||",
             &bridge,
         ];
-        let mut from = src.find(create.as_str()).unwrap_or(src.len());
-        for anchor in anchors {
-            let at = src[from..].find(anchor).map(|at| from + at);
-            assert!(at.is_some(), "{anchor} missing after the previous anchor");
-            from = at.unwrap_or(from);
+        let mut gaps = Vec::new();
+        let mut from = src.find(&create).unwrap_or(src.text().len());
+        for anchor in chain {
+            match src.find_after(from, anchor) {
+                Some(at) => from = at,
+                None => gaps.push(format!("{anchor} missing after the previous anchor")),
+            }
         }
-        assert!(
-            src.find(create.as_str())
-                .zip(src.find(admit.as_str()))
-                .is_some_and(|(c, a)| c + create.len() == a)
-        );
-        assert_eq!(src.matches("save_inflight_state_create_new(").count(), 2);
+        let adjacent = src.find(&create).zip(src.find(&admit));
+        if !adjacent.is_some_and(|(c, a)| c + create.len() == a) {
+            gaps.push("the foreign-row verdict must directly follow the row create".into());
+        }
+        if src.count("save_inflight_state_create_new(") != 2 {
+            gaps.push("intake must keep one production row create".into());
+        }
+        gaps
+    }
+
+    #[test]
+    fn intake_judges_its_row_create_before_any_provider_or_bridge_spawn() {
+        assert_eq!(row_admission_gaps(INTAKE_TURN), Vec::<String>::new());
+    }
+
+    #[test]
+    fn row_admission_guard_rejects_commented_and_separated_steps() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        let bridge = ["spawn_turn_", "bridge("].concat();
+        let admit = "if !super::foreign_row::admit(";
+        let teardown = "turn_teardown_clearance::for_turn(";
+        let spawn = "tokio::task::spawn_blocking(move || {";
+        for needle in [CREATE, admit, teardown, spawn, &bridge] {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(INTAKE_TURN, needle, forgery);
+                assert!(forged.contains(needle));
+                assert!(
+                    !row_admission_gaps(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        let separated = INTAKE_TURN.replacen(admit, &format!("let _ = 0;\n{admit}"), 1);
+        assert!(!row_admission_gaps(&separated).is_empty());
     }
 }

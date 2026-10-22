@@ -519,6 +519,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
     let mut bridge_created_candidate = Some(current_msg_id);
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = persist_stream_tick_state_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -532,6 +533,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::io_error_candidate_test",
     )
@@ -540,6 +542,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
     assert_eq!(pending_candidate, Some(MessageId::new(2)));
     assert!(gateway.deletes.lock().expect("deletes lock").is_empty());
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     assert!(
         !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -553,6 +556,7 @@ async fn io_error_candidate_retries_until_loop_exit_then_is_cleaned() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -585,6 +589,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut bound_current = MessageId::new(2);
     let mut bound_pending = Some(bound_current);
     let mut bound_created = Some(bound_current);
+    let actor_nonce = bound_baseline.turn_nonce.clone();
     assert!(
         settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -598,6 +603,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             current_msg_id: &mut bound_current,
             pending_current_message_candidate: &mut bound_pending,
             bridge_created_response_placeholder_msg_id: &mut bound_created,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -626,6 +632,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut competing_current = MessageId::new(3);
     let mut competing_pending = Some(competing_current);
     let mut competing_created = Some(competing_current);
+    let actor_nonce = competing_baseline.turn_nonce.clone();
     assert!(
         settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -639,6 +646,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             current_msg_id: &mut competing_current,
             pending_current_message_candidate: &mut competing_pending,
             bridge_created_response_placeholder_msg_id: &mut competing_created,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -660,6 +668,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut stale_current = MessageId::new(4);
     let mut stale_pending = Some(stale_current);
     let mut stale_created = Some(stale_current);
+    let actor_nonce = stale_baseline.turn_nonce.clone();
     assert!(
         persist_stream_tick_state_with_candidate_cleanup(
             StreamTickCandidateSaveContext {
@@ -674,6 +683,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
                 current_msg_id: &mut stale_current,
                 pending_current_message_candidate: &mut stale_pending,
                 bridge_created_response_placeholder_msg_id: &mut stale_created,
+                captured_nonce: actor_nonce.as_deref(),
             },
             "turn_bridge::stream_tick::candidate_reowned_test",
         )
@@ -701,6 +711,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut missing_current = MessageId::new(5);
     let mut missing_pending = Some(missing_current);
     let mut missing_created = Some(missing_current);
+    let actor_nonce = missing_baseline.turn_nonce.clone();
     assert_eq!(
         persist_stream_tick_state_with_candidate_cleanup(
             StreamTickCandidateSaveContext {
@@ -715,6 +726,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
                 current_msg_id: &mut missing_current,
                 pending_current_message_candidate: &mut missing_pending,
                 bridge_created_response_placeholder_msg_id: &mut missing_created,
+                captured_nonce: actor_nonce.as_deref(),
             },
             "turn_bridge::stream_tick::candidate_missing_test",
         )
@@ -758,6 +770,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
     let intended_authority =
         crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -771,6 +784,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::strict_authority_interleaving_test",
     )
@@ -883,6 +897,7 @@ async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epo
     let mut bridge_created_candidate = Some(current_msg_id);
 
     let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -896,6 +911,7 @@ async fn abandoned_local_rollover_is_deleted_when_the_fence_adopts_a_durable_epo
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::abandoned_local_rollover_test",
     )
@@ -960,6 +976,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     let intended_authority =
         crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
         StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -973,6 +990,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },
         "turn_bridge::stream_tick::second_rollover_bind_test",
     )
@@ -985,6 +1003,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     assert_eq!(pending_candidate, Some(MessageId::new(3)));
     assert!(gateway.deletes.lock().expect("deletes lock").is_empty());
 
+    let actor_nonce = persisted_baseline.turn_nonce.clone();
     assert!(
         !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
             gateway: &gateway,
@@ -998,6 +1017,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
             current_msg_id: &mut current_msg_id,
             pending_current_message_candidate: &mut pending_candidate,
             bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            captured_nonce: actor_nonce.as_deref(),
         },)
         .await
     );
@@ -1015,154 +1035,12 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     );
 }
 
+#[path = "guarded_persist_source_guard_tests.rs"]
+mod source_guard_tests;
+
 #[test]
 fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
-    let tick = [
-        include_str!("../stream_tick.rs"),
-        include_str!("output.rs"),
-        include_str!("runtime.rs"),
-    ]
-    .map(|source| {
-        source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production stream tick prefix")
-    })
-    .join("\n");
-    let production_tick = tick
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production stream tick prefix");
-    let flush_predicate = production_tick
-        .find("if state_dirty")
-        .expect("production flush predicate remains present");
-    let pending = production_tick[flush_predicate..]
-        .find("|| pending_current_message_candidate.is_some()")
-        .map(|offset| flush_predicate + offset)
-        .expect("pending response candidate forces a guarded retry");
-    let persist = production_tick[pending..]
-        .find("persist_stream_tick_state_with_candidate_cleanup(")
-        .map(|offset| pending + offset)
-        .expect("forced retry reaches candidate-aware persistence");
-    assert!(flush_predicate < pending && pending < persist);
-
-    let anchor_preflight = production_tick
-        .find("turn_bridge::stream_tick::anchor_preflight")
-        .expect("unsaved response is persisted before anchor send");
-    let ensure = production_tick
-        .find("ensure_bridge_current_message_anchor(")
-        .expect("production tick materializes an absent anchor");
-    let reconcile = production_tick[ensure..]
-        .find("reconcile_tick_runtime_from_inflight!(")
-        .map(|offset| ensure + offset)
-        .expect("anchor await refreshes every detached tick snapshot");
-    let relay_gate = production_tick[reconcile..]
-        .find("if !bridge_stream_relay_suppressed(")
-        .map(|offset| reconcile + offset)
-        .expect("refreshed relay ownership gates bridge output");
-    assert!(anchor_preflight < ensure && ensure < reconcile && reconcile < relay_gate);
-
-    let dirty_flush = production_tick
-        .find("turn_bridge::stream_tick::dirty_flush")
-        .expect("ordinary dirty flush remains guarded");
-    let dirty_anchor = production_tick[..dirty_flush]
-        .rfind("let current_msg_id_before_flush = current_msg_id;")
-        .expect("dirty flush captures the pre-save edit-cache anchor");
-    let saved_reconcile = production_tick[dirty_flush..]
-        .find("reconcile_tick_runtime_from_inflight!(current_msg_id_before_flush);")
-        .map(|offset| dirty_flush + offset)
-        .expect("ordinary Saved flush refreshes detached tick state");
-    let tick_writeback = production_tick[saved_reconcile..]
-        .find("writeback_tick_state!();")
-        .map(|offset| saved_reconcile + offset)
-        .expect("reconciled tick state is written back");
-    assert!(
-        dirty_anchor < dirty_flush
-            && dirty_flush < saved_reconcile
-            && saved_reconcile < tick_writeback
-    );
-
-    let rollover_send = production_tick
-        .find("TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block)")
-        .expect("rollover creates a fresh tail candidate");
-    let immediate_rollover_bind = production_tick[rollover_send..]
-        .find("turn_bridge::stream_tick::rollover_candidate_bind")
-        .map(|offset| rollover_send + offset)
-        .expect("every rollover candidate is guarded before another loop iteration");
-    let post_rollover_panel = production_tick[immediate_rollover_bind..]
-        .find("turn_bridge::stream_tick::panel_reanchor")
-        .map(|offset| immediate_rollover_bind + offset)
-        .expect("post-rollover work starts only after the candidate bind");
-    assert!(rollover_send < immediate_rollover_bind);
-    assert!(immediate_rollover_bind < post_rollover_panel);
-
-    let parent_tick = include_str!("../stream_tick.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production parent tick prefix");
-    let parent_relay_gate = parent_tick
-        .find("if !bridge_stream_relay_suppressed(")
-        .expect("parent relay gate remains present");
-    let rollover_call = parent_tick
-        .find("output::run_rollover_loop(")
-        .expect("parent tick calls the rollover phase");
-    let response_call = parent_tick
-        .find("output::refresh_streaming_response(")
-        .expect("parent tick calls the response refresh phase");
-    assert!(
-        parent_relay_gate < rollover_call && rollover_call < response_call,
-        "parent tick gates rollover before refreshing the response"
-    );
-
-    let stream_loop = include_str!("../stream_loop.rs");
-    let persistent_dirty = stream_loop
-        .find("let mut state_dirty = false;")
-        .expect("save retry state is initialized once");
-    let outer = stream_loop
-        .find("'outer: while")
-        .expect("production stream loop remains present");
-    let tick_call = stream_loop[outer..]
-        .find("let tick_outcome = run_bridge_stream_tick(")
-        .map(|offset| outer + offset)
-        .expect("stream loop observes the explicit tick outcome");
-    let authority_loss = stream_loop[tick_call..]
-        .find("if tick_outcome == StreamTickOutcome::AuthorityLost")
-        .map(|offset| tick_call + offset)
-        .expect("tick authority loss reaches the stream loop");
-    let authority_break = stream_loop[authority_loss..]
-        .find("break 'outer;")
-        .map(|offset| authority_loss + offset)
-        .expect("authority loss immediately stops stream draining");
-    let writeback = stream_loop[outer..]
-        .find("*state.inflight_state = inflight_state;")
-        .map(|offset| outer + offset)
-        .expect("detached state is staged for exit settlement");
-    let exit_settlement_call = stream_loop[writeback..]
-        .find("settle_and_reconcile_exit_candidate(")
-        .map(|offset| writeback + offset)
-        .expect("stream-loop exit delegates remaining-candidate settlement");
-    assert!(
-        persistent_dirty < outer
-            && outer < tick_call
-            && tick_call < authority_loss
-            && authority_loss < authority_break
-            && authority_break < writeback
-            && writeback < exit_settlement_call
-    );
-
-    let exit_reconcile = include_str!("../stream_loop/exit_reconcile.rs");
-    let pre_settle_anchor = exit_reconcile
-        .find("let current_msg_id_before_exit_settle = *context.state.current_msg_id;")
-        .expect("candidate edit-cache identity is captured before settlement");
-    let settle = exit_reconcile[pre_settle_anchor..]
-        .find("settle_pending_current_message_candidate_on_loop_exit(")
-        .map(|offset| pre_settle_anchor + offset)
-        .expect("stream-loop exit settles a remaining candidate");
-    let saved_reconcile = exit_reconcile[settle..]
-        .find("reconcile_saved_exit_candidate(")
-        .map(|offset| settle + offset)
-        .expect("successful exit merge refreshes caller-owned state");
-    assert!(pre_settle_anchor < settle && settle < saved_reconcile);
+    source_guard_tests::production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges();
 }
 
 #[test]
@@ -1188,4 +1066,53 @@ fn heartbeat_touches_same_owner_but_skips_successor() {
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
         assert_eq!(persisted.user_msg_id, 99_999);
     });
+}
+
+/// A local the successor's row already overwrote carries the successor's nonce on both sides, so
+/// only the bridge actor's own start nonce can refuse the exit flush that would bind it.
+#[tokio::test(flavor = "current_thread")]
+async fn exit_flush_nonce_collision_7219() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+    let channel = ChannelId::new(7_219_201);
+    let successor = owner_state(channel.get(), 77_010);
+    save_inflight_state(&successor).expect("seed the successor episode");
+    let path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &ProviderKind::Codex,
+        channel.get(),
+    );
+    let successor_bytes = std::fs::read(&path).unwrap();
+    let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&successor);
+    let mut baseline = successor.clone();
+    let mut local = successor.clone();
+    local.current_msg_id = 2;
+    local.current_msg_len = 10;
+    let (mut expected_message, mut current) = ((0, 0), MessageId::new(2));
+    let (mut pending, mut created) = (Some(current), Some(current));
+    assert_ne!(successor.turn_nonce.as_deref(), Some("bridge-actor-a"));
+    assert!(
+        !settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+            gateway: &gateway,
+            provider: &ProviderKind::Codex,
+            token_hash: "exit-flush-nonce-7219",
+            channel_id: channel,
+            persisted_baseline: &mut baseline,
+            inflight_state: &mut local,
+            expected_identity: &expected,
+            expected_current_message: &mut expected_message,
+            current_msg_id: &mut current,
+            pending_current_message_candidate: &mut pending,
+            bridge_created_response_placeholder_msg_id: &mut created,
+            captured_nonce: Some("bridge-actor-a"),
+        })
+        .await
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), successor_bytes);
+    assert_eq!(pending, None);
+    assert_eq!(
+        gateway.deletes.lock().expect("deletes lock").as_slice(),
+        &[2]
+    );
 }

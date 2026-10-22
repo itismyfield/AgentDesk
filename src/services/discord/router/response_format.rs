@@ -158,21 +158,11 @@ pub(super) fn wrap_user_prompt_with_author(
     request_owner: UserId,
     sanitized_prompt: String,
 ) -> String {
-    let author = crate::services::tui_input::human_frame::author_name(
+    crate::services::tui_input::human_frame::idle(
         request_owner_name,
-        request_owner.get(),
-    );
-    let prefix = format!("[User: {author} (ID: {})]", request_owner.get());
-    let normalized_prompt = sanitized_prompt.replace("\r\n", "\n").replace('\r', "\n");
-    if normalized_prompt.is_empty() {
-        prefix
-    } else if normalized_prompt.contains('\n') {
-        format!("{prefix}\n{normalized_prompt}")
-    } else {
-        // Keep ordinary Discord messages on one terminal line so TUI input can
-        // use literal send-keys instead of multiline paste-buffer submission.
-        format!("{prefix} {normalized_prompt}")
-    }
+        &request_owner.to_string(),
+        &sanitized_prompt,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

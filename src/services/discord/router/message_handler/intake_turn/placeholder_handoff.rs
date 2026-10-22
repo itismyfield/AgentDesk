@@ -95,6 +95,7 @@ pub(super) async fn reuse_bound_busy_notice(
                 QueuedCardDisposition::Preserved { owner } => {
                     format!("preserved_for_{}", owner.get())
                 }
+                QueuedCardDisposition::Unmeasured => "unmeasured".to_string(),
             };
         tracing::info!(
             channel_id = channel_id.get(),

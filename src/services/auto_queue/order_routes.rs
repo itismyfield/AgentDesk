@@ -83,6 +83,95 @@ pub(super) async fn resolve_submit_order_card_with_pg(
     }))
 }
 
+enum OrderStoreError {
+    NotPending,
+    Store(String),
+}
+
+/// Store an order under the run token in one transaction: every entry plus pending→active, or
+/// nothing. An empty order completes the run in-tx (re-entering the held token) instead.
+async fn store_submitted_order_on_pg(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    ready_cards: &[(i64, ResolvedDispatchCard)],
+    rationale: &str,
+) -> Result<Option<crate::db::auto_queue::RunCompletionOutcome>, OrderStoreError> {
+    let store = |error: String| OrderStoreError::Store(error);
+    let mut tx = pool.begin().await.map_err(|error| {
+        store(format!(
+            "begin auto-queue order for run '{run_id}': {error}"
+        ))
+    })?;
+    crate::db::auto_queue::run_admission::admit_run_writer_on_pg_tx(
+        &mut tx,
+        run_id,
+        &["pending"],
+        "store an order",
+    )
+    .await
+    .map_err(|error| {
+        if error.contains("refusing to store an order") {
+            OrderStoreError::NotPending
+        } else {
+            store(error)
+        }
+    })?;
+
+    for (rank, card) in ready_cards {
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(run_id)
+        .bind(&card.card_id)
+        .bind(card.assigned_agent_id.as_deref().unwrap_or(""))
+        .bind(rank)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| store(format!("insert order entry {}: {error}", card.card_id)))?;
+    }
+
+    let outcome = if ready_cards.is_empty() {
+        sqlx::query("UPDATE auto_queue_runs SET ai_rationale = $1 WHERE id = $2")
+            .bind(format!("{rationale} (no ready cards — auto-completed)"))
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                store(format!(
+                    "record auto-queue run '{run_id}' rationale: {error}"
+                ))
+            })?;
+        // A pending run without entries is trivially ready; the canonical
+        // writer owns the status flip so it stays subject to the same gates.
+        let outcome = crate::db::auto_queue::finalize_run_if_ready_on_pg_tx(&mut tx, run_id)
+            .await
+            .map_err(|error| store(format!("complete auto-queue run '{run_id}': {error}")))?;
+        Some(outcome)
+    } else {
+        sqlx::query(
+            "UPDATE auto_queue_runs
+             SET status = 'active',
+                 ai_rationale = $1
+             WHERE id = $2
+               AND status = 'pending'",
+        )
+        .bind(rationale)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| store(format!("activate auto-queue run '{run_id}': {error}")))?;
+        None
+    };
+    tx.commit().await.map_err(|error| {
+        store(format!(
+            "commit auto-queue order for run '{run_id}': {error}"
+        ))
+    })?;
+    Ok(outcome)
+}
+
 pub(super) async fn submit_order_with_pg(
     state: &AppState,
     run_id: &str,
@@ -152,7 +241,7 @@ pub(super) async fn submit_order_with_pg(
     };
     let run_log_ctx = AutoQueueLogContext::new().run(run_id);
 
-    let mut created = 0;
+    let mut ready_cards = Vec::new();
     for (rank, item) in body.order.iter().enumerate() {
         let card = match resolve_submit_order_card_with_pg(pool, run_repo.as_deref(), item).await {
             Ok(Some(card)) => card,
@@ -184,23 +273,7 @@ pub(super) async fn submit_order_with_pg(
             );
             continue;
         }
-
-        let entry_id = uuid::Uuid::new_v4().to_string();
-        if sqlx::query(
-            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(&entry_id)
-        .bind(run_id)
-        .bind(&card.card_id)
-        .bind(card.assigned_agent_id.as_deref().unwrap_or(""))
-        .bind(rank as i64)
-        .execute(pool)
-        .await
-        .is_ok()
-        {
-            created += 1;
-        }
+        ready_cards.push((rank as i64, card));
     }
 
     let rationale = body
@@ -213,65 +286,35 @@ pub(super) async fn submit_order_with_pg(
                 .map(|agent_id| format!("{agent_id} order submitted"))
                 .unwrap_or_else(|| "API order submitted".to_string())
         });
-    if created > 0 {
-        if let Err(error) = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET status = 'active',
-                 ai_rationale = $1
-             WHERE id = $2",
-        )
-        .bind(&rationale)
-        .bind(run_id)
-        .execute(pool)
-        .await
-        {
-            return Err(auto_queue_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),
-            ));
-        }
-    } else {
+    let created = ready_cards.len();
+    if created == 0 {
         crate::auto_queue_log!(
             warn,
             "submit_order_no_ready_cards",
             run_log_ctx.clone(),
             "[auto-queue] submit_order: no ready cards enqueued, run {run_id} stays pending"
         );
-        if let Err(error) = sqlx::query(
-            "UPDATE auto_queue_runs
-             SET ai_rationale = $1
-             WHERE id = $2",
-        )
-        .bind(format!("{rationale} (no ready cards — auto-completed)"))
-        .bind(run_id)
-        .execute(pool)
+    }
+    let outcome = store_submitted_order_on_pg(pool, run_id, &ready_cards, &rationale)
         .await
-        {
-            return Err(auto_queue_json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("record auto-queue run '{run_id}' rationale: {error}")}),
-                ),
-            ));
-        }
-        // A pending run without entries is trivially ready; the canonical
-        // writer owns the status flip so it stays subject to the same gates.
-        match crate::db::auto_queue::finalize_run_if_ready_pg(pool, run_id).await {
-            Ok(outcome) if outcome.is_completed() => {}
-            Ok(outcome) => crate::auto_queue_log!(
-                warn,
-                "submit_order_empty_run_not_completed",
-                run_log_ctx.clone(),
-                "[auto-queue] submit_order: empty run {run_id} left unchanged ({})",
-                outcome.describe()
+        .map_err(|error| match error {
+            OrderStoreError::NotPending => auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "run not found or not pending"})),
             ),
-            Err(error) => {
-                return Err(auto_queue_json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
-                ));
-            }
-        }
+            OrderStoreError::Store(error) => auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            ),
+        })?;
+    if let Some(outcome) = outcome.filter(|outcome| !outcome.is_completed()) {
+        crate::auto_queue_log!(
+            warn,
+            "submit_order_empty_run_not_completed",
+            run_log_ctx.clone(),
+            "[auto-queue] submit_order: empty run {run_id} left unchanged ({})",
+            outcome.describe()
+        );
     }
 
     let _ = state;

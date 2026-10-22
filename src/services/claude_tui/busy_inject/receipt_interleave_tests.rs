@@ -1,0 +1,95 @@
+use super::{frame, transcript_submission};
+use crate::services::tui_input::human_frame::history;
+use serde_json::json;
+use std::io::Write;
+
+#[test]
+fn a_previous_same_author_drain_does_not_contaminate_the_next_receipt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("receipt-interleave-{}", uuid::Uuid::new_v4());
+    let first = frame("discord", "720205", "ann", "ca720251", "first body");
+    let second = frame("discord", "720205", "ann", "ca720252", "second body");
+    let append = |record: serde_json::Value| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
+    };
+    history::register(("claude", &session, "ca720251", "720205"), &path, 0, &first).unwrap();
+    append(json!({
+        "type": "queue-operation", "operation": "enqueue",
+        "uuid": "enqueue-a", "content": first,
+    }));
+    assert_eq!(
+        transcript_submission(&path, 0, "ca720251", Some(&first)),
+        Some(true)
+    );
+    let offset = std::fs::metadata(&path).unwrap().len();
+    history::register(
+        ("claude", &session, "ca720252", "720205"),
+        &path,
+        offset,
+        &second,
+    )
+    .unwrap();
+
+    append(json!({
+        "type": "attachment",
+        "attachment": {
+            "type": "queued_command", "commandMode": "prompt",
+            "source_uuid": "command-a", "prompt": first,
+        },
+    }));
+    append(json!({
+        "type": "user", "uuid": "late-user-a", "message": { "content": first },
+    }));
+    assert_eq!(
+        transcript_submission(&path, offset, "ca720252", Some(&second)),
+        None,
+        "a prior same-author drain must not contaminate the next frame"
+    );
+    assert_eq!(history::receipt_row("ca720252", &path), None);
+
+    append(json!({
+        "type": "queue-operation", "operation": "enqueue",
+        "uuid": "enqueue-b", "content": second,
+    }));
+    for _ in 0..2 {
+        assert_eq!(
+            transcript_submission(&path, offset, "ca720252", Some(&second)),
+            Some(true),
+            "B must confirm from its own enqueue despite A's earlier drain"
+        );
+    }
+    assert_eq!(
+        history::receipt_row("ca720251", &path).as_deref(),
+        Some("enqueue-a")
+    );
+    assert_eq!(
+        history::receipt_row("ca720252", &path).as_deref(),
+        Some("enqueue-b")
+    );
+    let history_path = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(history_path).unwrap()).unwrap();
+    let receipts = stored["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "ca720252")
+        .unwrap()["events"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "B's receipt must be persisted exactly once"
+    );
+    assert_eq!(receipts[0]["row"], "enqueue-b");
+}

@@ -5,6 +5,7 @@ async fn constant_unknown_is_successfully_noticed_once_through_3661_seconds() {
     let channel = 6_218_701;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let run = supervise(&fake);
     wait(59).await;
     assert!(lock(&fake.notice_ok).is_empty());
@@ -24,6 +25,7 @@ async fn recovered_unknown_can_notice_again_before_half_an_hour() {
     let channel = 6_218_702;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     let run = supervise(&fake);
     wait(61).await;
     fake.set(channel, IDLE);
@@ -43,6 +45,7 @@ async fn failed_unknown_notice_retries_without_recording_success() {
     let channel = 6_218_703;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], UNKNOWN);
+    *lock(&fake.head) = Some(7);
     fake.notice_error.store(true, Ordering::SeqCst);
     let run = supervise(&fake);
     wait(61).await;

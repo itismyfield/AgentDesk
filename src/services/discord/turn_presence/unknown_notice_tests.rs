@@ -38,7 +38,7 @@ fn isolated(channel: u64) -> (tempfile::TempDir, Arc<Owner>) {
 type Sends = Arc<Mutex<Vec<String>>>;
 
 async fn update(owner: &Arc<Owner>, observed: Option<NoticeObservation>, sends: &Sends) {
-    if owner.observe(observed, None, Instant::now()) {
+    if owner.observe(observed, true, None, Instant::now()) {
         let sends = sends.clone();
         owner
             .drive(move |reason| async move {
@@ -209,9 +209,9 @@ async fn same_namespace_owners_share_one_reservation_and_other_tokens_are_indepe
     update(&owner, Some(actual.clone()), &sends).await;
     update(&other, Some(actual.clone()), &sends).await;
     tokio::time::advance(Duration::from_secs(61)).await;
-    assert!(owner.observe(Some(actual.clone()), None, Instant::now()));
-    assert!(!same.observe(Some(actual.clone()), None, Instant::now()));
-    assert!(other.observe(Some(actual.clone()), None, Instant::now()));
+    assert!(owner.observe(Some(actual.clone()), true, None, Instant::now()));
+    assert!(!same.observe(Some(actual.clone()), true, None, Instant::now()));
+    assert!(other.observe(Some(actual.clone()), true, None, Instant::now()));
     for reserved in [&owner, &other] {
         let sends = sends.clone();
         reserved
@@ -224,7 +224,7 @@ async fn same_namespace_owners_share_one_reservation_and_other_tokens_are_indepe
     assert_eq!(lock(&sends).len(), 2);
     assert!(owner.scope.load().unwrap().is_some());
     assert!(other.scope.load().unwrap().is_some());
-    assert!(!same.observe(Some(actual), None, Instant::now()));
+    assert!(!same.observe(Some(actual), true, None, Instant::now()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -234,7 +234,7 @@ async fn successful_http_with_save_failure_retries_only_the_dirty_receipt() {
     let actual = nonce("A", "L1");
     update(&owner, Some(actual.clone()), &sends).await;
     tokio::time::advance(Duration::from_secs(61)).await;
-    assert!(owner.observe(Some(actual.clone()), None, Instant::now()));
+    assert!(owner.observe(Some(actual.clone()), true, None, Instant::now()));
     let path = owner.scope.path().unwrap();
     let failed_path = path.clone();
     let sent = sends.clone();
@@ -271,7 +271,7 @@ async fn old_http_success_after_known_cannot_resurrect_a_receipt_or_suppress_rec
     let actual = nonce("A", "L1");
     update(&owner, Some(actual.clone()), &sends).await;
     tokio::time::advance(Duration::from_secs(61)).await;
-    assert!(owner.observe(Some(actual.clone()), None, Instant::now()));
+    assert!(owner.observe(Some(actual.clone()), true, None, Instant::now()));
     let entered = Arc::new(tokio::sync::Notify::new());
     let resume = Arc::new(tokio::sync::Notify::new());
     let task = {
@@ -293,7 +293,7 @@ async fn old_http_success_after_known_cannot_resurrect_a_receipt_or_suppress_rec
         })
     };
     entered.notified().await;
-    assert!(!owner.observe(None, None, Instant::now()));
+    assert!(!owner.observe(None, true, None, Instant::now()));
     resume.notify_one();
     task.await.unwrap();
     assert_eq!(
@@ -529,7 +529,7 @@ async fn late_http_cannot_suppress_a_changed_cause_or_a_recovered_same_cause() {
         let actual = nonce("A", "L1");
         update(&owner, Some(actual.clone()), &sends).await;
         tokio::time::advance(Duration::from_secs(61)).await;
-        assert!(owner.observe(Some(actual.clone()), None, Instant::now()));
+        assert!(owner.observe(Some(actual.clone()), true, None, Instant::now()));
         let entered = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let task = {
@@ -553,11 +553,11 @@ async fn late_http_cannot_suppress_a_changed_cause_or_a_recovered_same_cause() {
         entered.notified().await;
         let mut next = actual;
         if recovered {
-            assert!(!owner.observe(None, None, Instant::now()));
+            assert!(!owner.observe(None, true, None, Instant::now()));
         } else {
             next.reason = "facts_halted";
         }
-        assert!(!owner.observe(Some(next.clone()), None, Instant::now()));
+        assert!(!owner.observe(Some(next.clone()), true, None, Instant::now()));
         resume.notify_one();
         task.await.unwrap();
         assert!(
@@ -686,7 +686,7 @@ async fn old_receipt_write_then_recovery_clears_before_the_new_cause_succeeds() 
     update(&owner, Some(actual.clone()), &sends).await;
     tokio::time::advance(Duration::from_secs(61)).await;
     let mut pause = StorePauseGuard::arm(&owner.scope);
-    assert!(owner.observe(Some(actual.clone()), None, Instant::now()));
+    assert!(owner.observe(Some(actual.clone()), true, None, Instant::now()));
     let task = drive_notice(&owner, &sends);
     pause.entered().await;
     let old = lock(&owner.state)
@@ -695,10 +695,10 @@ async fn old_receipt_write_then_recovery_clears_before_the_new_cause_succeeds() 
         .expect("HTTP succeeded before the paused write");
     assert_eq!(lock(&sends).len(), 1);
 
-    assert!(!owner.observe(None, None, Instant::now()));
+    assert!(!owner.observe(None, true, None, Instant::now()));
     let mut next = actual;
     next.reason = "facts_halted";
-    assert!(!owner.observe(Some(next.clone()), None, Instant::now()));
+    assert!(!owner.observe(Some(next.clone()), true, None, Instant::now()));
     pause.release();
     task.await.unwrap();
     assert!(
@@ -726,16 +726,16 @@ async fn old_clear_then_due_new_cause_preserves_the_latest_success_receipt() {
     first_notice(&owner, &actual, &sends).await;
     let old = owner.scope.load().unwrap().expect("old cause receipt");
     let mut pause = StorePauseGuard::arm(&owner.scope);
-    assert!(owner.observe(None, None, Instant::now()));
+    assert!(owner.observe(None, true, None, Instant::now()));
     let task = drive_notice(&owner, &sends);
     pause.entered().await;
     assert_eq!(owner.scope.load().unwrap(), Some(old.clone()));
 
     let mut next = actual;
     next.reason = "facts_halted";
-    assert!(!owner.observe(Some(next.clone()), None, Instant::now()));
+    assert!(!owner.observe(Some(next.clone()), true, None, Instant::now()));
     tokio::time::advance(Duration::from_secs(61)).await;
-    assert!(!owner.observe(Some(next.clone()), None, Instant::now()));
+    assert!(!owner.observe(Some(next.clone()), true, None, Instant::now()));
     assert_eq!(
         lock(&sends).len(),
         1,

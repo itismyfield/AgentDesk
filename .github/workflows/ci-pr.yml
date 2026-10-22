@@ -123,8 +123,7 @@ jobs:
               - 'src/services/gemini.rs'
               - 'src/services/qwen.rs'
               - 'src/services/qwen_tmux_wrapper.rs'
-              # Provider launch trees and the session-host boundary they probe
-              # sessions through; this lane's cargo targets do not run them.
+              # Provider launch trees and session-host boundaries used by recovery.
               - 'src/services/claude.rs'
               - 'src/services/claude/**'
               - 'src/services/codex.rs'
@@ -146,8 +145,11 @@ jobs:
               - 'src/server/routes/dispatched_sessions.rs'
               - 'src/server/routes/dispatches/**'
               - 'src/server/outbox_actionable_delivery.rs'
+              - 'src/server/outbox_worker.rs'
+              - 'src/server/outbox_worker/**'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
+              - 'src/server/routes/scheduled_messages/**'
               - 'src/server/worker_registry.rs'
               - 'src/server/mod.rs'
               - 'src/server/policy_tick_logging.rs'
@@ -168,6 +170,7 @@ jobs:
               - 'src/services/hang_forensics/**'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
+              - 'src/services/message_outbox/**'
               # #5232 R3: these five, and `outbound/source_registry.rs` above
               # (already covered by `src/services/discord/**`), match no target
               # among this job's 21 `cargo test --lib` invocations. They stay as
@@ -212,10 +215,13 @@ jobs:
               # filter ORs patterns, so a '!' excludes nothing (#5232): refused anywhere.
               - 'src/cli/channel_home_tests.rs'
               - 'src/cli/dcserver_pg_bootstrap.rs'
+              - 'src/cli/doctor/orchestrator/dispatch_outbox_tests.rs'
+              - 'src/cli/doctor/orchestrator/observation_tests.rs'
               - 'src/cli/herdr_tests.rs'
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'
+              - 'src/db/auto_queue/run_admission_pg_tests.rs'
               - 'src/db/auto_queue/run_completion_pg_tests.rs'
               - 'src/db/auto_queue/run_owner_guard_pg_tests.rs'
               - 'src/db/auto_queue/tests.rs'
@@ -254,6 +260,8 @@ jobs:
               - 'src/db/replay_disposition_tests/compatibility_tests.rs'
               - 'src/db/replay_disposition_tests/concurrency_tests.rs'
               - 'src/db/replay_disposition_tests/consumer_tests.rs'
+              - 'src/db/scheduled_messages/attachments_pg_tests.rs'
+              - 'src/db/scheduled_messages/image_lifecycle_tests.rs'
               - 'src/db/scheduled_messages/postgres_tests.rs'
               - 'src/db/session_observability/background_ordering_pg_tests.rs'
               - 'src/db/session_transcripts.rs'
@@ -261,6 +269,7 @@ jobs:
               - 'src/dispatch/dispatch_cancel.rs'
               - 'src/dispatch/dispatch_context.rs'
               - 'src/dispatch/dispatch_status.rs'
+              - 'src/dispatch/dispatch_status/auto_queue_terminal_sync_policy_tests/migration_value_pg_tests.rs'
               - 'src/dispatch/dispatch_status/terminal_timestamp_tests.rs'
               - 'src/engine/ops/auto_queue_ops.rs'
               - 'src/engine/ops/config_ops.rs'
@@ -274,20 +283,25 @@ jobs:
               - 'src/server/issue_specs.rs'
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
+              - 'src/server/outbox_worker/attachment_pg_tests.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver/pg_tests.rs'
+              - 'src/server/routes/auto_queue_admission_pg_tests.rs'
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/campaigns.rs'
               - 'src/server/routes/dispatched_sessions_tests.rs'
               - 'src/server/routes/dispatches/crud.rs'
               - 'src/server/routes/escalation.rs'
+              - 'src/server/routes/health_api/db_deadline_tests.rs'
               - 'src/server/routes/health_api/host_guard_tests.rs'
+              - 'src/server/routes/health_api/kv_gate_tests.rs'
               - 'src/server/routes/herdr_legacy_tests.rs'
               - 'src/server/routes/memory_api.rs'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/pipeline_stage_save_tests.rs'
               - 'src/server/routes/queue_api.rs'
+              - 'src/server/routes/scheduled_messages/image_activation_tests.rs'
               - 'src/server/routes/scheduled_messages/postgres_tests.rs'
               - 'src/server/routes/session_evidence_tests.rs'
               - 'src/server/routes/stats.rs'
@@ -349,6 +363,15 @@ jobs:
               - 'src/services/discord/commands/control/clear_entry_tests.rs'
               - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_metadata_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/joint_owner_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/auxiliary_tests/policy_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/custody_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/late_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_retirement_tests.rs'
               - 'src/services/discord/commands/control/home_fence_tests.rs'
               - 'src/services/discord/commands/control/native_policy_tests.rs'
@@ -358,14 +381,19 @@ jobs:
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
+              - 'src/services/discord/health/recovery/self_watchdog/tests/health_response.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/snapshot/health_observation_pg_tests.rs'
+              - 'src/services/discord/health/turn_deliver/inject/catch_up_race_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
-              - 'src/services/discord/herdr_terminate.rs'
+              - 'src/services/discord/herdr_terminate/http_force_e08_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_tests.rs'
               - 'src/services/discord/herdr_terminate_exit_tests.rs'
               - 'src/services/discord/herdr_terminate_route_tests.rs'
+              - 'src/services/discord/herdr_terminate_tests.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
               - 'src/services/discord/idle_recap_interaction.rs'
@@ -400,10 +428,12 @@ jobs:
               - 'src/services/discord/replay_policy/permit_tests.rs'
               - 'src/services/discord/replay_policy/policy_tests.rs'
               - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'
+              - 'src/services/discord/router/intake_dispatch/initial_fresh_tests.rs'
               - 'src/services/discord/router/intake_dispatch/replay_admission_tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs'
               - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
+              - 'src/services/discord/router/intake_gate/busy_inject/payload_tests.rs'
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
@@ -412,11 +442,20 @@ jobs:
               - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_codex_live_end_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_herdr_start_offset_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
+              - 'src/services/discord/router/message_handler/provider_dispatch_live_end_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/clear_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/legacy_clear_tests.rs'
+              - 'src/services/discord/router/message_handler/root_replaced_recovery_tests/recheck_tests.rs'
               - 'src/services/discord/router/message_handler/s1_entry_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'
@@ -428,17 +467,29 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/delegated_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/boot_gate_alarm_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_process_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_fresh_launch_tests/ordinary_restart_tests/fresh_scope_restart_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_joint_owner_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_repeated_absence_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host/fence_tests/b1b_restart_phase_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs'
               - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
+              - 'src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/terminal_ui_obligation/sweep_tests.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
+              - 'src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs'
+              - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
@@ -450,6 +501,8 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
@@ -463,6 +516,8 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/final_recheck_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/hosted_classification_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'
@@ -474,9 +529,13 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs'
+              - 'src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/native_stop_contract_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
@@ -487,6 +546,8 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_owner_nonce_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_review_tests.rs'
@@ -497,6 +558,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/stale_binding_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/superseded_measurement_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/watcher_runtime_tests.rs'
               - 'src/services/discord/turn_presence/activity_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
@@ -508,7 +570,9 @@ jobs:
               - 'src/services/dispatches/outbox_claiming.rs'
               - 'src/services/dispatches/outbox_queue_replay_tests.rs'
               - 'src/services/dispatches/wait_queue.rs'
+              - 'src/services/health_diagnostics/request_batch_pg_tests.rs'
               - 'src/services/herdr_launch_tests.rs'
+              - 'src/services/herdr_launch_tests/retired_hold_tests.rs'
               - 'src/services/maintenance/jobs/db_retention.rs'
               - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
               - 'src/services/message_outbox.rs'
@@ -517,6 +581,7 @@ jobs:
               - 'src/services/observability/queries.rs'
               - 'src/services/observability/recovery_audit.rs'
               - 'src/services/observability/turn_lifecycle.rs'
+              - 'src/services/onboarding/canonical_status_tests/migration_value_pg_tests.rs'
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
               - 'src/services/routines/agent_executor/execution.rs'
@@ -553,6 +618,7 @@ jobs:
               - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
+              - 'src/services/tui_o/writer/scoped_repost_tests.rs'
               - 'src/services/tui_o/writer/tool_result_repost_tests.rs'
               - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
@@ -809,6 +875,9 @@ jobs:
               - 'src/services/codex/**'
               - 'src/services/dispatched_sessions/**'
               - 'src/services/dispatches/**'
+              # queue/ and the cancel lookup wire the forced Herdr cancel behind cfg(unix).
+              - 'src/services/queue/**'
+              - 'src/services/session_forwarding/cancel_lookup.rs'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
@@ -831,6 +900,8 @@ jobs:
               - 'src/services/discord/admin_host_guard.rs'
               - 'src/services/discord/busy_followup_retry_store/**'
               - 'src/services/discord/catch_up/**'
+              - 'src/services/discord/codex_absence.rs'
+              - 'src/services/discord/codex_absence/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'
@@ -897,6 +968,8 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs'
               - 'src/services/discord/turn_bridge/**'
+              - 'src/services/discord/turn_end_summary.rs'
+              - 'src/services/discord/turn_end_summary_tests.rs'
               - 'src/services/discord/turn_finalizer.rs'
               - 'src/services/discord/turn_finalizer/**'
               - 'src/services/discord/turn_lease.rs'
@@ -908,6 +981,7 @@ jobs:
               - 'src/services/git/**'
               # Cover Windows-compiled cfg consumers outside the relay tree;
               # the source-wide derivation test rejects newly uncovered owners.
+              - 'src/services/herdr_launch/**'
               - 'src/services/kakao/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'
@@ -1296,6 +1370,7 @@ jobs:
     outputs:
       force_full: ${{ steps.plan.outputs.force_full }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      sweep_matrix: ${{ steps.plan.outputs.sweep_matrix }}
       plan: ${{ steps.plan.outputs.plan }}
     steps:
       - uses: actions/checkout@v4
@@ -1315,7 +1390,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
-      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -1429,6 +1503,7 @@ jobs:
         timeout-minutes: 75
         shell: bash
         env:
+          PG_INCLUDE_SHARD: ${{ matrix.shard }}
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
@@ -1625,6 +1700,11 @@ jobs:
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1
+      - name: Herdr recovery and admission regressions
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+        run: |
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- services::session_host::herdr_gate::tests::root_replaced_tests:: services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect::root_replaced_recovery_tests:: services::tui_prompt_dedupe::hosted_source::tests:: services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests:: --test-threads=1
       - name: Operational alert intake admission regressions
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
@@ -1724,10 +1804,13 @@ jobs:
 
   # The plan's non-PG tests, or main's full sweep and replay, against live PostgreSQL without DATABASE_URL.
   library_sweep:
-    name: Library test sweep
+    name: Library test sweep (shard ${{ matrix.shard }})
     needs: [changes, lib_test_prepare, pg_shards]
     if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pg_shards.outputs.sweep_matrix) }}
     env:
       RUST_BACKTRACE: 1
       # Fixture-side PostgreSQL wiring, matching `test_fast` /
@@ -1801,12 +1884,13 @@ jobs:
         timeout-minutes: 60
         shell: bash
         env:
+          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: python3 scripts/ci/test-selection.py run --lane sweep
+        run: python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"
 
       - name: Stop PostgreSQL service
         if: always()
@@ -2244,7 +2328,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6
+          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2497,7 +2581,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6
+          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

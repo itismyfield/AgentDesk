@@ -77,11 +77,20 @@ pub(super) fn run(
         let Ok(offset) = std::fs::metadata(transcript).map(|meta| meta.len()) else {
             return InjectAttempt::NotSent(veto_name(Veto::TranscriptUnavailable));
         };
+        if let Err(error) = crate::services::tui_input::human_frame::history::register(
+            ("claude", session, &input.nonce, &input.author),
+            transcript,
+            offset,
+            &text,
+        ) {
+            tracing::warn!(%error, "busy Herdr frame ledger registration failed");
+            return InjectAttempt::NotSent(veto_name(Veto::LoadFailed));
+        }
         let plan = [
             TuiInputAction::PasteBuffer(text.clone()),
             TuiInputAction::Enter,
         ];
-        match run_herdr(pane, &plan, None) {
+        let result = match run_herdr(pane, &plan, None) {
             // The server's write ACK is not Claude's receipt; the transcript decides, as on tmux.
             InputRun::Applied => {
                 let timing = &busy_inject::TIMING;
@@ -114,7 +123,11 @@ pub(super) fn run(
                 turn_id,
                 unconfirmed_name(Unconfirmed::EnterFailed),
             ),
+        };
+        if matches!(result, InjectAttempt::NotSent(_)) {
+            crate::services::tui_input::human_frame::history::withdraw(&input.nonce, transcript);
         }
+        result
     });
     locked.unwrap_or(InjectAttempt::NotSent(veto_name(Veto::LockContended)))
 }

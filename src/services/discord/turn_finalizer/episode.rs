@@ -1,6 +1,12 @@
 //! Captured episode identity shared by normal finalize and operator recovery.
 use super::*;
 
+mod row_retirement;
+#[cfg(test)]
+mod row_retirement_tests;
+pub(in crate::services::discord) use row_retirement::RuntimeWitness;
+pub(super) use row_retirement::{warn_no_episode_evidence, warn_same_id_row_kept};
+
 pub(super) fn episode_fingerprint(nonce: Option<&str>) -> [u8; 32] {
     nonce
         .filter(|nonce| !nonce.is_empty())
@@ -43,6 +49,19 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     clear_inflight: bool,
     expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
 ) -> Result<Option<CapturedFinish>, ()> {
+    claim_episode(shared, provider, key, clear_inflight, expected_actor, None).await
+}
+
+/// `claim_normal_episode`; a cleanup claim given `drift` also retires this episode's row whose
+/// finalizer id drifted, right after its own release and before any caller side effect.
+pub(super) async fn claim_episode(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    key: TurnKey,
+    clear_inflight: bool,
+    expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
+    drift: Option<RuntimeWitness<'_>>,
+) -> Result<Option<CapturedFinish>, ()> {
     if key.episode.is_none() {
         return Ok(None);
     }
@@ -83,9 +102,23 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             persistence_error: None,
         }
     };
+    let drifted = loaded
+        .as_ref()
+        .filter(|_| clear_inflight && row_miss == Some("finalizer_id_mismatch"));
     if captured_actor.is_some() && finish.removed_token.is_none() {
         // A strict actor miss authorizes neither row cleanup nor finalization
         // side effects, even when the replacement kept the same ID and nonce.
+        if let Some(loaded) = drifted.filter(|_| drift.is_some()) {
+            row_retirement::warn_declined(
+                provider,
+                key,
+                loaded,
+                &finish,
+                "proof",
+                "not_finalized",
+                None,
+            );
+        }
         return Err(());
     }
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
@@ -99,10 +132,23 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             &super::super::inflight::InflightTurnIdentity::from_state(row),
             row.turn_nonce.as_deref(),
         );
-        if outcome != super::super::inflight::GuardedClearOutcome::Cleared {
+        if !matches!(
+            outcome,
+            super::super::inflight::GuardedClearOutcome::Cleared
+                | super::super::inflight::GuardedClearOutcome::Missing
+        ) {
             let reason = format!("{outcome:?}");
             warn_episode_row_retained(provider, key, Some(row), "cas", &reason, &finish);
         }
+    } else if let (Some(loaded), Some(witness)) = (drifted, drift) {
+        row_retirement::retire_drifted_row(
+            provider,
+            key,
+            observed.as_ref(),
+            loaded,
+            &finish,
+            witness,
+        );
     } else if clear_inflight
         && (loaded.is_some() || finish.removed_token.is_some())
         && let Some(reason) = row_miss
@@ -172,6 +218,8 @@ pub(super) struct TerminalEvidence {
     pub(super) episode_captured: bool,
     pub(super) turn_nonce: Option<String>,
     pub(super) claim_snapshot: Option<SyntheticClaimSnapshot>,
+    /// The tmux session a stale-busy probe proved gone, for drifted-row retirement.
+    pub(super) probed_tmux_session: Option<String>,
 }
 
 /// One policy close, built from the row the notice ACK returned: the finalizer owns it, and only
@@ -662,6 +710,7 @@ impl TerminalEvidence {
                 .as_ref()
                 .and_then(|snapshot| snapshot.turn_nonce.clone()),
             claim_snapshot,
+            probed_tmux_session: None,
         }
     }
 }
@@ -678,19 +727,14 @@ impl TurnFinalizer {
         turn_nonce: Option<String>,
         shared: Arc<SharedData>,
     ) -> FinalizeOutcome {
-        self.submit_terminal_evidence(
-            key,
-            provider,
-            event,
-            ctx,
-            TerminalEvidence {
-                episode_captured: true,
-                turn_nonce,
-                claim_snapshot: None,
-            },
-            shared,
-        )
-        .await
+        let evidence = TerminalEvidence {
+            episode_captured: true,
+            turn_nonce,
+            claim_snapshot: None,
+            probed_tmux_session: None,
+        };
+        self.submit_terminal_evidence(key, provider, event, ctx, evidence, shared)
+            .await
     }
 
     pub(super) async fn submit_terminal_evidence(
@@ -714,6 +758,7 @@ impl TurnFinalizer {
             cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, Some(snapshot));
         }
         let cleanup_snapshot = evidence.claim_snapshot.clone();
+        let probed_tmux = evidence.probed_tmux_session.clone();
         let (ack, rx) = oneshot::channel();
         if self
             .tx
@@ -743,7 +788,10 @@ impl TurnFinalizer {
                 &event,
                 ctx,
                 &shared,
-                cleanup_snapshot.as_ref(),
+                RuntimeWitness {
+                    probed_tmux: probed_tmux.as_deref(),
+                    claim_snapshot: cleanup_snapshot.as_ref(),
+                },
             )
             .await;
         }

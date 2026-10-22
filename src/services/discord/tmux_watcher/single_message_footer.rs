@@ -7,6 +7,10 @@ use crate::services::tui_o::cutover::BodyClaim;
 #[path = "body_footer_rollover_tests.rs"]
 mod body_footer_rollover_tests;
 
+#[cfg(test)]
+#[path = "footer_retirement_tests.rs"]
+mod footer_retirement_tests;
+
 pub(super) fn make_owner(
     identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
     started_at_unix: i64,
@@ -42,10 +46,15 @@ fn footer_mode_enabled(single_message_panel_enabled: bool, status_panel_v2_enabl
 }
 
 pub(super) fn watcher_separate_status_panel_enabled(status_panel_v2_enabled: bool) -> bool {
-    separate_status_panel_enabled_for_flags(
-        crate::services::discord::single_message_panel_enabled(),
-        status_panel_v2_enabled,
-    )
+    // Existing ids still need adoption, edits and reclaim; creation has its own retirement gate.
+    if crate::services::discord::footer_retirement::retired() {
+        status_panel_v2_enabled
+    } else {
+        separate_status_panel_enabled_for_flags(
+            crate::services::discord::single_message_panel_enabled(),
+            status_panel_v2_enabled,
+        )
+    }
 }
 
 fn separate_status_panel_enabled_for_flags(
@@ -86,7 +95,8 @@ pub(super) fn watcher_should_create_separate_status_panel(
     status_panel_present: bool,
     panel_eligible_turn: bool,
 ) -> bool {
-    !single_message_panel_footer_mode
+    !crate::services::discord::footer_retirement::retired()
+        && !single_message_panel_footer_mode
         && watcher_should_create_external_input_status_panel(
             status_panel_v2_enabled,
             status_panel_present,
@@ -117,7 +127,12 @@ pub(super) fn build_watcher_single_message_panel_status_block(
     full_response: &str,
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
-    if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
+    // Retired snapshots omit this block, but keep its budget to preserve rollover offsets.
+    if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled)
+        || (crate::services::discord::footer_retirement::retired()
+            && crate::services::discord::single_message_panel_enabled()
+            && shared.ui.status_panel_v2_enabled)
+    {
         let content = (full_response, indicator);
         return shared
             .ui
@@ -175,7 +190,7 @@ impl Default for WatcherCompletionFooterIdleState {
 }
 
 #[derive(Clone)]
-pub(super) struct WatcherCompletionFooterTerminalTarget {
+pub(in crate::services::discord) struct WatcherCompletionFooterTerminalTarget {
     pub(super) msg_id: serenity::MessageId,
     pub(super) text: String,
 }
@@ -432,12 +447,13 @@ pub(super) async fn complete_watcher_terminal_footer_or_status_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::DISCORD_MSG_LIMIT;
+    use crate::services::discord::{DISCORD_MSG_LIMIT, footer_retirement::legacy_for_test};
 
     const PANEL: &str = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
 
     #[test]
     fn single_message_panel_footer_mode_requires_both_flags() {
+        let _legacy = legacy_for_test();
         assert!(footer_mode_enabled(true, true));
         assert!(!footer_mode_enabled(true, false));
         assert!(!footer_mode_enabled(false, true));
@@ -455,6 +471,7 @@ mod tests {
 
     #[test]
     fn single_message_panel_footer_disables_separate_panel_creation_and_binding() {
+        let _legacy = legacy_for_test();
         let footer_mode = footer_mode_enabled(true, true);
 
         assert!(!watcher_should_create_separate_status_panel(
@@ -474,6 +491,7 @@ mod tests {
 
     #[test]
     fn single_message_panel_footer_rollover_keeps_panel_in_seed_only() {
+        let _legacy = legacy_for_test();
         let status_block = compose_single_message_footer_status_block("⠸", PANEL);
         let footer = format!("\n\n{status_block}");
         let current_portion = "x".repeat(DISCORD_MSG_LIMIT);
@@ -529,6 +547,7 @@ mod tests {
 
     #[test]
     fn single_message_panel_pathological_panel_stays_within_discord_limit() {
+        let _legacy = legacy_for_test();
         let huge_panel = format!(
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n{}",
             "└ reviewer ".repeat(1_000)

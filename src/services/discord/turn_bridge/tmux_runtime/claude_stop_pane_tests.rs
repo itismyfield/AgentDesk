@@ -49,7 +49,37 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
         "⏺ DONE",
         "⏺ DONE. The ping kept running while processing; thinking it over, nothing is running now.",
     );
-    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 11] = [
+    let foreground = capture!("tool-running")
+        .lines()
+        .filter(|line| !line.contains("Tomfoolering"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let old_tool_done = format!("{foreground}\n⏺ DONE\n❯\n{MANUAL_FOOTER}");
+    let old_tool_interrupted = format!(
+        "{foreground}\n  ⎿ Interrupted · What should Claude do instead?\n❯\n{MANUAL_FOOTER}"
+    );
+    let rows: [(&str, &str, Transcript, ClaudeTuiInterruptPhase, usize); 14] = [
+        (
+            "foreground-no-spinner",
+            &foreground,
+            Transcript::Streaming,
+            ActiveGeneration,
+            1,
+        ),
+        (
+            "historical-tool-done",
+            &old_tool_done,
+            Transcript::Streaming,
+            Ambiguous,
+            0,
+        ),
+        (
+            "historical-tool-interrupted",
+            &old_tool_interrupted,
+            Transcript::Streaming,
+            Ambiguous,
+            0,
+        ),
         (
             "tool-running",
             capture!("tool-running"),
@@ -139,10 +169,11 @@ fn claude_tui_stop_escapes_only_a_pane_showing_live_turn_chrome() {
                     active,
                 );
                 let _ = fx.take_calls();
-                let outcome = interrupt_claude_turn_session_preserving(
+                let outcome = interrupt_claude_native_turn(
                     &token,
-                    Some(session.clone()),
+                    session.clone(),
                     "!stop",
+                    ClaudeStopTurnIdentity::capture(path.to_str().unwrap()).unwrap(),
                 )
                 .await;
                 let sent = fx

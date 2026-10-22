@@ -1093,6 +1093,7 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 system_prompt: None,
                 allowed_tools: &[],
                 cancel: Arc::new(CancelToken::new()),
+                codex_observation: None,
                 remote_profile: None,
                 tmux_session_name: Some("AgentDesk-dash"),
                 teardown: None,
@@ -1572,3 +1573,6 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
         );
     }
 }
+
+#[path = "provider_dispatch_codex_live_end_tests.rs"]
+mod live_end;

@@ -102,6 +102,7 @@ pub(super) fn process_native_codex_messages(
 ) -> WatcherLineOutcome {
     let mut result = WatcherLineOutcome::default();
     for message in messages {
+        tools.summary_outcome.native(&message);
         let mut canonical_terminal_response = None;
         let value = match message {
             StreamMessage::Init { session_id, .. } => {

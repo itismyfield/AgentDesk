@@ -28,7 +28,7 @@ fn codex_direct_answer_on_a_rollout_without_turn_ids_keeps_the_text_search() {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, anchor);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
@@ -66,7 +66,7 @@ fn codex_direct_answer_waits_for_its_turn_through_a_torn_opening() {
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, claimed.user_msg_id);
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[claimed.user_msg_id]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
@@ -109,7 +109,7 @@ fn codex_direct_answer_skips_another_turn_with_the_same_prompt() {
                 fx.sent(RESPONSE).is_empty(),
                 "the other turn's answer leaked"
             );
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
@@ -198,7 +198,11 @@ async fn steer_into_running_turn(root: PathBuf, channel: u64, tmux: &str, order:
             .all(|(method, path, _)| method == "PATCH" && path.ends_with(&target)),
         "{sent:?}"
     );
-    assert_eq!(fx.completed_turns(), 1, "one native turn, one bridge turn");
+    assert_eq!(
+        fx.wait_completed_turns(&[anchor]).await,
+        1,
+        "one native turn, one bridge turn"
+    );
     assert_eq!(tail_starts(fx.codex.channel), 1, "one tail");
     assert!(
         fx.pending_starts().is_empty(),
@@ -295,7 +299,7 @@ fn codex_direct_steer_after_a_failed_announcement_answers_on_its_own_anchor() {
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE2, anchor);
             assert_eq!(fx.sent(PROMPT2).len(), 1, "one announcement, no echo");
-            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(fx.wait_completed_turns(&[anchor]).await, 1);
             assert_eq!(tail_starts(fx.codex.channel), 1);
             fx.assert_released().await;
             fx.finish();
@@ -364,7 +368,11 @@ fn codex_direct_repeated_steer_text_past_the_duplicate_window_is_echoed_again() 
                     .iter()
                     .all(|(method, path, _)| method == "PATCH" && path.ends_with(&target))
             );
-            assert_eq!(fx.completed_turns(), 1, "one native turn, one bridge turn");
+            assert_eq!(
+                fx.wait_completed_turns(&[anchor]).await,
+                1,
+                "one native turn, one bridge turn"
+            );
             assert_eq!(tail_starts(fx.codex.channel), 1, "one tail");
             assert!(fx.pending_starts().is_empty());
             fx.assert_released().await;
@@ -533,7 +541,7 @@ fn codex_direct_steer_after_an_abandoned_deferred_input_answers_on_its_own_ancho
             tokio::time::sleep(Duration::from_secs(2)).await;
             fx.assert_answer(RESPONSE, first_anchor);
             fx.assert_answer(RESPONSE3, anchor);
-            assert_eq!(fx.completed_turns(), 2);
+            assert_eq!(fx.wait_completed_turns(&[first_anchor, anchor]).await, 2);
             assert_eq!(tail_starts(fx.codex.channel), 2);
             fx.assert_released().await;
             fx.finish();

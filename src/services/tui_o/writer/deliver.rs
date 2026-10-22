@@ -135,7 +135,10 @@ struct Running(Arc<AtomicUsize>);
 
 type RepostCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
-fn source_delivery_allowed(channel: u64, sources: impl IntoIterator<Item = SourceId>) -> bool {
+pub(super) fn source_delivery_allowed(
+    channel: u64,
+    sources: impl IntoIterator<Item = SourceId>,
+) -> bool {
     crate::services::tui_prompt_dedupe::codex_verified_channel_delivery_allowed(channel)
         && sources.into_iter().all(|source| {
             crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(channel, &source)
@@ -210,6 +213,7 @@ impl<H> Drop for LeaseReturn<H> {
 }
 
 pub struct ChannelWriter<P, L, A> {
+    pub(super) suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
@@ -269,6 +273,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         };
         let posts = herdr.then(|| with_in_flight(shared));
         let mut writer = Self {
+            suspension: super::suspension::Suspension::default(),
             channel,
             store,
             gate,
@@ -335,7 +340,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             self.channel,
             self.store
                 .cursors()
-                .filter(|cursor| !cursor.retired || owing)
+                .filter(|cursor| {
+                    (!cursor.retired || owing) && !self.suspension.contains(&cursor.source)
+                })
                 .map(|cursor| cursor.source.clone()),
         )
     }
@@ -352,6 +359,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
     pub(crate) async fn repost_turn(&mut self) {
+        let allowed = self.suspension.is_empty();
+        #[cfg(test)]
+        let allowed = allowed
+            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-repost")
+            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s");
+        if !allowed {
+            return;
+        }
         if self.is_stopped() {
             return;
         }
@@ -401,6 +416,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     pub fn reconcile_reader_count(&self, count: usize) {
         self.alarms.reconcile_reader_count(self.channel, count);
+    }
+
+    pub fn reconcile_boundary_pending(&self, count: usize) {
+        self.alarms.reconcile_boundary_pending(self.channel, count);
     }
 
     /// Stops the channel once; only the first stop raises its alarm.
@@ -845,6 +864,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .cursors()
             .filter(|cursor| !cursor.retired)
             .map(|cursor| cursor.source.clone())
+            .collect();
+        #[cfg(test)]
+        let sources: Arc<[SourceId]> = sources
+            .iter()
+            .filter(|source| {
+                !crate::services::claude_tui::source_verify::n2b_mutant("b1b-live-s")
+                    || !self.suspension.contains(source)
+            })
+            .cloned()
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)

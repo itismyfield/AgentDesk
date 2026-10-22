@@ -20,6 +20,8 @@ impl StopReply {
             };
         }
         match &self.stop {
+            CommandStop::Native(stop) => stop.text(),
+            CommandStop::Observed(sent) => turn_bridge::NativeStop::observed_text(*sent),
             CommandStop::Session(_) | CommandStop::Stop(_) => super::STOPPING_RESPONSE,
             #[cfg(unix)]
             CommandStop::Herdr(stop) => stop.reply(),
@@ -39,6 +41,10 @@ impl StopReply {
             return refused;
         }
         match &self.stop {
+            CommandStop::Native(stop) => stop.wire(),
+            CommandStop::Observed(sent) => {
+                serde_json::json!({"outcome": if *sent {"native_pending"} else {"unconfirmed"}, "effect_started": sent})
+            }
             CommandStop::Session(_) | CommandStop::Stop(_) => {
                 serde_json::json!({"outcome": "stopping", "effect_started": true})
             }
@@ -64,37 +70,19 @@ impl StopReply {
     ) {
         crate::services::cluster::channel_home::command_scope(self.permit, async {
             match self.stop {
+            CommandStop::Native(stop) => {
+                if stop.finish().await.token.is_some() {
+                    after_native_publish(shared, provider, channel, None).await;
+                }
+            }
+            CommandStop::Observed(_) => {}
             CommandStop::Session(stop) => {
                 stop.interrupt("/stop").await;
             }
             CommandStop::Stop(stop) => {
                 stop.stop(turn_bridge::TmuxCleanupPolicy::PreserveSession, "/stop")
                     .await;
-                let release =
-                    super::super::zombie_foreground_release::release_zombie_foreground_turn(
-                        shared, provider, channel, "/stop",
-                    )
-                    .await;
-                if matches!(
-                    release.verdict,
-                    Some(super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldInflightPresent
-                        | super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldTuiNotIdle)
-                ) {
-                    super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
-                        shared, provider, channel, "slash_stop_held_release",
-                    )
-                    .await;
-                }
-                log_info_event!(
-                    "discord_cancel_signal_sent",
-                    channel_id = channel.get(),
-                    provider = provider.as_str(),
-                    status = if release.released { "released" } else { "sent" },
-                    mailbox_foreground_released = release.released,
-                    zombie_verdict = release.verdict_str(),
-                    queue_depth_after = release.queue_depth_after,
-                    queue_kickoff_scheduled = release.queue_kickoff_scheduled,
-                );
+                after_native_publish(shared, provider, channel, None).await;
             }
             #[cfg(unix)]
             CommandStop::Herdr(_) =>
@@ -184,6 +172,37 @@ pub(in crate::services::discord) async fn run_holder_stop_on(
     wire
 }
 
+/// A non-forced cancel's `/stop` on a live Herdr turn of this runtime, as the holder answers it;
+/// `None` when no runtime serves the channel or its turn is not one, and nothing was done.
+pub(crate) async fn run_herdr_cancel(
+    registry: &crate::services::discord::health::HealthRegistry,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Option<serde_json::Value> {
+    let channel = ChannelId::new(channel);
+    let shared = registry
+        .shared_for_provider_on_channel(provider, channel)
+        .await?;
+    let stop = turn_bridge::ChannelStop::herdr_user_stop(&shared, provider, channel).await?;
+    let reply = StopReply {
+        stop,
+        refusal: None,
+        permit: None,
+    };
+    let wire = reply.wire();
+    reply.finish(&shared, provider, channel).await;
+    Some(wire)
+}
+
+/// What `/stop` answers once its owner took the cancel: a Herdr holder's answer as it is, and
+/// "stopping" for a cancel that carries none.
+pub(in crate::services::discord) fn remote_cancel_reply(answer: &serde_json::Value) -> String {
+    match answer.get("outcome") {
+        Some(_) => holder_reply(answer),
+        None => super::STOPPING_RESPONSE.to_owned(),
+    }
+}
+
 /// What a gateway's `/stop` answers for a channel delegated away; `None` keeps the existing path.
 pub(in crate::services::discord) async fn gateway_stop_reply(
     context: &crate::services::session_forwarding::ForwardCallerContext,
@@ -206,6 +225,9 @@ pub(in crate::services::discord) async fn gateway_stop_reply(
 }
 
 fn holder_reply(answer: &serde_json::Value) -> String {
+    if answer["outcome"] == "unconfirmed" && answer["notice"] == false {
+        return "같은 중단 요청의 결과를 이미 안내했어요.".into();
+    }
     let field = |key: &str| {
         answer
             .get(key)
@@ -224,6 +246,9 @@ fn holder_reply(answer: &serde_json::Value) -> String {
             );
         }
         ("herdr", _) => "holder 노드의 중지 키 전달 결과를 확인하지 못했어요. 다시 보내지 않아요.",
+        ("unconfirmed", _) => turn_bridge::NativeStop::observed_text(false),
+        ("native_pending", _) => turn_bridge::NativeStop::observed_text(true),
+        ("completed", _) => "중단 대상 작업이 이미 끝났거나 바뀌었어요.",
         ("stopping", _) => super::STOPPING_RESPONSE,
         ("already_stopping", _) => super::ALREADY_STOPPING_RESPONSE,
         ("host_refused", _) => super::HOST_REFUSED_STOP_RESPONSE,
@@ -231,4 +256,56 @@ fn holder_reply(answer: &serde_json::Value) -> String {
         _ => return format!("holder 노드가 중지를 거절했어요 ({}).", field("reason")),
     };
     fixed.to_owned()
+}
+
+/// Preserve the existing recovery and queue consequences after a confirmed native publish.
+pub(in crate::services::discord) async fn after_native_publish(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    text_source: Option<&'static str>,
+) {
+    if let Some(source) = text_source {
+        crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+            crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_text_stop(
+                provider.clone(),
+                channel,
+                source,
+                true,
+            ),
+        );
+        super::text_commands::schedule_text_stop_pending_queue_drain(
+            shared, provider, channel, source,
+        );
+        return;
+    }
+    let release = super::super::zombie_foreground_release::release_zombie_foreground_turn(
+        shared, provider, channel, "/stop",
+    )
+    .await;
+    if matches!(
+        release.verdict,
+        Some(
+            super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldInflightPresent
+                | super::super::zombie_foreground_release::ZombieForegroundVerdict::HoldTuiNotIdle
+        )
+    ) {
+        super::super::queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            shared,
+            provider,
+            channel,
+            "slash_stop_held_release",
+        )
+        .await;
+    }
+    log_info_event!(
+        "discord_cancel_signal_sent",
+        channel_id = channel.get(),
+        provider = provider.as_str(),
+        status = if release.released { "released" } else { "sent" },
+        mailbox_foreground_released = release.released,
+        zombie_verdict = release.verdict_str(),
+        queue_depth_after = release.queue_depth_after,
+        queue_kickoff_scheduled = release.queue_kickoff_scheduled,
+    );
 }
