@@ -147,7 +147,7 @@ async fn codex_cancel_during_replacement_does_not_protect_dead_pane_pg() {
         ReplacementCase::CancelDuringGap,
         concat!(
             module_path!(),
-            "::codex_cancel_during_replacement_does_not_protect_dead_pane"
+            "::codex_cancel_during_replacement_does_not_protect_dead_pane_pg"
         ),
     )
     .await;
