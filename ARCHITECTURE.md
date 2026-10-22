@@ -40,6 +40,8 @@ src/
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
+│   │   │   ├── herdr_policy.rs
+│   │   │   ├── herdr_policy_tests.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
@@ -106,7 +108,9 @@ src/
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
 │   │   ├── migration_tests.rs
-│   │   └── projection.rs
+│   │   ├── projection.rs
+│   │   ├── user_default.rs
+│   │   └── user_default_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -679,6 +683,8 @@ src/
 │   │   ├── herdr_turn/
 │   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
+│   │   │   ├── composer.rs
+│   │   │   ├── composer_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
@@ -898,7 +904,11 @@ src/
 │   ├── codex/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
+│   │   ├── herdr_turn/
+│   │   │   └── composer_tests.rs
 │   │   ├── tui_session_launch/
+│   │   │   ├── launch_policy/
+│   │   │   │   └── fresh_tests.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
@@ -2208,9 +2218,10 @@ src/
 │   │   │   │   │   ├── boundary_tests.rs
 │   │   │   │   │   └── runtime_switch_tests.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests/
-│   │   │   │   │   └── herdr_synthetic_identity_pg_tests/
-│   │   │   │   │       ├── final_recheck_tests.rs
-│   │   │   │   │       └── hosted_classification_tests.rs
+│   │   │   │   │   ├── herdr_synthetic_identity_pg_tests/
+│   │   │   │   │   │   ├── final_recheck_tests.rs
+│   │   │   │   │   │   └── hosted_classification_tests.rs
+│   │   │   │   │   └── herdr_synthetic_identity_pg_tests.rs
 │   │   │   │   ├── absent_tmux_host_tests.rs
 │   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
@@ -2238,6 +2249,7 @@ src/
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
+│   │   │   ├── herdr_adoption.rs
 │   │   │   ├── herdr_source.rs
 │   │   │   ├── herdr_source_tests.rs
 │   │   │   ├── hook_observer.rs
@@ -3086,6 +3098,8 @@ src/
 │   │   │   │   ├── checker_tests.rs
 │   │   │   │   ├── consent.rs
 │   │   │   │   ├── consent_tests.rs
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
 │   │   │   │   ├── durable.rs
 │   │   │   │   ├── durable_tests.rs
 │   │   │   │   ├── editor.rs
@@ -3107,6 +3121,7 @@ src/
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
 │   │   │   ├── model.rs

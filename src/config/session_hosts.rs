@@ -17,6 +17,7 @@ const CLAUDE_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
 pub(crate) mod approval_store;
 pub(crate) mod migration;
 pub(crate) mod projection;
+mod user_default;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +133,9 @@ fn normalized(config: &Config) -> Result<(Config, &'static str)> {
     let ids = GUARD_INPUT.get_or_init(|| read_guard_input().map_err(|error| error.to_string()));
     let ids = ids.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut effective = config.clone();
+    user_default::resolve(&mut effective, || {
+        std::env::var_os("HOME").map(PathBuf::from)
+    })?;
     let source = match ids {
         None => "yaml",
         Some(ids) => {
@@ -219,11 +223,13 @@ fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, Channe
             "{at}.herdr_session is empty"
         );
         ensure!(
-            endpoint.socket_path.is_absolute(),
+            endpoint.socket_path.is_absolute()
+                || (endpoint.mode == EndpointMode::UserDefault
+                    && endpoint.socket_path.as_os_str().is_empty()),
             "{at}.socket_path is not absolute"
         );
         ensure!(
-            endpoint.herdr_home.is_absolute(),
+            endpoint.herdr_home.is_absolute() || endpoint.mode == EndpointMode::UserDefault,
             "{at}.herdr_home is not absolute"
         );
     }
@@ -294,7 +300,9 @@ pub(crate) struct BootMigration {
 
 impl BootMigration {
     pub(crate) fn restart_required(&self, config: &Config) -> bool {
-        self.candidate != config.session_hosts
+        normalized(config).map_or(true, |(effective, _)| {
+            self.candidate != effective.session_hosts
+        })
     }
 
     pub(crate) fn candidate(&self) -> &SessionHostsConfig {

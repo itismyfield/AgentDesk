@@ -1,6 +1,5 @@
 //! Mutation gate for one recorded pane: admission, endpoint policy, exact execution.
 //! Every write stays pinned to the server that the policy permitted.
-#![cfg_attr(not(test), allow(dead_code))]
 
 #[cfg(unix)]
 #[path = "herdr_gate/root_replaced.rs"]

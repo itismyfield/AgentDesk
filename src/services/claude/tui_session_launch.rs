@@ -176,6 +176,9 @@ pub(crate) fn prepare_claude_herdr_launch(
     auth_env_lines: &str,
 ) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
     use crate::services::herdr_launch::{HerdrLaunchCommand, unset_herdr_env_before_exec};
+    if prepared.context.launch_mode != "fresh" {
+        return Err("claude herdr launch: fresh mode is required; resume is not supported".into());
+    }
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let (claude_bin, _resolution) = resolve_claude_binary()?;
@@ -212,6 +215,34 @@ pub(crate) fn prepare_claude_herdr_launch(
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn claude_herdr_prepare_refuses_resume_before_binary_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let prepared = PreparedIncarnation::prepare_at(
+            "claude",
+            "fresh-claude",
+            Some(1),
+            Some("session"),
+            true,
+            None,
+        )
+        .unwrap();
+        let result = super::prepare_claude_herdr_launch(
+            &prepared,
+            root.path(),
+            "session",
+            None,
+            None,
+            "http://localhost/unused".into(),
+            "",
+        );
+        assert!(
+            matches!(result, Err(error) if error.contains("fresh mode is required")),
+            "actual_claude_prepare_refuses_resume_contract"
+        );
+    }
+
     #[test]
     fn binding_context_t7_claude_launch_fails_before_tmux() {
         use super::prepare_and_create_claude_tui_session as launch;

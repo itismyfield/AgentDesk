@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d19231a4d97e01a79bd78793d453e4e23477f7a9",
+  "measured_at_sha": "89918b6d11e7b8892934f76ae4000d9df33a1585",
   "records": [
     {
       "root": "migrations/postgres",
@@ -10521,6 +10521,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:1ce608b0aa23ba79494268704fb312e66e593acf1536e3ec5b2e8fd2b87c296c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:4055a0013b6c53ab059fe9e05c572b8827a6e2e7d935365aec968427ab5554f2"
     },
     {
@@ -10548,7 +10557,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:e4dc41ae4b790333065f8a53aa7d1c9fd2f098b772cb79b8d63576fa19a41bd0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:fefcac3fa35fab3cea75a2323f3df25987ca7431ace82d0c4c0760955c320e47"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6ab0595d87e7eedf731a8252069f3bcf3587d9b69d8e0ee62f3688a59a6f2f53"
     },
     {
       "root": "src",
@@ -10576,6 +10603,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:303193bc05dd4cc242e5e6fabd5850c063f587182c334b4d89253aa8befd4d89"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:417d7df1eddc638be5a75568425db3e36b2db130c2940d20d72995680adc89a8"
     },
     {
       "root": "src",
@@ -10621,6 +10657,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:ea67ec44bc11a8d282861d77ef806dd63d723748f604093e8fd8c862376c7fda"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:561c83c12fef913e85485f79f0a7a8a132ec19a15fc569d4c1dffa1e1f635fe2"
     },
     {
       "root": "src",
@@ -31811,6 +31856,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/commands/control/consent_clear_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0f47f76dc7aed4732827fcdea7ee8170e0b06b5b2b89e6d1197508e81b8bb1e3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/commands/inspect/query.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -32805,7 +32859,25 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:6a17f0f772c63ec2cbb007900a955801f9ec1631b5597816f625a115d6fb25f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:8741ddb62553af7b5f2f056d7777c991b55bafc14d37e1556da24e329a235107"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b047f63e12a7d6b266a861a0722361421dbe88505eb0589bd8c9597ecfccc823"
     },
     {
       "root": "src",

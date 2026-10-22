@@ -47,7 +47,6 @@ pub(crate) async fn prepare(
     source: Arc<dyn PeerSource>,
     revision: u64,
 ) -> Result<Prepared, String> {
-    let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         let peer = source.snapshot().map_err(|e| format!("peer: {e:?}"))?;
         let plan = apply::preview(&peer.config).map_err(|e| e.detail)?;
@@ -60,13 +59,10 @@ pub(crate) async fn prepare(
         };
         let prepared = Prepared { token, plan, peer };
         prepared.peer_unchanged(source.as_ref())?;
-        prepared.plan.check_candidate(&|path: &Path| {
-            prepared.peer_unchanged(source.as_ref())?;
-            runtime
-                .block_on(checker::candidate(&prepared.peer, path))
-                .map_err(|e| format!("preview full config checker: {e:?}"))?;
-            prepared.peer_unchanged(source.as_ref())
-        })?;
+        prepared.plan.check_candidate(&checker::FullCandidate::new(
+            &prepared.peer,
+            source.as_ref(),
+        ))?;
         prepared.peer_unchanged(source.as_ref())?;
         prepared.plan.unchanged()?;
         Ok(prepared)

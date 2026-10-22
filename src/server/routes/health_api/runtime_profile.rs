@@ -30,7 +30,15 @@ pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value 
             for (key, endpoint) in &boot.config().herdr.endpoints {
                 let node = endpoint.execution_node.trim();
                 let local = boot.local_node() == Some(node);
-                let entry = serde_json::json!({"node": node, "local": local, "last_e7": "never"});
+                let mut entry =
+                    serde_json::json!({"node": node, "local": local, "last_e7": "never"});
+                if endpoint.mode == crate::config::session_hosts::EndpointMode::UserDefault {
+                    entry["mode"] = "user_default".into();
+                    entry["socket"] = endpoint.socket_path.to_string_lossy().into_owned().into();
+                    entry["policy"] = crate::services::session_host::policy::diagnostics::snapshot(
+                        &endpoint.socket_path,
+                    );
+                }
                 endpoints.insert(key.clone(), entry);
             }
             let mut view = serde_json::json!({
@@ -118,6 +126,34 @@ mod tests {
         let mut health = json!({});
         super::attach_runtime_profile(&mut health, config);
         health["herdr"].take()
+    }
+
+    #[test]
+    fn health_exposes_user_default_proof_refusal_without_server_or_file_io() {
+        use crate::services::session_host::policy::{ProofCache, Unverified, diagnostics};
+        let _hosts = force_for_test(Some("worker"), &[(41, "worker")])
+            .with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+        diagnostics::record(
+            std::path::Path::new("/adk/herdr/agentdesk.sock"),
+            &ProofCache::default(),
+            &Err(Unverified::Identity),
+        );
+        let mut live = crate::config::Config::default();
+        live.session_hosts = with_boot(|b| b.unwrap().config().clone());
+        let view = herdr(&live);
+        let endpoint = &view["endpoints"]["worker-endpoint"];
+        assert_eq!(endpoint["mode"], "user_default");
+        assert_eq!(
+            endpoint["policy"]["next_restart_ready"], false,
+            "health_user_default_refusal_is_not_readiness_contract"
+        );
+        assert_eq!(endpoint["policy"]["startup_proof"], "unknown");
+        assert!(
+            endpoint["policy"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Identity")
+        );
     }
 
     // The health body shows the boot section as booted: nothing configured reads no admission,

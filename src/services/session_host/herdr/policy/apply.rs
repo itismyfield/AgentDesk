@@ -58,9 +58,15 @@ pub(crate) struct Applied {
     pub original_absent: bool,
 }
 /// The blocking apply owner supplies a full local checker, never a semantic-key-only check.
-pub(crate) trait CandidateChecker {
+pub(super) mod sealed {
+    pub trait FullConfig {}
+}
+pub(crate) trait CandidateChecker: sealed::FullConfig {
     fn check(&self, path: &Path) -> Result<(), String>;
 }
+#[cfg(test)]
+impl<F: Fn(&Path) -> Result<(), String>> sealed::FullConfig for F {}
+#[cfg(test)]
 impl<F: Fn(&Path) -> Result<(), String>> CandidateChecker for F {
     fn check(&self, path: &Path) -> Result<(), String> {
         self(path)

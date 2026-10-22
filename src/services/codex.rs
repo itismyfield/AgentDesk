@@ -22,8 +22,11 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
+use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
+#[cfg(unix)]
+pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(unix)]
 pub(crate) use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
@@ -478,25 +481,6 @@ fn base_tui_args(
 pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = codex_tui_option_args(options);
     args.extend(["--".to_string(), options.prompt.to_string()]);
-    args
-}
-
-/// The TUI argv up to its prompt; a Herdr launch types the prompt into the composer instead.
-fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
-    let mut args = Vec::new();
-    if options.resume_session_id.is_some() {
-        args.push("resume".to_string());
-    }
-    append_codex_common_launch_args(&mut args, options);
-    // Startup menus must never turn a routed Enter into a global toolchain update.
-    args.extend([
-        "-c".to_string(),
-        "check_for_update_on_startup=false".to_string(),
-    ]);
-    append_codex_sandbox_args(&mut args, options.readonly_mode);
-    if let Some(session_id) = options.resume_session_id.as_deref() {
-        args.push(session_id.to_string());
-    }
     args
 }
 

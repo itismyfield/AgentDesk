@@ -21,7 +21,7 @@ use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
-use crate::services::claude_tui::host_input::{InputRun, run_herdr};
+use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
@@ -649,8 +649,9 @@ fn prompt_and_read(
         start.offset = before;
         start
     };
-    let HerdrInputRun::Ran(run) =
-        observed_input(cancel, start, || run_herdr(&attached.target, &plan, cancel))?
+    let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
+        composer::run(&attached.target, &plan, cancel)
+    })?
     else {
         if !before_start::mutant("closed_release_callsite_removed_claude") {
             before_start::release_claude_hold(&turn.owner.logical_key, &held);
@@ -923,3 +924,5 @@ mod coldstop_input_tests;
 
 #[cfg(all(test, unix))]
 mod boot_host_tests;
+
+mod composer;

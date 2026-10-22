@@ -106,6 +106,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_end_tests
   --skip services::discord::commands::control::clear_entry_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
+  --skip services::discord::commands::control::clear_report::consent_clear_tests
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
   --skip services::discord::commands::control::home_fence::tests
@@ -478,6 +479,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+  services::discord::commands::control::clear_report::consent_clear_tests::clear_consent_settles_only_exact_durable_waiting_refs_and_keeps_unknowns
+  services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
@@ -634,10 +637,12 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_each_unsafe_class
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
+  services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
   services::discord::router::herdr_consent::admission::tests::consent_actual_queued_readmission_restores_same_head_lease_uploads_and_origin
   services::discord::router::herdr_consent::admission::tests::consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fifo
   services::discord::router::herdr_consent::admission::tests::consent_persistence_failure_retains_live_payload_without_success_or_card
   services::discord::router::herdr_consent::admission::tests::consent_unprepared_attachment_and_missing_durable_source_never_succeed_as_text
+  services::discord::router::herdr_consent::admission::tests::expired_consent_backstop_restores_head_without_store_or_card_effects
   services::discord::router::herdr_consent::admission::tests::full_binding_validator_keeps_user_default_unreachable
   services::discord::router::herdr_consent::admission::tests::legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_consent_io
   services::discord::router::herdr_consent::admission::tests::legacy_actual_queued_entry_retains_local_admission_without_consent_io

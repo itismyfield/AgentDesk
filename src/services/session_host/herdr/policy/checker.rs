@@ -9,6 +9,53 @@ use tokio::process::Command;
 use super::Unverified;
 use super::peer::PeerSnapshot;
 
+#[cfg(unix)]
+pub(crate) struct FullCandidate<'a> {
+    peer: &'a PeerSnapshot,
+    source: &'a dyn super::PeerSource,
+    runtime: tokio::runtime::Handle,
+}
+
+#[cfg(unix)]
+impl<'a> FullCandidate<'a> {
+    pub(crate) fn new(peer: &'a PeerSnapshot, source: &'a dyn super::PeerSource) -> Self {
+        Self {
+            peer,
+            source,
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    fn unchanged(&self) -> Result<(), String> {
+        if self.source.snapshot().map_err(|e| format!("peer: {e:?}"))? != *self.peer {
+            return Err("consented peer changed".into());
+        }
+        self.peer
+            .image
+            .unchanged()
+            .map_err(|e| format!("checker: {e:?}"))
+    }
+}
+
+#[cfg(unix)]
+impl super::apply::sealed::FullConfig for FullCandidate<'_> {}
+
+#[cfg(unix)]
+impl super::apply::CandidateChecker for FullCandidate<'_> {
+    fn check(&self, path: &std::path::Path) -> Result<(), String> {
+        self.unchanged()?;
+        self.runtime
+            .block_on(candidate(self.peer, path))
+            .map_err(|e| {
+                format!(
+                    "full config checker: {e:?}; {}",
+                    super::diagnostics::checker_detail(&self.peer.witness.socket)
+                )
+            })?;
+        self.unchanged()
+    }
+}
+
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const HEALTHY_OUTPUT: &[u8] = b"config: ok\n";
@@ -82,6 +129,7 @@ async fn run_config_with_limits(
             read_capped(stderr, limit),
             async { child.wait().await.map_err(|_| Unverified::Checker) },
         )?;
+        super::diagnostics::checker(&peer.witness.socket, &stdout, &stderr);
         if !status.success() {
             return Err(Unverified::Checker);
         }

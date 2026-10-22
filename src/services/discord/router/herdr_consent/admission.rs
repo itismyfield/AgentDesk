@@ -117,12 +117,14 @@ async fn assess(
     }
     let source = peer(&configured)?;
     static PROOFS: std::sync::OnceLock<ProofCache> = std::sync::OnceLock::new();
-    if PROOFS
-        .get_or_init(ProofCache::default)
-        .next_restart(source.clone(), &LocalChecker)
-        .await
-        .is_ok()
-    {
+    let proofs = PROOFS.get_or_init(ProofCache::default);
+    let checked = proofs.next_restart(source.clone(), &LocalChecker).await;
+    crate::services::session_host::policy::diagnostics::record(
+        std::path::Path::new(&configured.socket_addr),
+        proofs,
+        &checked,
+    );
+    if checked.is_ok() {
         return Ok(None);
     }
     let prepared = preview::prepare(source, 1).await?;

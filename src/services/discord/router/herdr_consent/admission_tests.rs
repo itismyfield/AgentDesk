@@ -1345,7 +1345,7 @@ async fn expired_consent_backstop_restores_head_without_store_or_card_effects() 
 
 #[tokio::test(flavor = "current_thread")]
 async fn already_held_requires_every_original_source_and_exact_generation() {
-    for old_generation in [false, true] {
+    for (old_generation, include_new) in [(false, true), (true, true), (true, false)] {
         let f = Fixture::new("disabled").await;
         let _boot =
             session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
@@ -1369,11 +1369,13 @@ async fn already_held_requires_every_original_source_and_exact_generation() {
         }])
         .await
         .unwrap();
-        let mut b = submission(8_916_111, IntakeOrigin::TextSkill);
-        b.request.merge_consecutive = true;
-        b.request.has_reply_boundary = false;
-        b.request.reply_context = None;
-        assert!(intake::defer_live_submission(&f.deps(), b, true).await);
+        if include_new {
+            let mut b = submission(8_916_111, IntakeOrigin::TextSkill);
+            b.request.merge_consecutive = true;
+            b.request.has_reply_boundary = false;
+            b.request.reply_context = None;
+            assert!(intake::defer_live_submission(&f.deps(), b, true).await);
+        }
         let taken = f
             .shared
             .mailbox(ChannelId::new(discord_mock::CHANNEL_ID))
@@ -1386,7 +1388,7 @@ async fn already_held_requires_every_original_source_and_exact_generation() {
         let head = taken.intervention.as_ref().unwrap();
         assert_eq!(
             head.source_message_ids.len(),
-            2,
+            1 + usize::from(include_new),
             "already_held_mixed_fixture_has_both_sources_contract"
         );
         let result = intake::admit_queued_intake(
@@ -1416,7 +1418,7 @@ async fn already_held_requires_every_original_source_and_exact_generation() {
         }
         assert_eq!(
             consent.unresolved_intents().len(),
-            2 + usize::from(old_generation),
+            1 + usize::from(include_new) + usize::from(old_generation),
             "already_held_never_drops_new_or_reused_generation_contract"
         );
     }

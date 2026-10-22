@@ -140,6 +140,7 @@ cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests:
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
+cli::doctor::orchestrator::herdr_policy::tests::doctor_separates_fresh_ready_from_startup_restart_and_does_not_fix_servers
 cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
 cli::doctor::orchestrator::observation_tests::doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair
 cli::doctor::orchestrator::observation_tests::observations_gate_stale_mailbox_posts
@@ -303,6 +304,8 @@ config::session_hosts::tests::claude_guard_channel_runtime_follows_the_hosting_r
 config::session_hosts::tests::claude_guard_channels_default_empty_round_trip_unchanged_and_only_claude_tui
 config::session_hosts::tests::guard_and_herdr_checks_read_provider_keys_as_the_installed_resolver_does
 config::session_hosts::tests::session_hosts_boot_loader_takes_tui_channels_on_complete_endpoints_and_refuses_the_rest
+config::session_hosts::user_default::tests::legacy_and_explicit_user_sockets_do_not_read_home
+config::session_hosts::user_default::tests::user_default_resolves_only_the_execution_users_socket
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config::tool_activity_display::tests::omitted_tool_activity_detail_defaults_to_summary
 config::tool_activity_display::tests::tool_activity_modes_round_trip_without_accepting_unknown_detail
@@ -669,6 +672,7 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
+db::intake_outbox::consent_handoff::tests::consent_before_record_rollback_consumes_exact_authority_and_preserves_bookkeeping_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_first_release_after_regeneration_uses_stable_consent_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_refuses_unmarked_post_accept_rows_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg
@@ -1494,6 +1498,7 @@ server::routes::health_api::presence_unknown_tests::public_unknown_diagnostics_k
 server::routes::health_api::public_projection::tui_output_readiness_tests::public_health_proves_the_tui_gateway_reason_to_the_readiness_predicate
 server::routes::health_api::response::kv_gate_tests::health_gate_kv_timeout_does_not_report_fallback_as_effective
 server::routes::health_api::runtime_profile::tests::health_counts_reconnects_and_held_inputs_only_with_a_local_endpoint
+server::routes::health_api::runtime_profile::tests::health_exposes_user_default_proof_refusal_without_server_or_file_io
 server::routes::health_api::runtime_profile::tests::health_projects_the_boot_session_hosts_and_admission
 server::routes::health_api::runtime_profile::tests::health_shows_channel_homes_only_once_one_is_registered
 server::routes::health_api::session_repair::tests::measured_refusal_precedes_failed_session_lookup
@@ -2001,6 +2006,7 @@ services::claude::guarded_owner_tests::cg_b2c_fresh_finalize_preserves_the_typed
 services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cleanup_with_valid_clearance
 services::claude::herdr_turn::boot_host_tests::boot_launch_host_forwards_endpoint_mode
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
+services::claude::herdr_turn::composer::composer_tests::herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or_enter
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
 services::claude::herdr_turn::start_offset::test_hooks::a_missing_file_and_metadata_or_whole_json_without_newline_commit_no_start
@@ -2045,6 +2051,7 @@ services::claude::tui_session_launch::herdr_off_tests::claude_launch_creates_no_
 services::claude::tui_session_launch::herdr_off_tests::claude_launch_entry_stays_on_tmux_and_starts_no_herdr_preparation
 services::claude::tui_session_launch::host_marker_tests::claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches
 services::claude::tui_session_launch::tests::binding_context_t7_claude_launch_fails_before_tmux
+services::claude::tui_session_launch::tests::claude_herdr_prepare_refuses_resume_before_binary_resolution
 services::claude_command::chokepoint_guard_tests::claude_binaries_are_not_raw_spawned_outside_the_chokepoint
 services::claude_command::chokepoint_guard_tests::raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint
 services::claude_command::chokepoint_guard_tests::sealed_claude_seam_confined_to_chokepoint
@@ -3074,6 +3081,7 @@ services::codex::codex_fifo_followup_transport_tests::send_codex_pipe_prompt_wri
 services::codex::herdr_guard_tests::both_codex_tmux_entries_refuse_a_herdr_channel_before_any_tmux_call_or_cleanup
 services::codex::herdr_turn::coldstop_input_tests::coldstop_actual_typed_outcomes_keep_indeterminate_unsubmitted_held
 services::codex::herdr_turn::coldstop_input_tests::coldstop_input_boundary_never_calls_write_or_start
+services::codex::herdr_turn::composer_tests::codex_actual_composer_entry_preserves_draft_modal_busy_and_capture_failure
 services::codex::herdr_turn::observed_input_tests::a_followup_builds_its_turn_start_only_under_settlement
 services::codex::relay_separator_tests::codex_second_agent_message_carries_paragraph_separator_3431
 services::codex::remote_dispatch_gate_tests::remote_direct_is_refused_when_gate_off
@@ -3106,6 +3114,8 @@ services::codex::tui_hosting_tests::codex_tui_turn_lock_is_shared_only_by_the_sa
 services::codex::tui_hosting_tests::codex_wrapper_existing_session_audit_reasons_match_cleanup_paths
 services::codex::tui_hosting_tests::codex_wrapper_input_mode_detector_distinguishes_fifo_pipe_and_unknown
 services::codex::tui_hosting_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
+services::codex::tui_session_launch::launch_policy::fresh_tests::codex_herdr_prepare_rejects_resume_before_launch_effects
+services::codex::tui_session_launch::launch_policy::fresh_tests::herdr_fresh_argv_rejects_resume_without_rejecting_option_values
 services::codex::tui_session_launch::tests::actual_launch_pins_verified_only_for_exact_canary_and_keeps_policy_after_rollback
 services::codex::tui_session_launch::tests::binding_context_t7_codex_launch_fails_before_tmux
 services::codex::tui_session_launch::tests::codex_launch_home_follows_the_auth_profile_and_hooks_pin_only_an_unprofiled_home
@@ -3816,6 +3826,8 @@ services::discord::commands::control::clear_report::clear_count_tests::clear_rep
 services::discord::commands::control::clear_report::clear_count_tests::clear_reply_says_the_count_is_unknown_when_the_marker_is_unreadable
 services::discord::commands::control::clear_report::consent_clear_tests::clear_consent_settles_only_exact_durable_waiting_refs_and_keeps_unknowns
 services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
+services::discord::commands::control::clear_report::consent_clear_tests::user_default_actual_general_clear_settles_exact_consent_once_pg
+services::discord::commands::control::clear_report::consent_clear_tests::user_default_actual_herdr_clear_early_return_settles_exact_consent_once_pg
 services::discord::commands::control::clear_report::herdr_report_tests::held_and_partial_herdr_clear_reports_keep_input_discard_and_execution_separate
 services::discord::commands::control::clear_teardown::clear_end_record_tests::only_a_confirmed_claude_pane_end_is_recorded
 services::discord::commands::control::clear_wait_tests::a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head
@@ -6990,11 +7002,15 @@ services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg
+services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
 services::discord::router::herdr_consent::admission::tests::consent_actual_queued_readmission_restores_same_head_lease_uploads_and_origin
 services::discord::router::herdr_consent::admission::tests::consent_live_custody_keeps_expanded_prompt_sources_upload_and_voice_fifo
 services::discord::router::herdr_consent::admission::tests::consent_persistence_failure_retains_live_payload_without_success_or_card
 services::discord::router::herdr_consent::admission::tests::consent_unprepared_attachment_and_missing_durable_source_never_succeed_as_text
+services::discord::router::herdr_consent::admission::tests::expired_consent_backstop_restores_head_without_store_or_card_effects
 services::discord::router::herdr_consent::admission::tests::full_binding_validator_keeps_user_default_unreachable
 services::discord::router::herdr_consent::admission::tests::legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_consent_io
 services::discord::router::herdr_consent::admission::tests::legacy_actual_queued_entry_retains_local_admission_without_consent_io
@@ -9969,6 +9985,7 @@ services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::h
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_with_ambiguous_original_source_holds_without_blocking_valid_n2_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_with_an_exact_original_source_still_claims_current_n1_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_without_original_source_holds_without_blocking_valid_n2_pg
+services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthetic_claimed_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::stale_pending_cannot_replace_a_live_n2_lease_before_its_claim_is_refused_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session
@@ -12721,6 +12738,7 @@ services::session_host::consumer_guard::tests::automatic_state_change_verdict_fo
 services::session_host::consumer_guard::tests::policy_probe_defers_every_non_legacy_host_without_probing
 services::session_host::consumer_guard::tests::transcript_completion_is_never_blocked_by_host_evidence
 services::session_host::herdr::launch_host::real_tests::herdr_real_server_launch_input_bytes_and_refusals
+services::session_host::herdr::launch_host::t19_real_tests::herdr_t19_resume_true_restores_claude_and_codex_as_shells_only
 services::session_host::herdr::launch_host::tests::launch_evidence_probes_the_located_pane_on_the_launch_server
 services::session_host::herdr::launch_host::tests::policy::policy_boot_restore_errors_are_endpoint_scoped_and_cache_poison_remains_closed
 services::session_host::herdr::launch_host::tests::policy::policy_endpoint_keys_do_not_alias_and_missing_source_is_a_refusal
@@ -12851,6 +12869,7 @@ services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_
 services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_requires_current_owner_and_node_and_invalidates_old_buttons
 services::session_host::herdr::policy::consent::workflow::tests::workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads
 services::session_host::herdr::policy::consent::workflow::tests::workflow_unsent_card_ttl_starts_at_reservation
+services::session_host::herdr::policy::diagnostics::tests::diagnosis_reports_refusal_and_bounded_checker_output_without_reading_files
 services::session_host::herdr::policy::durable::tests::durable_directory_is_lazy_and_missing_is_distinct_from_failure
 services::session_host::herdr::policy::durable::tests::durable_existing_snapshot_permissions_and_nonregular_paths_are_not_missing
 services::session_host::herdr::policy::durable::tests::durable_failed_update_and_equal_cas_never_publish_another_generation

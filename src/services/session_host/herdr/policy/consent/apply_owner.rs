@@ -20,17 +20,10 @@ pub(crate) async fn apply(
     if prepared.token != *expected {
         return Err(refused("consent preview changed".into()));
     }
-    let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         prepared.peer_unchanged(source.as_ref()).map_err(refused)?;
         prepared.plan.unchanged().map_err(refused)?;
-        let check = |path: &std::path::Path| {
-            prepared.peer_unchanged(source.as_ref())?;
-            runtime
-                .block_on(checker::candidate(&prepared.peer, path))
-                .map_err(|e| format!("full config checker: {e:?}"))?;
-            prepared.peer_unchanged(source.as_ref())
-        };
+        let check = checker::FullCandidate::new(&prepared.peer, source.as_ref());
         let result = apply::apply(&prepared.plan, &check)?;
         prepared
             .peer_unchanged(source.as_ref())

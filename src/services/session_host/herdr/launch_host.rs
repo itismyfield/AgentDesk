@@ -1,5 +1,4 @@
 //! Socket launch adapter; legacy E7 and user-default permits remain separate.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::policy::grant_store::GrantRestoration;
 use super::policy::permit::{CreatePermit, ExistingMutationEvidence, LaunchAdmissionGrant};
@@ -404,11 +403,14 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
                 return Err("endpoint mode is not user_default".into());
             }
             let source = self.source(launch).ok_or("endpoint is not configured")?;
-            let proof = self
-                .policy
-                .next_restart(source, &LocalChecker)
-                .await
-                .map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
+            let checked = self.policy.next_restart(source, &LocalChecker).await;
+            super::policy::diagnostics::record(
+                Path::new(&launch.socket_addr),
+                &self.policy,
+                &checked,
+            );
+            let proof =
+                checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
             self.witnessed
                 .lock()
                 .map_err(|_| "policy cache unavailable")?
@@ -504,3 +506,7 @@ mod tests;
 #[cfg(test)]
 #[path = "launch_host_real_tests.rs"]
 mod real_tests;
+
+#[cfg(all(test, unix))]
+#[path = "launch_host_t19_real_tests.rs"]
+mod t19_real_tests;

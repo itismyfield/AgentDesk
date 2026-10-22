@@ -85,6 +85,7 @@ pub(in crate::services::discord) use self::anchor_completion::{
 };
 use self::bridge_completion::ensure_tui_direct_bridge_delivery_committed;
 use self::bridge_gateway::TuiDirectBridgeGateway;
+mod herdr_adoption;
 #[cfg(unix)]
 pub(in crate::services::discord) mod herdr_source;
 #[cfg(unix)]
@@ -312,6 +313,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         );
         return;
     };
+    if !herdr_adoption::current(
+        shared,
+        &prompt.provider,
+        channel_id,
+        &prompt.tmux_session_name,
+    )
+    .await
+    {
+        return;
+    }
     if prompt.steer_echo {
         return synthetic_start_wiring::post_steer_echo(shared, &prompt, channel_id).await;
     }

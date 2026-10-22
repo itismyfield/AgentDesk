@@ -1,6 +1,5 @@
 //! Herdr launch preparation for one channel's canonical row.
 //! Durable Pending and user-default grants precede create; retries only probe.
-#![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod policy;
 pub(crate) mod retired_hold;

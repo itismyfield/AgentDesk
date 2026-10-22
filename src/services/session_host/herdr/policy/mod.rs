@@ -9,6 +9,7 @@ mod cache;
 pub(crate) mod checker;
 #[cfg(unix)]
 pub(crate) mod consent;
+pub(crate) mod diagnostics;
 pub(crate) mod durable;
 #[cfg(unix)]
 pub(crate) mod editor;

@@ -218,6 +218,9 @@ impl<'a> AdmissionFence<'a> {
         {
             return Err("synthetic exact and canonical hosted rows differ".into());
         }
+        if !super::super::herdr_adoption::execution_current(record).await {
+            return Err("synthetic original execution is no longer alive".into());
+        }
         // The map guard is a leaf: no database, file or actor await runs while it is held.
         let admitted = tui_prompt_dedupe::herdr_claim_admission(&self.logical, true)
             .ok()

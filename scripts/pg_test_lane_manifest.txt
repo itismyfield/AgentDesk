@@ -163,6 +163,7 @@ src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_t
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs
 src/services/discord/commands/control/codex_clear_retirement_tests.rs
+src/services/discord/commands/control/consent_clear_tests.rs
 src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
@@ -308,6 +309,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
+src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/final_recheck_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/hosted_classification_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
@@ -581,6 +583,7 @@ services::discord::commands::cancel_backstop_tests
 services::discord::commands::control::clear_end_tests
 services::discord::commands::control::clear_entry_tests
 services::discord::commands::control::clear_persist_failure_tests
+services::discord::commands::control::clear_report::consent_clear_tests
 services::discord::commands::control::codex_clear_relaunch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests
@@ -1113,6 +1116,7 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
+db::intake_outbox::consent_handoff::tests::consent_before_record_rollback_consumes_exact_authority_and_preserves_bookkeeping_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_first_release_after_regeneration_uses_stable_consent_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_refuses_unmarked_post_accept_rows_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg
@@ -1854,6 +1858,8 @@ services::discord::commands::control::clear_entry_tests::slash_clear_commits_and
 services::discord::commands::control::clear_entry_tests::text_clear_commits_and_warns_once_whatever_fails_pg
 services::discord::commands::control::clear_persist_failure_tests::a_clear_commits_its_transcript_boundary_whatever_its_queue_write_did_pg
 services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg
+services::discord::commands::control::clear_report::consent_clear_tests::user_default_actual_general_clear_settles_exact_consent_once_pg
+services::discord::commands::control::clear_report::consent_clear_tests::user_default_actual_herdr_clear_early_return_settles_exact_consent_once_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_restored_head_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_off_with_stale_session_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_off_without_session_reaches_fresh_provider_pg
@@ -2155,7 +2161,9 @@ services::discord::replay_policy::policy_tests::stale_attempt_retries_only_on_co
 services::discord::replay_policy::policy_tests::stale_decision_failures_hold_without_a_permit_pg
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg
 services::discord::router::herdr_consent::custody::tests::live_outbox_custody_sink_passes_shared_durable_conformance_pg
 services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg
 services::discord::router::intake_dispatch::home_order_tests::dormant_owner_admission_primitive_preserves_full_sources_without_receipt_key_pg
@@ -2625,6 +2633,7 @@ services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::h
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_with_ambiguous_original_source_holds_without_blocking_valid_n2_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_with_an_exact_original_source_still_claims_current_n1_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::old_pending_without_original_source_holds_without_blocking_valid_n2_pg
+services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthetic_claimed_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::stale_pending_cannot_replace_a_live_n2_lease_before_its_claim_is_refused_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session
