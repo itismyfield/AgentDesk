@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::BootSessionHosts;
 use super::projection::{self, Decoded, Projection};
-use crate::services::discord::runtime_store::{self, AtomicWriteContext};
+use crate::services::discord::runtime_store;
 
 pub(crate) enum Loaded {
     Missing,
@@ -51,11 +51,14 @@ impl FileApprovalStore {
             "schema": projection::SCHEMA, "projection": Projection::of(hosts)
         }))
         .map_err(|error| error.to_string())?;
-        runtime_store::critical_atomic_write(
-            &path,
-            &bytes,
-            AtomicWriteContext::new("session_hosts_approval"),
-        )?;
+        runtime_store::atomic_write(&path, &bytes).inspect_err(|error| {
+            tracing::error!(
+                store = "session_hosts_approval",
+                path = %path.display(),
+                error = %error,
+                "recovery-critical atomic write failed"
+            );
+        })?;
         #[cfg(test)]
         if name == "current.json" && FAIL_CURRENT_SYNC.with(|fault| fault.replace(false)) {
             return Err("injected current snapshot directory sync failure".into());
@@ -150,26 +153,33 @@ impl ApprovalStore for FileApprovalStore {
         let root = self.0.as_ref().ok_or("runtime root unavailable")?;
         std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
         let pending = root.join("pending");
-        runtime_store::critical_atomic_write(
-            &pending,
-            &marker,
-            AtomicWriteContext::new("session_hosts_approval"),
-        )?;
+        runtime_store::atomic_write(&pending, &marker).inspect_err(|error| {
+            tracing::error!(
+                store = "session_hosts_approval",
+                path = %pending.display(),
+                error = %error,
+                "recovery-critical atomic write failed"
+            );
+        })?;
         runtime_store::fsync_parent_dir(&pending).map_err(|error| error.to_string())?;
         self.write("current.json", hosts)?;
         // Clear pending state durably without unlinking store files.
-        runtime_store::critical_atomic_write(
-            &pending,
-            "committed",
-            AtomicWriteContext::new("session_hosts_approval"),
-        )?;
+        runtime_store::atomic_write(&pending, "committed").inspect_err(|error| {
+            tracing::error!(
+                store = "session_hosts_approval",
+                path = %pending.display(),
+                error = %error,
+                "recovery-critical atomic write failed"
+            );
+        })?;
         if let Err(error) = cleanup_sync(&pending) {
-            runtime_store::critical_atomic_write(
-                &root.join("pending"),
-                &marker,
-                AtomicWriteContext::new("session_hosts_approval"),
-            )
-            .map_err(|restore| {
+            runtime_store::atomic_write(&root.join("pending"), &marker).map_err(|restore| {
+                tracing::error!(
+                    store = "session_hosts_approval",
+                    path = %pending.display(),
+                    error = %restore,
+                    "recovery-critical atomic write failed"
+                );
                 format!("approval marker sync: {error}; restore pending: {restore}")
             })?;
             runtime_store::fsync_parent_dir(&pending).map_err(|restore| {

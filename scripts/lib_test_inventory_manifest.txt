@@ -4788,6 +4788,7 @@ services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_ro
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::http::tests::discord_content_or_zwsp_replaces_empty_content
+services::discord::http::tests::discord_send_and_edit_reject_oversized_content_before_network
 services::discord::http::tests::relay_allowed_mentions_suppresses_everyone_and_roles_allows_users
 services::discord::http::tests::required_reference_classifier_is_structured_and_narrow
 services::discord::http::tests::required_reference_nonce_builder_enforces_discord_reconciliation

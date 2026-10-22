@@ -52,7 +52,7 @@ fn classify_required_reference_error(error: serenity::Error) -> RequiredReferenc
 
 pub(in crate::services::discord) fn discord_content_or_zwsp(
     content: &str,
-) -> serenity::Result<&str> {
+) -> Result<&str, &'static str> {
     let content = if content.is_empty() {
         DISCORD_EMPTY_MESSAGE_SENTINEL
     } else {
@@ -65,7 +65,7 @@ pub(in crate::services::discord) fn discord_content_or_zwsp(
             hard_cap_units = DISCORD_CONTENT_HARD_CAP_UNITS,
             "Discord outbound content rejected before dispatch: internal length cap exceeded"
         );
-        return Err(serenity::Error::Other(DISCORD_CONTENT_LIMIT_ERROR));
+        return Err(DISCORD_CONTENT_LIMIT_ERROR);
     }
     Ok(content)
 }
@@ -77,7 +77,7 @@ fn channel_message_builder(
     content: &str,
     reference: Option<(ChannelId, MessageId)>,
     nonce: Option<&str>,
-) -> serenity::Result<CreateMessage> {
+) -> Result<CreateMessage, &'static str> {
     let mut message = CreateMessage::new()
         .content(discord_content_or_zwsp(content)?)
         .allowed_mentions(relay_allowed_mentions());
@@ -122,7 +122,7 @@ pub(in crate::services::discord) async fn send_channel_message(
     channel_id: ChannelId,
     content: &str,
 ) -> serenity::Result<Message> {
-    let message = channel_message_builder(content, None, None)?;
+    let message = channel_message_builder(content, None, None).map_err(serenity::Error::Other)?;
     channel_id.send_message(http, message).await
 }
 
@@ -135,7 +135,8 @@ pub(in crate::services::discord) async fn send_channel_message_with_nonce(
     content: &str,
     nonce: &str,
 ) -> serenity::Result<Message> {
-    let message = channel_message_builder(content, None, Some(nonce))?;
+    let message =
+        channel_message_builder(content, None, Some(nonce)).map_err(serenity::Error::Other)?;
     channel_id.send_message(http, message).await
 }
 
@@ -150,7 +151,8 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference(
         content,
         Some((reference_channel_id, reference_message_id)),
         None,
-    )?;
+    )
+    .map_err(serenity::Error::Other)?;
     channel_id.send_message(http, message).await
 }
 
@@ -166,7 +168,8 @@ pub(in crate::services::discord) async fn send_channel_message_with_reference_an
         content,
         Some((reference_channel_id, reference_message_id)),
         Some(nonce),
-    )?;
+    )
+    .map_err(serenity::Error::Other)?;
     channel_id.send_message(http, message).await
 }
 
@@ -222,7 +225,7 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
         .send_message(
             http,
             CreateMessage::new()
-                .content(discord_content_or_zwsp(content)?)
+                .content(discord_content_or_zwsp(content).map_err(serenity::Error::Other)?)
                 .components(components)
                 .allowed_mentions(relay_allowed_mentions()),
         )
@@ -241,7 +244,7 @@ pub(in crate::services::discord) async fn edit_channel_message_with_components<'
         .components(components)
         .allowed_mentions(relay_allowed_mentions());
     if let Some(content) = content.into() {
-        edit = edit.content(discord_content_or_zwsp(content)?);
+        edit = edit.content(discord_content_or_zwsp(content).map_err(serenity::Error::Other)?);
     }
     channel_id.edit_message(http, message_id, edit).await
 }
@@ -257,7 +260,7 @@ pub(in crate::services::discord) async fn edit_channel_message(
             http,
             message_id,
             EditMessage::new()
-                .content(discord_content_or_zwsp(content)?)
+                .content(discord_content_or_zwsp(content).map_err(serenity::Error::Other)?)
                 .allowed_mentions(relay_allowed_mentions()),
         )
         .await
@@ -277,12 +280,16 @@ pub(in crate::services::discord) async fn delete_channel_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        DISCORD_CONTENT_HARD_CAP_UNITS, DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder,
-        discord_content_or_zwsp, is_unknown_required_reference_response, relay_allowed_mentions,
+        DISCORD_CONTENT_HARD_CAP_UNITS, DISCORD_CONTENT_LIMIT_ERROR,
+        DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder, discord_content_or_zwsp,
+        edit_channel_message, edit_channel_message_with_components,
+        is_unknown_required_reference_response, relay_allowed_mentions, send_channel_message,
+        send_channel_message_with_components, send_channel_message_with_nonce,
+        send_channel_message_with_reference, send_channel_message_with_reference_and_nonce,
     };
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use crate::services::discord::formatting::{discord_message_units, needs_multiple_messages};
-    use poise::serenity_prelude::{ChannelId, MessageId};
+    use poise::serenity_prelude::{ChannelId, HttpBuilder, MessageId};
 
     #[test]
     fn discord_content_or_zwsp_replaces_empty_content() {
@@ -301,6 +308,76 @@ mod tests {
         assert!(channel_message_builder(&overflow, None, None).is_err());
         assert!(!needs_multiple_messages(&exact));
         assert!(needs_multiple_messages(&overflow));
+    }
+
+    #[tokio::test]
+    async fn discord_send_and_edit_reject_oversized_content_before_network() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let http = HttpBuilder::new("test-token")
+            .proxy(format!("http://{}", listener.local_addr().unwrap()))
+            .ratelimiter_disabled(true)
+            .build();
+        let channel = ChannelId::new(4_055);
+        let message = MessageId::new(90_062);
+        let content = format!("{}x", "😀".repeat(DISCORD_MSG_LIMIT / 2));
+        assert_eq!(discord_message_units(&content), DISCORD_MSG_LIMIT + 1);
+
+        let results = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            [
+                ("send", send_channel_message(&http, channel, &content).await),
+                (
+                    "send with nonce",
+                    send_channel_message_with_nonce(&http, channel, &content, "nonce").await,
+                ),
+                (
+                    "send with reference",
+                    send_channel_message_with_reference(&http, channel, &content, channel, message)
+                        .await,
+                ),
+                (
+                    "send with reference and nonce",
+                    send_channel_message_with_reference_and_nonce(
+                        &http, channel, &content, channel, message, "nonce",
+                    )
+                    .await,
+                ),
+                (
+                    "send with components",
+                    send_channel_message_with_components(&http, channel, &content, Vec::new())
+                        .await,
+                ),
+                (
+                    "edit with components",
+                    edit_channel_message_with_components(
+                        &http,
+                        channel,
+                        message,
+                        Some(content.as_str()),
+                        Vec::new(),
+                    )
+                    .await,
+                ),
+                (
+                    "edit",
+                    edit_channel_message(&http, channel, message, &content).await,
+                ),
+            ]
+        })
+        .await
+        .expect("oversized content must be rejected before waiting for HTTP");
+        for (operation, result) in results {
+            assert!(
+                matches!(result, Err(super::serenity::Error::Other(error)) if error == DISCORD_CONTENT_LIMIT_ERROR),
+                "{operation} must preserve the exact content-limit error"
+            );
+        }
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "oversized send/edit content must create no network connections"
+        );
     }
 
     #[test]
