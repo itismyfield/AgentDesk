@@ -56,3 +56,7 @@ fn requests_tool(json: &Value) -> bool {
                 .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
         })
 }
+
+#[cfg(test)]
+#[path = "claude_meta_tests.rs"]
+mod tests;
