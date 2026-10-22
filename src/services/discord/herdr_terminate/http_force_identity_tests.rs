@@ -13,6 +13,7 @@ use crate::services::herdr_launch::{
 use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
+use super::super::Node;
 use super::*;
 
 const IDENTITY: &str = "execution identity differs";
@@ -98,10 +99,8 @@ async fn forwarded(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, V
     crate::server::routes::home_stop_test_post(app, uri, &headers, &body).await
 }
 
-// A forced cancel retires only the execution its own read selected: a later nonce or owner on the
-// same row, a forwarded cancel's receiver read, a no-dispatch turn giving way to a dispatched one,
-// and a successor the production launch made after the selected one retired are each refused
-// before any close, and the running turn, session, dispatches and queue stay.
+// A forced cancel retires only the execution its own read selected: any later execution on the row
+// is refused before any close, and the running turn, session, dispatches and queue stay.
 #[test]
 fn e07_initial_execution_identity_is_immutable_pg() {
     let Some((rig, runtime)) = rig("e07_initial_execution_identity_is_immutable_pg") else {
@@ -204,9 +203,8 @@ fn e07_initial_execution_identity_is_immutable_pg() {
     });
 }
 
-// A force-kill retires only the execution its own read selected, retry on: a later nonce or owner
-// on the same row, a forwarded force-kill's receiver read and a dispatched successor turn after a
-// no-dispatch read are refused before any close, with no retry and the running turn kept.
+// A force-kill retires only the execution its own read selected, retry on: any later execution on
+// the row is refused before any close, with no retry and the running turn kept.
 #[test]
 fn e08_initial_execution_identity_is_immutable_pg() {
     let Some((rig, runtime)) = rig("e08_initial_execution_identity_is_immutable_pg") else {

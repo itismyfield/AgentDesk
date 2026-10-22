@@ -177,6 +177,7 @@ src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate/http_force_e08_tests.rs
+src/services/discord/herdr_terminate/http_force_identity_tests.rs
 src/services/discord/herdr_terminate/http_force_tests.rs
 src/services/discord/herdr_terminate_exit_tests.rs
 src/services/discord/herdr_terminate_route_tests.rs
@@ -602,6 +603,7 @@ services::discord::health::turn_deliver::inject_tests::turn_mode_reading
 services::discord::herdr_terminate::exit_tests
 services::discord::herdr_terminate::http_force::tests
 services::discord::herdr_terminate::http_force::tests::e08
+services::discord::herdr_terminate::http_force::tests::e08::identity
 services::discord::herdr_terminate::route_tests
 services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
@@ -1981,6 +1983,8 @@ services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_t
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_retires_then_applies_effects_once_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_terminated_handler_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg

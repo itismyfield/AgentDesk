@@ -4713,6 +4713,8 @@ services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_t
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_retires_then_applies_effects_once_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_terminated_handler_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg
