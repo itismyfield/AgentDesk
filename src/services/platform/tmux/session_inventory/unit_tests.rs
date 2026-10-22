@@ -228,6 +228,7 @@ fn u_inventory_command_context() {
 
 #[test]
 fn u_inventory_complete_stdout() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let ctx = context(Path::new("/tmp/s0u-none"));
     let bin = tempfile::tempdir().unwrap();
     let tool = bin.path().join("tmux");
@@ -307,6 +308,7 @@ fn u_inventory_complete_stdout() {
 
 #[test]
 fn u_inventory_absence_recheck() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("socket");
     let ctx = context(&path);
@@ -375,6 +377,7 @@ fn u_inventory_absence_recheck() {
 
 #[test]
 fn u_inventory_execution_failures() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("socket");
     let ctx = context(&path);
@@ -448,6 +451,7 @@ fn u_inventory_execution_failures() {
 
 #[test]
 fn u_inventory_no_server_control() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let path = Path::new("/tmp/s0u-stale");
     let ctx = context(path);
     let out = output(1, b"", "no server running on /tmp/s0u-stale\n");
