@@ -91,7 +91,6 @@ pub(super) async fn enqueue_custody_notices(
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(%session, %error, "custody delivery state unknown");
-                continue;
             }
         }
         let message = OutboxMessage {
