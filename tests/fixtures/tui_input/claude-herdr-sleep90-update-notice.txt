@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.293
+▝▜██████▀  Sonnet 5.5 · Claude Team
+ ▝▝   ▝▝   ~/.adk/release/workspaces/adk-claude-tui-e2e
+
+❯ Use the Bash tool to run exactly python3 -c "import time; time.sleep(90)" in the foreground (not in the
+  background; it is a deliberate 90 second probe). After it finishes, reply with the si
+  word DONE and the elapsed seconds you observed for it..
+
+  Sleeping for 90 seconds · 15s
+  ⎿  $ python3 -c "import time; time.sleep(90)" (15s)
+     (ctrl+b to run in background)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Wrangling… (17s · ↓ 119 tokens)
+
+✔ Update installed · Restart to update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏱ 8h13m │ █░░░░░░░░░ │ 6% │ 61K/1.0M │ 📦️ 99% │ $0.41
+  ◆ Sonnet(X) │ 5h: 8% (1h38m) │ 7d: 20% (5d4h) │ 7d-F: 0% (5d4h)
+  🔷️ gpt-6.1-sol │ 5h: 18% (6d4h)
+  📁️ cwd
+  MCP: 2 │ ⚙️ Bash(python3 -c "import time; time.sleep(90)") (0 done)
+  ⏸ manual mode on · ← for agents

@@ -13,7 +13,7 @@ use super::{
     ChannelMailboxState, ClearChannelResult, QueueExitEvent, QueueExitKind,
     QueuePersistenceContext, clear_pending_user_dispatch, queued_head, release_active_turn_anchor,
 };
-use crate::services::discord::runtime_store::{AtomicWriteContext, critical_atomic_write};
+use crate::services::discord::runtime_store::{AtomicWriteContext, critical_publish};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ActivePolicy {
@@ -261,7 +261,7 @@ fn write_cleared_files(
             .provider(provider.as_str())
             .token_hash(token_hash)
             .channel_id(channel_id.get());
-        critical_atomic_write(&path, &snapshot, context)
+        critical_publish(&path, &snapshot, context)
     });
     let namespace = super::remint_fence::namespace(persistence);
     if published {

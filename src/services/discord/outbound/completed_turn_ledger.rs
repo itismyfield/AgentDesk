@@ -259,23 +259,48 @@ enum PublishError {
     ParentSyncFailed(String),
 }
 
-fn log_publish_error(
-    error: PublishError,
+/// The ledger write a log line reports, with the id that names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerOperation {
+    Append { user_msg_id: u64 },
+    MergedAlias { primary: u64 },
+}
+
+/// Logs what a publication left behind: failures as warnings, an unflushed one at debug.
+fn log_publish_outcome(
+    outcome: Result<Publication, PublishError>,
     provider: &ProviderKind,
     channel_id: u64,
-    user_msg_id: u64,
-    operation: &str,
+    operation: LedgerOperation,
 ) {
-    match error {
-        PublishError::ParentSyncFailed(error) => tracing::warn!(
-            provider = provider.as_str(), channel_id, user_msg_id, operation,
-            error = %error, published = true,
-            "completed-turn ledger published; parent sync failed (best-effort durability unconfirmed)"
+    let provider = provider.as_str();
+    let (error, published, message) = match outcome {
+        Ok(Publication::Published(ParentSync::Unflushed)) => {
+            return tracing::debug!(
+                provider, channel_id, operation = ?operation, published = true,
+                "completed-turn ledger published without a directory flush (durability unconfirmed)"
+            );
+        }
+        Ok(_) => return,
+        Err(PublishError::ParentSyncFailed(error)) => (
+            error,
+            true,
+            "completed-turn ledger published; parent sync failed (best-effort durability unconfirmed)",
         ),
-        PublishError::WriteFailed(error) => tracing::warn!(
-            provider = provider.as_str(), channel_id, user_msg_id, operation,
-            error = %error, published = false,
-            "completed-turn ledger write failed (best-effort; settlement evidence unavailable)"
+        Err(PublishError::WriteFailed(error)) => (
+            error,
+            false,
+            "completed-turn ledger write failed (best-effort; settlement evidence unavailable)",
+        ),
+    };
+    match operation {
+        LedgerOperation::Append { user_msg_id } => tracing::warn!(
+            provider, channel_id, user_msg_id, operation = "append", issue = "#4564",
+            error = %error, published, "{message}"
+        ),
+        LedgerOperation::MergedAlias { primary } => tracing::warn!(
+            provider, channel_id, primary, operation = "merged_alias", issue = "#6035",
+            error = %error, published, "{message}"
         ),
     }
 }
@@ -289,7 +314,7 @@ fn mutate_at(
         path,
         now_ms,
         mutate,
-        runtime_store::fsync_parent_dir,
+        runtime_store::fsync_parent_and_ancestors,
         runtime_store::PARENT_DIR_FSYNC_FLUSHES,
     )
 }
@@ -339,7 +364,7 @@ fn append_at(
         user_msg_id,
         turn_nonce,
         committed_at_epoch_ms,
-        runtime_store::fsync_parent_dir,
+        runtime_store::fsync_parent_and_ancestors,
         runtime_store::PARENT_DIR_FSYNC_FLUSHES,
     )
 }
@@ -438,9 +463,13 @@ pub(in crate::services::discord) fn append_completed_episode(
         );
         return;
     };
-    if let Err(error) = append_at(&path, user_msg_id, turn_nonce, now_epoch_ms()) {
-        log_publish_error(error, provider, channel_id, user_msg_id, "append");
-    }
+    let outcome = append_at(&path, user_msg_id, turn_nonce, now_epoch_ms());
+    log_publish_outcome(
+        outcome,
+        provider,
+        channel_id,
+        LedgerOperation::Append { user_msg_id },
+    );
 }
 
 /// Durably record that episode `turn_nonce` of `primary` absorbed `absorbed`, before the claim
@@ -455,9 +484,13 @@ pub(in crate::services::discord) fn record_merged_alias(
     let Some(path) = ledger_path(provider, channel_id) else {
         return;
     };
-    if let Err(error) = record_alias_at(&path, primary, turn_nonce, absorbed, now_epoch_ms()) {
-        log_publish_error(error, provider, channel_id, primary, "merged_alias");
-    }
+    let outcome = record_alias_at(&path, primary, turn_nonce, absorbed, now_epoch_ms());
+    log_publish_outcome(
+        outcome,
+        provider,
+        channel_id,
+        LedgerOperation::MergedAlias { primary },
+    );
 }
 
 #[cfg(test)]
@@ -506,7 +539,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .without_time()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || Capture(output.clone()))
             .finish();
         crate::logging::test_capture::pin_callsite_interest();
@@ -537,6 +570,51 @@ mod tests {
             turn_nonce: Some(turn_nonce.to_owned()),
             ..entry(user_msg_id, committed_at)
         }
+    }
+
+    const APPEND: LedgerOperation = LedgerOperation::Append { user_msg_id: 7_001 };
+
+    #[test]
+    fn ledger_operation_logs_keep_primary_and_issue() {
+        let sync_failed = || Err(PublishError::ParentSyncFailed("eio".into()));
+        let alias = LedgerOperation::MergedAlias { primary: P };
+        let logs =
+            capture_logs(|| log_publish_outcome(sync_failed(), &ProviderKind::Codex, 1, alias));
+        for field in [
+            format!("primary={P}"),
+            "operation=\"merged_alias\"".into(),
+            "#6035".into(),
+        ] {
+            assert!(logs.contains(&field), "{field}: {logs}");
+        }
+        assert!(!logs.contains("user_msg_id"), "{logs}");
+        let logs =
+            capture_logs(|| log_publish_outcome(sync_failed(), &ProviderKind::Codex, 1, APPEND));
+        assert!(
+            logs.contains("user_msg_id=7001") && logs.contains("#4564"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn unflushed_publication_is_observable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        let unflushed = append_at_with_sync(&path, 7_001, None, 1_000, |_| Ok(()), false);
+        let logs = capture_logs(|| log_publish_outcome(unflushed, &ProviderKind::Codex, 1, APPEND));
+        assert!(
+            logs.contains("DEBUG") && logs.contains("durability unconfirmed"),
+            "{logs}"
+        );
+        assert!(
+            logs.contains("published=true") && logs.contains("7001"),
+            "{logs}"
+        );
+        let flushed = Ok(Publication::Published(ParentSync::Flushed));
+        assert!(
+            capture_logs(|| log_publish_outcome(flushed, &ProviderKind::Codex, 1, APPEND))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -589,7 +667,7 @@ mod tests {
         let error = result.expect_err("rename failure must remain a write failure");
         assert!(matches!(&error, PublishError::WriteFailed(detail) if detail.contains("rename")));
         let logs =
-            capture_logs(|| log_publish_error(error, &ProviderKind::Codex, 5166, 7_001, "append"));
+            capture_logs(|| log_publish_outcome(Err(error), &ProviderKind::Codex, 5166, APPEND));
         assert!(logs.contains("ledger write failed"), "{logs}");
         assert!(logs.contains("published=false"), "{logs}");
         assert!(!logs.contains("durability unconfirmed"), "{logs}");
@@ -623,7 +701,7 @@ mod tests {
                 error,
                 PublishError::ParentSyncFailed("injected parent sync failure".into())
             );
-            log_publish_error(error, &ProviderKind::Codex, 5166, 7_001, "append");
+            log_publish_outcome(Err(error), &ProviderKind::Codex, 5166, APPEND);
         });
         assert_eq!(syncs, 1);
         assert_eq!(

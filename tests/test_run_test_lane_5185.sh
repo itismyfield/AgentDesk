@@ -32,6 +32,7 @@ RUNNER="$REPO_ROOT/scripts/run_test_lane.py"
 REAL_LEDGER="$REPO_ROOT/scripts/known_test_failures.txt"
 REAL_MANIFEST="$REPO_ROOT/scripts/lib_test_inventory_manifest.txt"
 WORKFLOW="$REPO_ROOT/.github/workflows/ci-pr.yml"
+MAIN_WORKFLOW="$REPO_ROOT/.github/workflows/ci-main.yml"
 PYTHON="${PYTHON:-python3}"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-test-lane-5185.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -1005,10 +1006,11 @@ LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summari
 # development machines finished writing first, so the suite was green
 # locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
 # so sed always completes and the status reflects the match alone.
-# The PR runs the selector, whose full mode is this exact line (main keeps its own copy).
+# Keep the selector's unsharded fallback and both sharded workflow entrypoints exact.
 if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null \
-    || ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF "run: python3 scripts/ci/test-selection.py run --lane sweep" >/dev/null; then
-    fail_test "ci-pr.yml must run the non-pg-sweep lane through the gate with exactly the pinned command"
+    || ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF 'run: python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"' >/dev/null \
+    || ! sed 's/^[[:space:]]*//' "$MAIN_WORKFLOW" | grep -xF 'run: python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"' >/dev/null; then
+    fail_test "PR and Main must run the non-pg-sweep lane through the gate with exactly the pinned shard commands"
 else pass_test
 fi
 
@@ -1040,11 +1042,13 @@ while lines and lines[-1].lstrip().startswith("#"):
 end = text.index("\n  library_sweep_required_context:\n")
 region = text[start:end]
 
-wrapper = (scripts / "run_test_lane.py").read_text(encoding="utf-8")
-declared = set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"', wrapper))
-if not declared:
-    print("could not read the wrapper's own option list")
-    raise SystemExit(1)
+declared = set()
+for owner in (scripts / "run_test_lane.py", scripts / "ci/test-selection.py"):
+    options = set(re.findall(r'add_argument\(\s*"(--[a-z][a-z0-9-]*)"', owner.read_text(encoding="utf-8")))
+    if not options:
+        print(f"could not read {owner.name}'s own option list")
+        raise SystemExit(1)
+    declared.update(options)
 # Flags belonging to the tools the region invokes rather than to the wrapper.
 #
 # MEASURED LIMIT OF THIS GUARD: the allowlist is a literal in the same file as
