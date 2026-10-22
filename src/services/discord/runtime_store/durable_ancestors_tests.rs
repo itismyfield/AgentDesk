@@ -244,7 +244,8 @@ fn every_chain_link_flushed_after_its_identity() {
         ..Plan::default()
     };
     {
-        let _failing = Watch::new(temp.path(), failing);
+        // A narrower scope, so dropping it leaves the outer watch in place.
+        let _failing = Watch::new(&tokens("codex", "c"), failing);
         let target = tokens("codex", "c").join("1.json");
         fsync_ancestors_with(&witness, &root, &target).unwrap_err();
     }

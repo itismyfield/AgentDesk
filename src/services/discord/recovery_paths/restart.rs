@@ -904,7 +904,7 @@ fn persist_force_clear_report(report: &RecoveryForceClearReport) -> Result<PathB
 }
 
 /// Root-explicit inner form for unit tests.
-fn persist_force_clear_report_in_root(
+pub(in crate::services::discord) fn persist_force_clear_report_in_root(
     root: &Path,
     report: &RecoveryForceClearReport,
 ) -> Result<PathBuf, String> {

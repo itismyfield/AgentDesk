@@ -5029,6 +5029,8 @@ services::discord::inflight::removal::boot_custody_tests::an_earlier_turn_start_
 services::discord::inflight::removal::boot_custody_tests::an_unparseable_pending_start_keeps_its_channel_and_is_not_complete
 services::discord::inflight::removal::boot_custody_tests::an_unwritable_custody_root_does_not_stop_the_reaper
 services::discord::inflight::removal::boot_custody_tests::custody_copies_every_tui_direct_turn_and_only_the_bytes_of_other_rows
+services::discord::inflight::removal::boot_custody_tests::custody_copies_precede_manifest_publication
+services::discord::inflight::removal::boot_custody_tests::custody_flush_failure_is_recopied_by_the_next_boot
 services::discord::inflight::removal::boot_custody_tests::n1a_boot_custody_copy_precedes_retirement_without_delivery_completion
 services::discord::inflight::removal::boot_custody_tests::reaped_live_pane_tui_direct_row_leaves_a_custody_copy
 services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
@@ -5096,6 +5098,13 @@ services::discord::inflight::save_store::create_monotonic_observer::tests::path_
 services::discord::inflight::save_store::create_monotonic_observer::tests::same_path_lower_start_warns
 services::discord::inflight::save_store::create_monotonic_observer::tests::unobservable_births_do_not_allocate_and_evidenced_slots_are_bounded
 services::discord::inflight::save_store::create_monotonic_observer::tests::witness_io_is_outside_mutex_and_revision_blocks_stale_install
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::archive_move_syncs_source_and_destination
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::blocked_inflight_sync_other_channel_keeps_progress
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::create_new_observer_runs_once_after_publication
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::inflight_retirement_syncs_without_resurrection
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::inflight_row_publication_keeps_the_write_audit_log
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::p2_post_rename_sync_failure_keeps_saved_outcome
+services::discord::inflight::save_store::delivery_rewind::durable_writers_tests::p2_writers_sync_only_after_successful_rename
 services::discord::inflight::save_store::delivery_rewind::tests::rewind_applies_when_expected_owner_matches
 services::discord::inflight::save_store::delivery_rewind::tests::rewind_identity_and_terminal_guards_win
 services::discord::inflight::save_store::delivery_rewind::tests::rewind_legacy_watcher_authority_matches
@@ -6777,6 +6786,7 @@ services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pin
 services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
 services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
 services::discord::relay_recovery::circuit_breaker::circuit_evidence_tests::alpha_existing_open_identity_preserved
+services::discord::relay_recovery::circuit_breaker::circuit_evidence_tests::circuit_record_is_published_durably
 services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
 services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
 services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
@@ -7768,6 +7778,9 @@ services::discord::runtime_store::durable_publish::tests::checkpoint_publication
 services::discord::runtime_store::durable_publish::tests::existing_durable_writers_do_not_double_flush
 services::discord::runtime_store::durable_publish::tests::publication_failures_at_each_stage
 services::discord::runtime_store::durable_publish::tests::retirement_syncs_without_resurrecting_memory
+services::discord::runtime_store::durable_publish::tests::stores::delivery_record_publication_keeps_delivered_content
+services::discord::runtime_store::durable_publish::tests::stores::force_clear_report_is_published_durably
+services::discord::runtime_store::durable_publish::tests::stores::watcher_owner_context_is_published_durably
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
