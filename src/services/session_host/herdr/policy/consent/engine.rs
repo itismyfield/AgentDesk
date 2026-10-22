@@ -1,6 +1,5 @@
 use super::super::{PeerSource, apply};
 use super::settlement::{self, CustodySink};
-#[cfg(test)]
 use super::workflow::Request;
 use super::workflow::{Current, Effect, Transition, Workflow};
 use super::{ApplyResult, Consent, ConsentKey, ConsentStore, Question, State, card};
@@ -12,7 +11,6 @@ use super::{
 use std::sync::Arc;
 
 pub(crate) enum Event<'a> {
-    #[cfg(test)]
     Hold {
         question: Box<Question>,
         now: u64,
@@ -65,11 +63,20 @@ pub(crate) enum SendFailure {
     Unknown(String),
 }
 
+impl SendFailure {
+    fn diagnostic(self, operation: &str) -> String {
+        match self {
+            Self::Definitive(detail) => format!("consent card {operation} rejected: {detail}"),
+            Self::Unknown(detail) => format!("consent card {operation} outcome unknown: {detail}"),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub(crate) trait Cards: Send {
     async fn send(&mut self, card: &card::Card) -> Result<u64, SendFailure>;
-    async fn replace(&mut self, message: u64, card: &card::Card) -> Result<(), String>;
-    async fn disable(&mut self, message: u64) -> Result<(), String>;
+    async fn replace(&mut self, message: u64, card: &card::Card) -> Result<(), SendFailure>;
+    async fn disable(&mut self, message: u64) -> Result<(), SendFailure>;
 }
 
 pub(crate) struct Engine<'a, S: CustodySink> {
@@ -87,6 +94,7 @@ impl<S: CustodySink> Engine<'_, S> {
         match self.cards.disable(message).await {
             Ok(()) => original,
             Err(cleanup) => {
+                let cleanup = cleanup.diagnostic("disable");
                 format!("{original}; disabling unbound consent card also failed: {cleanup}")
             }
         }
@@ -99,7 +107,11 @@ impl<S: CustodySink> Engine<'_, S> {
         original: String,
     ) -> String {
         let replaced = match card::binding_failed(consent) {
-            Ok(card) => self.cards.replace(message, &card).await,
+            Ok(card) => self
+                .cards
+                .replace(message, &card)
+                .await
+                .map_err(|error| error.diagnostic("replace")),
             Err(error) => Err(error),
         };
         match replaced {
@@ -121,7 +133,6 @@ impl<S: CustodySink> Engine<'_, S> {
     ) -> Result<Option<Transition>, String> {
         let workflow = Workflow(self.store);
         let mut transition = match event {
-            #[cfg(test)]
             Event::Hold {
                 question,
                 now,
@@ -322,7 +333,9 @@ impl<S: CustodySink> Engine<'_, S> {
                     .replace(message, &card::render(&transition.consent)?)
                     .await
                 {
-                    return Err(self.disable_after(message, error).await);
+                    return Err(self
+                        .disable_after(message, error.diagnostic("replace"))
+                        .await);
                 }
             }
             Effect::ReleaseThenWake => {
@@ -339,10 +352,10 @@ impl<S: CustodySink> Engine<'_, S> {
                             transition.consent.message,
                             &card::render_result(&transition.consent, result_kind)?,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.diagnostic("replace"))?;
                 }
             }
-            #[cfg(test)]
             Effect::RevisionChanged => {
                 if transition.consent.message != 0 {
                     self.cards
@@ -350,7 +363,8 @@ impl<S: CustodySink> Engine<'_, S> {
                             transition.consent.message,
                             &card::revision_changed(&transition.consent)?,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.diagnostic("replace"))?;
                 }
             }
             Effect::ShowResult | Effect::KeepHeld => {
@@ -360,7 +374,8 @@ impl<S: CustodySink> Engine<'_, S> {
                             transition.consent.message,
                             &card::render(&transition.consent)?,
                         )
-                        .await?;
+                        .await
+                        .map_err(|error| error.diagnostic("replace"))?;
                 }
             }
             Effect::SendCard | Effect::Apply => return Err("uninterpreted consent effect".into()),

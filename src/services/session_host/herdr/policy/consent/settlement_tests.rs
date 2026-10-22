@@ -657,3 +657,39 @@ async fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
         );
     }
 }
+
+#[test]
+fn consent_per_file_inventory_keeps_valid_neighbors_and_strict_holds_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let first = store.hold(question("one"), 100).unwrap().into_consent();
+    let mut other = question("two");
+    other.key.target = "/fixture/second-target.toml".into();
+    let second = store.hold(other, 100).unwrap().into_consent();
+    let path = directory.join(format!("{}.json", durable::key(&first.key).unwrap()));
+    std::fs::write(&path, b"{bad snapshot").unwrap();
+    let entries = store.load_each().unwrap();
+    assert_eq!(
+        entries.iter().filter(|entry| entry.is_err()).count(),
+        1,
+        "consent_per_file_inventory_reports_corrupt_neighbor_contract"
+    );
+    assert_eq!(
+        entries
+            .into_iter()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>(),
+        [second],
+        "consent_per_file_inventory_preserves_valid_neighbor_contract"
+    );
+    assert!(
+        store.load_all().is_err() && store.unresolved().is_err(),
+        "consent_strict_hold_inventory_never_discards_unknown_contract"
+    );
+    std::fs::write(directory.join("unexpected.json"), b"{}").unwrap();
+    assert!(
+        store.load_each().is_err(),
+        "consent_unknown_inventory_failure_remains_global_contract"
+    );
+}

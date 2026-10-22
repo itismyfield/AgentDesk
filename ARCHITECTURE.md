@@ -99,6 +99,9 @@ src/
 │   └── mod.rs
 ├── config/
 │   ├── session_hosts/
+│   │   ├── migration/
+│   │   │   ├── consent_holds.rs
+│   │   │   └── consent_holds_tests.rs
 │   │   ├── approval_store.rs
 │   │   ├── boot_pg_tests.rs
 │   │   ├── migration.rs
@@ -819,6 +822,7 @@ src/
 │   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
+│   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
@@ -1023,6 +1027,7 @@ src/
 │   │   │   │   ├── codex_clear_relaunch_tests.rs
 │   │   │   │   ├── codex_clear_retirement_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
+│   │   │   │   ├── consent_clear_tests.rs
 │   │   │   │   ├── herdr_recovery.rs
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── home_fence.rs
@@ -1633,6 +1638,8 @@ src/
 │   │   │   └── model.rs
 │   │   ├── router/
 │   │   │   ├── herdr_consent/
+│   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── custody_tests.rs
 │   │   │   │   ├── service_tests.rs
@@ -1840,6 +1847,7 @@ src/
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_boot_restore_tests.rs
+│   │   │   ├── queued_recovery_consent_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
 │   │   │   ├── queued_recovery_held.rs
 │   │   │   ├── queued_recovery_held_tests.rs
@@ -3584,6 +3592,7 @@ src/
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
+│   │   ├── source_generation_origin_tests.rs
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs

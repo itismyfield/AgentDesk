@@ -469,3 +469,7 @@ pub(super) mod boot_restore_tests;
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_draft_tests.rs"]
 mod draft_tests;
+
+#[cfg(all(test, unix))]
+#[path = "queued_recovery_consent_tests.rs"]
+mod consent_tests;

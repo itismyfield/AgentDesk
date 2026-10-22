@@ -415,7 +415,8 @@ async fn migration_hold_blocks_even_without_rows_and_hold_failure_is_unverified(
             "session_hosts_migration_unverified",
         ),
     ] {
-        let old = fixture();
+        let mut old = fixture();
+        old.config.herdr.endpoints.get_mut("one").unwrap().mode = EndpointMode::UserDefault;
         let store = Store::new(Some(old.clone()));
         let rows = Rows::new(Vec::new());
         let holds = Holds::<true>::new(held);
@@ -433,7 +434,8 @@ async fn migration_hold_blocks_even_without_rows_and_hold_failure_is_unverified(
         assert_eq!(holds.calls.get(), 1);
         assert!(store.saved.borrow().is_empty());
     }
-    let old = fixture();
+    let mut old = fixture();
+    old.config.herdr.endpoints.get_mut("one").unwrap().mode = EndpointMode::UserDefault;
     let candidate = remap(old.clone(), "/fixture/new.sock");
     let store = Store::new(Some(old));
     let holds = Holds::<true>::new(Ok(Vec::new()));

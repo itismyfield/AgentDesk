@@ -85,7 +85,12 @@ impl ConsentStore {
     }
 
     pub(crate) fn load_all(&self) -> Result<Vec<Consent>, String> {
-        self.inventory_keys()?.into_iter().map(|name| {
+        self.load_each()?.into_iter().collect()
+    }
+
+    /// Inventory uncertainty is global; an identified file's error does not hide its neighbors.
+    pub(crate) fn load_each(&self) -> Result<Vec<Result<Consent, String>>, String> {
+        Ok(self.inventory_keys()?.into_iter().map(|name| {
             let bytes = self.0.read_stable(&name)?.ok_or_else(|| self.0.failure(&name, "snapshot disappeared during inventory; retry the read"))?;
             let raw: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|error| self.0.failure(&name, format!("consent_snapshot_corrupt: {error}")))?;
@@ -99,10 +104,9 @@ impl ConsentStore {
                 return Err(self.0.failure(&name, "consent_snapshot_corrupt: filename does not match consent key"));
             }
             self.decode(&bytes, &key)
-        }).collect()
+        }).collect())
     }
 
-    #[cfg(test)]
     pub(crate) fn unresolved(&self) -> Result<Vec<(Consent, Vec<IntentRef>)>, String> {
         Ok(self
             .load_all()?
@@ -154,7 +158,6 @@ impl ConsentStore {
     }
 
     /// The caller must have confirmed this exact reference was durably discarded by its custody owner.
-    #[cfg(test)]
     pub(crate) fn acknowledge_discard(
         &self,
         expected: &Consent,

@@ -901,3 +901,223 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     http_server.abort();
     gateway_server.abort();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_later_once() {
+    use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
+    use crate::services::turn_orchestrator::{
+        Intervention, InterventionMode, QueuePersistenceContext,
+    };
+    let runtime = tempfile::tempdir().unwrap();
+    let _runtime = crate::config::set_agentdesk_root_for_test(runtime.path());
+    let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
+    let _boot = session_hosts::force_for_test(Some("node"), &[(channel.get(), "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let (config_dir, peer) = preview::tests::fixture("printf 'config: ok\\n'");
+    peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
+    let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
+    let _peer = ScopedPeer(previous);
+    let token = consent::Preview {
+        revision: 1,
+        witness: peer.snapshot().unwrap().witness,
+        target_hash: [1; 32],
+        chain_hash: [2; 32],
+        checker_hash: [3; 32],
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(interaction_http)
+        .with_state(InteractionHttp {
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+    let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    for source in [940_487_400_000_071_u64, 940_487_400_000_072] {
+        let path = config_dir.path().join(format!("{source}.toml"));
+        let pending = store()
+            .hold(
+                consent::Question {
+                    key: consent::ConsentKey {
+                        node: "node".into(),
+                        user: unsafe { libc::geteuid() },
+                        socket: "/adk/herdr/agentdesk.sock".into(),
+                        named_session: "agentdesk".into(),
+                        config: path.clone(),
+                        target: path,
+                    },
+                    preview: token.clone(),
+                    owner: 1,
+                    bot: 940_487_400_000_003,
+                    provider: "claude".into(),
+                    channel: channel.get(),
+                    message: source + 100,
+                    intent: consent::IntentRef {
+                        store: "mailbox".into(),
+                        id: format!("{source}:17"),
+                        provider: "claude".into(),
+                        channel: channel.get(),
+                        source_message: source,
+                        fifo: 17,
+                    },
+                },
+                now(),
+            )
+            .unwrap()
+            .into_consent();
+        let accepted = store().decide(&pending, 1, true, now()).unwrap();
+        store()
+            .record_apply(
+                &accepted,
+                consent::ApplyResult {
+                    before: Some([1; 32]),
+                    after: Some([4; 32]),
+                    backup: None,
+                    detail: None,
+                },
+            )
+            .unwrap();
+    }
+    let ordered = store().load_all().unwrap();
+    assert_eq!(
+        ordered.len(),
+        2,
+        "fixture must contain two actual Applied receipts"
+    );
+    let failed = &ordered[0];
+    let later = &ordered[1];
+    let effects = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let observed = effects.clone();
+    let _executor = queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, channel, _| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let taken = shared
+                    .mailbox(channel)
+                    .take_next_soft(QueuePersistenceContext::new(
+                        &provider,
+                        &shared.token_hash,
+                        None,
+                    ))
+                    .await;
+                if let Some(item) = taken.intervention {
+                    assert_eq!(item.text, format!("original {}", item.message_id));
+                    crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                        &shared,
+                        &provider,
+                        channel,
+                        item.message_id,
+                        taken
+                            .dispatch_lease
+                            .as_ref()
+                            .expect("original lease")
+                            .clone(),
+                    )
+                    .await;
+                    *observed
+                        .lock()
+                        .unwrap()
+                        .entry(item.message_id.get())
+                        .or_insert(0_u32) += 1;
+                }
+                Some(IdleQueueKickoffChannelOutcome { started: true })
+            })
+        },
+    ));
+    // First recover has only the later receipt's original payload; the first release must fail.
+    for (step, record) in [later, failed].into_iter().enumerate() {
+        let source = serenity::MessageId::new(record.intents[0].source_message);
+        let enqueued = shared
+            .mailbox(channel)
+            .enqueue(
+                Intervention {
+                    author_id: serenity::UserId::new(1),
+                    author_is_bot: false,
+                    message_id: source,
+                    queued_generation: 17,
+                    source_message_ids: vec![source],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: Vec::new(),
+                    text: format!("original {source}"),
+                    mode: InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                },
+                QueuePersistenceContext::new(&provider, &shared.token_hash, None),
+            )
+            .await;
+        assert!(enqueued.enqueued && enqueued.persistence_error.is_none());
+        for _ in 0..2 {
+            let result = recover_excluding(
+                &http,
+                &shared,
+                &provider,
+                &std::collections::BTreeSet::new(),
+            )
+            .await;
+            let later_now = store().load(&later.key).unwrap().unwrap();
+            assert_eq!(
+                (
+                    effects
+                        .lock()
+                        .unwrap()
+                        .get(&later.intents[0].source_message)
+                        .copied()
+                        .unwrap_or(0),
+                    later_now.settlements.len()
+                ),
+                (1, 1),
+                "startup_failed_applied_consent_never_skips_later_release_contract"
+            );
+            let failed_now = store().load(&failed.key).unwrap().unwrap();
+            if step == 0 {
+                assert!(
+                    result.as_ref().is_err_and(
+                        |error| error.contains("durable mailbox custody reference missing")
+                    ) && failed_now.state == State::Applied
+                        && failed_now.releasable_intents().len() == 1
+                        && failed_now.settlements.is_empty(),
+                    "startup_failed_applied_consent_stays_retryable_contract: {result:?}"
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "restored original reference must recover: {result:?}"
+                );
+                assert_eq!(
+                    (
+                        effects
+                            .lock()
+                            .unwrap()
+                            .get(&failed.intents[0].source_message)
+                            .copied()
+                            .unwrap_or(0),
+                        failed_now.settlements.len()
+                    ),
+                    (1, 1),
+                    "startup_repaired_applied_consent_releases_and_acknowledges_once_contract"
+                );
+            }
+        }
+    }
+    assert!(
+        shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .intervention_queue
+            .is_empty()
+    );
+    http_server.abort();
+}

@@ -3,7 +3,7 @@ use super::super::super::{ChannelId, SharedData};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::policy::{
     consent::{
-        IntentRef,
+        ConsentKey, IntentRef,
         settlement::{CustodySink, SettlementKey},
     },
     durable::{self, Directory},
@@ -14,27 +14,53 @@ use std::sync::Arc;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Released {
+    #[serde(default)]
+    consent: String,
     nonce: String,
     intent: IntentRef,
     woken: bool,
 }
 
+static WAKES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub(super) struct LiveSink {
+    consent: String,
     shared: Arc<SharedData>,
     provider: ProviderKind,
     directory: Directory,
 }
 
 impl LiveSink {
-    pub(super) fn new(shared: Arc<SharedData>, provider: ProviderKind) -> Self {
-        Self {
+    pub(super) fn new(
+        shared: Arc<SharedData>,
+        provider: ProviderKind,
+        key: &ConsentKey,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            consent: durable::key(key)?,
             shared,
             provider,
             directory: Directory(
                 crate::config::runtime_root()
                     .map(|root| root.join("runtime/herdr_policy/consents/custody")),
             ),
+        })
+    }
+
+    /// The exact original payload may pass admission after release, before consent acknowledgement.
+    pub(super) async fn released(&self, intent: &IntentRef) -> Result<bool, String> {
+        let key = SettlementKey {
+            nonce: "eligibility".into(),
+            store: intent.store.clone(),
+            id: intent.id.clone(),
+        };
+        let Some(released) = self.read(self.identity(&key, intent)?).await? else {
+            return Ok(false);
+        };
+        if released.intent != *intent || released.consent != self.consent {
+            return Err("custody release belongs to a different consent or source".into());
         }
+        Ok(true)
     }
 
     fn identity(&self, key: &SettlementKey, intent: &IntentRef) -> Result<String, String> {
@@ -74,6 +100,7 @@ impl LiveSink {
         woken: bool,
     ) -> Result<(), String> {
         let directory = self.directory.clone();
+        let consent = self.consent.clone();
         tokio::task::spawn_blocking(move || {
             directory
                 .change(&name, |previous| {
@@ -82,12 +109,13 @@ impl LiveSink {
                             serde_json::from_slice::<Released>(&bytes).map_err(|e| e.to_string())?
                         }
                         None => Released {
+                            consent: consent.clone(),
                             nonce,
                             intent: intent.clone(),
                             woken: false,
                         },
                     };
-                    if released.intent != intent {
+                    if released.intent != intent || released.consent != consent {
                         return Err("custody reference changed; preserve its marker".into());
                     }
                     released.woken |= woken;
@@ -99,7 +127,7 @@ impl LiveSink {
         .map_err(|e| e.to_string())?
     }
 
-    async fn mailbox_present(&self, intent: &IntentRef) -> Result<(), String> {
+    async fn mailbox_pending(&self, intent: &IntentRef) -> Result<bool, String> {
         if intent.id != format!("{}:{}", intent.source_message, intent.fifo) {
             return Err(
                 "mailbox custody reference must bind its source and queued generation".into(),
@@ -125,19 +153,18 @@ impl LiveSink {
                         && source.queued_generation == intent.fifo
                 })
         };
-        if !disk.iter().any(matches) {
-            return Err("durable mailbox custody reference missing; preserve consent hold".into());
-        }
         let live = self
             .shared
             .mailbox(channel)
             .try_snapshot()
             .await
             .map_err(|e| format!("mailbox unavailable: {e:?}"))?;
-        if !live.intervention_queue.iter().any(matches) {
-            return Err("mailbox custody has not been restored; retry recovery".into());
+        let persisted = disk.iter().any(matches);
+        let restored = live.intervention_queue.iter().any(matches);
+        if persisted != restored {
+            return Err("mailbox custody is not durably restored; retry recovery".into());
         }
-        Ok(())
+        Ok(persisted)
     }
 }
 
@@ -146,14 +173,20 @@ impl CustodySink for LiveSink {
     async fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String> {
         let name = self.identity(key, intent)?;
         if let Some(released) = self.read(name.clone()).await? {
-            return if released.intent == *intent {
+            return if released.intent == *intent && released.consent == self.consent {
                 Ok(())
             } else {
                 Err("custody source changed".into())
             };
         }
         match intent.store.as_str() {
-            "mailbox" => self.mailbox_present(intent).await?,
+            "mailbox" => {
+                if !self.mailbox_pending(intent).await? {
+                    return Err(
+                        "durable mailbox custody reference missing; preserve consent hold".into(),
+                    );
+                }
+            }
             "intake_outbox" => {
                 let id = intent
                     .id
@@ -171,7 +204,7 @@ impl CustodySink for LiveSink {
                     intent.channel,
                     intent.source_message,
                     intent.fifo,
-                    &key.nonce,
+                    (&self.consent, &key.nonce),
                 )
                 .await?;
             }
@@ -187,18 +220,19 @@ impl CustodySink for LiveSink {
     }
 
     async fn wake(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String> {
+        let _wake = WAKES.lock().await;
         let name = self.identity(key, intent)?;
         let released = self
             .read(name.clone())
             .await?
             .ok_or("custody wake requires durable release")?;
-        if released.intent != *intent {
+        if released.intent != *intent || released.consent != self.consent {
             return Err("custody source changed".into());
         }
         if released.woken {
             return Ok(());
         }
-        if intent.store == "mailbox" {
+        if intent.store == "mailbox" && self.mailbox_pending(intent).await? {
             let channel = ChannelId::new(intent.channel);
             let outcome =
                 crate::services::discord::queue_io::kick_idle_queue_channel_if_context_available(

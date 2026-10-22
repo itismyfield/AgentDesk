@@ -60,8 +60,8 @@ struct FakeCards {
     replacements: Vec<card::Card>,
     disabled: Vec<u64>,
     fail_send: Option<SendFailure>,
-    fail_replace: bool,
-    fail_disable: bool,
+    fail_replace: Option<SendFailure>,
+    fail_disable: Option<SendFailure>,
 }
 #[async_trait::async_trait]
 impl Cards for FakeCards {
@@ -72,20 +72,18 @@ impl Cards for FakeCards {
             None => Ok(40),
         }
     }
-    async fn replace(&mut self, _: u64, card: &card::Card) -> Result<(), String> {
+    async fn replace(&mut self, _: u64, card: &card::Card) -> Result<(), SendFailure> {
         self.replacements.push(card.clone());
-        if self.fail_replace {
-            Err("replace cleanup failed".into())
-        } else {
-            Ok(())
+        match self.fail_replace.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
-    async fn disable(&mut self, message: u64) -> Result<(), String> {
+    async fn disable(&mut self, message: u64) -> Result<(), SendFailure> {
         self.disabled.push(message);
-        if self.fail_disable {
-            Err("disable cleanup failed".into())
-        } else {
-            Ok(())
+        match self.fail_disable.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -858,8 +856,8 @@ async fn engine_unknown_send_keeps_reservation_and_never_resends() {
 async fn engine_bind_failure_preserves_original_error_and_reports_cleanup() {
     let (mut rig, prepared) = Rig::new(false, false).await;
     rig.owner.fail = true;
-    rig.cards.fail_replace = true;
-    rig.cards.fail_disable = true;
+    rig.cards.fail_replace = Some(SendFailure::Definitive("replace cleanup failed".into()));
+    rig.cards.fail_disable = Some(SendFailure::Unknown("disable cleanup failed".into()));
     let question = rig.question(&prepared.token);
     let failed = rig
         .handle(
@@ -881,6 +879,10 @@ async fn engine_bind_failure_preserves_original_error_and_reports_cleanup() {
             && error.contains("replace cleanup failed")
             && error.contains("disable cleanup failed"),
         "engine_bind_failure_preserves_original_and_cleanup_contract"
+    );
+    assert!(
+        error.contains("replace rejected") && error.contains("disable outcome unknown"),
+        "engine_cleanup_outcome_classification_contract"
     );
     assert!(rig.cards.replacements.last().unwrap().buttons.is_empty());
     assert_eq!(rig.cards.disabled, vec![40]);

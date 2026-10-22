@@ -229,24 +229,21 @@ pub(in crate::services::discord) async fn send_channel_message_with_components(
         .await
 }
 
-/// Edit a channel message while replacing its interactive components.
-pub(in crate::services::discord) async fn edit_channel_message_with_components(
+/// Edit interactive components, preserving the current body when content is absent.
+pub(in crate::services::discord) async fn edit_channel_message_with_components<'a>(
     http: &serenity::Http,
     channel_id: ChannelId,
     message_id: MessageId,
-    content: &str,
+    content: impl Into<Option<&'a str>>,
     components: Vec<CreateActionRow>,
 ) -> serenity::Result<Message> {
-    channel_id
-        .edit_message(
-            http,
-            message_id,
-            EditMessage::new()
-                .content(discord_content_or_zwsp(content)?)
-                .components(components)
-                .allowed_mentions(relay_allowed_mentions()),
-        )
-        .await
+    let mut edit = EditMessage::new()
+        .components(components)
+        .allowed_mentions(relay_allowed_mentions());
+    if let Some(content) = content.into() {
+        edit = edit.content(discord_content_or_zwsp(content)?);
+    }
+    channel_id.edit_message(http, message_id, edit).await
 }
 
 pub(in crate::services::discord) async fn edit_channel_message(

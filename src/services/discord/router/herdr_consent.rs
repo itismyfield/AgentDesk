@@ -1,5 +1,6 @@
 //! Owner consent operates existing custody; intake producers are wired separately.
 
+pub(super) mod admission;
 pub(super) mod custody;
 pub(in crate::services::discord) mod startup;
 mod transport;
@@ -19,14 +20,14 @@ use crate::services::session_host::policy::{
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 
-pub(super) fn store() -> ConsentStore {
+pub(in crate::services::discord) fn store() -> ConsentStore {
     ConsentStore::new(
         crate::config::runtime_root().map(|r| r.join("runtime/herdr_policy/consents")),
     )
 }
 
 /// This pure guard precedes custom-ID parsing, command policy and every store lookup.
-pub(super) fn endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
+pub(in crate::services::discord) fn endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
     session_hosts::with_boot(|boot| {
         let boot = boot?;
         let mapped = boot.herdr_endpoint(channel)?;
@@ -101,7 +102,7 @@ async fn run(
         http: http.clone(),
         channel: serenity::ChannelId::new(consent.channel),
     };
-    let mut sink = custody::LiveSink::new(shared.clone(), provider.clone());
+    let mut sink = custody::LiveSink::new(shared.clone(), provider.clone(), &consent.key)?;
     Engine {
         store: &store(),
         local_node: session_hosts::local_node().unwrap_or_default(),
@@ -332,7 +333,18 @@ pub(super) async fn recover_excluding(
     if !enabled {
         return Ok(());
     }
-    for consent in records().await? {
+    let mut failures = Vec::new();
+    let records = tokio::task::spawn_blocking(|| store().load_each())
+        .await
+        .map_err(|e| e.to_string())??;
+    for record in records {
+        let consent = match record {
+            Ok(consent) => consent,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
         if consent.provider != provider.as_str()
             || Some(&consent.key.node) != local.as_ref()
             || consent.state != State::Applied
@@ -346,19 +358,26 @@ pub(super) async fn recover_excluding(
         {
             continue;
         }
-        let bot = http
-            .get_current_user()
-            .await
-            .map_err(|e| e.to_string())?
-            .id
-            .get();
+        let bot = match http.get_current_user().await {
+            Ok(bot) => bot.id.get(),
+            Err(error) => {
+                failures.push(error.to_string());
+                continue;
+            }
+        };
         if consent.bot != bot {
             continue;
         }
         let event = Event::Recover(consent.key.clone());
-        run(http, shared, provider, consent, event, None).await?;
+        if let Err(error) = run(http, shared, provider, consent, event, None).await {
+            failures.push(error);
+        }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn now() -> u64 {

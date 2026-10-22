@@ -30,18 +30,19 @@ async fn respond(
         .lock()
         .unwrap()
         .push((method.to_string(), body.clone()));
-    if method == axum::http::Method::POST {
-        let status = state.status.load(Ordering::SeqCst);
-        if status != 200 {
-            return (
-                axum::http::StatusCode::from_u16(status).unwrap(),
-                axum::Json(json!({"code":50013,"message":"fixture rejection"})),
-            )
-                .into_response();
-        }
-        if state.malformed.load(Ordering::SeqCst) {
-            return (axum::http::StatusCode::OK, "{invalid-json").into_response();
-        }
+    if method == axum::http::Method::GET {
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let status = state.status.load(Ordering::SeqCst);
+    if status != 200 {
+        return (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            axum::Json(json!({"code":50013,"message":"fixture rejection"})),
+        )
+            .into_response();
+    }
+    if state.malformed.load(Ordering::SeqCst) {
+        return (axum::http::StatusCode::OK, "{invalid-json").into_response();
     }
     if let Some(content) = body.get("content").and_then(Value::as_str) {
         *state.content.lock().unwrap() = content.into();
@@ -96,12 +97,17 @@ async fn live_cards_preserve_body_components_and_send_failure_classification() {
         cards.replace(940_487_400_000_051, &card).await.is_ok(),
         "transport_replace_card_contract"
     );
+    *state.content.lock().unwrap() = "newer concurrent replacement guidance".into();
     assert!(
         cards.disable(940_487_400_000_051).await.is_ok(),
         "transport_disable_succeeds_contract"
     );
     let calls = state.calls.lock().unwrap().clone();
-    let writes: Vec<_> = calls.iter().filter(|(method, _)| method != "GET").collect();
+    assert!(
+        calls.iter().all(|(method, _)| method != "GET"),
+        "transport_disable_never_reads_contract"
+    );
+    let writes = calls;
     assert_eq!(
         writes.len(),
         3,
@@ -117,9 +123,14 @@ async fn live_cards_preserve_body_components_and_send_failure_classification() {
         writes[1].1["components"][0]["components"][0]["disabled"],
         false
     );
+    assert!(
+        writes[2].1.get("content").is_none(),
+        "transport_disable_omits_content_contract"
+    );
     assert_eq!(
-        writes[2].1["content"], card.content,
-        "transport_disable_preserves_content_contract"
+        state.content.lock().unwrap().as_str(),
+        "newer concurrent replacement guidance",
+        "transport_disable_preserves_current_content_contract"
     );
     assert_eq!(
         writes[2].1["components"],
@@ -139,17 +150,59 @@ async fn live_cards_preserve_body_components_and_send_failure_classification() {
             matches!(cards.send(&card).await, Err(SendFailure::Definitive(_))),
             "transport_definitive_http_status_contract: {status}"
         );
+        assert!(
+            matches!(
+                cards.replace(940_487_400_000_051, &card).await,
+                Err(SendFailure::Definitive(_))
+            ),
+            "transport_replace_definitive_http_status_contract: {status}"
+        );
+        assert!(
+            matches!(
+                cards.disable(940_487_400_000_051).await,
+                Err(SendFailure::Definitive(_))
+            ),
+            "transport_disable_definitive_http_status_contract: {status}"
+        );
     }
     state.status.store(418, Ordering::SeqCst);
     assert!(
         matches!(cards.send(&card).await, Err(SendFailure::Unknown(_))),
         "transport_unknown_http_status_contract"
     );
+    assert!(
+        matches!(
+            cards.replace(940_487_400_000_051, &card).await,
+            Err(SendFailure::Unknown(_))
+        ),
+        "transport_replace_unknown_http_status_contract"
+    );
+    assert!(
+        matches!(
+            cards.disable(940_487_400_000_051).await,
+            Err(SendFailure::Unknown(_))
+        ),
+        "transport_disable_unknown_http_status_contract"
+    );
     state.status.store(200, Ordering::SeqCst);
     state.malformed.store(true, Ordering::SeqCst);
     assert!(
         matches!(cards.send(&card).await, Err(SendFailure::Unknown(_))),
         "transport_unknown_response_contract"
+    );
+    assert!(
+        matches!(
+            cards.replace(940_487_400_000_051, &card).await,
+            Err(SendFailure::Unknown(_))
+        ),
+        "transport_replace_unknown_response_contract"
+    );
+    assert!(
+        matches!(
+            cards.disable(940_487_400_000_051).await,
+            Err(SendFailure::Unknown(_))
+        ),
+        "transport_disable_unknown_response_contract"
     );
     server.abort();
 }

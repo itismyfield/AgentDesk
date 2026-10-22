@@ -178,3 +178,100 @@ async fn startup_legacy_returns_before_settings_or_policy_store_io() {
         "startup_legacy_additional_policy_files_zero_contract"
     );
 }
+
+#[test]
+fn startup_one_interrupted_config_failure_does_not_skip_later_accepts() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(temp.path().join("consents")));
+    accepted(
+        &store,
+        &temp.path().join("one.toml"),
+        "claude",
+        "/fixture/one.sock",
+    );
+    accepted(
+        &store,
+        &temp.path().join("two.toml"),
+        "codex",
+        "/fixture/two.sock",
+    );
+    let records = store.load_all().unwrap();
+    let first = &records[0];
+    std::fs::remove_file(&first.key.config).unwrap();
+    std::fs::create_dir(&first.key.config).unwrap();
+    let local = Local {
+        node: "node".into(),
+        endpoints: records
+            .iter()
+            .map(|record| (record.key.socket.clone(), record.key.named_session.clone()))
+            .collect(),
+    };
+    let boot = BootState::new();
+    assert!(
+        interrupt(&store, &local, &boot).is_err(),
+        "startup_partial_interruption_reports_failure_contract"
+    );
+    assert!(
+        !boot.is_ready(),
+        "startup_partial_interruption_keeps_apply_closed_contract"
+    );
+    assert_eq!(
+        store.load(&first.key).unwrap().unwrap().state,
+        State::Accepted
+    );
+    assert_eq!(
+        store.load(&records[1].key).unwrap().unwrap().state,
+        State::ApplyFailed,
+        "startup_failed_consent_does_not_skip_remaining_contract"
+    );
+}
+
+#[test]
+fn startup_one_corrupt_snapshot_does_not_skip_valid_accepted_neighbors() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let broken = accepted(
+        &store,
+        &temp.path().join("broken.toml"),
+        "claude",
+        "/fixture/broken.sock",
+    );
+    let valid = accepted(
+        &store,
+        &temp.path().join("valid.toml"),
+        "codex",
+        "/fixture/valid.sock",
+    );
+    let filename = crate::services::session_host::policy::durable::key(&broken.key).unwrap();
+    std::fs::write(
+        directory.join(format!("{filename}.json")),
+        b"{broken snapshot",
+    )
+    .unwrap();
+    let local = Local {
+        node: "node".into(),
+        endpoints: vec![
+            (broken.key.socket, "desk".into()),
+            (valid.key.socket.clone(), "desk".into()),
+        ],
+    };
+    let boot = BootState::new();
+    assert!(
+        interrupt(&store, &local, &boot).is_err(),
+        "startup_corrupt_neighbor_failure_is_reported_contract"
+    );
+    assert!(
+        !boot.is_ready(),
+        "startup_corrupt_neighbor_keeps_apply_closed_contract"
+    );
+    assert_eq!(
+        store.load(&valid.key).unwrap().unwrap().state,
+        State::ApplyFailed,
+        "startup_corrupt_neighbor_never_skips_valid_consent_contract"
+    );
+    assert!(
+        store.load_all().is_err(),
+        "startup_recovery_does_not_mask_corruption_contract"
+    );
+}

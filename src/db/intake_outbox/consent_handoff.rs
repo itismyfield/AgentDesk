@@ -12,6 +12,7 @@ const PREFIX: &str = "herdr-consent-custody:v1:";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Marker {
+    // A generation nonce is a release receipt, never authority for the held row.
     nonce: String,
     consent: String,
     row: i64,
@@ -79,8 +80,9 @@ pub(crate) async fn release(
     channel: u64,
     source: u64,
     fifo: u64,
-    nonce: &str,
+    receipt: (&str, &str),
 ) -> Result<(), String> {
+    let (consent, nonce) = receipt;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let identity = OwnerIdentity::new(provider, &channel.to_string());
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -102,8 +104,8 @@ pub(crate) async fn release(
         || row.attempt_no as u64 != fifo
         || held.row != id
         || held.payload != payload(&row)?
-        || held.nonce.is_empty()
         || held.consent.len() != 64
+        || held.consent != consent
         || nonce.is_empty()
     {
         return Err(
@@ -115,15 +117,12 @@ pub(crate) async fn release(
         tx.commit().await.map_err(|e| e.to_string())?;
         return Ok(());
     }
-    if held.nonce != nonce
-        || held.claim != row.claim_owner
+    if held.claim != row.claim_owner
         || held.owner != row.owner_instance_id
         || held.generation != row.owner_generation
         || row.status != super::IntakeOutboxStatus::Spawned
     {
-        return Err(
-            "consent outbox claim, generation or nonce changed; preserve its original row".into(),
-        );
+        return Err("consent outbox claim or generation changed; preserve its original row".into());
     }
     let owner_valid = match (&row.owner_instance_id, row.owner_generation) {
         (None, None) => true,
@@ -137,6 +136,7 @@ pub(crate) async fn release(
         return Err("consent outbox owner retired; preserve its original row".into());
     }
     held.released = true;
+    held.nonce = nonce.into();
     let encoded = format!(
         "{PREFIX}{}",
         serde_json::to_string(&held).map_err(|e| e.to_string())?
@@ -149,8 +149,72 @@ pub(crate) async fn release(
     tx.commit().await.map_err(|e| e.to_string())
 }
 
-#[cfg(test)]
-pub(crate) use tests::hold_before_effects;
+pub(crate) async fn hold_before_effects(
+    pool: &PgPool,
+    proof: crate::services::cluster::intake_worker::BeforeEffects,
+    store: &crate::services::session_host::policy::consent::ConsentStore,
+    expected: &crate::services::session_host::policy::consent::Consent,
+    intent: &crate::services::session_host::policy::consent::IntentRef,
+) -> Result<(), String> {
+    use crate::services::session_host::policy::durable;
+    let row = proof.row();
+    let current = store
+        .load(&expected.key)?
+        .ok_or("consent custody missing")?;
+    if current != *expected
+        || !current.unresolved_intents().contains(intent)
+        || intent.store != "intake_outbox"
+        || intent.id != row.id.to_string()
+        || intent.provider != row.provider
+        || intent.channel.to_string() != row.channel_id
+        || intent.source_message.to_string() != row.user_msg_id
+        || intent.fifo != row.attempt_no as u64
+        || row.status != crate::db::intake_outbox_status::IntakeOutboxStatus::Spawned
+        || row.claim_owner.is_none()
+    {
+        return Err(
+            "before-effects consent custody does not identify this exact worker payload".into(),
+        );
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let identity = OwnerIdentity::new(&row.provider, &row.channel_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(identity.advisory_key())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let current_row: IntakeOutboxRow =
+        sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
+            .bind(row.id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if payload(&current_row)? != payload(row)? {
+        return Err("worker payload changed before custody handoff".into());
+    }
+    let marker = Marker {
+        nonce: String::new(),
+        consent: durable::key(&current.key)?,
+        row: row.id,
+        payload: payload(row)?,
+        claim: row.claim_owner.clone(),
+        owner: row.owner_instance_id.clone(),
+        generation: row.owner_generation,
+        released: false,
+    };
+    let encoded = format!(
+        "{PREFIX}{}",
+        serde_json::to_string(&marker).map_err(|e| e.to_string())?
+    );
+    let changed = sqlx::query("UPDATE intake_outbox SET last_error=$2 WHERE id=$1 AND status='spawned' AND claim_owner=$3 AND owner_instance_id IS NOT DISTINCT FROM $4 AND owner_generation IS NOT DISTINCT FROM $5 AND last_error IS NULL")
+        .bind(row.id).bind(encoded).bind(&row.claim_owner).bind(&row.owner_instance_id).bind(row.owner_generation)
+        .execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
+    if changed == 1 {
+        tx.commit().await.map_err(|e| e.to_string())
+    } else {
+        Err("worker claim changed before consent custody handoff".into())
+    }
+}
 
 #[cfg(test)]
 #[path = "consent_handoff_tests.rs"]

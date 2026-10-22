@@ -133,6 +133,7 @@ src/services/cluster/intake_router_hook/execution_requirement_tests.rs
 src/services/cluster/intake_router_hook/home_route_tests.rs
 src/services/cluster/intake_router_hook/o_route_tests.rs
 src/services/cluster/intake_router_hook/owner_record.rs
+src/services/cluster/intake_worker/consent_scope_tests.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
 src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
@@ -216,6 +217,7 @@ src/services/discord/relay_recovery_circuit_breaker.rs
 src/services/discord/replay_policy/live_tests.rs
 src/services/discord/replay_policy/permit_tests.rs
 src/services/discord/replay_policy/policy_tests.rs
+src/services/discord/router/herdr_consent/admission_tests.rs
 src/services/discord/router/herdr_consent/custody_tests.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/initial_fresh_tests.rs
@@ -568,6 +570,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg
 services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
+services::cluster::intake_worker::o_input::tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::intake_worker::owner_fence_pg_tests
 services::cluster::intake_worker::replay_hold_tests
@@ -644,6 +647,7 @@ services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::replay_policy::live_tests
 services::discord::replay_policy::permit_tests
 services::discord::replay_policy::policy_tests
+services::discord::router::herdr_consent::admission::tests
 services::discord::router::herdr_consent::custody::tests
 services::discord::router::intake_dispatch::home_order_tests
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests
@@ -1109,9 +1113,11 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
+db::intake_outbox::consent_handoff::tests::consent_handoff_first_release_after_regeneration_uses_stable_consent_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_refuses_unmarked_post_accept_rows_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_requires_exact_payload_source_and_live_owner_pg
+db::intake_outbox::consent_handoff::tests::consent_handoff_stale_before_effects_proof_never_changes_row_pg
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
@@ -1798,6 +1804,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_home_
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_home_moves_between_select_and_confirm_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_no_row_matches_legacy_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_two_routers_one_holder_pg
+services::cluster::intake_worker::o_input::tests::before_effects_authority_is_exact_consumed_and_scoped_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
@@ -2146,6 +2153,9 @@ services::discord::replay_policy::live_tests::direct_adapter_without_a_live_atte
 services::discord::replay_policy::permit_tests::start_permit_runs_one_effect_only_on_its_own_target_pg
 services::discord::replay_policy::policy_tests::stale_attempt_retries_only_on_committed_no_effect_evidence_pg
 services::discord::replay_policy::policy_tests::stale_decision_failures_hold_without_a_permit_pg
+services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
+services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg
 services::discord::router::herdr_consent::custody::tests::live_outbox_custody_sink_passes_shared_durable_conformance_pg
 services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg
 services::discord::router::intake_dispatch::home_order_tests::dormant_owner_admission_primitive_preserves_full_sources_without_receipt_key_pg

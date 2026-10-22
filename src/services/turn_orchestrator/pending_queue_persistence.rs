@@ -321,7 +321,6 @@ fn created_at_wall_time_ms_from_instant(
         .unwrap_or(reference_wall_time);
     system_time_to_unix_millis(created_at_wall_time)
 }
-
 fn created_at_instant_from_wall_time_ms(
     created_at_wall_time_ms: Option<u64>,
     reference_wall_time: SystemTime,
@@ -349,7 +348,6 @@ fn created_at_instant_from_wall_time_ms(
             .unwrap_or(reference_instant),
     }
 }
-
 pub(super) fn pending_queue_item_from_intervention(
     intervention: &Intervention,
     channel_id: ChannelId,
@@ -366,6 +364,7 @@ pub(super) fn pending_queue_item_from_intervention(
             enqueued_at_epoch_us: owner.enqueued_at_epoch_us,
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
+            origin: owner.origin,
         })
         .collect();
     let source_text_segments: Vec<PendingQueueSourceTextSegment> = intervention
@@ -672,7 +671,6 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     }
     removed
 }
-
 pub(super) fn pending_queue_item_to_intervention(
     item: PendingQueueItem,
     reference_wall_time: SystemTime,
@@ -709,6 +707,7 @@ pub(super) fn pending_queue_item_to_intervention(
             enqueued_at_epoch_us: owner.enqueued_at_epoch_us.or(legacy_enqueued_us),
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
+            origin: owner.origin,
         })
         .collect();
     for message_id in &source_message_ids {
@@ -722,6 +721,7 @@ pub(super) fn pending_queue_item_to_intervention(
                 enqueued_at_epoch_us: legacy_enqueued_us,
                 preserve_on_cancel: false,
                 route: None,
+                origin: None,
             });
         }
     }

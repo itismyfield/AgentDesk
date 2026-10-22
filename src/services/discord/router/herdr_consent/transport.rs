@@ -57,35 +57,29 @@ impl Cards for LiveCards {
         .map(|message| message.id.get())
         .map_err(send_failure)
     }
-    async fn replace(&mut self, message: u64, card: &Card) -> Result<(), String> {
+    async fn replace(&mut self, message: u64, card: &Card) -> Result<(), SendFailure> {
         edit_channel_message_with_components(
             &self.http,
             self.channel,
             serenity::MessageId::new(message),
-            &card.content,
+            card.content.as_str(),
             components(card),
         )
         .await
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(send_failure)
     }
-    async fn disable(&mut self, message: u64) -> Result<(), String> {
-        // Preserve the existing guidance while removing its interactive buttons.
-        let current = self
-            .channel
-            .message(&self.http, message)
-            .await
-            .map_err(|error| error.to_string())?;
+    async fn disable(&mut self, message: u64) -> Result<(), SendFailure> {
         edit_channel_message_with_components(
             &self.http,
             self.channel,
             serenity::MessageId::new(message),
-            &current.content,
+            None,
             Vec::new(),
         )
         .await
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(send_failure)
     }
 }
 

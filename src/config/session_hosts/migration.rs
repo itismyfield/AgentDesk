@@ -2,6 +2,9 @@
 
 use std::collections::BTreeSet;
 
+mod consent_holds;
+pub(crate) use consent_holds::ConsentHolds;
+
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
@@ -289,8 +292,9 @@ async fn select_projection<S: ApprovalStore, R: RowSource, H: HoldSource>(
                 );
             }
         };
-        let held = if H::INTRODUCED {
-            holds.unresolved(&changes).await
+        let hold_changes = consent_holds::affected_user_default(&approved, &candidate, &changes);
+        let held = if H::INTRODUCED && !hold_changes.is_empty() {
+            holds.unresolved(&hold_changes).await
         } else {
             Ok(HOLDS_NOT_INTRODUCED.to_vec())
         };

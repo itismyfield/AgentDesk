@@ -54,16 +54,29 @@ fn interrupt(store: &ConsentStore, local: &Local, boot: &BootState) -> Result<()
         if std::ptr::eq(boot, &BOOT) {
             super::STORE_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        for consent in store.load_all()? {
+        let mut failures = Vec::new();
+        for result in store.load_each()? {
+            let consent = match result {
+                Ok(consent) => consent,
+                Err(error) => {
+                    failures.push(error);
+                    continue;
+                }
+            };
             if consent.state == State::Accepted
                 && consent.key.node == local.node
                 && consent.key.user == user
                 && local.endpoints.iter().any(|(socket, session)| {
                     *socket == consent.key.socket && *session == consent.key.named_session
                 })
+                && let Err(error) =
+                    engine::recover(store, Event::BootRecover(consent.key, &authority))
             {
-                engine::recover(store, Event::BootRecover(consent.key, &authority))?;
+                failures.push(error);
             }
+        }
+        if !failures.is_empty() {
+            return Err(failures.join("; "));
         }
         authority.complete();
     }
@@ -90,12 +103,24 @@ pub(in crate::services::discord) async fn restore_excluding(
         return Ok(());
     };
     let _recovery = RECOVERY.lock().await;
-    tokio::task::spawn_blocking(move || interrupt(&super::store(), &local, &BOOT))
-        .await
-        .map_err(|error| format!("consent boot recovery: {error}"))??;
-    super::recover_excluding(http, shared, provider, blocked).await
+    let interrupted =
+        tokio::task::spawn_blocking(move || interrupt(&super::store(), &local, &BOOT))
+            .await
+            .map_err(|error| format!("consent boot recovery: {error}"))
+            .and_then(|result| result);
+    let replayed = super::recover_excluding(http, shared, provider, blocked).await;
+    match (interrupted, replayed) {
+        (Ok(()), result) => result,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(replay)) => Err(format!("{error}; consent replay also failed: {replay}")),
+    }
 }
 
 #[cfg(test)]
 #[path = "startup_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn store_reads_for_test() -> usize {
+    super::STORE_READS.load(std::sync::atomic::Ordering::SeqCst)
+}

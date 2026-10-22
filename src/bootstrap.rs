@@ -114,7 +114,7 @@ pub(crate) async fn prepare_session_hosts_boot(
         candidate,
         &FileApprovalStore::runtime(),
         &migration::PgRows(pool),
-        &migration::NoHoldStore,
+        &migration::ConsentHolds,
         false,
     )
     .await

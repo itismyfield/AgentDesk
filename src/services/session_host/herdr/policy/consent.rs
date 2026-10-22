@@ -289,7 +289,6 @@ impl ConsentStore {
             .map(QuestionResult::into_consent)
     }
 
-    #[cfg(test)]
     pub(crate) fn hold_unbound(
         &self,
         question: Question,

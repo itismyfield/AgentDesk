@@ -79,7 +79,10 @@ async fn consent_handoff_refuses_unmarked_post_accept_rows_pg() {
             intent.channel,
             intent.source_message,
             intent.fifo,
-            &consent.nonce
+            (
+                &crate::services::session_host::policy::durable::key(&consent.key).unwrap(),
+                &consent.nonce
+            )
         )
         .await
         .is_err(),
@@ -108,7 +111,10 @@ async fn consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg(
         intent.channel,
         intent.source_message,
         intent.fifo,
-        &consent.nonce,
+        (
+            &crate::services::session_host::policy::durable::key(&consent.key).unwrap(),
+            &consent.nonce,
+        ),
     )
     .await
     .unwrap();
@@ -132,7 +138,10 @@ async fn consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg(
         intent.channel,
         intent.source_message,
         intent.fifo,
-        &consent.nonce,
+        (
+            &crate::services::session_host::policy::durable::key(&consent.key).unwrap(),
+            &consent.nonce,
+        ),
     )
     .await
     .unwrap();
@@ -162,6 +171,9 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
         ("891203", "payload"),
         ("891204", "owner"),
         ("891205", "source"),
+        ("891206", "claim"),
+        ("891207", "generation"),
+        ("891208", "consent"),
     ] {
         let (row, _temp, store, consent, intent) = setup(&pool, channel).await;
         hold_before_effects(&pool, &row, &store, &consent, &intent)
@@ -175,6 +187,22 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
                     .await
                     .unwrap();
             }
+            "claim" => {
+                sqlx::query("UPDATE intake_outbox SET claim_owner='different-claim' WHERE id=$1")
+                    .bind(row.id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            "generation" => {
+                sqlx::query(
+                    "UPDATE intake_outbox SET owner_generation=owner_generation+1 WHERE id=$1",
+                )
+                .bind(row.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
             "owner" => {
                 super::super::owner_fence_pg_tests::move_owner(&pool, channel, "other-worker")
                     .await;
@@ -183,6 +211,11 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
         }
         let before = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
         let source = intent.source_message + u64::from(change == "source");
+        let mut consent_key =
+            crate::services::session_host::policy::durable::key(&consent.key).unwrap();
+        if change == "consent" {
+            consent_key = "0".repeat(64);
+        }
         assert!(
             release(
                 &pool,
@@ -191,7 +224,7 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
                 intent.channel,
                 source,
                 intent.fifo,
-                &consent.nonce
+                (&consent_key, &consent.nonce)
             )
             .await
             .is_err(),
@@ -209,66 +242,153 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
 pub(crate) async fn hold_before_effects(
     pool: &PgPool,
     row: &IntakeOutboxRow,
-    store: &crate::services::session_host::policy::consent::ConsentStore,
+    store: &ConsentStore,
     expected: &crate::services::session_host::policy::consent::Consent,
-    intent: &crate::services::session_host::policy::consent::IntentRef,
+    intent: &IntentRef,
 ) -> Result<(), String> {
-    use crate::services::session_host::policy::{consent::State, durable};
-    let current = store
-        .load(&expected.key)?
-        .ok_or("consent custody missing")?;
-    if current != *expected
-        || current.state != State::Pending
-        || !current.unresolved_intents().contains(intent)
-        || intent.store != "intake_outbox"
-        || intent.id != row.id.to_string()
-        || intent.provider != row.provider
-        || intent.channel.to_string() != row.channel_id
-        || intent.source_message.to_string() != row.user_msg_id
-        || intent.fifo != row.attempt_no as u64
-        || row.status != crate::db::intake_outbox_status::IntakeOutboxStatus::Spawned
-        || row.claim_owner.is_none()
-    {
-        return Err(
-            "before-effects consent custody does not identify this exact worker payload".into(),
+    super::hold_before_effects(
+        pool,
+        crate::services::cluster::intake_worker::BeforeEffects::for_test(row),
+        store,
+        expected,
+        intent,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn consent_handoff_first_release_after_regeneration_uses_stable_consent_pg() {
+    use crate::services::session_host::policy::{
+        consent::{ApplyResult, State},
+        durable,
+    };
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (row, _root, store, first, intent) = setup(&pool, "891209").await;
+    hold_before_effects(&pool, &row, &store, &first, &intent)
+        .await
+        .unwrap();
+    let denied = store.decide(&first, first.owner, false, 101).unwrap();
+    assert_eq!(denied.state, State::Denied);
+    let second = store
+        .retry(
+            Question {
+                key: denied.key.clone(),
+                preview: denied.preview.clone(),
+                owner: denied.owner,
+                bot: denied.bot,
+                provider: denied.provider.clone(),
+                channel: denied.channel,
+                message: denied.message,
+                intent: intent.clone(),
+            },
+            102,
+        )
+        .unwrap();
+    assert_ne!(second.nonce, first.nonce);
+    let accepted = store.decide(&second, second.owner, true, 103).unwrap();
+    let applied = store
+        .record_apply(
+            &accepted,
+            ApplyResult {
+                before: Some([1; 32]),
+                after: Some([2; 32]),
+                backup: None,
+                detail: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(applied.state, State::Applied);
+    let key = durable::key(&applied.key).unwrap();
+    let outcome = release(
+        &pool,
+        row.id,
+        &row.provider,
+        intent.channel,
+        intent.source_message,
+        intent.fifo,
+        (&key, &applied.nonce),
+    )
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "consent_handoff_regenerated_first_release_contract: {outcome:?}"
+    );
+    let first_release = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+    assert_eq!(
+        first_release["status"], "pending",
+        "consent_handoff_regenerated_original_pending_contract"
+    );
+    let receipt = marker(first_release["last_error"].as_str()).unwrap();
+    assert_eq!(
+        receipt.nonce, applied.nonce,
+        "consent_handoff_nonce_is_receipt_only_contract"
+    );
+    assert_eq!(receipt.consent, key);
+    assert!(
+        !super::super::mark_accepted(&pool, row.id, "token")
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE intake_outbox SET status='spawned',claim_owner='new-claim' WHERE id=$1")
+        .bind(row.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reclaimed = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+    for nonce in [&first.nonce, &applied.nonce, "later-generation"] {
+        assert!(
+            release(
+                &pool,
+                row.id,
+                &row.provider,
+                intent.channel,
+                intent.source_message,
+                intent.fifo,
+                (&key, nonce)
+            )
+            .await
+            .is_ok(),
+            "consent_handoff_regenerated_replay_idempotent_contract"
+        );
+        assert_eq!(
+            super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await,
+            reclaimed,
+            "consent_handoff_one_row_one_release_contract"
         );
     }
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let identity = OwnerIdentity::new(&row.provider, &row.channel_id);
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(identity.advisory_key())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-    let current_row: IntakeOutboxRow =
-        sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
-            .bind(row.id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-    if payload(&current_row)? != payload(row)? {
-        return Err("worker payload changed before custody handoff".into());
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn consent_handoff_stale_before_effects_proof_never_changes_row_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (channel, mutation) in [
+        ("891210", "payload"),
+        ("891211", "claim"),
+        ("891212", "generation"),
+    ] {
+        let (row, _root, store, consent, intent) = setup(&pool, channel).await;
+        let sql = match mutation {
+            "payload" => "UPDATE intake_outbox SET user_text='changed' WHERE id=$1",
+            "claim" => "UPDATE intake_outbox SET claim_owner='changed' WHERE id=$1",
+            _ => "UPDATE intake_outbox SET owner_generation=owner_generation+1 WHERE id=$1",
+        };
+        sqlx::query(sql).bind(row.id).execute(&pool).await.unwrap();
+        let before = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+        assert!(
+            hold_before_effects(&pool, &row, &store, &consent, &intent)
+                .await
+                .is_err(),
+            "consent_handoff_stale_before_effects_authority_contract: {mutation}"
+        );
+        assert_eq!(
+            super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await,
+            before
+        );
     }
-    let marker = Marker {
-        nonce: current.nonce,
-        consent: durable::key(&current.key)?,
-        row: row.id,
-        payload: payload(row)?,
-        claim: row.claim_owner.clone(),
-        owner: row.owner_instance_id.clone(),
-        generation: row.owner_generation,
-        released: false,
-    };
-    let encoded = format!(
-        "{PREFIX}{}",
-        serde_json::to_string(&marker).map_err(|e| e.to_string())?
-    );
-    let changed = sqlx::query("UPDATE intake_outbox SET last_error=$2 WHERE id=$1 AND status='spawned' AND claim_owner=$3 AND owner_instance_id IS NOT DISTINCT FROM $4 AND owner_generation IS NOT DISTINCT FROM $5 AND last_error IS NULL")
-        .bind(row.id).bind(encoded).bind(&row.claim_owner).bind(&row.owner_instance_id).bind(row.owner_generation)
-        .execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
-    if changed == 1 {
-        tx.commit().await.map_err(|e| e.to_string())
-    } else {
-        Err("worker claim changed before consent custody handoff".into())
-    }
+    pool.close().await;
+    db.drop().await;
 }
