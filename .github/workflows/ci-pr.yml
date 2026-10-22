@@ -1390,7 +1390,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
-      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -1504,6 +1503,7 @@ jobs:
         timeout-minutes: 75
         shell: bash
         env:
+          PG_INCLUDE_SHARD: ${{ matrix.shard }}
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
@@ -1884,6 +1884,7 @@ jobs:
         timeout-minutes: 60
         shell: bash
         env:
+          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
@@ -2327,7 +2328,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=7510add426ab39fc6e14ddc7d257ed24cdbd255c6784a076496a6caa93860b9a
+          expected=c0553c0666f841d32569b56194d3e139eb9cc3422cc9d353a33d6402fc3154f2
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2580,7 +2581,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=7510add426ab39fc6e14ddc7d257ed24cdbd255c6784a076496a6caa93860b9a
+          expected=c0553c0666f841d32569b56194d3e139eb9cc3422cc9d353a33d6402fc3154f2
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

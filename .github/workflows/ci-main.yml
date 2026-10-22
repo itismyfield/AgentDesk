@@ -165,6 +165,7 @@ jobs:
         timeout-minutes: 60
         shell: bash
         env:
+          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -189,7 +190,9 @@ jobs:
         shell: bash
         env:
           SWEEP_RESULT: ${{ needs.full_non_pg.result }}
-        run: test "$SWEEP_RESULT" = success
+        run: |
+          echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"
+          test "$SWEEP_RESULT" = success
 
   lint:
     # The rest of `just check`: fmt, clippy (covers `cargo check`), policy JS, and
@@ -298,7 +301,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
-      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -372,6 +374,7 @@ jobs:
         timeout-minutes: 75
         run: just test-postgres-shard
         env:
+          PG_INCLUDE_SHARD: ${{ matrix.shard }}
           # #4245: see Full tests lane — keep test debuginfo off so the build
           # and serial PostgreSQL suite retain headroom in the bounded step.
           CARGO_PROFILE_TEST_DEBUG: "0"

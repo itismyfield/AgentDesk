@@ -10,8 +10,8 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `lint` runs no tests beyond the policy JS. |
-| **PostgreSQL tests** | `postgres` (matrix `shard: [0, 1, 2, 3]`) | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. main은 PG 선택을 네 샤드로 나눠 샤드마다 자기 PostgreSQL 서비스에서 직렬 실행하며, 모든 샤드가 성공해야 run이 green이다. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
+| **Full tests** | `full_non_pg` matrix → `full_non_pg_required_context` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` matrix → required mirror (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | Main은 push·dispatch에서 같은 전체 sweep 집합을 네 샤드로 나눈다. `full_non_pg`는 `sweep_shards`·`lib_test_prepare`를 필요로 하고 `!cancelled()`일 때 실행한다. `always()` 집계 잡이 모든 샤드의 success만 받아 기존 `Full tests (ubuntu-latest)` 컨텍스트를 보존한다. PR은 `rust_tests` 또는 selector의 `force_full`이 true일 때 선택 집합을 실행한다. 각 샤드는 자기 PostgreSQL 서비스를 시작한다. |
+| **PostgreSQL tests** | `postgres` (numeric ID shards + `continuity`) | `test_fast`의 같은 matrix와 PG 서비스 | `postgres_full` | Main/nightly는 항상 실행. numeric 샤드 수는 `PG_SHARD_COUNT`(현재 8)를 따르고 `continuity` leg가 추가 targeted recipe를 한 번 실행한다. Main은 전체 numeric 집합, PR은 선택 ID가 있는 numeric 샤드만 실행하며 양쪽 모두 continuity를 포함한다. PR의 `test_fast`는 `pg_db` 또는 selector의 `force_full`이 true일 때 실행하며, 닫힌 gate는 required mirror가 green으로 게시한다. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
 **주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
@@ -37,8 +37,21 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 
 ### PR 측 library sweep (#5185)
 
-`library_sweep` job은 `--lib` 하네스 전체에서 `--skip _pg --skip pg_ --skip
-postgres`가 제거하는 것만 뺀 나머지를 `scripts/run_test_lane.py`를 통해 실행한다.
+`library_sweep`은 `scripts/ci/test-selection.py plan`이 고른 PR sweep 집합을
+최대 네 샤드로 나눈다. full 모드의 집합은 기존 `--lib` 하네스에서
+`--skip _pg --skip pg_ --skip postgres`를 적용한 결과와 source-verified replay ID의
+합집합이다. Main은 같은 full 집합을 항상 계획한다. 일반 PR의 디렉터리 선택과
+full 전환 규칙은 그대로 유지한다.
+
+planner와 각 실행 leg는 원장의 declared-ignored ID를 같은 방식으로 읽고,
+실행 가능한 ID를 각 샤드에 먼저 배정한 뒤 ignored ID를 나눈다. 실행 가능한 ID가
+있으면 ignored-only 샤드를 만들지 않는다. 원장 판정 대상의 runnable ID가 있으면
+그 ID와 같은 샤드에 ignored 판정 대상 ID를 붙여, replay가 실행되기 전에 ignored-only
+하위 실행이 실패하는 새 경우를 만들지 않는다. 각 leg는 Counter 합집합·중복·빈 집합을
+검사하고 실제 matrix 크기인 `SWEEP_SHARD_TOTAL=${{ strategy.job-total }}`이 계획된
+샤드 수와 같은지도 실행 전에 검사한다. 실제 시험은 `run_test_lane.py`의 exact-ID
+판정을 거치며, replay ID도 판정 누락과 미등록 ignore를 거부한다. 모든 ID가 ignored면
+실행 0건이므로 실패한다. 샤드별 PostgreSQL 서비스는 계속 필요하다.
 
 > ⚠️ **이 잡은 PostgreSQL을 필요로 한다.** 이름의 skip 패턴은 **test id에 대한
 > 부분문자열 필터**이고 PG 의존성은 **테스트 본문의 성질**이라 둘이 일치하지
@@ -290,18 +303,18 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 | Gate | main 커맨드 | 재현 커맨드 (로컬) |
 | --- | --- | --- |
-| Full tests | `full_non_pg`의 `Library sweep (selection-set gated)` step (PR `library_sweep`과 같은 명령) | 아래 Full tests (PR) 행과 같다 |
+| Full tests | `full_non_pg` matrix의 `Library sweep (selection-set gated)` step → `full_non_pg_required_context` 집계 | PostgreSQL 환경에서 `sweep-matrix`가 출력한 모든 번호에 대해 `SWEEP_SHARD_TOTAL=<matrix job count> python3 scripts/ci/test-selection.py run --lane sweep --shard <n> --full` |
 | Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
-| Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
-| PostgreSQL tests | `postgres` 샤드별 `just test-postgres-shard` step: `PG_INCLUDE_SHARD=<0\|1\|2\|3> just test-postgres-shard` | workflow와 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=<n> just test-postgres-shard`를 0부터 3까지 한 번씩 (넷을 합친 것이 `just test-postgres` 한 번과 같다) |
+| Full tests (PR) | `library_sweep` matrix의 `Library sweep (selection-set gated)` step | 같은 checkout에서 생성한 `ADK_TEST_SELECTION_PLAN`과 `SWEEP_SHARD_TOTAL=<sweep_matrix job count>`를 두고 `python3 scripts/ci/test-selection.py run --lane sweep --shard <n>`을 출력된 모든 번호에 실행한다. PostgreSQL 환경도 필요하다. |
+| PostgreSQL tests | `postgres` 각 matrix leg의 `just test-postgres-shard` step | 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=<n> just test-postgres-shard`를 모든 numeric 번호에, `PG_INCLUDE_SHARD=continuity just test-postgres-shard`를 한 번 실행한다. 둘을 합친 선택은 기존 `just test-postgres`와 같다. |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
 ## 2. Path Filter Policy
 
 ### Always-on (필터 없음)
 
-- **Full tests** / **PostgreSQL tests** / **High-risk recovery (main)** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
-- 즉, 커밋이 어떤 파일만 건드리든 이 셋은 실행되고 red면 merge 차단에 준하는 신호다.
+- **Full tests** / **PostgreSQL tests** / **High-risk recovery (main)** 는 path filter 없이 `main` push·dispatch에서 계획한다. 이 세 gate는 `changes` 출력에 의존하지 않으며 `ci-main.yml`에는 `changes` job 자체가 없다. `full_non_pg` matrix는 `if: !cancelled()`를 쓰고 required aggregate는 `if: always()`로 전체 샤드 success를 요구한다. PostgreSQL·high-risk-recovery 잡에는 별도 path `if:`가 없다.
+- 커밋 경로가 gate를 닫지 않는다. 실패·취소·skip된 sweep matrix는 집계에서 success로 바뀌지 않는다.
 - main/nightly job 이름은 PR 필수 context(`Lint`, `High-risk recovery`, `Dashboard (Node 22)`)와 겹치지 않는다. 워크플로 이름은 check 이름을 구분하지 않아 같은 SHA에 경쟁 게시가 생기므로, `check-ci-runner-hardening.sh`가 트리거와 무관하게 유효 이름(job ID·matrix 접미사 포함)으로 강제한다(#5083).
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
@@ -379,9 +392,9 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 ### Serial execution
 
 - PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `test_fast`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. required `Fast targeted tests (ubuntu-latest)` mirror가 같은 `pg_db` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
-- main·PR `test_fast`는 같은 `pg_shards` 계획으로 PG matrix를 실행한다. shard 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정한다(현재 4). 이 값으로 matrix와 SHA256 modulus 및 허용 job 이름을 만든다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 shard 결과를 확인한다.
+- Main의 `postgres`와 PR의 `test_fast`는 numeric ID 샤드와 독립 `continuity` leg로 PG matrix를 실행한다. numeric 샤드 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정하며(현재 8 numeric + 1 continuity), 이 값으로 SHA256 modulus·full matrix·허용 job 이름을 만든다. PR selected 모드는 선택 ID가 배정된 numeric 샤드에만 `continuity`를 더하며 shard 0을 강제로 추가하지 않는다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 leg 결과를 확인한다.
 - `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
-- main·PR shard step은 `just test-postgres-shard`에서 PG 명령을 직접 실행한다. 모든 shard가 자기 PG 선택을 실행한 뒤 shard 0만 추가 targeted 명령을 실행한다. recipe는 한 Bash script에서 source·시험 실패를 전파하고, 각 shard 안에서는 `--test-threads=1`을 유지한다.
+- `PG_INCLUDE_SHARD`는 PG 시험 step에만 `${{ matrix.shard }}`로 설정한다. numeric leg는 자기 PG ID만 실행하며, `continuity` leg는 그 env를 제거한 뒤 기존 `just test-postgres-continuity` recipe를 한 번 실행한다. PR selected 모드도 같은 분리를 적용한다. continuity 대상과 PG ID 집합 사이의 기존 겹침은 유지한다. source·시험 실패를 전파하고, 각 leg 안에서는 `--test-threads=1`을 유지한다.
 - main·PR shard step은 같은 `timeout-minutes: 75` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
 - PR infra retry는 planner가 열거한 실제 shard 이름만 PG로 인정한다. unknown·실제 회귀·불완전 API 응답이면 재시도를 막고, 나머지는 infra로 판정한 shard job만 각각 한 번 재시도한다(최초 attempt에서만 요청). 여러 shard가 infra여도 모두 대상으로 삼으며, default branch checkout과 요청 전 stale-attempt 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다.
@@ -411,12 +424,18 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 | PG tests 개별 케이스 red | `<mod>::…_pg_…` / `postgres_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` (job 이름의 ` (main)` 접미사는 식별자에서 제거) | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 | High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
-| 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
+| 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | 2회까지 flaky skip, 같은 job 3회 연속이면 `infra::job::<name>` | `_job-level failure; see failing workflow job_` (승격 시) | `agent:project-agentdesk` (승격 시) |
 | Job-level red + 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 real-failure 신호 — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 
-### SIGTERM / 인프라 종료 = flaky skip (ci-red 미승격) — #3991 / #3996
+Main sweep 집계 job은 `aggregate-only: upstream=full_non_pg result=<result>`를 출력한다.
+같은 run에 다른 실패 job이 있고 평가된 result가 failure/cancelled/skipped이면 이 집계의
+job 폴백을 생략하고 실제 shard의 실패를 분류한다. 집계만 실패했거나 표식이 없으면
+기존 job 폴백을 유지한다. 실제 `test … FAILED` 식별자는 표식보다 먼저 수집하므로
+집계 로그에 실제 시험 실패가 있어도 숨기지 않는다.
 
-`job::<name>` 폴백은 실패 job 로그에서 `test … FAILED` assertion 을 하나도 못 뽑았을 때만 발생한다. 이 폴백 로그가 **인프라 레벨 종료** 패턴(러너 OOM/축출로 인한 `signal 15` / `SIGTERM` / `SIGKILL`, `exit 143`, GitHub Actions `The operation was canceled` / `runner has received a shutdown signal`)을 담고 있으면, 이는 코드 회귀가 아니라 flaky 러너 압박이므로 식별자를 **기록하지 않고 skip** 한다 (`log_has_infra_termination`). 따라서 2회 연속 red 여도 ci-red 이슈로 승격되지 않는다. 이 필터는 **오직 job-level 폴백에만** 적용된다 — 실제 `test … FAILED` 가 하나라도 있으면 (SIGTERM 노이즈가 같은 로그에 섞여 있어도) 그 test 식별자는 정상적으로 ci-red 승격된다.
+### SIGTERM / 인프라 종료의 flaky skip과 연속 승격 — #3991 / #3996 / #4245
+
+`job::<name>` 폴백은 실패 job 로그에서 `test … FAILED` assertion 을 하나도 못 뽑았을 때만 발생한다. 이 폴백 로그가 **인프라 레벨 종료** 패턴(러너 OOM/축출로 인한 `signal 15` / `SIGTERM` / `SIGKILL`, `exit 143`, GitHub Actions `The operation was canceled` / `runner has received a shutdown signal`)을 담고 있으면, 이는 코드 회귀가 아니라 flaky 러너 압박이므로 식별자를 **기록하지 않고 skip** 한다 (`log_has_infra_termination`). 따라서 2회 연속 red 여도 ci-red 이슈로 승격되지 않는다. 같은 job의 순수 인프라 종료가 3회 연속이면 별도 `infra::job::<name>` 식별자로 승격한다. 중간 성공이나 실제 시험 실패는 해당 infra 연속 기록을 끊는다. 이 필터는 **오직 job-level 폴백에만** 적용된다 — 실제 `test … FAILED` 가 하나라도 있으면 (SIGTERM 노이즈가 같은 로그에 섞여 있어도) 그 test 식별자는 정상적으로 ci-red 승격된다.
 
 **Real-failure 우선 규약 (#3996):** 인프라 종료 skip 은 **인프라 종료가 유일한 실패 신호일 때만** 적용된다. job-level 폴백 로그에서 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 `log_has_real_failure` 가 잡는 결정적 실패 신호가 하나라도 있으면 — 같은 로그에 SIGTERM/exit 143 노이즈가 섞여 있어도 — 그 job 은 **정상 승격**된다. 공유 술어가 지원 신호의 정본이며 이 문서는 닫힌 마커 목록을 중복하지 않는다. 즉 skip 조건은 `log_has_infra_termination && ! log_has_real_failure` 로, real 신호가 인프라 노이즈보다 항상 우선한다. 이 가드가 없으면 `test … FAILED` 를 남기지 않는 컴파일 회귀(job-level 폴백 경로)가 SIGTERM 문자열 혼재만으로 flaky 오분류되어 조용히 묻히는 false-negative 가 발생한다 (flaky 필터의 최악 실패 모드).
 

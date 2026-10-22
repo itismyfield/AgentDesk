@@ -36,7 +36,7 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-PG_SHARD_COUNT = 4
+PG_SHARD_COUNT = 8
 PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
 PG_INCLUDE_DERIVATION = tuple('''\
@@ -1830,6 +1830,10 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     return skips, tuple(sorted(replay))
 
 
+def pg_shard_legs() -> list[int | str]:
+    return [*range(PG_SHARD_COUNT), "continuity"]
+
+
 def pg_test_shard(test_id: str) -> int:
     return int.from_bytes(hashlib.sha256(test_id.encode("utf-8")).digest(), "big") % PG_SHARD_COUNT
 
@@ -2265,10 +2269,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.pg_shard_matrix:
-            print(json.dumps({"shard": list(range(PG_SHARD_COUNT))}, separators=(",", ":")))
+            print(json.dumps({"shard": pg_shard_legs()}, separators=(",", ":")))
             return 0
         if args.pg_job_names:
-            print("\n".join(f"PostgreSQL tests (shard {index})" for index in range(PG_SHARD_COUNT)))
+            print("\n".join(f"PostgreSQL tests (shard {index})" for index in pg_shard_legs()))
             return 0
         if args.validate_pg_shard is not None:
             validate_pg_shard(args.validate_pg_shard)
