@@ -14,6 +14,8 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::hang_forensics;
 use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
+mod resource_regression_tests;
+
 const RTT: Duration = Duration::from_millis(300);
 const BUDGET: Duration = Duration::from_secs(2);
 
@@ -592,10 +594,16 @@ async fn health_handler_snapshot_delay_marks_bulk_unmeasured() {
     db.finish().await;
 }
 
-/// A cut or cancelled request leaves no probe in flight and starts nothing afterwards, and the
-/// next request after the stall clears reads correct values through the same pool.
+/// Repeated requests add no connection or thread; a cut or cancelled one leaves no probe in flight,
+/// and the next reads correctly. It reruns alone in a new process, so it counts only its threads.
 #[test]
 fn health_handler_timeout_drops_all_db_guards() {
+    if resource_regression_tests::rerun_alone(concat!(
+        module_path!(),
+        "::health_handler_timeout_drops_all_db_guards"
+    )) {
+        return;
+    }
     let _serial = hang_forensics::counter_test_lock();
     counted_runtime().block_on(health_handler_timeout_drops_all_db_guards_body());
 }
@@ -606,6 +614,7 @@ async fn health_handler_timeout_drops_all_db_guards_body() {
     db.seed_blocks().await;
     let registry = registry_with_mailboxes(&mailboxes(4)).await;
     let addr = serve(app(&db.pool, Some(registry.clone()), Default::default())).await;
+    resource_regression_tests::repeated_requests_keep_resources(&db, addr).await;
     db.proxy.stall("FROM dispatch_outbox");
 
     let before = hang_forensics::snapshot();
@@ -654,6 +663,7 @@ async fn health_handler_timeout_drops_all_db_guards_body() {
     );
     assert_eq!(body["dispatch_outbox"]["pending"], 1, "{body}");
     assert_eq!(body["dispatch_outbox"]["permanent_failures"], 1, "{body}");
+    resource_regression_tests::connections_return_after_cuts(&db).await;
     db.finish().await;
 }
 
