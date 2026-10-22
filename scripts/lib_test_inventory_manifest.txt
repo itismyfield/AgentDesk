@@ -12648,6 +12648,7 @@ services::session_host::herdr::policy::consent::settlement::tests::consent_bulk_
 services::session_host::herdr::policy::consent::settlement::tests::consent_legacy_schema_defaults_to_unresolved_and_duplicate_scopes_are_separate
 services::session_host::herdr::policy::consent::settlement::tests::settlement_ack_failure_replays_completed_effects_without_duplicate_payloads
 services::session_host::herdr::policy::consent::settlement::tests::settlement_crash_after_release_replays_the_same_key_before_acknowledging
+services::session_host::herdr::policy::consent::settlement::tests::settlement_incomplete_applied_receipt_is_corrupt_and_never_releases
 services::session_host::herdr::policy::consent::settlement::tests::settlement_requires_a_durable_receipt_and_keeps_new_preview_intents_held
 services::session_host::herdr::policy::consent::settlement::tests::workflow_restart_after_applied_receipt_releases_once
 services::session_host::herdr::policy::consent::tests::consent_absent_corrupt_newer_and_permissions_have_distinct_results

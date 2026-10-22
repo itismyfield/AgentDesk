@@ -190,6 +190,15 @@ impl ConsentStore {
             {
                 return Err("consent_snapshot_corrupt: incompatible or mismatched consent".into());
             }
+            if value.state == State::Applied
+                && value
+                    .apply
+                    .as_ref()
+                    .and_then(|result| result.after)
+                    .is_none()
+            {
+                return Err("consent_snapshot_corrupt: Applied consent requires a successful durable apply receipt".into());
+            }
             let mut identities = std::collections::BTreeSet::new();
             let mut settlements = std::collections::BTreeSet::new();
             if value

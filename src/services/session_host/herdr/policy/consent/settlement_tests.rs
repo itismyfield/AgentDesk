@@ -332,3 +332,46 @@ fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads()
     );
     assert!(reopened.unresolved().unwrap().is_empty());
 }
+
+#[test]
+fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
+    for missing in ["apply", "after"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("consents");
+        let store = ConsentStore::new(Some(directory.clone()));
+        let valid = applied(&store);
+        let path = directory.join(format!("{}.json", durable::key(&valid.key).unwrap()));
+        let mut raw = serde_json::to_value(&valid).unwrap();
+        if missing == "apply" {
+            raw["apply"] = serde_json::Value::Null;
+        } else {
+            raw["apply"]["after"] = serde_json::Value::Null;
+        }
+        let expected: Consent = serde_json::from_value(raw.clone()).unwrap();
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut sink = FakeSink::new(root.path().join("sink.json"));
+        let result = release(&store, &expected, &mut sink);
+        assert!(
+            matches!(&result, Err(error) if error.contains("consent_snapshot_corrupt")),
+            "settlement_incomplete_receipt_never_authorizes_release_contract: {missing}: {result:?}"
+        );
+        assert!(
+            sink.calls.is_empty(),
+            "settlement_incomplete_receipt_effects_zero_contract: {missing}"
+        );
+        assert!(
+            matches!(store.load_all(), Err(error) if error.contains("consent_snapshot_corrupt")),
+            "settlement_incomplete_receipt_bulk_is_corrupt_contract: {missing}"
+        );
+        assert!(
+            matches!(store.unresolved(), Err(error) if error.contains("consent_snapshot_corrupt")),
+            "settlement_incomplete_receipt_never_becomes_empty_holds_contract: {missing}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "settlement_incomplete_receipt_preserves_snapshot_contract: {missing}"
+        );
+    }
+}
