@@ -1247,6 +1247,8 @@ src/
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   ├── reconcile_gate.rs
 │   │   │   │   └── snapshot.rs
+│   │   │   ├── host_recovery_guard/
+│   │   │   │   └── log_state.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1314,6 +1316,7 @@ src/
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
+│   │   │   ├── host_recovery_guard_log_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs

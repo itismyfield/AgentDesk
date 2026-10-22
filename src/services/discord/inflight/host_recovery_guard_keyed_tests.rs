@@ -12,6 +12,50 @@ use crate::db::dispatched_sessions::hosted_execution::tests::{
 };
 use crate::services::session_host::HostedRuntimeLocator;
 
+use super::log_tests::WarningSink;
+
+#[tokio::test(flavor = "current_thread")]
+async fn keyed_guard_warning_rearms_after_successful_clear_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let name = "log-rearm-target";
+    let channel = 7_266;
+    let key = seed_session_row(&pool, name, channel, None).await;
+    let sink = WarningSink::default();
+    let _guard = tracing::subscriber::set_default(sink.subscriber());
+    let missing = || {
+        teardown_for_lookup(
+            HostedLookup::Missing,
+            &ProviderKind::Claude,
+            channel,
+            Some(&key),
+            name,
+            None,
+            "retry",
+        )
+    };
+    assert!(matches!(missing(), KeyedTeardown::RowMissing));
+    assert!(matches!(missing(), KeyedTeardown::RowMissing));
+    assert_eq!(sink.count(), 1, "initial refusal warns once");
+    assert!(matches!(
+        keyed_teardown(
+            Some(&pool),
+            &ProviderKind::Claude,
+            channel,
+            Some(&key),
+            name,
+            None,
+            "retry"
+        )
+        .await,
+        KeyedTeardown::Cleared(_)
+    ));
+    assert!(matches!(missing(), KeyedTeardown::RowMissing));
+    assert_eq!(sink.count(), 2, "a new refusal after success must warn");
+    db.drop().await;
+}
+
 /// Seeds the sessions row `claude/<token>/mac-mini:<name>` for `channel_id`;
 /// `raw` is its hosted record, `None` for SQL NULL. Returns the row's key.
 pub(in crate::services::discord) async fn seed_session_row(

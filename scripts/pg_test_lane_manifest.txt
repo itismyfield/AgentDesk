@@ -2014,6 +2014,7 @@ services::discord::idle_recap_interaction::host_guard_tests::recap_clear_resets_
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
 services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
+services::discord::inflight::host_recovery_guard::keyed_tests::keyed_guard_warning_rearms_after_successful_clear_pg
 services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
 services::discord::inflight::rebind_reap::tests::dead_watcher_rebind_reap_unlinks_only_a_row_the_host_guard_admits_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_clear_and_boot_recovery_observe_fresh_receipt_pg
