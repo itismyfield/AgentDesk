@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "09cd93af8cfdf74b6c0f0ec6296f96b51eae0b43",
+  "measured_at_sha": "c508298cb07acd85aaf0c6f9ed0bb32f0832b998",
   "records": [
     {
       "root": "migrations/postgres",
@@ -31676,6 +31676,42 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/commands/text_commands/clear_http_overlap_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1e9b47902bfd824873e5535f87e3b125a532ae52671c1a62d71718fd922440dc"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/text_commands/clear_http_overlap_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2a69fc56a420c89f972d24003d6f68bbbc88078ffcb0cb66b4c4dce67c00969a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/text_commands/clear_http_overlap_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8bc0c08d755cf6378306c909b81f8939b9460f49f1ef0751553c06515a8d7411"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/commands/text_commands/clear_http_overlap_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:579f1d5cbd8bfb1d16bf7a5fa44e41ec64df02be815ca9a502a982327798b511"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/completion_footer_metadata.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -36226,6 +36262,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:0fd0453a7ee7028ffbb5e2ea4c7c06793692eca9a9432395cbd158f55d17530d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_output_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cb882bec95b0780389c959a5face3958d1256ab35387dcbd462da10e63d118d0"
     },
     {
       "root": "src",
