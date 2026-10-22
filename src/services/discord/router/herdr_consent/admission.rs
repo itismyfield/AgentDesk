@@ -27,7 +27,7 @@ pub(in crate::services::discord::router) async fn check(
     if session_hosts::local_node().as_deref() != Some(configured.execution_node.as_str()) {
         return None;
     }
-    match assess(deps, provider, request, configured).await {
+    match Box::pin(assess(deps, provider, request, configured)).await {
         Ok(None) => None,
         other => Some(other.and_then(|hold| hold.ok_or("consent assessment missing".into()))),
     }
@@ -215,7 +215,7 @@ impl Hold {
                 Request::Automatic
             },
         };
-        run(deps.http, deps.shared, provider, consent, event, None).await
+        Box::pin(run(deps.http, deps.shared, provider, consent, event, None)).await
     }
 }
 

@@ -149,6 +149,13 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
     let f = Fixture::new("disabled").await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")]);
     let reads = STORE_READS.load(Ordering::SeqCst);
+    let deps = f.deps();
+    let original = request(8_916_099);
+    let frame = std::mem::size_of_val(&check(&deps, &ProviderKind::Claude, &original));
+    assert!(
+        frame < 16 * 1024,
+        "legacy_consent_future_frame_contract: {frame} bytes"
+    );
     for (index, origin) in [
         IntakeOrigin::LiveMessage,
         IntakeOrigin::SlashSkill,
