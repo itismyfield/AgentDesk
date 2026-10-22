@@ -652,8 +652,14 @@ fn persist_under_lock_inner(
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     #[cfg(test)]
     super::managed_submission::fault::check(path, updated.channel_id, caller, &json)?;
-    atomic_write(path, &json)?;
+    publish_row(path, &json)?;
     Ok(Some(updated))
+}
+
+/// Publishes an inflight row durably: a pre-rename failure is the `atomic_write` error, and a
+/// directory flush failure after the rename is only logged, so callers keep their saved state.
+pub(super) fn publish_row(path: &Path, json: &str) -> Result<(), String> {
+    crate::services::discord::runtime_store::durable_publish::publish_store_row(path, json)
 }
 
 /// Whether a general write leaves the durable coordinate group as it is: it may not add, drop

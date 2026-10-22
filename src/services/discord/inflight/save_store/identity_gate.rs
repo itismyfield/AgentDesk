@@ -549,7 +549,7 @@ fn bind_recovery_anchor_if_matches_snapshot(
     let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
         return GuardedSaveOutcome::IoError;
     };
-    match atomic_write(&path, &json) {
+    match store::publish_row(&path, &json) {
         Ok(()) => {
             if let Some(refresh) = refresh_on_saved {
                 refresh.clone_from(&on_disk);
@@ -943,7 +943,7 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
     let Ok(json) = serde_json::to_string_pretty(&updated) else {
         return Err(GuardedSaveOutcome::IoError);
     };
-    match atomic_write(&path, &json) {
+    match store::publish_row(&path, &json) {
         Ok(()) => Ok((lock, updated)),
         Err(error) => {
             tracing::warn!(

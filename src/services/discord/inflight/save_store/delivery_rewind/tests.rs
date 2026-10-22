@@ -59,7 +59,11 @@ impl Fixture {
             "future": {"nested": [1, null]}
         });
         let bytes = serde_json::to_vec_pretty(&raw).unwrap();
-        atomic_write(&self.path, std::str::from_utf8(&bytes).unwrap()).unwrap();
+        crate::services::discord::runtime_store::atomic_write(
+            &self.path,
+            std::str::from_utf8(&bytes).unwrap(),
+        )
+        .unwrap();
         bytes
     }
 

@@ -6,6 +6,11 @@ use super::*;
 #[path = "delivery_rewind/tests.rs"]
 mod tests;
 
+/// Placed under `save_store` so the writer tests reach its create-new and observer seams.
+#[cfg(test)]
+#[path = "durable_writers_tests.rs"]
+mod durable_writers_tests;
+
 /// Saves a rewind only onto the episode `captured_nonce` names; the bridge passes the nonce it
 /// captured once for the whole rewind so the reloads that follow compare against the same value.
 pub(in crate::services::discord) fn save_inflight_delivery_rewind_if_matches_identity(
@@ -69,6 +74,6 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
     updated.updated_at = now_string();
     bump_save_generation_for_write(&path, &mut updated)?;
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)?;
+    store::publish_row(&path, &json)?;
     Ok(true)
 }
