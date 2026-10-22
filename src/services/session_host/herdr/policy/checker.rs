@@ -38,7 +38,7 @@ async fn run_with_limits(
     run_config_with_limits(peer, &peer.config, timeout, limit).await
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) async fn candidate(
     peer: &PeerSnapshot,
     config: &std::path::Path,

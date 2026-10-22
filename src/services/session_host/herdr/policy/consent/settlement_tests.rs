@@ -74,17 +74,18 @@ impl FakeSink {
         Ok(())
     }
 }
+#[async_trait::async_trait]
 impl CustodySink for FakeSink {
-    fn release(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
+    async fn release(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
         self.effect("release", key)
     }
-    fn wake(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
+    async fn wake(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
         self.effect("wake", key)
     }
 }
 
-#[test]
-fn workflow_restart_after_applied_receipt_releases_once() {
+#[tokio::test]
+async fn workflow_restart_after_applied_receipt_releases_once() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("consents");
     let store = ConsentStore::new(Some(directory.clone()));
@@ -102,7 +103,9 @@ fn workflow_restart_after_applied_receipt_releases_once() {
         "applied_receipt_is_not_settlement_contract"
     );
     let mut sink = FakeSink::new(root.path().join("sink.json"));
-    let settled = release(&reopened, &recovered.consent, &mut sink).unwrap();
+    let settled = release(&reopened, &recovered.consent, &mut sink)
+        .await
+        .unwrap();
     assert_eq!(
         sink.calls,
         ["release", "wake"],
@@ -117,7 +120,9 @@ fn workflow_restart_after_applied_receipt_releases_once() {
     );
     let recovered = Workflow(&reopened).recover(&applied.key).unwrap().unwrap();
     let mut sink = FakeSink::new(root.path().join("sink.json"));
-    release(&reopened, &recovered.consent, &mut sink).unwrap();
+    release(&reopened, &recovered.consent, &mut sink)
+        .await
+        .unwrap();
     assert!(
         sink.calls.is_empty(),
         "settlement_ack_suppresses_duplicate_effects_contract"
@@ -125,15 +130,15 @@ fn workflow_restart_after_applied_receipt_releases_once() {
     assert_eq!(sink.effects().len(), 2);
 }
 
-#[test]
-fn settlement_crash_after_release_replays_the_same_key_before_acknowledging() {
+#[tokio::test]
+async fn settlement_crash_after_release_replays_the_same_key_before_acknowledging() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("consents");
     let store = ConsentStore::new(Some(directory.clone()));
     let applied = applied(&store);
     let mut sink = FakeSink::new(root.path().join("sink.json"));
     sink.fail_wake = true;
-    let failed = release(&store, &applied, &mut sink);
+    let failed = release(&store, &applied, &mut sink).await;
     assert!(matches!(failed, Err(ref error) if error.contains("crash after durable release")));
     assert_eq!(
         store.unresolved().unwrap().len(),
@@ -143,7 +148,7 @@ fn settlement_crash_after_release_replays_the_same_key_before_acknowledging() {
     assert_eq!(sink.effects().len(), 1);
     let store = ConsentStore::new(Some(directory));
     let mut sink = FakeSink::new(root.path().join("sink.json"));
-    release(&store, &applied, &mut sink).unwrap();
+    release(&store, &applied, &mut sink).await.unwrap();
     assert_eq!(
         sink.effects().len(),
         2,
@@ -152,19 +157,19 @@ fn settlement_crash_after_release_replays_the_same_key_before_acknowledging() {
     assert!(store.unresolved().unwrap().is_empty());
 }
 
-#[test]
-fn settlement_requires_a_durable_receipt_and_keeps_new_preview_intents_held() {
+#[tokio::test]
+async fn settlement_requires_a_durable_receipt_and_keeps_new_preview_intents_held() {
     let root = tempfile::tempdir().unwrap();
     let store = ConsentStore::new(Some(root.path().join("consents")));
     let pending = store.hold(question("first"), 100).unwrap().into_consent();
     let mut sink = FakeSink::new(root.path().join("sink.json"));
     assert!(
-        release(&store, &pending, &mut sink).is_err(),
+        release(&store, &pending, &mut sink).await.is_err(),
         "settlement_receipt_before_release_contract"
     );
     assert!(sink.calls.is_empty());
     let accepted = store.decide(&pending, 1, true, 101).unwrap();
-    assert!(release(&store, &accepted, &mut sink).is_err());
+    assert!(release(&store, &accepted, &mut sink).await.is_err());
     assert!(sink.calls.is_empty());
     let applied = store
         .record_apply(
@@ -184,7 +189,7 @@ fn settlement_requires_a_durable_receipt_and_keeps_new_preview_intents_held() {
         store.hold(revised, 102).unwrap(),
         QuestionResult::RevisionChanged(_)
     ));
-    let settled = release(&store, &applied, &mut sink).unwrap();
+    let settled = release(&store, &applied, &mut sink).await.unwrap();
     assert_eq!(
         sink.calls,
         ["release", "wake"],
@@ -297,8 +302,8 @@ fn consent_legacy_schema_defaults_to_unresolved_and_duplicate_scopes_are_separat
     );
 }
 
-#[test]
-fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads() {
+#[tokio::test]
+async fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("consents");
     let store = ConsentStore::new(Some(directory.clone()));
@@ -307,7 +312,7 @@ fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads()
     let mut sink = FakeSink::new(root.path().join("sink.json"));
     sink.pending_on_wake = Some(marker.clone());
     assert!(
-        release(&store, &applied, &mut sink).is_err(),
+        release(&store, &applied, &mut sink).await.is_err(),
         "settlement_ack_failure_is_not_success_contract"
     );
     assert_eq!(sink.effects().len(), 2);
@@ -327,7 +332,7 @@ fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads()
     std::fs::remove_file(marker).unwrap();
     let reopened = ConsentStore::new(Some(directory));
     let mut sink = FakeSink::new(root.path().join("sink.json"));
-    release(&reopened, &applied, &mut sink).unwrap();
+    release(&reopened, &applied, &mut sink).await.unwrap();
     assert_eq!(
         sink.effects().len(),
         2,
@@ -336,8 +341,8 @@ fn settlement_ack_failure_replays_completed_effects_without_duplicate_payloads()
     assert!(reopened.unresolved().unwrap().is_empty());
 }
 
-#[test]
-fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
+#[tokio::test]
+async fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
     for missing in ["apply", "after"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("consents");
@@ -354,7 +359,7 @@ fn settlement_incomplete_applied_receipt_is_corrupt_and_never_releases() {
         let bytes = serde_json::to_vec(&raw).unwrap();
         std::fs::write(&path, &bytes).unwrap();
         let mut sink = FakeSink::new(root.path().join("sink.json"));
-        let result = release(&store, &expected, &mut sink);
+        let result = release(&store, &expected, &mut sink).await;
         assert!(
             matches!(&result, Err(error) if error.contains("consent_snapshot_corrupt")),
             "settlement_incomplete_receipt_never_authorizes_release_contract: {missing}: {result:?}"
@@ -400,10 +405,10 @@ impl CustodySinkFixture for FakeSink {
     }
 }
 
-#[test]
-fn custody_sink_durable_idempotence_conformance() {
+#[tokio::test]
+async fn custody_sink_durable_idempotence_conformance() {
     let root = tempfile::tempdir().unwrap();
-    custody_sink_conformance(|| FakeSink::new(root.path().join("sink.json")));
+    custody_sink_conformance(|| FakeSink::new(root.path().join("sink.json"))).await;
 }
 
 // The factory reopens the same durable fixture, including after an injected failure.
@@ -414,7 +419,7 @@ pub(crate) trait CustodySinkFixture: CustodySink {
     fn fail_next_wake(&mut self);
 }
 
-pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() -> S) {
+pub(crate) async fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() -> S) {
     let intent = IntentRef {
         store: "conformance-custody".into(),
         id: "intent-1".into(),
@@ -431,8 +436,11 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
     let mut sink = make();
     for _ in 0..2 {
         sink.release(&first, &intent)
+            .await
             .expect("conformance first release");
-        sink.wake(&first, &intent).expect("conformance first wake");
+        sink.wake(&first, &intent)
+            .await
+            .expect("conformance first wake");
     }
     assert_eq!(
         sink.effect_counts(&first),
@@ -448,8 +456,10 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
         "custody_conformance_effects_survive_recreation_contract"
     );
     sink.release(&first, &intent)
+        .await
         .expect("conformance release after recreation");
     sink.wake(&first, &intent)
+        .await
         .expect("conformance wake after recreation");
     assert_eq!(
         sink.effect_counts(&first),
@@ -462,8 +472,8 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
         ..first.clone()
     };
     // The receipt may change, but a custody reference still names the same payload.
-    let _ = sink.release(&another_nonce, &intent);
-    let _ = sink.wake(&another_nonce, &intent);
+    let _ = sink.release(&another_nonce, &intent).await;
+    let _ = sink.wake(&another_nonce, &intent).await;
     assert_eq!(
         sink.effect_counts(&another_nonce),
         (1, 1),
@@ -480,9 +490,10 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
     };
     sink.fail_next_wake();
     sink.release(&failed, &failed_intent)
+        .await
         .expect("release before failure");
     assert!(
-        sink.wake(&failed, &failed_intent).is_err(),
+        sink.wake(&failed, &failed_intent).await.is_err(),
         "custody_conformance_injected_wake_failure_is_real_contract"
     );
     assert_eq!(
@@ -493,8 +504,10 @@ pub(crate) fn custody_sink_conformance<S: CustodySinkFixture>(make: impl Fn() ->
     drop(sink);
     let mut sink = make();
     sink.release(&failed, &failed_intent)
+        .await
         .expect("failure replay release");
     sink.wake(&failed, &failed_intent)
+        .await
         .expect("failure replay wake");
     assert_eq!(
         sink.effect_counts(&failed),
@@ -560,8 +573,8 @@ fn consent_bulk_waits_for_live_publication_but_not_an_abandoned_marker() {
     );
 }
 
-#[test]
-fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
+#[tokio::test]
+async fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
     for fail_ack in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("consents");
@@ -574,7 +587,7 @@ fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
         } else {
             sink.fail_wake = true;
         }
-        assert!(release(&store, &applied, &mut sink).is_err());
+        assert!(release(&store, &applied, &mut sink).await.is_err());
         if fail_ack {
             std::fs::remove_file(&marker).unwrap();
         }
@@ -599,7 +612,7 @@ fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
             "workflow_unacknowledged_release_replays_before_generation_contract"
         );
         assert!(retry.consent.history.is_empty());
-        let settled = release(&store, &retry.consent, &mut sink).unwrap();
+        let settled = release(&store, &retry.consent, &mut sink).await.unwrap();
         let first = SettlementKey {
             nonce: applied.nonce.clone(),
             store: applied.intents[0].store.clone(),
@@ -636,7 +649,7 @@ fn workflow_new_generation_never_rereleases_an_unacknowledged_intent() {
                 },
             )
             .unwrap();
-        release(&store, &applied_next, &mut sink).unwrap();
+        release(&store, &applied_next, &mut sink).await.unwrap();
         assert_eq!(
             sink.effect_counts(&first),
             (1, 1),

@@ -1,6 +1,8 @@
 use super::super::{PeerSource, apply};
 use super::settlement::{self, CustodySink};
-use super::workflow::{Current, Effect, Request, Transition, Workflow};
+#[cfg(test)]
+use super::workflow::Request;
+use super::workflow::{Current, Effect, Transition, Workflow};
 use super::{ApplyResult, Consent, ConsentKey, ConsentStore, Question, State, card};
 use super::{
     apply_owner,
@@ -10,11 +12,13 @@ use super::{
 use std::sync::Arc;
 
 pub(crate) enum Event<'a> {
+    #[cfg(test)]
     Hold {
         question: Box<Question>,
         now: u64,
         request: Request,
     },
+    #[cfg(test)]
     Bind {
         reserved: Box<Consent>,
         current: Box<Current>,
@@ -117,11 +121,13 @@ impl<S: CustodySink> Engine<'_, S> {
     ) -> Result<Option<Transition>, String> {
         let workflow = Workflow(self.store);
         let mut transition = match event {
+            #[cfg(test)]
             Event::Hold {
                 question,
                 now,
                 request,
             } => workflow.hold(*question, now, request)?,
+            #[cfg(test)]
             Event::Bind {
                 reserved,
                 current,
@@ -175,7 +181,28 @@ impl<S: CustodySink> Engine<'_, S> {
                 owner,
                 local_node,
                 now,
-            } => workflow.retry(*question, actor, owner, &local_node, now)?,
+            } => {
+                let mut transition = workflow.retry(*question, actor, owner, &local_node, now)?;
+                if transition.effect == Effect::SendCard
+                    && let Some(preview) = prepared.as_ref()
+                    && !preview.plan.requires_write()
+                {
+                    if !preview.matches_key(&transition.consent.key)
+                        || preview.token != transition.consent.preview
+                    {
+                        return Err("owner recheck preview changed; preserve held inputs".into());
+                    }
+                    self.boot.require_ready()?;
+                    self.owner
+                        .current(&transition.consent)
+                        .await?
+                        .check(&transition.consent, true)?;
+                    transition.consent =
+                        self.store.accept_recheck(&transition.consent, actor, now)?;
+                    transition.effect = Effect::Apply;
+                }
+                transition
+            }
             Event::BootRecover(key, authority) => {
                 if !authority.authorizes(self.boot) {
                     return Err(
@@ -305,7 +332,7 @@ impl<S: CustodySink> Engine<'_, S> {
                     );
                 }
                 transition.consent =
-                    settlement::release(self.store, &transition.consent, self.custody)?;
+                    settlement::release(self.store, &transition.consent, self.custody).await?;
                 if transition.consent.message != 0 {
                     self.cards
                         .replace(
@@ -315,6 +342,7 @@ impl<S: CustodySink> Engine<'_, S> {
                         .await?;
                 }
             }
+            #[cfg(test)]
             Effect::RevisionChanged => {
                 if transition.consent.message != 0 {
                     self.cards

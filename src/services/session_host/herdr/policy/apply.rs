@@ -47,11 +47,14 @@ pub(crate) struct ApplyPlan {
 /// Backups and the stable lock sidecar remain for explicit manual cleanup.
 #[derive(Debug)]
 pub(crate) struct Applied {
+    #[cfg(test)]
     pub logical: PathBuf,
+    #[cfg(test)]
     pub target: PathBuf,
     pub before_hash: Option<[u8; 32]>,
     pub after_hash: [u8; 32],
     pub backup: Option<PathBuf>,
+    #[cfg(test)]
     pub original_absent: bool,
 }
 /// The blocking apply owner supplies a full local checker, never a semantic-key-only check.
@@ -70,6 +73,7 @@ impl ApplyPlan {
             Original::Missing(_) => true,
         }
     }
+    #[cfg(test)]
     pub(crate) fn candidate(&self) -> &str {
         &self.candidate
     }
@@ -221,11 +225,14 @@ pub(crate) fn apply(
                 return Err("missing unchanged source".into());
             };
             return Ok(Applied {
+                #[cfg(test)]
                 logical: plan.logical.clone(),
+                #[cfg(test)]
                 target: plan.target.clone(),
                 before_hash: Some(original.token.digest()),
                 after_hash: original.token.digest(),
                 backup: None,
+                #[cfg(test)]
                 original_absent: false,
             });
         }
@@ -314,7 +321,9 @@ pub(crate) fn apply(
             return Err("published target parent changed".into());
         }
         Ok(Applied {
+            #[cfg(test)]
             logical: plan.logical.clone(),
+            #[cfg(test)]
             target: plan.target.clone(),
             before_hash: match &plan.original {
                 Original::Existing(read) => Some(read.token.digest()),
@@ -322,6 +331,7 @@ pub(crate) fn apply(
             },
             after_hash: token.digest(),
             backup: backup.clone(),
+            #[cfg(test)]
             original_absent: matches!(plan.original, Original::Missing(_)),
         })
     })();
@@ -340,18 +350,18 @@ fn sync_parent(path: &Path, stage: Stage) -> Result<(), String> {
     checkpoint(stage)?;
     crate::services::discord::runtime_store::fsync_parent_dir(path).map_err(|e| e.to_string())
 }
-fn checkpoint(stage: Stage) -> Result<(), String> {
+fn checkpoint(_stage: Stage) -> Result<(), String> {
     #[cfg(test)]
-    tests::run_hook(stage);
+    tests::run_hook(_stage);
     #[cfg(test)]
     if FAULT.with(|fault| {
-        let hit = fault.get() == Some(stage);
+        let hit = fault.get() == Some(_stage);
         if hit {
             fault.set(None);
         }
         hit
     }) {
-        return Err(format!("injected {stage:?}"));
+        return Err(format!("injected {_stage:?}"));
     }
     Ok(())
 }

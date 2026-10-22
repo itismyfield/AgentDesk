@@ -3,9 +3,15 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub(crate) struct BootState(AtomicU8);
+pub(crate) static PROCESS: BootState = BootState::empty();
 impl BootState {
-    pub(crate) const fn new() -> Self {
+    const fn empty() -> Self {
         Self(AtomicU8::new(0))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new() -> Self {
+        Self::empty()
     }
 
     pub(crate) fn try_claim(&self) -> Option<BootRecovery<'_>> {

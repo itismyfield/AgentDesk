@@ -187,7 +187,6 @@ impl SocketHerdrLaunchHost {
             .cloned()
     }
 
-    #[cfg(all(test, unix))]
     pub(crate) fn consent_source(
         &self,
         endpoint: &HerdrLaunchEndpoint,

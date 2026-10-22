@@ -189,7 +189,7 @@ impl Directory {
     }
 
     // A live writer's marker is transient; abandoned markers still fail after its lock is released.
-    #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn read_stable(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         let path = self.path(key, "lock")?;
         match fs::symlink_metadata(&path) {

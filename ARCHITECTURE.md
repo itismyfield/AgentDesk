@@ -181,6 +181,8 @@ src/
 │   │   ├── metadata.rs
 │   │   └── mod.rs
 │   ├── intake_outbox/
+│   │   ├── consent_handoff.rs
+│   │   ├── consent_handoff_tests.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   └── worker_status.rs
@@ -1616,6 +1618,13 @@ src/
 │   │   │   ├── capacity.rs
 │   │   │   └── model.rs
 │   │   ├── router/
+│   │   │   ├── herdr_consent/
+│   │   │   │   ├── custody.rs
+│   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── service_tests.rs
+│   │   │   │   ├── startup.rs
+│   │   │   │   ├── startup_tests.rs
+│   │   │   │   └── transport.rs
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
@@ -1752,6 +1761,7 @@ src/
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
+│   │   │   ├── herdr_consent.rs
 │   │   │   ├── intake_dispatch.rs
 │   │   │   ├── intake_gate.rs
 │   │   │   ├── intake_queue_transaction.rs
@@ -3002,6 +3012,7 @@ src/
 │   │   │   │   ├── consent/
 │   │   │   │   │   ├── apply_owner.rs
 │   │   │   │   │   ├── apply_owner_tests.rs
+│   │   │   │   │   ├── boot_recovery.rs
 │   │   │   │   │   ├── card.rs
 │   │   │   │   │   ├── card_tests.rs
 │   │   │   │   │   ├── engine.rs

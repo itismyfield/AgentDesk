@@ -1,10 +1,11 @@
 //! Durable transitions describe effects; Discord, file apply and queue owners execute them later.
 
-use super::{
-    ApplyResult, CardState, Consent, ConsentKey, ConsentStore, Preview, Question, QuestionResult,
-    State,
-};
+#[cfg(test)]
+use super::QuestionResult;
 
+use super::{ApplyResult, CardState, Consent, ConsentKey, ConsentStore, Preview, Question, State};
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Request {
     ExplicitLaunch,
@@ -14,6 +15,7 @@ pub(crate) enum Request {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Effect {
     KeepHeld,
+    #[cfg(test)]
     RevisionChanged,
     SendCard,
     EnableButtons,
@@ -65,6 +67,7 @@ impl Current {
 pub(crate) struct Workflow<'a>(pub &'a ConsentStore);
 
 impl Workflow<'_> {
+    #[cfg(test)]
     pub(crate) fn hold(
         &self,
         question: Question,

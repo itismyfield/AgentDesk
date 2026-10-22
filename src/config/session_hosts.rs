@@ -442,6 +442,20 @@ pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)
 }
 
 #[cfg(test)]
+impl ForcedSessionHosts {
+    pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
+        FORCED.with(|forced| {
+            if let Some(boot) = forced.borrow_mut().as_mut() {
+                for endpoint in boot.config.herdr.endpoints.values_mut() {
+                    endpoint.mode = mode;
+                }
+            }
+        });
+        self
+    }
+}
+
+#[cfg(test)]
 impl Drop for ForcedSessionHosts {
     fn drop(&mut self) {
         FORCED.with(|forced| *forced.borrow_mut() = self.0.take());

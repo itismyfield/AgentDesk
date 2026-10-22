@@ -15,7 +15,7 @@ const LIMIT: u64 = 256 * 1024;
 const START_MARGIN: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(all(test, unix), derive(serde::Serialize))]
+#[cfg_attr(unix, derive(serde::Serialize))]
 pub(crate) struct FileIdentity {
     dev: u64,
     ino: u64,
@@ -28,7 +28,7 @@ pub(crate) struct FileIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(all(test, unix), derive(serde::Serialize))]
+#[cfg_attr(unix, derive(serde::Serialize))]
 struct SymlinkIdentity {
     path: PathBuf,
     target: PathBuf,
@@ -36,7 +36,7 @@ struct SymlinkIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(all(test, unix), derive(serde::Serialize))]
+#[cfg_attr(unix, derive(serde::Serialize))]
 pub(crate) struct FileToken {
     logical_path: PathBuf,
     resolved_path: PathBuf,
@@ -53,7 +53,7 @@ pub(crate) struct FileSnapshot {
 }
 
 impl FileToken {
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn fingerprint(&self) -> Result<[u8; 32], Unverified> {
         let bytes = serde_json::to_vec(self).map_err(|_| Unverified::File)?;
         Ok(Sha256::digest(bytes).into())
@@ -63,17 +63,17 @@ impl FileToken {
         self.hash
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn resolved_path(&self) -> &Path {
         &self.resolved_path
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn ownership(&self) -> (u32, u32, u32) {
         (self.identity.uid, self.identity.gid, self.identity.mode)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn same_path(&self, other: &Self) -> bool {
         self.logical_path == other.logical_path
             && self.resolved_path == other.resolved_path
@@ -296,7 +296,7 @@ fn identity(_: &Metadata) -> Result<FileIdentity, Unverified> {
 #[path = "file_tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MissingToken {
     logical: PathBuf,
@@ -305,7 +305,7 @@ pub(crate) struct MissingToken {
     chain: Vec<SymlinkIdentity>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 impl MissingToken {
     pub(crate) fn read(logical: &Path) -> Result<Self, Unverified> {
         if !matches!(std::fs::symlink_metadata(logical), Err(e) if e.kind() == std::io::ErrorKind::NotFound)

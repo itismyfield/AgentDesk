@@ -278,15 +278,18 @@ impl ConsentStore {
             .transpose()
     }
 
+    #[cfg(test)]
     pub(crate) fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn retry(&self, question: Question, now: u64) -> Result<Consent, String> {
         self.question(question, now, true, false)
             .map(QuestionResult::into_consent)
     }
 
+    #[cfg(test)]
     pub(crate) fn hold_unbound(
         &self,
         question: Question,
@@ -595,6 +598,34 @@ impl ConsentStore {
             serde_json::to_vec(&current).map_err(|e| e.to_string())
         })?;
         self.decode(&bytes, &key)
+    }
+
+    /// A current owner recheck can receipt an already-verified false config without a card.
+    pub(crate) fn accept_recheck(
+        &self,
+        expected: &Consent,
+        actor: u64,
+        now: u64,
+    ) -> Result<Consent, String> {
+        self.update(expected, |current| {
+            if actor != current.owner
+                || actor == 0
+                || expected.state != State::Pending
+                || expected.card != CardState::Reserved
+                || expected.message != 0
+                || current.state != State::Pending
+                || current.card != CardState::Reserved
+                || current.message != 0
+                || now >= current.expires
+            {
+                return Err(
+                    "owner recheck requires its current unpublished reserved consent".into(),
+                );
+            }
+            current.state = State::Accepted;
+            current.decision = Some((actor, now));
+            Ok(())
+        })
     }
 
     pub(crate) fn decide(

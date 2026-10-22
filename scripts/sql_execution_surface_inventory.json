@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5873e238198dcb3eb5a9c51103095574e1cc68ed",
+  "measured_at_sha": "4c51c4f3fb543ea4abbad8f383838bf2e8f78592",
   "records": [
     {
       "root": "migrations/postgres",
@@ -10495,6 +10495,105 @@
       "symbol": "raw_sql",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:f0088fb188281e4ae874137f18916dead3a66a0d81b903b3f37c7491022edbd2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c2f67cecc4ea3f8ecc9462418e2e421b7ab317fdb1e41c40050ca21f4b1606e3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fefcac3fa35fab3cea75a2323f3df25987ca7431ace82d0c4c0760955c320e47"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f39b0d2c6143b0c80fe20707bbfd80f97d7f557051a41e1122b91397393de64f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:303193bc05dd4cc242e5e6fabd5850c063f587182c334b4d89253aa8befd4d89"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0221c62b104b6b992e925156404b022a730238eb3f735d9069c77ff1a558add1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:17c9463d4a0f0215450ecdf4176cef4e686068bad76266e5204c79d53e7889a8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c1e8f331d51c14f6e758ca010ca98b6fcff99026ea353017845341504ec6400e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fedba68b4bb3e6e2b47ecea2bc83566f0d0ac3088c7027df5b36f917a1691dd6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4220238563d891e69683e43923e7e6b6d18cd922f60e4b4a34beb1a5f915231d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d73c50c2d37faa3a36fe484b9eb52e42aa6f456070107b17165df865e2297bf1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bdf7a568c9fe29d3ab49a91dbfeda59b0829d5cc63007056cd2677a62361d13c"
     },
     {
       "root": "src",
@@ -32419,6 +32518,24 @@
       "symbol": "raw_sql",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:6ea73323692d9e5aaabbd33f887517eaf7c2af6152aa3f42858a0f4864674ee4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/custody_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d333e741ddc85b61482627e72df67b96807f6143cd39c0f24a123f5437076dbb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/custody_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ff0509524b7e19ddce0454be9ffd1276a29d3d47010609f9949e81cd25f5b93c"
     },
     {
       "root": "src",

@@ -102,6 +102,7 @@ impl ConsentStore {
         }).collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn unresolved(&self) -> Result<Vec<(Consent, Vec<IntentRef>)>, String> {
         Ok(self
             .load_all()?
@@ -153,6 +154,7 @@ impl ConsentStore {
     }
 
     /// The caller must have confirmed this exact reference was durably discarded by its custody owner.
+    #[cfg(test)]
     pub(crate) fn acknowledge_discard(
         &self,
         expected: &Consent,
@@ -165,12 +167,13 @@ impl ConsentStore {
 /// Both operations are durable and idempotent by (store, id), including after a process restart.
 /// Nonce identifies the authorizing receipt; changing it must never repeat a payload.
 /// A release may succeed before consent acknowledgement fails; replay must never duplicate its payload.
-pub(crate) trait CustodySink {
-    fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
-    fn wake(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
+#[async_trait::async_trait]
+pub(crate) trait CustodySink: Send {
+    async fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
+    async fn wake(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
 }
 
-pub(crate) fn release(
+pub(crate) async fn release(
     store: &ConsentStore,
     expected: &Consent,
     sink: &mut impl CustodySink,
@@ -190,8 +193,8 @@ pub(crate) fn release(
             store: intent.store.clone(),
             id: intent.id.clone(),
         };
-        sink.release(&key, &intent)?;
-        sink.wake(&key, &intent)?;
+        sink.release(&key, &intent).await?;
+        sink.wake(&key, &intent).await?;
         current = store.acknowledge(&current, &intent, Resolution::Released)?;
     }
     Ok(current)

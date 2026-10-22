@@ -96,8 +96,9 @@ struct FakeCustody {
     woken: Vec<SettlementKey>,
     events: Arc<Mutex<Vec<&'static str>>>,
 }
+#[async_trait::async_trait]
 impl CustodySink for FakeCustody {
-    fn release(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
+    async fn release(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
         let receipt = self
             .store
             .load_all()?
@@ -119,7 +120,7 @@ impl CustodySink for FakeCustody {
         }
         Ok(())
     }
-    fn wake(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
+    async fn wake(&mut self, key: &SettlementKey, _: &IntentRef) -> Result<(), String> {
         if !self.woken.contains(key) {
             self.woken.push(key.clone());
             self.events.lock().unwrap().push("wake");
@@ -1128,8 +1129,8 @@ async fn engine_non_boot_recover_never_interrupts_an_in_flight_apply() {
     );
 }
 
-#[test]
-fn engine_boot_authority_is_single_use_and_failed_boot_never_admits_apply() {
+#[tokio::test]
+async fn engine_boot_authority_is_single_use_and_failed_boot_never_admits_apply() {
     let boot = BootState::new();
     assert!(boot.require_ready().is_err());
     let authority = boot.try_claim().unwrap();
@@ -1184,4 +1185,87 @@ async fn engine_apply_waits_for_completed_boot_authority() {
         .unwrap()
         .unwrap();
     assert_eq!(applied.consent.state, State::Applied);
+}
+
+#[tokio::test]
+async fn engine_owner_retry_of_verified_false_releases_without_a_card() {
+    let (mut rig, _) = Rig::new(false, false).await;
+    let bytes = b"[session]\nresume_agents_on_restore = false\n";
+    fs::write(&rig.source.0.config, bytes).unwrap();
+    let first = preview::prepare(rig.source.clone(), 1).await.unwrap();
+    let automatic = rig
+        .handle(
+            Event::Hold {
+                question: Box::new(rig.question(&first.token)),
+                now: 100,
+                request: Request::Automatic,
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(automatic.effect, Effect::KeepHeld);
+    let prepared = preview::prepare(rig.source.clone(), 2).await.unwrap();
+    assert!(!prepared.plan.requires_write());
+    let rejected = rig
+        .handle(
+            Event::Retry {
+                question: Box::new(rig.question(&prepared.token)),
+                actor: 2,
+                owner: Some(1),
+                local_node: "execution-node".into(),
+                now: 101,
+            },
+            Some(prepared.clone()),
+        )
+        .await;
+    assert!(
+        matches!(rejected, Err(ref error) if error.contains("current owner")),
+        "engine_verified_false_retry_still_requires_owner_contract"
+    );
+    assert!(rig.cards.sends.is_empty());
+    let retried = rig
+        .handle(
+            Event::Retry {
+                question: Box::new(rig.question(&prepared.token)),
+                actor: 1,
+                owner: Some(1),
+                local_node: "execution-node".into(),
+                now: 102,
+            },
+            Some(prepared),
+        )
+        .await;
+    assert!(
+        retried.is_ok(),
+        "engine_verified_false_owner_retry_completes_contract: {retried:?}"
+    );
+    let applied = retried.unwrap().unwrap().consent;
+    assert!(
+        rig.cards.sends.is_empty(),
+        "engine_verified_false_retry_card_zero_contract"
+    );
+    assert_eq!(
+        applied.state,
+        State::Applied,
+        "engine_verified_false_retry_records_receipt_contract"
+    );
+    assert_eq!(
+        fs::read(&rig.source.0.config).unwrap(),
+        bytes,
+        "engine_verified_false_retry_does_not_rewrite_config_contract"
+    );
+    assert!(
+        applied.apply.as_ref().unwrap().backup.is_none(),
+        "engine_verified_false_retry_backup_zero_contract"
+    );
+    assert_eq!(applied.message, 0);
+    assert_eq!(
+        rig.custody.released.len(),
+        1,
+        "engine_verified_false_retry_release_once_contract"
+    );
+    rig.handle(Event::Recover(applied.key), None).await.unwrap();
+    assert_eq!(rig.custody.released.len(), 1);
 }

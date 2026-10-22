@@ -77,4 +77,4 @@ pub(crate) async fn prepare(
 
 #[cfg(test)]
 #[path = "preview_tests.rs"]
-pub(super) mod tests;
+pub(crate) mod tests;

@@ -121,6 +121,7 @@ pub(crate) fn render_result(consent: &Consent, kind: ResultKind) -> Result<Card,
     bounded(Card { content, buttons })
 }
 
+#[cfg(test)]
 pub(crate) fn revision_changed(consent: &Consent) -> Result<Card, String> {
     let mut card = render(consent)?;
     card.content = format!(

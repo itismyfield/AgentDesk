@@ -29,6 +29,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::dispatches::delivery_events::tests
   --skip db::dispatches::outbox::delivery::tests
   --skip db::imsg_reply::tests
+  --skip db::intake_outbox::consent_handoff::tests
   --skip db::intake_outbox::home_tests
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
@@ -153,6 +154,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::replay_policy::live_tests
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
+  --skip services::discord::router::herdr_consent::custody::tests
   --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::initial_fresh_tests
   --skip services::discord::router::intake_dispatch::replay_admission_tests
@@ -628,6 +630,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_each_unsafe_class
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
+  services::discord::router::herdr_consent::custody::tests::live_custody_missing_corrupt_or_changed_references_fail_closed
+  services::discord::router::herdr_consent::custody::tests::live_custody_replays_a_lost_response_and_wake_without_recreating_payload
+  services::discord::router::herdr_consent::custody::tests::live_mailbox_custody_sink_passes_shared_durable_conformance
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint

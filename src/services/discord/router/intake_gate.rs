@@ -306,11 +306,7 @@ pub(in crate::services::discord) async fn handle_event(
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
-                if component_events::handle_model_picker_component_if_applicable(
-                    ctx, component, data,
-                )
-                .await?
-                {
+                if component_events::handle_component_if_applicable(ctx, component, data).await? {
                     return Ok(());
                 }
                 if super::super::idle_recap_interaction::is_idle_recap_custom_id(
