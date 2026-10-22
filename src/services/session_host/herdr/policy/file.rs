@@ -15,6 +15,7 @@ const LIMIT: u64 = 256 * 1024;
 const START_MARGIN: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(all(test, unix), derive(serde::Serialize))]
 pub(crate) struct FileIdentity {
     dev: u64,
     ino: u64,
@@ -27,6 +28,7 @@ pub(crate) struct FileIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(all(test, unix), derive(serde::Serialize))]
 struct SymlinkIdentity {
     path: PathBuf,
     target: PathBuf,
@@ -34,6 +36,7 @@ struct SymlinkIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(all(test, unix), derive(serde::Serialize))]
 pub(crate) struct FileToken {
     logical_path: PathBuf,
     resolved_path: PathBuf,
@@ -50,6 +53,12 @@ pub(crate) struct FileSnapshot {
 }
 
 impl FileToken {
+    #[cfg(all(test, unix))]
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32], Unverified> {
+        let bytes = serde_json::to_vec(self).map_err(|_| Unverified::File)?;
+        Ok(Sha256::digest(bytes).into())
+    }
+
     pub(crate) fn digest(&self) -> [u8; 32] {
         self.hash
     }
@@ -312,6 +321,18 @@ impl MissingToken {
             parent: directory_identity(&resolved)?,
             chain,
         })
+    }
+
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32], Unverified> {
+        let bytes = serde_json::to_vec(&(
+            "absent",
+            &self.logical,
+            &self.target,
+            self.parent,
+            &self.chain,
+        ))
+        .map_err(|_| Unverified::File)?;
+        Ok(Sha256::digest(bytes).into())
     }
 
     pub(crate) fn unchanged(&self) -> Result<(), Unverified> {

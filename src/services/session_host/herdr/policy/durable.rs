@@ -250,8 +250,12 @@ impl Directory {
                 clear_marker(&pending, "before_marker_clear", "after_marker_clear")?;
                 Ok(next)
             })();
-            if publication.is_err() && !persist_started {
-                clear_marker(&pending, "cleanup_unlink", "cleanup_parent_sync")?;
+            if let Err(original) = &publication
+                && !persist_started
+                && let Err(cleanup) =
+                    clear_marker(&pending, "cleanup_unlink", "cleanup_parent_sync")
+            {
+                return Err(format!("{original}; cleanup also failed: {cleanup}"));
             }
             publication
         })();

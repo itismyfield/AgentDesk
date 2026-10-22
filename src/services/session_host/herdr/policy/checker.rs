@@ -35,7 +35,24 @@ async fn run_with_limits(
     timeout: Duration,
     limit: usize,
 ) -> Result<(), Unverified> {
-    if !peer.checker.is_absolute() || !peer.home.is_absolute() || !peer.config.is_absolute() {
+    run_config_with_limits(peer, &peer.config, timeout, limit).await
+}
+
+#[cfg(all(test, unix))]
+pub(crate) async fn candidate(
+    peer: &PeerSnapshot,
+    config: &std::path::Path,
+) -> Result<(), Unverified> {
+    run_config_with_limits(peer, config, CHECK_TIMEOUT, OUTPUT_LIMIT).await
+}
+
+async fn run_config_with_limits(
+    peer: &PeerSnapshot,
+    config: &std::path::Path,
+    timeout: Duration,
+    limit: usize,
+) -> Result<(), Unverified> {
+    if !peer.checker.is_absolute() || !peer.home.is_absolute() || !config.is_absolute() {
         return Err(Unverified::Ambiguous);
     }
     if peer.image.logical_path() != peer.checker {
@@ -50,7 +67,7 @@ async fn run_with_limits(
         .current_dir(&peer.home)
         .env_clear()
         .env("HOME", &peer.home)
-        .env("HERDR_CONFIG_PATH", &peer.config)
+        .env("HERDR_CONFIG_PATH", config)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -121,10 +121,15 @@ fn durable_prepublication_cleanup_failure_keeps_the_marker() {
         let result = store.change(&name, |_| Ok(b"new".to_vec()));
         FAIL.with(|fail| fail.set(None));
         CLEANUP_FAIL.with(|fail| fail.set(None));
-        assert!(result.is_err());
+        let error = result.unwrap_err();
         assert!(
             store.path(&name, "pending").unwrap().exists() && store.read(&name).is_err(),
             "durable_cleanup_failure_retains_fail_closed_marker_contract: {cleanup}"
+        );
+        assert!(
+            error.contains("injected before_rename; cleanup also failed:")
+                && error.contains(&format!("injected {cleanup}")),
+            "durable_original_and_cleanup_errors_are_reported_contract: {error}"
         );
         assert_eq!(
             fs::read(store.path(&name, "json").unwrap()).unwrap(),

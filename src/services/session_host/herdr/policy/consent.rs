@@ -99,12 +99,15 @@ pub(crate) enum CardState {
 pub(crate) enum QuestionResult {
     Current(Consent),
     RevisionChanged(Consent),
+    AlreadyApplied(Consent),
 }
 
 impl QuestionResult {
     pub(crate) fn into_consent(self) -> Consent {
         match self {
-            Self::Current(value) | Self::RevisionChanged(value) => value,
+            Self::Current(value) | Self::RevisionChanged(value) | Self::AlreadyApplied(value) => {
+                value
+            }
         }
     }
 }
@@ -138,6 +141,18 @@ pub(crate) struct Consent {
     pub intents: Vec<IntentRef>,
     pub apply: Option<ApplyResult>,
     pub launch: Option<String>,
+    #[serde(default)]
+    pub settlements: Vec<settlement::Settlement>,
+    #[serde(default)]
+    intent_previews: Vec<IntentPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntentPreview {
+    store: String,
+    id: String,
+    preview: Preview,
 }
 
 pub(crate) struct Question {
@@ -174,6 +189,32 @@ impl ConsentStore {
             if value.schema != 1 || &value.key != key || value.nonce.is_empty() || value.owner == 0
             {
                 return Err("consent_snapshot_corrupt: incompatible or mismatched consent".into());
+            }
+            let mut identities = std::collections::BTreeSet::new();
+            let mut settlements = std::collections::BTreeSet::new();
+            if value
+                .intents
+                .iter()
+                .any(|intent| !identities.insert((&intent.store, &intent.id)))
+                || (!value.intent_previews.is_empty()
+                    && (value.intent_previews.len() != value.intents.len()
+                        || value.intents.iter().any(|intent| {
+                            value
+                                .intent_previews
+                                .iter()
+                                .filter(|held| held.store == intent.store && held.id == intent.id)
+                                .count()
+                                != 1
+                        })))
+                || value.settlements.iter().any(|settled| {
+                    settled.key.nonce.is_empty()
+                        || !settlements.insert((&settled.key.store, &settled.key.id))
+                        || !value.intents.iter().any(|intent| {
+                            settled.key.store == intent.store && settled.key.id == intent.id
+                        })
+                })
+            {
+                return Err("consent_snapshot_corrupt: incompatible custody metadata".into());
             }
             Ok(value)
         })();
@@ -244,15 +285,44 @@ impl ConsentStore {
                 "consent question requires owner, card and custody identities",
             ));
         }
+        let question_preview = preview.clone();
         let mut revision_changed = false;
+        let mut already_applied = false;
         let bytes = self.0.change(&durable::key(&key)?, |previous| {
-            let previous = previous
-                .map(|bytes| self.decode(&bytes, &key))
+            let decoded = previous
+                .as_ref()
+                .map(|bytes| self.decode(bytes, &key))
                 .transpose()?;
+            if retry && let Some(current) = &decoded {
+                if current.state == State::Accepted {
+                    return Err(
+                        "apply in progress; preserve this decision and wait for its receipt".into(),
+                    );
+                }
+                if current.state == State::Applied {
+                    already_applied = true;
+                    return previous.ok_or_else(|| "consent missing".to_string());
+                }
+            }
+            let previous = decoded;
             let mut value = if let Some(mut current) = previous {
+                if current.intent_previews.is_empty() {
+                    current.intent_previews = current
+                        .intents
+                        .iter()
+                        .map(|intent| IntentPreview {
+                            store: intent.store.clone(),
+                            id: intent.id.clone(),
+                            preview: current.preview.clone(),
+                        })
+                        .collect();
+                }
                 if !retry {
                     revision_changed = current.preview.revision != preview.revision;
-                    if current.state == State::Pending && now >= current.expires {
+                    if current.state == State::Pending
+                        && current.card != CardState::Awaiting
+                        && now >= current.expires
+                    {
                         current.state = State::Expired;
                     }
                     current
@@ -280,6 +350,9 @@ impl ConsentStore {
                     current.decision = None;
                     current.apply = None;
                     current.launch = None;
+                    for intent in &mut current.intent_previews {
+                        intent.preview = current.preview.clone();
+                    }
                     current
                 }
             } else {
@@ -304,6 +377,8 @@ impl ConsentStore {
                     intents: Vec::new(),
                     apply: None,
                     launch: None,
+                    settlements: Vec::new(),
+                    intent_previews: Vec::new(),
                 }
             };
             if let Some(existing) = value
@@ -315,19 +390,30 @@ impl ConsentStore {
                     return Err("custody identity changed; preserve the original intent".into());
                 }
             } else {
+                value.intent_previews.push(IntentPreview {
+                    store: intent.store.clone(),
+                    id: intent.id.clone(),
+                    preview: if retry {
+                        value.preview.clone()
+                    } else {
+                        question_preview
+                    },
+                });
                 value.intents.push(intent);
             }
             serde_json::to_vec(&value).map_err(|e| e.to_string())
         })?;
         let value = self.decode(&bytes, &key)?;
-        Ok(if revision_changed {
+        Ok(if already_applied {
+            QuestionResult::AlreadyApplied(value)
+        } else if revision_changed {
             QuestionResult::RevisionChanged(value)
         } else {
             QuestionResult::Current(value)
         })
     }
 
-    pub(crate) fn reserve_card(&self, expected: &Consent) -> Result<Consent, String> {
+    pub(crate) fn reserve_card(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
             if current.state != State::Pending
                 || current.message != 0
@@ -336,6 +422,7 @@ impl ConsentStore {
                 return Err("card is already reserved or no longer pending".into());
             }
             current.card = CardState::Reserved;
+            current.expires = now.saturating_add(TTL);
             Ok(())
         })
     }
@@ -416,7 +503,10 @@ impl ConsentStore {
 
     pub(crate) fn expire(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
-            if current.state == State::Pending && now >= current.expires {
+            if current.state == State::Pending
+                && current.card != CardState::Awaiting
+                && now >= current.expires
+            {
                 current.state = State::Expired;
             }
             Ok(())
@@ -443,8 +533,14 @@ impl ConsentStore {
     }
 }
 
+pub(crate) mod settlement;
 pub(crate) mod workflow;
 
 #[cfg(test)]
 #[path = "consent_tests.rs"]
 mod tests;
+
+pub(crate) mod apply_owner;
+pub(crate) mod card;
+pub(crate) mod engine;
+pub(crate) mod preview;

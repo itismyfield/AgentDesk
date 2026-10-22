@@ -187,6 +187,14 @@ impl SocketHerdrLaunchHost {
             .cloned()
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn consent_source(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+    ) -> Option<Arc<dyn PeerSource>> {
+        self.source(endpoint)
+    }
+
     pub(crate) fn mutation_evidence(
         &self,
         endpoint: &HerdrEndpoint,

@@ -76,7 +76,50 @@ impl ApplyPlan {
     pub(crate) fn target(&self) -> &Path {
         &self.target
     }
-    fn unchanged(&self) -> Result<(), String> {
+    pub(crate) fn logical(&self) -> &Path {
+        &self.logical
+    }
+    pub(crate) fn before_hash(&self) -> Option<[u8; 32]> {
+        match &self.original {
+            Original::Existing(read) => Some(read.token.digest()),
+            Original::Missing(_) => None,
+        }
+    }
+    pub(crate) fn fingerprint(&self) -> Result<[u8; 32], String> {
+        use sha2::Digest;
+        let original = match &self.original {
+            Original::Existing(read) => read.token.fingerprint(),
+            Original::Missing(missing) => missing.fingerprint(),
+        }
+        .map_err(|e| format!("preview fingerprint: {e:?}"))?;
+        let bytes = serde_json::to_vec(&(self.parent, original)).map_err(|e| e.to_string())?;
+        Ok(sha2::Sha256::digest(bytes).into())
+    }
+    pub(crate) fn check_candidate(&self, checker: &dyn CandidateChecker) -> Result<(), String> {
+        let directory = apply_fs::Directory::open(self.target.parent().ok_or("target parent")?)?;
+        let held = directory.file().metadata().map_err(|e| e.to_string())?;
+        if (held.dev(), held.ino()) != self.parent {
+            return Err("target parent changed".into());
+        }
+        self.unchanged()?;
+        let mut candidate = directory.unique(".agentdesk-preview-")?;
+        candidate
+            .write_all(self.candidate.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let token = file::read(candidate.path())
+            .map_err(|e| format!("{e:?}"))?
+            .token;
+        let metadata = candidate.as_file().metadata().map_err(|e| e.to_string())?;
+        if token.dev_ino() != (metadata.dev(), metadata.ino()) {
+            return Err("preview candidate left held parent".into());
+        }
+        checker.check(candidate.path())?;
+        token
+            .unchanged()
+            .map_err(|e| format!("candidate changed: {e:?}"))?;
+        self.unchanged()
+    }
+    pub(crate) fn unchanged(&self) -> Result<(), String> {
         if file::directory_identity(self.target.parent().ok_or("target parent")?)
             .map_err(|e| format!("{e:?}"))?
             != self.parent

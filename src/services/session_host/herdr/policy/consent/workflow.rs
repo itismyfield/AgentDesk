@@ -43,7 +43,7 @@ pub(crate) struct Current {
 }
 
 impl Current {
-    fn check(&self, consent: &Consent, preview: bool) -> Result<(), String> {
+    pub(super) fn check(&self, consent: &Consent, preview: bool) -> Result<(), String> {
         if self.owner != Some(consent.owner)
             || consent.owner == 0
             || self.bot != consent.bot
@@ -84,7 +84,7 @@ impl Workflow<'_> {
             && consent.state == State::Pending
             && consent.card == CardState::Awaiting
         {
-            return match self.0.reserve_card(&consent) {
+            return match self.0.reserve_card(&consent, now) {
                 Ok(consent) => Ok(Transition {
                     consent,
                     effect: Effect::SendCard,
@@ -203,7 +203,13 @@ impl Workflow<'_> {
             return Err("consent retry requires the current owner on the execution node".into());
         }
         let consent = self.0.retry_unbound(question, now)?;
-        let consent = self.0.reserve_card(&consent)?;
+        if consent.state == State::Applied {
+            return Ok(Transition {
+                consent,
+                effect: Effect::ShowResult,
+            });
+        }
+        let consent = self.0.reserve_card(&consent, now)?;
         Ok(Transition {
             consent,
             effect: Effect::SendCard,
@@ -211,9 +217,13 @@ impl Workflow<'_> {
     }
 
     pub(crate) fn recover(&self, key: &ConsentKey) -> Result<Option<Transition>, String> {
-        Ok(self.0.load(key)?.map(|consent| Transition {
-            consent,
-            effect: Effect::KeepHeld,
+        Ok(self.0.load(key)?.map(|consent| {
+            let effect = if consent.state == State::Applied {
+                Effect::ReleaseThenWake
+            } else {
+                Effect::KeepHeld
+            };
+            Transition { consent, effect }
         }))
     }
 }

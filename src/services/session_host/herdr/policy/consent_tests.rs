@@ -1,6 +1,6 @@
 use super::*;
 
-fn question(id: &str) -> Question {
+pub(super) fn question(id: &str) -> Question {
     let mut witness = ServerWitness::for_test(7);
     witness.socket = "/fixture/socket".into();
     Question {

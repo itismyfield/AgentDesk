@@ -1,3 +1,4 @@
+use super::super::TTL;
 use super::*;
 use crate::services::session_host::herdr::contract::ServerWitness;
 
@@ -328,8 +329,12 @@ fn workflow_denial_expiry_and_failed_apply_preserve_fifo_without_requestion() {
         let recovered = Workflow(&reopened).recover(&bound.key).unwrap().unwrap();
         assert_eq!(
             recovered.effect,
-            Effect::KeepHeld,
-            "workflow_restart_never_applies_or_releases_contract: {phase}"
+            if phase == "applied" {
+                Effect::ReleaseThenWake
+            } else {
+                Effect::KeepHeld
+            },
+            "workflow_restart_only_applied_releases_contract: {phase}"
         );
         assert_eq!(recovered.consent.state, terminal.consent.state);
         assert_eq!(
@@ -513,5 +518,95 @@ fn workflow_racing_retries_can_bind_only_the_latest_card() {
         Workflow(&store)
             .decide(&initial, &current(&initial), 1, true, 121)
             .is_err()
+    );
+}
+
+#[test]
+fn workflow_unsent_card_ttl_starts_at_reservation() {
+    for elapsed in [TTL - 1, TTL, TTL + 1] {
+        let root = tempfile::tempdir().unwrap();
+        let store = ConsentStore::new(Some(root.path().join("consents")));
+        let automatic = Workflow(&store)
+            .hold(question("first"), 100, Request::Automatic)
+            .unwrap();
+        assert_eq!(automatic.consent.card, CardState::Awaiting);
+        let at = 100 + elapsed;
+        let reserved = Workflow(&store)
+            .hold(question("second"), at, Request::ExplicitLaunch)
+            .unwrap();
+        assert_eq!(
+            reserved.effect,
+            Effect::SendCard,
+            "workflow_awaiting_card_never_expires_contract: elapsed={elapsed}"
+        );
+        assert_eq!(
+            reserved.consent.expires,
+            at + TTL,
+            "workflow_reserved_card_gets_full_ttl_contract: elapsed={elapsed}"
+        );
+        let bound = Workflow(&store)
+            .bind(&reserved.consent, &current(&reserved.consent), 40)
+            .unwrap()
+            .consent;
+        assert!(
+            store.decide(&bound, 1, true, bound.expires - 1).is_ok(),
+            "workflow_reserved_ttl_last_instant_contract"
+        );
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = ConsentStore::new(Some(root.path().join("consents")));
+    let bound = bound(&store);
+    assert!(
+        store.decide(&bound, 1, true, bound.expires).is_err(),
+        "workflow_reserved_ttl_boundary_contract"
+    );
+}
+
+#[test]
+fn workflow_retry_never_discards_an_in_flight_or_completed_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("consents");
+    let store = ConsentStore::new(Some(directory.clone()));
+    let bound = bound(&store);
+    let accepted = Workflow(&store)
+        .decide(&bound, &current(&bound), 1, true, 110)
+        .unwrap()
+        .consent;
+    let path = directory.join(format!(
+        "{}.json",
+        crate::services::session_host::herdr::policy::durable::key(&bound.key).unwrap()
+    ));
+    let before = std::fs::read(&path).unwrap();
+    let retry = Workflow(&store).retry(question("second"), 1, Some(1), "one", 120);
+    assert!(
+        matches!(retry, Err(ref error) if error.contains("apply in progress")),
+        "workflow_retry_preserves_in_flight_apply_contract: {retry:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "workflow_accepted_retry_bytes_unchanged_contract"
+    );
+    let applied = Workflow(&store)
+        .receipt(&accepted, result(true))
+        .unwrap()
+        .consent;
+    let before = std::fs::read(&path).unwrap();
+    let retry = Workflow(&store)
+        .retry(question("second"), 1, Some(1), "one", 130)
+        .unwrap();
+    assert_eq!(
+        retry.effect,
+        Effect::ShowResult,
+        "workflow_applied_retry_already_applied_contract"
+    );
+    assert_eq!(
+        retry.consent, applied,
+        "workflow_applied_retry_preserves_history_contract"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "workflow_applied_retry_bytes_unchanged_contract"
     );
 }
