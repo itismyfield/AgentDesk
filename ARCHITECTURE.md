@@ -1258,6 +1258,8 @@ src/
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── custody_notice/
+│   │   │   │   │   └── retention.rs
 │   │   │   │   ├── loader_gate_observation_tests/
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
