@@ -140,10 +140,8 @@ async fn prepared(rig: &herdr::P11TerminationRig, row: &str) -> (Node, String) {
     (node, token)
 }
 
-// A forced cancel absorbs the runtime's own unread queue file before it captures, so the purge
-// removes and records it; input after the capture, an unreadable or foreign file, an actor writing
-// another namespace and a file a clear could not rewrite are never purged unseen, and a restart's
-// merge brings nothing back.
+// A forced cancel absorbs its runtime's unread own queue file before the capture; a file it may not
+// absorb, or input after the capture, is never purged unseen, and a restart restores nothing purged.
 #[test]
 fn e07_force_absorbs_unhydrated_own_queue_pg() {
     let Some((rig, runtime)) = hydrate_rig("e07_force_absorbs_unhydrated_own_queue_pg") else {
