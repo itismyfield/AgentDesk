@@ -304,7 +304,7 @@ impl TransitionPort {
 }
 
 impl Operation {
-    pub(super) fn request(&self) -> &Request {
+    pub(super) fn request_ref(&self) -> &Request {
         match self {
             Self::Inspect(request) | Self::AutomaticApply(request, _, _) => request,
             #[cfg(test)]
@@ -322,7 +322,7 @@ impl Receiver {
             Err(closed) => return Err(closed),
         };
         if envelope.generation != self.generation || !Arc::ptr_eq(&envelope.run, &self.run) {
-            let job = &envelope.operation.request().job_id;
+            let job = &envelope.operation.request_ref().job_id;
             let _ = (envelope.reply).send(Reply::refused(job, Refused::ForeignRun));
             return Ok(None);
         }

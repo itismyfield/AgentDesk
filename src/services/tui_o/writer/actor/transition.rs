@@ -172,7 +172,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             if let Some(receiver) = &mut self.transitions.receiver
                 && let Ok(Some(envelope)) = receiver.try_next()
             {
-                let id = &envelope.operation.request().job_id;
+                let id = &envelope.operation.request_ref().job_id;
                 let _ = envelope
                     .reply
                     .send(Reply::refused(id, Refused::CodexDeferred));

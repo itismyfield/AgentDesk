@@ -1110,7 +1110,9 @@ src/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── o_transition/
-│   │   │   │   └── automatic.rs
+│   │   │   │   ├── automatic.rs
+│   │   │   │   ├── automatic_idle.rs
+│   │   │   │   └── automatic_idle_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
