@@ -13,7 +13,7 @@ use crate::services::tui_o::store::spool::Cursor;
 const MAX_BYTES: u64 = 32 << 20;
 const MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Runs on the scheduler's blocking worker; unknown ages always retain the source.
+/// Runs on the actor's blocking worker; unknown ages always retain the source.
 pub(super) fn last_dialogue(cursor: &Cursor) -> Option<SystemTime> {
     if cursor.captured_through > MAX_BYTES {
         return None;

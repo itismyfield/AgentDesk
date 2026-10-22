@@ -34,13 +34,11 @@ pub(crate) enum Operation {
     AutomaticApply(Request, ScopeDigest, Idle),
 }
 
+type IdleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+
 /// A runtime-owned check; a missing or unreachable mailbox never counts as idle.
 #[derive(Clone)]
-pub(crate) struct Idle(
-    pub  Arc<
-        dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync,
-    >,
-);
+pub(crate) struct Idle(pub Arc<dyn Fn() -> IdleFuture + Send + Sync>);
 
 impl std::fmt::Debug for Idle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
