@@ -240,9 +240,8 @@ fn http_receipt(status: StatusCode, reply: &Value) -> BTreeSet<u64> {
     claimed.iter().filter_map(id).collect()
 }
 
-// A text `!clear` and a forced HTTP cancel overlapping on one Herdr channel, in either order: the
-// clear discards the waiting input it finds once, the cancel records only what its purge removed,
-// no input is discarded by both, and nothing waiting is lost unaccounted.
+// A text `!clear` overlapping a forced HTTP cancel: the clear discards what it finds once, the
+// cancel records only what its purge removed, and no waiting input is lost or discarded twice.
 #[test]
 fn force_root_replaced_text_clear_overlap_pg() {
     let name = "force_root_replaced_text_clear_overlap_pg";
