@@ -71,7 +71,7 @@ impl InflightDeleteRequest<'_> {
                 break 'decision InflightDeleteOutcome::Failed;
             }
             log_inflight_remove_for_path(provider, channel, "delete_inflight_state_file", &path);
-            match fs::remove_file(path) {
+            match fs::remove_file(&path).map(|()| sync_removed(&path)) {
                 Ok(()) => InflightDeleteOutcome::Deleted,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     InflightDeleteOutcome::AlreadyAbsent

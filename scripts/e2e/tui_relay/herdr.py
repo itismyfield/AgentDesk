@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 
-from . import assertions, http_auth, known_gap
+from . import assertions, health_readiness, http_auth, known_gap
 
 TMUX_STEPS = {
     "kill_pane", "capture_session_identity", "assert_session_preserved",
@@ -56,7 +56,11 @@ def detail_ready(driver, http_status, payload, *, allowed, channel):
             or ("degraded" in payload and payload["degraded"] is not (state == "degraded"))
             or healthy == bool(reasons)):
         raise assertions.AssertionError("Herdr detail health readiness failed or incomplete")
-    hard = [r for r in reasons if "herdr" in r.lower() or str(channel) in r]
+    error = health_readiness.unknown_error(payload, channel)
+    if error:
+        raise assertions.AssertionError(f"Herdr detail degraded_reasons never_waived: {error}")
+    hard = [r for r in reasons if not health_readiness.unknown_family(r)
+            and ("herdr" in r.lower() or str(channel) in r)]
     unmatched = [r for r in reasons if r not in hard and not driver._health_reason_allowed(r, tuple(allowed))]
     if hard or unmatched:
         raise assertions.AssertionError(
@@ -180,6 +184,8 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         if ignored:
             evidence["readiness"].update(degraded_reason_waiver="applied", ignored_degraded_reasons=list(ignored),
                                          ignored_degraded_reasons_unattributed=unattributed(ignored))
+            if any(health_readiness.unknown_family(r) for r in ignored):
+                evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
                              ("admission", "restart_required", "configured_channels", "endpoints", "input_holds", "reconnect") if k in block}
@@ -196,6 +202,7 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["validated"] = True
         return evidence
     except Exception as error:
+        evidence["readiness"]["error"] = str(error)
         error.herdr_observation = evidence
         raise
 

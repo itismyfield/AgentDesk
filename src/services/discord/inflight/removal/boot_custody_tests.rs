@@ -438,3 +438,98 @@ async fn n1a_boot_custody_copy_precedes_retirement_without_delivery_completion()
         channel
     ));
 }
+
+/// A kept TUI-direct row whose turn custody copies on every boot that finds something new.
+fn kept_row(env: &Env, channel_id: u64) -> Vec<u8> {
+    set_test_tmux_alive_override(Some(&[PANE]));
+    let (out, offset) = transcript(env, &format!("{channel_id}.jsonl"), "old\n", "turn\n");
+    let mut state = tui_direct_row(channel_id, &out, offset);
+    state.set_restart_mode(InflightRestartMode::DrainRestart);
+    (state.born_generation, state.restart_generation) = (G - 3, Some(G - 1));
+    fs::read(env.seed(&state, 0)).unwrap()
+}
+
+fn manifest(episode: &Path, rev: &str) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(episode.join(rev).join("manifest.json")).unwrap()).unwrap()
+}
+
+// Contract: the copies and the directories holding them are flushed before the manifest that
+// vouches for them is published.
+#[tokio::test]
+async fn custody_copies_precede_manifest_publication() {
+    use crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
+    let env = Env::new();
+    kept_row(&env, 5_997_101);
+    let watch = Watch::new(env.dir().parent().unwrap(), Plan::default());
+    assert_eq!(boot().await.kept, 1);
+    let episode = episodes(&env)[&5_997_101].clone();
+    let target = episode.join("rev-0000").join("manifest.json");
+    let syncs: Vec<Option<String>> = watch
+        .events()
+        .into_iter()
+        .filter(|event| event.target == target && event.step == Step::ParentSync && event.ok)
+        .map(|event| event.target_bytes)
+        .collect();
+    assert_eq!(syncs.len(), 2, "{syncs:?}");
+    assert!(
+        syncs[0].is_none(),
+        "copies flushed before the manifest exists"
+    );
+    assert!(
+        syncs[1]
+            .as_deref()
+            .is_some_and(|m| m.contains("\"complete\":true"))
+    );
+    let ancestors = watch.flushed(Step::Ancestors);
+    for dir in [episode.clone(), custody_root(&env)] {
+        assert!(ancestors.contains(&dir), "{} not flushed", dir.display());
+    }
+    assert_eq!(manifest(&episode, "rev-0000")["complete"], true);
+}
+
+// Contract: copies whose directory flush failed are recorded as not copied, so the next boot
+// that still finds the row copies the same bytes again.
+#[tokio::test]
+async fn custody_flush_failure_is_recopied_by_the_next_boot() {
+    use crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES;
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    if !PARENT_DIR_FSYNC_FLUSHES {
+        return; // no directory flush to observe; `windows_contract` covers this platform
+    }
+    let env = Env::new();
+    let bytes = kept_row(&env, 5_997_102);
+    {
+        let plan = Plan {
+            fail: vec![Step::ParentSync],
+            ..Plan::default()
+        };
+        let _failing = Watch::new(&custody_root(&env), plan);
+        assert_eq!(boot().await.kept, 1);
+    }
+    let episode = episodes(&env)[&5_997_102].clone();
+    let first = manifest(&episode, "rev-0000");
+    assert_eq!(first["complete"], false);
+    for entry in first["entries"].as_array().unwrap() {
+        assert!(entry["copy"].is_null(), "{entry}");
+        let error = entry["error"].as_str().unwrap_or_default();
+        assert!(error.contains("custody directory sync failed"), "{entry}");
+    }
+
+    assert_eq!(boot().await.kept, 1);
+    let second = manifest(&episode, "rev-0001");
+    assert_eq!(second["complete"], true, "{second}");
+    let row = second["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "row")
+        .cloned()
+        .expect("the row is copied again");
+    let digest = crate::services::discord::inflight::removal::boot_custody::sha(&bytes);
+    assert_eq!(row["sha256"].as_str(), Some(digest.as_str()));
+    assert_eq!(copy_of(&episode, "row"), Some(bytes));
+}

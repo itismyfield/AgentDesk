@@ -446,6 +446,7 @@ src/
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
 │   │   │   ├── kv_gate_tests.rs
+│   │   │   ├── presence_unknown_tests.rs
 │   │   │   ├── public_projection.rs
 │   │   │   ├── response.rs
 │   │   │   ├── runtime_profile.rs
@@ -1200,12 +1201,15 @@ src/
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── o_transition.rs
+│   │   │   ├── presence_unknown.rs
+│   │   │   ├── presence_unknown_tests.rs
 │   │   │   ├── probe_runtime.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
 │   │   │   ├── recovery.rs
 │   │   │   ├── redaction.rs
+│   │   │   ├── registry_tests.rs
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
@@ -1293,6 +1297,7 @@ src/
 │   │   │   │   ├── coordinate_replay_tests.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
+│   │   │   │   ├── durable_writers_tests.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── outcome_decomposition_tests.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -1869,7 +1874,8 @@ src/
 │   │   │   ├── durable_ancestors.rs
 │   │   │   ├── durable_ancestors_tests.rs
 │   │   │   ├── durable_publish.rs
-│   │   │   └── durable_publish_tests.rs
+│   │   │   ├── durable_publish_tests.rs
+│   │   │   └── durable_stores_tests.rs
 │   │   ├── session_relay_sink/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
@@ -2520,6 +2526,7 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
 │   │   │   │   ├── tail_tests.rs
@@ -2528,11 +2535,17 @@ src/
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
+│   │   │   ├── activity_notice_tests.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
-│   │   │   └── supervisor_tests.rs
+│   │   │   ├── supervisor_notice_tests.rs
+│   │   │   ├── supervisor_reader_notice_tests.rs
+│   │   │   ├── supervisor_tests.rs
+│   │   │   ├── unknown_notice.rs
+│   │   │   ├── unknown_notice_store.rs
+│   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs

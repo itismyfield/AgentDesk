@@ -46,6 +46,10 @@ pub(super) struct HoldLeaf {
 }
 
 impl HoldLeaf {
+    pub(super) fn leaf(&self) -> &'static str {
+        self.leaf
+    }
+
     pub(super) fn of(
         leaf: &'static str,
         candidates: &Result<Candidates, String>,

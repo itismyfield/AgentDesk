@@ -167,7 +167,7 @@ fn load_record(path: &Path) -> Result<Option<CircuitRecord>, String> {
 
 fn persist_record(path: &Path, record: &CircuitRecord) -> Result<(), String> {
     let json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
-    super::super::runtime_store::atomic_write(path, &json)
+    super::super::runtime_store::durable_publish::publish_store_row(path, &json)
 }
 
 fn effective_frontier(

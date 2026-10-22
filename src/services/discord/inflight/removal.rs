@@ -366,7 +366,7 @@ pub(super) fn invalidate_stale_generation_in_root(
             "invalidate_stale_generation_boot",
             &path,
         );
-        if fs::remove_file(&path).is_ok() {
+        if fs::remove_file(&path).map(|()| sync_removed(&path)).is_ok() {
             // Only emit observability when called via the env wrapper —
             // raw `_in_root` calls are unit tests and we want to keep
             // them deterministic.

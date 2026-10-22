@@ -1211,7 +1211,7 @@ fn create_new_atomic_write(path: &Path, data: &str) -> Result<(), String> {
         create_monotonic_observer::test_seams::sync_result(&lock_file)
             .map_err(|error| error.to_string())?;
     }
-    atomic_write(path, data)
+    store::publish_row(path, data)
 }
 
 #[cfg(test)]
@@ -1240,7 +1240,7 @@ pub(super) fn save_inflight_state_in_root(
     updated.updated_at = now_string();
     bump_save_generation_for_write(&path, &mut updated)?;
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)
+    super::super::runtime_store::atomic_write(&path, &json)
 }
 
 /// #3107 codex re-review (P1): atomic compare-and-set save. Writes `state` ONLY
@@ -1269,7 +1269,7 @@ fn save_inflight_state_if_absent_in_root(
         root,
         state,
         |path| fs::symlink_metadata(path),
-        atomic_write,
+        store::publish_row,
     )
 }
 

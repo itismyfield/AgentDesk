@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod durable_ancestors;
-mod durable_publish;
+pub(crate) mod durable_publish;
 pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
@@ -1015,12 +1015,8 @@ pub(in crate::services::discord) mod rename_fault {
 /// fsync of the parent directory. What either one survives is not a claim this
 /// helper makes.
 ///
-/// Deliberately a second call rather than a flag on `atomic_write`: the inflight
-/// hot path must not pay a directory fsync, and callers need rename and parent
-/// sync failures separable. Gateway identity recovery skips its derived index
-/// on failure; generation allocation records a non-advanced route after its
-/// rename. The directory is opened read-only because opening one for writing
-/// fails with `EISDIR`.
+/// Separate from `atomic_write` (unflushed; recovery-critical stores use `durable_publish`) so
+/// rename and parent sync failures stay apart; read-only because a writable open fails `EISDIR`.
 #[cfg(not(windows))]
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path
@@ -1038,15 +1034,15 @@ pub(crate) fn fsync_parent_dir(_path: &Path) -> std::io::Result<()> {
 
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
 #[cfg(unix)]
-fn dir_identity(dir: &Path) -> std::io::Result<(u64, u64)> {
+fn dir_identity(meta: &fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
-    fs::metadata(dir).map(|meta| (meta.dev(), meta.ino()))
+    (meta.dev(), meta.ino())
 }
 
 /// Never consulted without a directory flush, which this platform lacks.
 #[cfg(not(unix))]
-fn dir_identity(dir: &Path) -> std::io::Result<(u64, u64)> {
-    fs::metadata(dir).map(|_| (0, 0))
+fn dir_identity(_meta: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
 }
 
 /// Whether an `Ok` from `fsync_parent_dir` flushed the parent directory. Callers

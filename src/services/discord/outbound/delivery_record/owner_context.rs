@@ -116,7 +116,7 @@ pub(super) fn write_watcher_owner_context_at(
         generation_mtime_ns,
     };
     let data = serde_json::to_string_pretty(&context).map_err(|e| e.to_string())?;
-    runtime_store::atomic_write(path, &data)
+    runtime_store::durable_publish::publish_store_row(path, &data)
 }
 
 /// Mixed-binary-safe owner-channel index writer for #3751.
