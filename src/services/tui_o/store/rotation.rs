@@ -2,8 +2,12 @@
 //! Both files are replaced atomically; only resolution or explicit provisional refinement changes a decided boundary.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+#[cfg(test)]
+use std::fs::File;
+use std::fs::OpenOptions;
+#[cfg(test)]
 use std::io::{BufRead, BufReader};
+#[cfg(test)]
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
 use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
+#[cfg(test)]
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::writer::binding::{
@@ -83,7 +88,7 @@ pub enum Boundary {
     Undecided,
     /// Records starting at or after `from` are owed.
     Owed { from: u64 },
-    /// The source spools but posts nothing until an operator picks the start.
+    /// The source spools but posts nothing until its delivery start is known.
     Pending { candidates: Vec<u64> },
 }
 
@@ -392,13 +397,15 @@ impl ChannelStore {
     }
 }
 
-/// Where an operator's resolved boundary starts: a byte offset, or the record with this uuid.
+/// A test fixture's delivery start in a retained boundary record.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolveFrom {
     Offset(u64),
     Uuid(String),
 }
 
+#[cfg(test)]
 fn rejected(detail: String) -> StoreError {
     StoreError::Rejected(detail)
 }
@@ -416,8 +423,8 @@ impl OStore {
         }
     }
 
-    /// Appends an operator's start for a pending source to the ledger and fsyncs it, without
-    /// opening the channel: nothing is swept or rewritten, and the writer applies it on start.
+    /// Seeds a retained boundary record for writer replay tests.
+    #[cfg(test)]
     pub fn record_boundary_resolved(
         &self,
         channel: u64,
@@ -434,6 +441,7 @@ impl OStore {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn record_boundary_resolved_with_append(
         &self,
         channel: u64,
@@ -487,6 +495,7 @@ impl OStore {
 }
 
 /// The byte offset `from` names in the source file, which must be the start of a record.
+#[cfg(test)]
 fn record_start(source: &SourceId, from: &ResolveFrom) -> Result<u64, StoreError> {
     let file = File::open(&source.path)?;
     if file_match(source, file_identity(&file.metadata()?)) == FileMatch::Other {

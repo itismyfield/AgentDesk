@@ -9,9 +9,7 @@ use super::*;
 use crate::services::claude_tui::composer_lock::{
     DraftGuard, DraftRecoveryHold, admit_composer_write, guard_draft,
 };
-use crate::services::claude_tui::host_input::{
-    SpyGuard, SpyState, capture_draft_with, native_clear_composer_empty,
-};
+use crate::services::claude_tui::host_input::{SpyGuard, SpyState, capture_draft_with};
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
 };
@@ -205,10 +203,9 @@ fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
     }
 }
 
-/// The hold covers the follow-up submit, the cleanup lock and a native `/clear` until a capture
-/// shows the stash gone and the composer empty.
+/// Follow-up submission and cleanup stay held until the stash is gone and the composer is empty.
 #[test]
-fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
+fn a_held_pane_keeps_the_follow_up_out_until_recovered() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
@@ -220,11 +217,10 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
             Delivery::Observed
         )
     );
-    // The turn ends; the draft stays stashed under a bare empty prompt that /clear would accept.
+    // The turn ends; the draft stays stashed under a bare empty prompt.
     tui.put("placeholder", "");
     tui.put("head", IDLE_HEAD);
     let held = tui.capture();
-    assert!(native_clear_composer_empty(&held));
     let (session, idle) = (tui.session(), idle(&tui));
 
     let guard = spy(&[&held, &held, &held, BUSY], None);

@@ -11,7 +11,6 @@ pub(super) fn check_reviewed_calls() {
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
-    const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
     const CLEAR: &str = "a user clear of a channel with no Herdr endpoint";
     const CALLS: &[(&str, Listed)] = &[
         (
@@ -79,7 +78,7 @@ pub(super) fn check_reviewed_calls() {
         (
             "cleanup_session_temp_files_under_source_authority",
             &[
-                ("src/services/tmux_common.rs", 2, ENTRY),
+                ("src/services/tmux_common.rs", 1, ENTRY),
                 ("src/services/codex/absence_launch.rs", 1, SWEEP),
                 (
                     "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs",
@@ -87,10 +86,6 @@ pub(super) fn check_reviewed_calls() {
                     CLEAR,
                 ),
             ],
-        ),
-        (
-            "cleanup_native_clear_fallback_under_source_authority",
-            &[("src/services/tui_prompt_dedupe/native_clear.rs", 1, NATIVE)],
         ),
         (
             "end_managed_process_session",

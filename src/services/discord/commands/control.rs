@@ -28,7 +28,6 @@ pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
 pub(in crate::services::discord) mod native;
-pub(in crate::services::discord) use native::native_clear_admits;
 
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,

@@ -20,8 +20,7 @@ mod codex_end_record;
 #[cfg(all(test, unix))]
 mod codex_end_tests;
 
-/// Advances the channel's transcript clear boundary, retried once; it also supersedes any
-/// unresolved native clear boundary, so no older clear holds the next input.
+/// Advances the channel's transcript clear boundary, retried once.
 pub(super) async fn write_boundary(
     shared: &SharedData,
     channel_id: serenity::ChannelId,

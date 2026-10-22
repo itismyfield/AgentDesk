@@ -85,7 +85,6 @@ src/
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── o.rs
-│   ├── o_tests.rs
 │   ├── o_transition.rs
 │   ├── o_transition_tests.rs
 │   ├── query.rs
@@ -271,9 +270,6 @@ src/
 │   ├── session_observability.rs
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
-│   ├── session_transcripts_native_clear_record.rs
-│   ├── session_transcripts_native_clear_seed.rs
-│   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -1034,8 +1030,6 @@ src/
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   ├── native_policy_tests.rs
-│   │   │   │   ├── native_tests.rs
 │   │   │   │   └── provider_reset.rs
 │   │   │   ├── diagnostics/
 │   │   │   │   ├── mod.rs
@@ -1707,7 +1701,6 @@ src/
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── runtime_transition/
-│   │   │   │   │   │   └── native_hold_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1717,7 +1710,6 @@ src/
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   │   ├── intake_dispatch.rs
-│   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
@@ -3069,8 +3061,6 @@ src/
 │   │   ├── herdr_host_tests/
 │   │   │   └── teardown_census_tests.rs
 │   │   ├── consumer_guard.rs
-│   │   ├── herdr_clear_adapter.rs
-│   │   ├── herdr_clear_adapter_tests.rs
 │   │   ├── herdr_gate.rs
 │   │   ├── herdr_gate_tests.rs
 │   │   ├── herdr_host.rs
@@ -3217,9 +3207,7 @@ src/
 │   │   │   ├── ledger_lock_tests.rs
 │   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── operator_resume.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
-│   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
 │   │   │   ├── spool.rs
@@ -3473,7 +3461,6 @@ src/
 │   │   ├── hosted_source.rs
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
-│   │   ├── native_clear.rs
 │   │   ├── observation.rs
 │   │   ├── pending.rs
 │   │   ├── pending_history_tests.rs
