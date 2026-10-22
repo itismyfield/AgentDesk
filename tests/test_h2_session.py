@@ -563,7 +563,7 @@ THREADED = ("import ctypes, mmap, sys, threading\nlib, main = ctypes.CDLL(None),
             "f = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\n"
             "def worker():\n    lib.pthread_join(ctypes.c_void_p(main), None)\n    print('held', flush=True)\n    sys.stdin.read()\n"
             "threading.Thread(target=worker).start()\nlib.pthread_exit(None)\n")
-HOLDER = "import mmap, sys\nf = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\nprint('held', flush=True)\nsys.stdin.read()\n"
+HOLDER = "import mmap, sys\nf = open(sys.argv[1], 'r+b')\nm = mmap.mmap(f.fileno(), 0)\nm[:1] = m[:1]\nprint('held', flush=True)\nsys.stdin.readline()\nm.close()\nprint('released', flush=True)\nsys.stdin.read()\n"
 
 
 def restore(path: Path, body: bytes) -> None:
@@ -729,12 +729,16 @@ class Fence(Harness):
 
     def test_shared_writable_mapping_refuses_the_session(self):
         holder = subprocess.Popen([sys.executable, "-c", HOLDER, str(self.lib)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.addCleanup(holder.communicate)
         self.addCleanup(holder.kill)
         self.assertEqual(holder.stdout.readline(), b"held\n")
-        with patch.object(s, "list_pids", LIST_PIDS):
+        # Scan real mappings of both owned processes, independent of unrelated host churn.
+        with patch.object(s, "list_pids", return_value=[os.getpid(), holder.pid]):
             self.reject(lambda *args: None, rf"process {holder.pid} maps {re.escape(str(self.lib))} shared and writable", "mapped")
             self.assertFalse((self.root / "mapped/request.json").exists())
-            holder.communicate(b"")
+            holder.stdin.write(b"release\n")
+            holder.stdin.flush()
+            self.assertEqual(holder.stdout.readline(), b"released\n")
             guard = self.run_session("unmapped")["request"]["fence"]["mappings"]
         self.assertEqual(guard["status"], "checked")
         self.assertGreater(guard["processes"], 1)
