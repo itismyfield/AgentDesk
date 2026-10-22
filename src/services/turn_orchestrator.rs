@@ -30,7 +30,7 @@ mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
 pub(crate) use mailbox_observation::MailboxObservationFailure;
-mod checked_purge;
+pub(crate) mod checked_purge;
 mod overflow;
 mod pending_queue_persistence;
 pub(crate) mod policy_close;
@@ -1410,6 +1410,9 @@ enum ChannelMailboxMsg {
         clear_cancelled_active_anchor: bool,
         reply: oneshot::Sender<PurgeQueueResult>,
     },
+    /// The forced Herdr cancel's purge, refused unless the queue is still the one it captured.
+    #[cfg(unix)]
+    PurgeQueueIfUnchanged(checked_purge::CheckedPurgeRequest),
     /// #3864: blind queue overwrite. Production restore now uses
     /// `MergeRestoredQueueItems` (in-actor, race-immune); `ReplaceQueue` has no
     /// production caller and survives ONLY as a `#[cfg(test)]` queue-seeding
@@ -2455,6 +2458,8 @@ fn input_mailbox_step(
                 reply,
             );
         }
+        #[cfg(unix)]
+        ChannelMailboxMsg::PurgeQueueIfUnchanged(request) => request.run(&mut state, channel_id),
         #[cfg(test)]
         ChannelMailboxMsg::ReplaceQueue {
             queue,

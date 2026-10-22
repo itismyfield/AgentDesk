@@ -115,11 +115,31 @@ fn answer(
             ServiceError::conflict(message)
         }));
     };
+    let loss = effects.loss.clone().unwrap_or_default();
+    let remaining = loss
+        .queue_depth_after
+        .or(effects.purge.and_then(|p| p.queue_len_after));
     if let Some(step) = effects.failed {
         let message = format!("herdr terminate retired the execution; {step}");
-        return Err(refused(ServiceError::internal(message)));
+        let error = refused(ServiceError::internal(message));
+        // Past the disconnect, the reply still names what applied and what the purge removed.
+        return Err(match effects.disconnected {
+            false => error,
+            true => (error.with_context("dispatch_cancelled", &info.dispatch_id))
+                .with_context("session_disconnected", true)
+                .with_context("queue_purged", effects.purge.map(|p| p.removed))
+                .with_context(
+                    "queue_dead_lettered_message_ids",
+                    &loss.dead_lettered_message_ids,
+                )
+                .with_context(
+                    "queue_unpreserved_message_ids",
+                    &loss.unpreserved_message_ids,
+                )
+                .with_context("queued_remaining", remaining)
+                .with_context("queue_loss_recorded", loss.loss_recorded()),
+        });
     }
-    let loss = effects.loss.unwrap_or_default();
     let loss_recorded = match effects.purge {
         Some(_) => json!(loss.loss_recorded()),
         None => json!(false),
@@ -134,8 +154,8 @@ fn answer(
         "tmux_session": tmux_name_from_session_key(&info.session_key),
         "tmux_killed": false,
         "lifecycle_path": HERDR_TERMINATE,
-        "queued_remaining": loss.queue_depth_after.or(effects.purge.and_then(|p| p.queue_len_after)),
-        "queue_purged": effects.purge.map(|p| p.drained),
+        "queued_remaining": remaining,
+        "queue_purged": effects.purge.map(|p| p.removed),
         "queue_dead_lettered_message_ids": loss.dead_lettered_message_ids,
         "queue_unpreserved_message_ids": loss.unpreserved_message_ids,
         "queue_loss_recorded": loss_recorded,
