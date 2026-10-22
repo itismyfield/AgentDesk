@@ -103,7 +103,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
     let cmd = parts[0];
     let arg1 = parts.get(1).unwrap_or(&"");
     let arg2 = parts.get(2).unwrap_or(&"");
-
+    // High-risk arms require owner and environment opt-in; consent retry above is owner-only.
     let classified = TextCommandId::from_str(cmd);
     let risk = super::command_risk(cmd, arg1);
     let (is_owner, high_risk_enabled) = if classified.is_some() && risk.is_high_risk() {
