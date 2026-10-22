@@ -1,13 +1,17 @@
 //! Resource counts for the health deadline test: the process's threads as the OS reports them,
 //! and the pool's and the proxy's connections, sampled on one warmed server between requests.
 
+use std::io::{Read, Seek};
 use std::net::SocketAddr;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::{Db, http_get, reasons};
 
 /// Set in the rerun process, which runs the test body itself.
 const ALONE: &str = "HEALTH_DB_DEADLINE_RESOURCE_RERUN";
+/// A rerun still running after this is killed and fails the test rather than hanging it.
+const RERUN_LIMIT: Duration = Duration::from_secs(120);
 const SEGMENTS: usize = 3;
 const REQUESTS: usize = 16;
 const MAX_CONNECTIONS: usize = 8;
@@ -23,17 +27,33 @@ pub(super) fn rerun_alone(test: &str) -> bool {
     }
     // Test names drop the crate segment of the module path.
     let name = test.split_once("::").expect("a full test path").1;
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut log = tempfile::tempfile().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--test-threads=1", "--nocapture"])
         .env(ALONE, "1")
-        .output()
+        .stdout(log.try_clone().unwrap())
+        .stderr(log.try_clone().unwrap())
+        .spawn()
         .expect("rerun the test binary");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let deadline = Instant::now() + RERUN_LIMIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut output = String::new();
+    log.rewind().unwrap();
+    log.read_to_string(&mut output).unwrap();
     assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "the rerun of {name} failed ({:?}):\n{stdout}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
+        status.is_some_and(|status| status.success())
+            && output.contains("test result: ok. 1 passed"),
+        "the rerun of {name} failed ({status:?}):\n{output}"
     );
     true
 }
