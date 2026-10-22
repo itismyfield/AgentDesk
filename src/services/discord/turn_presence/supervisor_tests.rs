@@ -301,6 +301,8 @@ pub(crate) fn seed_long_unknown_for_tests(channel: u64, reason: &'static str, ag
 
 #[path = "supervisor_notice_tests.rs"]
 mod notice_tests;
+// Uses the unix-only activity test probe (`activity::tests`).
+#[cfg(unix)]
 #[path = "supervisor_reader_notice_tests.rs"]
 mod reader_notice_tests;
 
