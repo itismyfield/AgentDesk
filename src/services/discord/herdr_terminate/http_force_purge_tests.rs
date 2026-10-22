@@ -370,3 +370,6 @@ fn published_snapshot_with_metadata(token: &str) {
     let snapshot = json!({"version": 1, "items": [], "terminal_identities": [terminal]});
     std::fs::write(dir.join(format!("{CHANNEL}.json")), snapshot.to_string()).unwrap();
 }
+
+#[path = "http_force_hydrate_tests.rs"]
+mod hydrate;
