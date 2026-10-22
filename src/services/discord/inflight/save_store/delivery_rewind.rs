@@ -6,14 +6,20 @@ use super::*;
 #[path = "delivery_rewind/tests.rs"]
 mod tests;
 
+/// Saves a rewind only onto the episode `captured_nonce` names; the bridge passes the nonce it
+/// captured once for the whole rewind so the reloads that follow compare against the same value.
 pub(in crate::services::discord) fn save_inflight_delivery_rewind_if_matches_identity(
     state: &InflightTurnState,
+    captured_nonce: Option<&str>,
     expected_owner: StreamRelayAuthority,
     reason: InflightDeliveryRewindReason,
 ) -> Result<bool, String> {
     let Some(root) = inflight_runtime_root() else {
         return Err("Home directory not found".to_string());
     };
+    if !state.owned_by_turn_nonce(captured_nonce) {
+        return Ok(false);
+    }
     save_inflight_delivery_rewind_if_matches_identity_in_root(&root, state, expected_owner, reason)
 }
 
@@ -35,7 +41,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
         return Ok(false);
     };
     let expected = InflightTurnIdentity::from_state(state);
-    if !expected.matches_state(&on_disk) {
+    if !expected.matches_state(&on_disk) || on_disk.turn_nonce != state.turn_nonce {
         return Ok(false);
     }
     if on_disk.terminal_delivery_committed {

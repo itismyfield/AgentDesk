@@ -262,16 +262,13 @@ fn guarded_projection_other_nonce_is_denied_without_changing_durable_bytes() {
     let mut ordinary_stamp = dormant.baseline.clone();
     ordinary_stamp.turn_nonce = Some("unprojected-local-nonce".into());
     ordinary_stamp.full_response.push_str("normal progress");
+    let dormant_before = dormant.bytes();
     assert_eq!(
         Writer::RuntimeStamp.save(dormant.root.path(), &mut ordinary_stamp, &dormant_expected),
-        GuardedSaveOutcome::Saved,
-        "a stamp without replay projection keeps main's nonce policy",
+        GuardedSaveOutcome::SuccessorOwned,
+        "a stamp from another episode's nonce is refused even without replay projection",
     );
-    let ordinary_durable = dormant.load();
-    assert_eq!(ordinary_durable.replay_receipt_id, None);
-    assert!(!ordinary_durable.replay_rerun_blocked());
-    assert_eq!(ordinary_durable.turn_nonce, dormant.baseline.turn_nonce);
-    assert_eq!(ordinary_durable.full_response, ordinary_stamp.full_response);
+    assert_eq!(dormant.bytes(), dormant_before);
 
     for writer in Writer::ALL {
         let fixture = Fixture::new();

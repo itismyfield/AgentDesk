@@ -1137,6 +1137,7 @@ async fn drive_bridge_stream_tick(
         (None, None, None);
     let (mut adk_heartbeat, mut long_run_heartbeat) =
         (std::time::Instant::now(), std::time::Instant::now());
+    let actor_nonce = baseline.turn_nonce.clone();
     let outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
             shared_owned: Arc::clone(&driver.shared),
@@ -1145,6 +1146,7 @@ async fn drive_bridge_stream_tick(
             provider: &ProviderKind::Claude,
             turn_id: "terminal-delivery-driver-5191",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:

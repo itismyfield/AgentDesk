@@ -1,6 +1,8 @@
 use super::*;
 #[path = "identity_gate/bridge_entry.rs"]
 mod bridge_entry;
+#[path = "identity_gate/captured_nonce.rs"]
+mod captured_nonce;
 #[path = "identity_gate/completion_preserve.rs"]
 mod completion_preserve;
 #[path = "identity_gate/guarded_read.rs"]
@@ -21,6 +23,7 @@ pub(in crate::services::discord) use bridge_entry::{
     patch_bridge_entry_state_if_identity_unchanged,
     patch_bridge_entry_state_tracking_placeholder_clear,
 };
+use captured_nonce::{identity_matches_with_offset_guard, read_owned_row_for_guarded_write};
 pub(in crate::services::discord) use completion_preserve::save_inflight_state_if_matches_identity;
 #[cfg(test)]
 pub(in crate::services::discord::inflight) use completion_preserve::save_inflight_state_if_matches_identity_in_root;
@@ -125,11 +128,12 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let on_disk = match read_inflight_state_for_guarded_write(
+    let on_disk = match read_owned_row_for_guarded_write(
         &path,
         &provider,
         state.channel_id,
         expected,
+        state.turn_nonce.as_deref(),
         caller,
     ) {
         Ok(on_disk) => on_disk,
@@ -164,10 +168,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
         );
         return GuardedSaveOutcome::AuthorityPinned;
     }
-    if on_disk.restart_mode.is_some()
-        || on_disk.rebind_origin
-        || !expected.matches_state(&on_disk)
-        || (state.terminal_delivery_committed && on_disk.turn_nonce != state.turn_nonce)
+    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
         tracing::info!(
             provider = %provider.as_str(),
@@ -274,11 +275,12 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
         return GuardedSaveOutcome::IoError;
     };
     let expected = InflightTurnIdentity::from_state(state);
-    let mut on_disk = match read_inflight_state_for_guarded_write(
+    let mut on_disk = match read_owned_row_for_guarded_write(
         &path,
         &provider,
         state.channel_id,
         &expected,
+        state.turn_nonce.as_deref(),
         caller,
     ) {
         Ok(on_disk) => on_disk,
@@ -372,42 +374,17 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
     }
 }
 
-fn identity_matches_with_offset_guard(
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-    state: &InflightTurnState,
-) -> bool {
-    if !expected.matches_state(state) {
-        return false;
-    }
-    // Anchor bind/reuse reads or rewrites another persisted row. For synthetic
-    // id-0 rows, fail closed unless BOTH sides carry the birth offset and it
-    // matches. This is stricter than the delivery-lease id-0 degenerate fallback,
-    // which is transport-level dedup only and never authorizes row mutation.
-    if expected.user_msg_id == 0 {
-        return matches!(
-            (expected_turn_start_offset, state.turn_start_offset),
-            (Some(expected_offset), Some(actual_offset)) if expected_offset == actual_offset
-        );
-    }
-    if let Some(expected_offset) = expected_turn_start_offset {
-        state.turn_start_offset == Some(expected_offset)
-    } else {
-        true
-    }
-}
-
 pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
     provider: &ProviderKind,
     channel_id: u64,
     expected: &InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
+    captured_nonce: Option<&str>,
 ) -> Option<u64> {
     recovery_anchor_message_if_matches_identity(
         provider,
         channel_id,
-        expected,
-        expected_turn_start_offset,
+        (expected, expected_turn_start_offset, captured_nonce),
         None,
         None,
         None,
@@ -418,12 +395,12 @@ pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
 pub(in crate::services::discord) fn recovery_anchor_message_if_matches_identity(
     provider: &ProviderKind,
     channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
+    episode: (&InflightTurnIdentity, Option<u64>, Option<&str>),
     expected_current_message: Option<(u64, usize)>,
     expected_relay_authority: Option<StreamRelayAuthority>,
     refresh_on_match: Option<&mut InflightTurnState>,
 ) -> Option<(u64, usize)> {
+    let (expected, expected_turn_start_offset, captured_nonce) = episode;
     let root = inflight_runtime_root()?;
     let path = inflight_state_path(&root, provider, channel_id);
     let _lock = lock_inflight_state_path(&path).ok()?;
@@ -431,7 +408,12 @@ pub(in crate::services::discord) fn recovery_anchor_message_if_matches_identity(
     let state = serde_json::from_str::<InflightTurnState>(&data).ok()?;
     if state.restart_mode.is_some()
         || state.rebind_origin
-        || !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &state)
+        || !identity_matches_with_offset_guard(
+            expected,
+            expected_turn_start_offset,
+            captured_nonce,
+            &state,
+        )
         || expected_relay_authority
             .is_some_and(|authority| StreamRelayAuthority::from_state(&state) != authority)
         || expected_current_message
@@ -450,8 +432,7 @@ pub(in crate::services::discord) fn recovery_anchor_message_if_matches_identity(
 pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     provider: &ProviderKind,
     channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
+    episode: (&InflightTurnIdentity, Option<u64>, Option<&str>),
     expected_current_msg_id: u64,
     expected_current_msg_len: Option<usize>,
     anchor_msg_id: u64,
@@ -462,7 +443,7 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     bind_recovery_anchor_if_matches_snapshot(
         provider,
         channel_id,
-        (expected, expected_turn_start_offset, None),
+        (episode.0, episode.1, episode.2, None),
         (expected_current_msg_id, expected_current_msg_len),
         (anchor_msg_id, anchor_text_len),
         expected_relay_authority,
@@ -483,6 +464,7 @@ pub(in crate::services::discord) fn bind_recovery_anchor_for_snapshot(
         (
             &InflightTurnIdentity::from_state(&expected),
             expected.turn_start_offset,
+            expected.turn_nonce.as_deref(),
             Some(&expected),
         ),
         (expected.current_msg_id, Some(expected.current_msg_len)),
@@ -498,6 +480,7 @@ fn bind_recovery_anchor_if_matches_snapshot(
     identity: (
         &InflightTurnIdentity,
         Option<u64>,
+        Option<&str>,
         Option<&InflightTurnState>,
     ),
     expected_message: (u64, Option<usize>),
@@ -505,7 +488,7 @@ fn bind_recovery_anchor_if_matches_snapshot(
     expected_relay_authority: Option<StreamRelayAuthority>,
     refresh_on_saved: Option<&mut InflightTurnState>,
 ) -> GuardedSaveOutcome {
-    let (expected, expected_turn_start_offset, captured) = identity;
+    let (expected, expected_turn_start_offset, captured_nonce, captured) = identity;
     let (expected_current_msg_id, expected_current_msg_len) = expected_message;
     let (anchor_msg_id, anchor_text_len) = anchor;
     let Some(root) = inflight_runtime_root() else {
@@ -540,7 +523,12 @@ fn bind_recovery_anchor_if_matches_snapshot(
             || state.updated_at != on_disk.updated_at
     }) || on_disk.restart_mode.is_some()
         || on_disk.rebind_origin
-        || !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &on_disk)
+        || !identity_matches_with_offset_guard(
+            expected,
+            expected_turn_start_offset,
+            captured_nonce,
+            &on_disk,
+        )
         || expected_relay_authority
             .is_some_and(|authority| StreamRelayAuthority::from_state(&on_disk) != authority)
     {
@@ -895,7 +883,9 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
     let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         return Err(GuardedSaveOutcome::AuthorityPinned);
     };
-    if expected_episode.is_some_and(|pin| !pin.matches_state(&on_disk)) {
+    if expected_episode.is_some_and(|pin| !pin.matches_state(&on_disk))
+        || !on_disk.owned_by_turn_nonce(state.turn_nonce.as_deref())
+    {
         return Err(GuardedSaveOutcome::SuccessorOwned);
     }
     if on_disk.rebind_origin {

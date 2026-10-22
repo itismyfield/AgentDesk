@@ -48,6 +48,32 @@ impl<'a> GuardedStampTarget for (&'a InflightTurnState, &'a mut InflightTurnStat
     }
 }
 
+pub(super) fn apply_local_change_if_durable_unchanged<T: Clone + PartialEq>(
+    before: &T,
+    local: &T,
+    durable: &mut T,
+) {
+    if local != before && (durable == before || durable == local) {
+        durable.clone_from(local);
+    }
+}
+
+pub(super) fn merge_stream_response_progress(
+    before: (&str, usize),
+    local: (&str, usize),
+    durable: (&str, usize),
+) -> Option<(String, usize)> {
+    let (local_body, local_offset) = local;
+    let (durable_body, durable_offset) = durable;
+    if local == before {
+        return Some((durable_body.to_string(), durable_offset));
+    }
+    if durable == before {
+        return Some((local_body.to_string(), local_offset));
+    }
+    merge_forward_response_progress((durable_body, durable_offset), (local_body, local_offset))
+}
+
 pub(super) fn merge_forward_response_progress(
     durable: (&str, usize),
     local: (&str, usize),

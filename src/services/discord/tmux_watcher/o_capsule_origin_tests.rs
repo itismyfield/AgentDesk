@@ -44,10 +44,7 @@ async fn rowless_legacy_capsule_keeps_partial_utf8_and_source_authority() {
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
     assert_eq!(legacy.len(), 1, "{legacy:?}");
     let capsule = &legacy[0];
-    assert!(
-        capsule.origin.is_legacy() && capsule.has_utf8_carry,
-        "{legacy:?}"
-    );
+    assert!(capsule.has_utf8_carry, "{legacy:?}");
     assert!(
         capsule.body.is_empty() && capsule.buffer.is_empty(),
         "{legacy:?}"

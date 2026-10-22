@@ -8,6 +8,10 @@ error() {
   fail=1
 }
 
+if ! python3 scripts/ci/nested_libtest.py check; then
+  error "nested libtest declarations must pass validation"
+fi
+
 readonly REQUIRED_CHECK_MIRROR_SHA256="57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 
 verify_required_check_mirror_hash() {
@@ -886,7 +890,7 @@ targets = {
     "needs" => ["changes", "pg_shards", "lib_test_prepare"],
     "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "cbbadf7bad4f8c631281b6a686f614e1c75a18c9388720c12a87a3fbd3840e47",
+    "job_sha256" => "97407ada5fcaf2bb22ffbdf58f1d9bd2b2827079253998e35b13c9bcf8b2a3f6",
     "cargo_steps" => {
       "Footer-only marker regressions" => {
         "commands" => [
@@ -915,7 +919,7 @@ targets = {
       "PostgreSQL shard tests" => {
         "commands" => ["python3 scripts/ci/test-selection.py run --lane pg"],
         "timeout_minutes" => 75,
-        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "PG_INCLUDE_SHARD" => "${{ matrix.shard }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
@@ -937,16 +941,16 @@ targets = {
   },
   "library_sweep" => {
     "label" => "PR library sweep job",
-    "name" => "Library test sweep",
+    "name" => "Library test sweep (shard ${{ matrix.shard }})",
     "needs" => %w[changes lib_test_prepare pg_shards],
     "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "41d97b438d2749d8e86a89daf0f97d36b61e1ed61ed43a134e56b241dabdf3ac",
+    "job_sha256" => "92e8171f4fba33ebfd2c1b4721edbf0bb856281baebad43d5c78e418b4df7d09",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
-        "commands" => ["python3 scripts/ci/test-selection.py run --lane sweep"],
+        "commands" => ['python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"'],
         "timeout_minutes" => 60,
-        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "SWEEP_SHARD_TOTAL" => "${{ strategy.job-total }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
@@ -1173,6 +1177,10 @@ targets.each do |job_id, spec|
       errors << "#{label} must retain the Windows matrix" unless strategy.dig("matrix", "os") == ["windows-latest"]
     end
   end
+  if job_id == "library_sweep"
+    expected_strategy = {"fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.sweep_matrix) }}"}
+    errors << "#{label} must use the validated sweep matrix without fail-fast" unless job["strategy"] == expected_strategy
+  end
 
   unless spec["require_debug_env"] == false
     env = job["env"]
@@ -1266,6 +1274,8 @@ expected_shards = {
 }
 base_env = {
   "GFP_EVENT_NAME" => "${{ github.event_name }}",
+  "GFP_REF" => "${{ github.ref }}",
+  "GFP_REF_PROTECTED" => "${{ github.ref_protected }}",
   "GFP_REPOSITORY" => "${{ github.repository }}",
   "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
   "TEST_LANE_BASELINE_REF" => "HEAD",
@@ -1309,7 +1319,8 @@ unless evidence == [["scripts", {"name" => "Upload giant-file progress evidence"
   errors << "giant-file progress evidence upload must remain exact, unconditional and only in the cargo shard job"
 end
 clippy_upload = {"name" => "Upload Clippy observation", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "clippy-observation-${{ github.sha }}", "path" => "target/clippy-observation/", "if-no-files-found" => "error"}}
-errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) }
+lib_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
+errors << "artifact uploads must stay in their approved jobs" unless uploads.all? { |job_id, step| job_id == "scripts" || (job_id == "lint" && step == clippy_upload) || (job_id == "lib_test_prepare" && step == lib_upload) }
 errors.each { |message| warn "#{path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1330,7 +1341,7 @@ errors = []
 sweep_name = "Library sweep (selection-set gated)"
 lint_tests_name = "Non-lib tests and doctests"
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-{"full_non_pg" => "Full tests (ubuntu-latest)", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
+{"full_non_pg" => "Library test sweep (main shard ${{ matrix.shard }})", "lint" => "Main lint and non-lib tests (ubuntu-latest)"}.each do |job_id, name|
   job = main_jobs[job_id]
   unless job.is_a?(Hash)
     errors << "job #{job_id} is missing"
@@ -1338,11 +1349,13 @@ cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./script
   end
   errors << "job #{job_id} must be named #{name.inspect}" unless job["name"] == name
   errors << "job #{job_id} must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-  %w[if needs continue-on-error strategy].each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
+  forbidden = job_id == "lint" ? %w[if needs continue-on-error strategy] : %w[continue-on-error]
+  forbidden.each { |key| errors << "job #{job_id} must not set #{key}" if job.key?(key) }
   Array(job["steps"]).each do |step|
     next unless step.is_a?(Hash)
     label = "job #{job_id} step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
+    optional_restore = job_id == "full_non_pg" && ["Download shared lib tests", "Restore shared lib tests"].include?(step["name"]) && step["continue-on-error"] == true
+    errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !optional_restore
     errors << "#{label} may only set if: always() as a cleanup step" if step.key?("if") && !(step["if"] == "always()" && cleanup.(step))
   end
 end
@@ -1376,6 +1389,10 @@ if lint.is_a?(Hash)
 end
 job = main_jobs["full_non_pg"]
 if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
+  errors << "job full_non_pg must retain the sweep planner and optional artifact producer dependencies" unless job["needs"] == %w[sweep_shards lib_test_prepare]
+  errors << "job full_non_pg must preserve producer-failure fallback" unless job["if"] == "${{ !cancelled() }}"
+  strategy = {"fail-fast" => false, "matrix" => "${{ fromJSON(needs.sweep_shards.outputs.matrix) }}"}
+  errors << "job full_non_pg must use the validated sweep matrix without fail-fast" unless job["strategy"] == strategy
   env = job["env"] || {}
   errors << "job full_non_pg env must equal #{pr_path} library_sweep env" unless env == pr_sweep["env"]
   { "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0", "AGENTDESK_REQUIRE_PG" => "1" }.each do |key, value|
@@ -1394,9 +1411,42 @@ if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
     end
     errors << "full_non_pg #{sweep_name} must keep timeout-minutes: 60" unless step["timeout-minutes"] == 60
   end
+  pr_step = Array(pr_sweep["steps"]).find { |step| step["name"] == sweep_name }
+  expected_step = pr_step && pr_step.merge("env" => pr_step.fetch("env").reject { |key, _| key == "ADK_TEST_SELECTION_PLAN" },
+                                         "run" => 'python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"')
+  errors << "full_non_pg must execute exactly one unconditional full sweep shard with the shared artifact fallback" unless expected_step && steps.select { |step| step["name"] == sweep_name } == [expected_step]
+  artifact_names = ["Download shared lib tests", "Restore shared lib tests"]
+  expected_restore = Array(pr_sweep["steps"]).select { |step| artifact_names.include?(step["name"]) }
+  errors << "full_non_pg must retain same-run download and producer-failure fallback wiring" unless expected_restore.length == 2 && steps.select { |step| artifact_names.include?(step["name"]) } == expected_restore
 else
   errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
 end
+planner = {
+  "runs-on" => "ubuntu-latest",
+  "outputs" => {"matrix" => "${{ steps.plan.outputs.matrix }}"},
+  "steps" => [
+    {"uses" => "actions/checkout@v4"},
+    {"id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n"},
+  ],
+}
+errors << "sweep_shards must validate and emit the canonical full sweep matrix" unless main_jobs["sweep_shards"] == planner
+producer = pr_jobs["lib_test_prepare"]
+expected_producer = producer && producer.reject { |key, _| %w[needs if].include?(key) }
+errors << "main lib_test_prepare must retain the independent shared lib producer contract" unless expected_producer && main_jobs["lib_test_prepare"] == expected_producer
+aggregate = main_jobs["full_non_pg_required_context"]
+expected_aggregate_step = {"shell" => "bash", "env" => {"SWEEP_RESULT" => "${{ needs.full_non_pg.result }}"}, "run" => "echo \"aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT\"\ntest \"$SWEEP_RESULT\" = success\n"}
+aggregate_steps = Array(aggregate && aggregate["steps"]).map { |step| step.reject { |key, _| key == "name" } }
+expected_aggregate = {"name" => "Full tests (ubuntu-latest)", "needs" => "full_non_pg", "if" => "always()", "runs-on" => "ubuntu-latest"}
+errors << "full_non_pg_required_context must preserve the original required status and fail closed over every sweep shard" unless aggregate.is_a?(Hash) && aggregate.reject { |key, _| key == "steps" } == expected_aggregate && aggregate_steps == [expected_aggregate_step]
+errors << "only full_non_pg_required_context may publish the original Full tests required status" unless main_jobs.select { |_, candidate| candidate["name"] == "Full tests (ubuntu-latest)" }.keys == ["full_non_pg_required_context"]
+expected_pr_aggregate = {
+  "name" => "Library test sweep (ubuntu-latest)", "needs" => %w[changes library_sweep], "if" => "${{ !cancelled() }}", "runs-on" => "ubuntu-latest",
+  "steps" => [
+    {"uses" => "actions/checkout@v4"},
+    {"name" => "Mirror library sweep result across path-filter skips", "env" => {"CHANGED_PATHS_RESULT" => "${{ needs.changes.result }}", "FILTER_NAME" => "rust_tests", "FILTER_OUTPUT" => "${{ needs.changes.outputs.rust_tests }}", "UPSTREAM_JOB_NAME" => "library_sweep", "UPSTREAM_RESULT" => "${{ needs.library_sweep.result }}"}, "run" => "./scripts/required-check-mirror.sh"},
+  ],
+}
+errors << "library_sweep_required_context must preserve its required status and mirror every sweep shard" unless pr_jobs["library_sweep_required_context"] == expected_pr_aggregate
 errors.each { |message| warn "#{main_path}: #{message}" }
 exit(errors.empty? ? 0 : 1)
 RUBY
@@ -1422,7 +1472,7 @@ plan = {
     { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
   ],
 }
-plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}"),
+plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}", "sweep_matrix" => "${{ steps.plan.outputs.sweep_matrix }}"),
             "steps" => [plan["steps"][0], { "id" => "plan", "shell" => "bash", "env" => { "ADK_CI_SELECT" => "${{ vars.ADK_CI_SELECT }}" }, "run" => "python3 scripts/ci/test-selection.py plan" }]) if pr
 recipe, recipe_step = pr ? ["python3 scripts/ci/test-selection.py run --lane pg", "PostgreSQL shard tests"] : ["just test-postgres-shard"] * 2
 job = document.dig("jobs", job_id)
@@ -1438,7 +1488,7 @@ errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{
 errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
 errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
 env = job["env"] || {}
-errors << "job postgres env must set PG_INCLUDE_SHARD from matrix.shard" unless env["PG_INCLUDE_SHARD"] == "${{ matrix.shard }}"
+errors << "PG_INCLUDE_SHARD must not be inherited by the PostgreSQL prelude" if env.key?("PG_INCLUDE_SHARD") || (document["env"] || {}).key?("PG_INCLUDE_SHARD")
 errors << "job postgres env must set AGENTDESK_REQUIRE_PG=1" unless env["AGENTDESK_REQUIRE_PG"] == "1"
 diagnostics = {
   "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
@@ -1451,6 +1501,7 @@ start_run = "./scripts/ci/postgres-service.sh start"
 steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
 steps.each do |step|
   label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
+  errors << "PG_INCLUDE_SHARD must be confined to the actual PostgreSQL shard step" if step["name"] != recipe_step && (step["env"] || {}).key?("PG_INCLUDE_SHARD")
   errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !(pr && %w[Download Restore].any? { |prefix| step["name"] == "#{prefix} shared lib tests" } && step["continue-on-error"] == true)
   next unless step.key?("if")
   allowed = if runs_tests.(step) || step["run"] == start_run then nil
@@ -1465,6 +1516,7 @@ tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
 errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == recipe } == 1
 test_step = steps.find { |step| step["run"].to_s.strip == recipe } || {}
+errors << "actual PostgreSQL shard step must set PG_INCLUDE_SHARD from matrix.shard" unless test_step.dig("env", "PG_INCLUDE_SHARD") == "${{ matrix.shard }}"
 errors << "PG shard step must keep its exact name" unless test_step["name"] == recipe_step
 errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")

@@ -1,0 +1,18 @@
+{
+  "source_log": "ci-7244-s3.log",
+  "source_sha256": "06d198aa31dab57b9622a5458699a7735633dcd490e67cc0e5be999d56911b4e",
+  "source_lines": [
+    [
+      1331,
+      1336
+    ],
+    [
+      1339,
+      1339
+    ]
+  ],
+  "ci_sha": "0b81da23f73054787f6d28cad7dbc7a7da15160b",
+  "original_primary_summary": "test result: ok. 3019 passed; 0 failed; 1 ignored; 0 measured; 12118 filtered out; finished in 544.50s",
+  "original_adjudicator_summary": "test-lane summary: lane=non-pg-sweep executed=3020 passed=3020 failed=0 declared-failed=0 known=0 unexpected=0 stale=0 flaky-passed=1 expected=3020 missing=0 extra=1 ignored=1 summaries=2 rc=0",
+  "fixture_note": "Only GitHub timestamp envelopes removed. Tests append a synthetic top-level ignored verdict and primary summary to model the new co-located selection; the original full transcript is not claimed to pass unchanged."
+}

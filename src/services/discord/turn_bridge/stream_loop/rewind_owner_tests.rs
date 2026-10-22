@@ -49,7 +49,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     );
     let captured = Arc::new(CapturingGateway::default());
     let gateway: Arc<dyn TurnGateway> = captured.clone();
-    let cancel = CancelToken::new();
+    let cancel = CancelToken::from_persisted_turn_nonce(inflight.turn_nonce.clone());
     let mut full_response = inflight.full_response.clone();
     let (mut sent, mut confirmed) = (inflight.response_sent_offset, 0usize);
     let (mut dirty, mut panel_dirty) = (false, false);
@@ -180,6 +180,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     let (mut heartbeat, mut long_run_heartbeat) =
         (std::time::Instant::now(), std::time::Instant::now());
 
+    let actor_nonce = baseline.turn_nonce.clone();
     let tick_outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
             shared_owned: shared,
@@ -188,6 +189,7 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
             provider: &provider,
             turn_id: "rewind-owner-error",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:
@@ -270,4 +272,60 @@ async fn rejected_error_rewind_reloads_the_owner_and_next_tick_loses_authority()
     assert!(captured.sends.lock().unwrap().is_empty());
     assert!(captured.edits.lock().unwrap().is_empty());
     assert!(captured.deletes.lock().unwrap().is_empty());
+}
+
+/// A successor saved in this turn's start second shares its identity; the rejected error rewind
+/// keeps this turn's local instead of reloading the successor's row into it.
+#[test]
+fn rejected_error_rewind_keeps_a_successor_episode_out_of_the_local_7219() {
+    let temp = tempfile::TempDir::new().expect("isolated inflight root");
+    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    let channel = ChannelId::new(42_497_219);
+    let provider = ProviderKind::Codex;
+    let mut inflight = InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        Some("rewind-owner-7219".into()),
+        343_742_347_365_974_026,
+        77_219,
+        18,
+        "prompt".into(),
+        Some("session".into()),
+        Some("rewind-owner-7219-session".into()),
+        Some("/tmp/rewind-owner-7219.jsonl".into()),
+        None,
+        512,
+    );
+    inflight.turn_nonce = Some("episode-a".into());
+    inflight.full_response = "this turn's delivered answer".into();
+    inflight.response_sent_offset = inflight.full_response.len();
+    let mut successor = inflight.clone();
+    successor.turn_nonce = Some("episode-b".into());
+    successor.full_response = "the successor's own answer".into();
+    successor.response_sent_offset = successor.full_response.len();
+    save_inflight_state(&successor).expect("seed the successor row");
+    assert_eq!(
+        InflightTurnIdentity::from_state(&successor),
+        InflightTurnIdentity::from_state(&inflight)
+    );
+    let path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel.get(),
+    );
+    let successor_bytes = std::fs::read(&path).unwrap();
+    let (mut sent, mut confirmed) = (inflight.response_sent_offset, 0usize);
+
+    sync_terminal_error_delivery_state_for_bridge_owner(
+        "provider failed",
+        &mut sent,
+        &mut confirmed,
+        &mut inflight,
+        channel,
+        false,
+    );
+
+    assert_eq!(inflight.turn_nonce.as_deref(), Some("episode-a"));
+    assert_ne!(inflight.full_response, successor.full_response);
+    assert_eq!(std::fs::read(&path).unwrap(), successor_bytes);
 }

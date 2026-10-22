@@ -55,7 +55,10 @@ pub(super) async fn on_error(
         return false;
     };
     if !crate::services::discord::inflight::load_inflight_state_read_only(provider, channel.get())
-        .is_some_and(|current| expected.matches_state(&current))
+        .is_some_and(|current| {
+            expected.matches_state(&current)
+                && current.owned_by_turn_nonce(inflight.turn_nonce.as_deref())
+        })
     {
         return false;
     }
@@ -135,7 +138,10 @@ pub(super) fn try_profile_retry(
             provider,
             channel.get(),
         )
-        .is_some_and(|current| expected.matches_state(&current))
+        .is_some_and(|current| {
+            expected.matches_state(&current)
+                && current.owned_by_turn_nonce(inflight.turn_nonce.as_deref())
+        })
     {
         return false;
     }

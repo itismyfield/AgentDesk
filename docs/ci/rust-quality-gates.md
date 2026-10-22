@@ -73,13 +73,26 @@ production-only, test-aware, or repo-wide before adding hard gates.
 ## Non-Postgres Test Scope
 
 `just test-non-pg` keeps a targeted non-Postgres subset for local `just check`.
-CI no longer runs it: on every `main` push `ci-main.yml` `full_non_pg` runs the
-same adjudicated whole-library sweep as the PR `library_sweep` (non-PG `--lib`
-minus `scripts/ci/non-pg-test-filter.sh`, with its own PostgreSQL), and the
-`lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
+CI no longer runs it: on `main` push and dispatch, `ci-main.yml` plans the
+full adjudicated library sweep and runs `full_non_pg` as four parallel shards,
+each with its own PostgreSQL service. The job needs `sweep_shards` and
+`lib_test_prepare` and runs under `!cancelled()`. An `always()` aggregate
+requires every shard to succeed and retains `Full tests (ubuntu-latest)`.
+PR `library_sweep` uses the same partitioner on its existing selected or full
+set and retains its required mirror. Counter union checks preserve the exact
+filter-plus-replay population, declared ignored IDs share shards with runnable
+IDs, and each leg checks `SWEEP_SHARD_TOTAL` against its planned count before
+execution. Exact-ID adjudication still rejects missing IDs and zero execution.
+
+The `lint` job runs fmt, clippy, the policy JS tests, the non-lib side of the
 recipe's `--all-targets` lines (`--bins --test '*'`), and the `ClaudeBinary`
 compile-fail doctests. The nightly macOS and Windows lanes run their
-`--all-targets` non-Postgres sweeps.
+`--all-targets` non-Postgres sweeps. Main and PR PG matrices use the numeric
+shard count from `PG_SHARD_COUNT` (currently eight), plus a separate `continuity` leg. Numeric
+legs run only their PG selection; continuity runs its existing recipe once
+with `PG_INCLUDE_SHARD` removed. Selected PRs schedule only numeric shards
+containing selected IDs, plus continuity, while preserving the existing PG
+and continuity populations.
 
 A broader sweep was attempted with:
 

@@ -2,6 +2,7 @@
 //! one-way latency, records each executed statement, and can hold statements matching a needle.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ struct Shared {
     delay: Mutex<Duration>,
     stalls: Mutex<Vec<String>>,
     executions: Mutex<Vec<String>>,
+    accepted: AtomicUsize,
+    open: AtomicUsize,
 }
 
 /// One proxy in front of one upstream database; dropping it stops accepting connections.
@@ -51,6 +54,7 @@ impl PgWireProxy {
             let release = release.clone();
             tokio::spawn(async move {
                 while let Ok((client, _)) = listener.accept().await {
+                    shared.accepted.fetch_add(1, Ordering::SeqCst);
                     let Ok(server) = TcpStream::connect((upstream.0.as_str(), upstream.1)).await
                     else {
                         continue;
@@ -114,6 +118,16 @@ impl PgWireProxy {
 
     pub(crate) fn reset_executions(&self) {
         self.shared.executions.lock().unwrap().clear();
+    }
+
+    /// Client connections accepted since the proxy started.
+    pub(crate) fn accepted(&self) -> usize {
+        self.shared.accepted.load(Ordering::SeqCst)
+    }
+
+    /// Client connections still being relayed.
+    pub(crate) fn open(&self) -> usize {
+        self.shared.open.load(Ordering::SeqCst)
     }
 }
 
@@ -198,6 +212,7 @@ async fn relay(
     shared: Arc<Shared>,
     release: watch::Receiver<u64>,
 ) {
+    let _open = OpenConnection::count(&shared);
     let (from_client, mut to_client) = client.into_split();
     let (mut from_server, to_server) = server.into_split();
     let (queue, queued) = tokio::sync::mpsc::unbounded_channel();
@@ -211,4 +226,20 @@ async fn relay(
         write_server(to_server, queued, shared, release),
         downlink
     );
+}
+
+/// Counts one relayed connection as open until the relay ends.
+struct OpenConnection(Arc<Shared>);
+
+impl OpenConnection {
+    fn count(shared: &Arc<Shared>) -> Self {
+        shared.open.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(shared))
+    }
+}
+
+impl Drop for OpenConnection {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
 }

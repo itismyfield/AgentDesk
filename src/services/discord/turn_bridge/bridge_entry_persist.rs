@@ -5,6 +5,11 @@ use super::chunk_compose::body_mutation_telemetry::{
 };
 use super::context::BridgeCompletionSignal;
 use super::*;
+use identity_and_owner::{
+    live_watcher_relay_observation, reconciled_watcher_owner_channel_id, relay_owner_flags,
+};
+
+mod identity_and_owner;
 
 pub(in crate::services::discord) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
@@ -76,51 +81,6 @@ pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) status_panel_generation: &'a mut u64,
-}
-
-struct LiveWatcherRelayObservation {
-    incarnation: WatcherClaimIncarnation,
-}
-
-fn live_watcher_relay_observation(
-    shared: &SharedData,
-    owner_channel_id: ChannelId,
-) -> Option<LiveWatcherRelayObservation> {
-    let watcher = shared.tmux_watchers.get(&owner_channel_id)?;
-    if watcher.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        return None;
-    }
-    Some(LiveWatcherRelayObservation {
-        incarnation: WatcherClaimIncarnation::from_handle(owner_channel_id, &watcher),
-    })
-}
-
-fn relay_owner_flags(
-    owner_kind: crate::services::discord::inflight::RelayOwnerKind,
-    watcher_registered: bool,
-) -> (bool, bool, bool) {
-    use crate::services::discord::inflight::RelayOwnerKind;
-
-    let watcher_owns_assistant_relay = matches!(owner_kind, RelayOwnerKind::Watcher);
-    let watcher_relay_available_for_turn = watcher_owns_assistant_relay && watcher_registered;
-    let standby_relay_owns_output = matches!(
-        owner_kind,
-        RelayOwnerKind::StandbyRelay | RelayOwnerKind::SessionBoundRelay | RelayOwnerKind::Unknown
-    );
-    (
-        watcher_owns_assistant_relay,
-        watcher_relay_available_for_turn,
-        standby_relay_owns_output,
-    )
-}
-
-fn reconciled_watcher_owner_channel_id(
-    durable_owner_channel_id: Option<u64>,
-    delivery_channel_id: u64,
-) -> ChannelId {
-    durable_owner_channel_id
-        .and_then(crate::services::discord::inflight::opt_channel_id)
-        .unwrap_or_else(|| ChannelId::new(delivery_channel_id))
 }
 
 pub(super) fn bridge_stream_relay_suppressed(
@@ -364,6 +324,7 @@ pub(super) fn persist_bridge_entry_inflight_state(
     shared: &SharedData,
     runtime: &mut BridgeEntryRuntimeState<'_>,
     placeholder_clear_applied: &mut bool,
+    captured_nonce: Option<&str>,
 ) -> crate::services::discord::inflight::GuardedSaveOutcome {
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, patch_bridge_entry_state_if_identity_unchanged,
@@ -371,7 +332,12 @@ pub(super) fn persist_bridge_entry_inflight_state(
     };
 
     const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
-    let outcome = if before.long_running_placeholder_active
+    // The actor's start nonce, not the possibly replaced local, decides whose row this patches.
+    let outcome = if !before.owned_by_turn_nonce(captured_nonce)
+        || !runtime.inflight_state.owned_by_turn_nonce(captured_nonce)
+    {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if before.long_running_placeholder_active
         && !runtime.inflight_state.long_running_placeholder_active
     {
         patch_bridge_entry_state_tracking_placeholder_clear(
@@ -416,6 +382,7 @@ pub(super) struct BridgeEntryAuthorityContext<'a> {
     pub(super) bridge_created_placeholder: &'a mut Option<MessageId>,
     pub(super) last_edit_text: &'a mut String,
     pub(super) resumed_placeholder_clear_applied: &'a mut bool,
+    pub(super) captured_nonce: Option<&'a str>,
 }
 
 /// Proves durable bridge authority, then materializes an absent Discord anchor. Guards may be
@@ -430,6 +397,7 @@ pub(super) async fn establish_bridge_entry_authority(
         ctx.shared,
         &mut runtime,
         ctx.resumed_placeholder_clear_applied,
+        ctx.captured_nonce,
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     *ctx.entry_was_rowless =
@@ -448,6 +416,7 @@ pub(super) async fn establish_bridge_entry_authority(
         &ctx.shared.token_hash,
         ctx.bridge.channel_id,
         &identity,
+        ctx.captured_nonce,
         runtime.current_msg_id,
         ctx.bridge_created_placeholder,
         runtime.inflight_state,
@@ -826,6 +795,7 @@ mod tests {
         let channel_id = ChannelId::new(4_259_701);
         let mut state = rowless_entry_state(channel_id.get());
         let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let nonce = state.turn_nonce.clone();
         let mut detached = detached_current_msg_id_from_durable(state.current_msg_id);
         let anchor_present = durable_current_msg_id_from_detached(detached) != 0;
         assert!(!anchor_present, "this turn has no anchor to continue onto");
@@ -838,6 +808,7 @@ mod tests {
                 "entry-rowless-token",
                 channel_id,
                 &identity,
+                nonce.as_deref(),
                 &mut detached,
                 &mut created,
                 &mut state,
@@ -877,7 +848,9 @@ mod tests {
         let mut cleared = false;
         let runtime = &mut harness.runtime;
 
-        let outcome = persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared);
+        let nonce = before.turn_nonce.as_deref();
+        let outcome =
+            persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared, nonce);
 
         assert_eq!(outcome, GuardedSaveOutcome::RowAbsent);
         assert_eq!(
@@ -1057,6 +1030,7 @@ mod tests {
         let harness = ReconcileHarness::new(&mut durable, channel);
         let (mut rowless, mut created, mut last_edit, mut cleared) =
             (false, None, String::new(), false);
+        let nonce = bridge.inflight_state.turn_nonce.clone();
         let ctx = BridgeEntryAuthorityContext {
             entry_was_rowless: &mut rowless,
             bridge,
@@ -1064,6 +1038,7 @@ mod tests {
             bridge_created_placeholder: &mut created,
             last_edit_text: &mut last_edit,
             resumed_placeholder_clear_applied: &mut cleared,
+            captured_nonce: nonce.as_deref(),
         };
         let Err(notice) =
             establish_bridge_entry_authority(ctx, harness.runtime, "processing").await

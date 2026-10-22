@@ -4,13 +4,14 @@ A selection that is too narrow is a false green, so each rule here is pinned by 
 case it exists for: the changed file, its siblings and its literal readers are
 selected; a full-run authority, an unresolved inclusion or module, the kill switch,
 an empty, erroring or 40%-wide selection runs the lane in full; a plan that does not
-reproduce, a planned id that did not run and an empty expectation are red; shard 0
-always runs the continuity recipe; main never consumes a plan.
+reproduce, a planned id that did not run and an empty expectation are red; continuity
+runs in its own matrix leg; main never consumes a plan.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from unittest import mock
 
 import yaml
@@ -153,7 +155,8 @@ class Fixture:
         self.event = Path(directory) / "event.json"
         self.label()
         self.write({**SOURCES, "scripts/ci/non-pg-test-filter.sh": FILTER,
-                    "scripts/lib_test_inventory_manifest.txt": manifest(ALPHA + BETA + GAMMA + HOOK)})
+                    "scripts/lib_test_inventory_manifest.txt": manifest(ALPHA + BETA + GAMMA + HOOK),
+                    ts.LEDGER: "", "scripts/ci/nested_libtest_declarations.json": '{"schema":1,"children":[]}'})
         git(self.root, "init", "-q")
         self.base = self.commit("base")
 
@@ -221,7 +224,7 @@ class SelectionTests(unittest.TestCase):
         for lane in ts.LANES:
             self.assertEqual((plan["lanes"][lane]["mode"], plan["lanes"][lane]["reason"]),
                              ("full", "empty-selection"))
-        self.assertEqual(plan["lanes"]["pg"]["shards"], list(range(PGM.PG_SHARD_COUNT)))
+        self.assertEqual(plan["lanes"]["pg"]["shards"], [*range(PGM.PG_SHARD_COUNT), "continuity"])
 
     def test_forty_percent_is_full_and_just_below_is_selected(self) -> None:
         population = [f"t{index}" for index in range(10)]
@@ -329,11 +332,12 @@ class SelectionTests(unittest.TestCase):
             plan = ts.make_plan(self.repo.root, None, head)
         self.assertEqual(plan["lanes"]["pg"]["reason"], "no-merge-parent")
 
-    def test_shard_zero_always_enters_the_selected_matrix(self) -> None:
+    def test_continuity_is_separate_and_shard_zero_is_not_forced_into_selected_matrix(self) -> None:
         ids = on_shard(1)
-        self.assertEqual(ts.shards(ids, False), [0, 1])
-        self.assertEqual(ts.shards(on_shard(0), False), [0])
-        self.assertEqual(ts.shards(ids, True), list(range(PGM.PG_SHARD_COUNT)))
+        self.assertEqual(ts.shards(ids, False), [1, "continuity"])
+        self.assertEqual(ts.shards(on_shard(0), False), [0, "continuity"])
+        self.assertEqual(ts.shards([], False), ["continuity"])
+        self.assertEqual(ts.shards(ids, True), [*range(PGM.PG_SHARD_COUNT), "continuity"])
 
 
 class ReplayTests(unittest.TestCase):
@@ -350,8 +354,8 @@ class ReplayTests(unittest.TestCase):
                 mock.patch.object(ts, "log"):
             return ts.load_plan(self.repo.root, lane)
 
-    def run_pg(self, shard: int, ids: list[str], ignored=(), declared=(), reported=None,
-               summary=None):
+    def run_pg(self, shard: int | str, ids: list[str], ignored=(), declared=(), reported=None,
+               summary=None, database="postgres://x", continuity_rc=0):
         """run_pg with libtest faked: the ignored listing, then run_test_lane for real over a
         transcript reporting `ignored` as ignored and the rest it was asked to run (or
         `reported`) as passed, against a ledger that declares `declared` for lane pg."""
@@ -376,9 +380,9 @@ class ReplayTests(unittest.TestCase):
                         *command[2:split + 1], sys.executable, "-c",
                         f"import sys; sys.stdout.write({text!r})"]
                 return real(lane, capture_output=True, text=True)
-            return subprocess.CompletedProcess(command, 0)  # `just`, or an unwrapped libtest run
+            return subprocess.CompletedProcess(command, continuity_rc)  # continuity recipe
 
-        env = {"PG_INCLUDE_SHARD": str(shard), "POSTGRES_TEST_DATABASE_URL_BASE": "postgres://x"}
+        env = {"PG_INCLUDE_SHARD": str(shard), "POSTGRES_TEST_DATABASE_URL_BASE": database}
         with mock.patch.dict(os.environ, env), mock.patch.object(ts.subprocess, "run", fake):
             return ts.run_pg(self.repo.root, ids), calls
 
@@ -415,18 +419,24 @@ class ReplayTests(unittest.TestCase):
         with self.assertRaises(ValueError):  # Every planned id ignored runs nothing.
             self.run_pg(1, ids, ignored=ids, declared=ids)
 
-    def test_shard_zero_runs_the_continuity_recipe_once_and_other_shards_never(self) -> None:
-        for shard, ids, lanes, recipes in ((0, [], 0, 1), (0, on_shard(0), 1, 1),
-                                           (1, on_shard(1), 1, 0)):
+    def test_continuity_has_its_own_leg_and_numeric_shards_never_repeat_it(self) -> None:
+        for shard, ids, lanes, recipes in (("continuity", [], 0, 1),
+                                           ("continuity", on_shard(0), 0, 1),
+                                           (0, on_shard(0), 1, 0), (1, on_shard(1), 1, 0)):
             with self.subTest(shard=shard, ids=len(ids)):
                 rc, calls = self.run_pg(shard, ids)
                 self.assertEqual(rc, 0)
                 self.assertEqual(sum(str(c[1]).endswith("run_test_lane.py") for c in calls), lanes)
                 self.assertEqual(calls.count([*ts.CONTINUITY]), recipes)
-        with self.assertRaises(ValueError):
-            self.run_pg(1, [])
-        shard_recipe = (REPO_ROOT / "justfile").read_text("utf-8").split("\ntest-postgres-shard:", 1)[1]
-        self.assertIn("&& just test-postgres-continuity", shard_recipe.split("\n\n", 1)[0])
+        self.assertEqual(self.run_pg("continuity", [], continuity_rc=7)[0], 7)
+        for shard in (0, 1, "", "other", -1, PGM.PG_SHARD_COUNT):
+            with self.subTest(shard=shard), self.assertRaises(ValueError):
+                self.run_pg(shard, [])
+
+    def test_all_pg_legs_require_a_named_database(self) -> None:
+        for shard in ("continuity", 0, 1):
+            with self.subTest(shard=shard), self.assertRaises(ValueError):
+                self.run_pg(shard, on_shard(shard) if isinstance(shard, int) else [], database="")
 
     def run_sweep(self, ids: list[str], reported=None, replay_rc=0, ignored=(), ledger=None):
         """run_sweep with both runs faked: the ids run_test_lane judges, the ids replayed outside
@@ -513,8 +523,270 @@ class ReplayTests(unittest.TestCase):
                                       self.repo.base, "--head", head]), 0)
         lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
         self.assertEqual(json.loads(lines["matrix"]), {"shard": self.plan["lanes"]["pg"]["shards"]})
+        self.assertEqual(json.loads(lines["sweep_matrix"]), {
+            "shard": list(range(min(ts.SWEEP_SHARD_COUNT,
+                                    len(self.repo.selected(self.plan, "sweep")))))})
         self.assertEqual(json.loads(lines["plan"])["lanes"], self.plan["lanes"])
         self.assertEqual(lines["force_full"], "false")
+
+
+class SweepShardTests(unittest.TestCase):
+    """The planned sweep is partitioned once, with no missing, repeated or empty shard."""
+
+    setUp = ReplayTests.setUp
+
+    def test_inherited_child_is_colocated_without_changing_the_selected_union(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        parts = ts.checked_sweep_partition(ids, {child}, frozenset(), ((parent, child),))
+        owner = next(part for part in parts if parent in part)
+        self.assertIn(child, owner, "the nested child's ignored row must share its parent's primary harness")
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), sorted(ids))
+        self.assertEqual(sum(child in part for part in parts), 1)
+
+    def test_nested_colocation_is_enforced_at_the_actual_sweep_entrypoint(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.object(ts, "load_plan", return_value=({"mode": "selected"}, ids)), \
+                mock.patch.object(ts, "sweep_partition_inputs", return_value=({child}, set(), ((parent, child),))), \
+                mock.patch.dict(os.environ, {"SWEEP_SHARD_TOTAL": "3"}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            for shard in range(3):
+                self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", str(shard)]), 0)
+            calls = [call.args[1] for call in run.call_args_list]
+        self.assertTrue(any({parent, child} <= set(part) for part in calls))
+        self.assertEqual(sorted(test_id for part in calls for test_id in part), sorted(ids))
+
+    def test_split_or_missing_nested_children_are_rejected_independently(self):
+        parent, child = "suite::parent", "suite::child"
+        ids = ["suite::a", "suite::b", parent, child]
+        nested = ((parent, child),)
+        broken = [["suite::a", child], ["suite::b"], [parent]]
+        with mock.patch.object(ts, "sweep_partition", return_value=broken), \
+                self.assertRaisesRegex(ValueError, "must share the shard"):
+            ts.checked_sweep_partition(ids, {child}, frozenset(), nested)
+        with self.assertRaisesRegex(ValueError, "must be selected and declared ignored"):
+            ts.checked_sweep_partition([parent, "suite::a"], {child}, frozenset(), nested)
+
+    def test_shared_nested_children_group_all_selected_parents_once(self):
+        first, second, child = "suite::p1", "suite::p2", "suite::child"
+        ids = [first, second, child, "suite::other"]
+        parts = ts.checked_sweep_partition(ids, {child}, frozenset(),
+                                         ((first, child), (second, child)))
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(any({first, second, child} <= set(part) for part in parts))
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), sorted(ids))
+
+    def test_real_runner_limits_nested_summaries_and_requires_the_selected_parent(self):
+        parent, child = ts.nested_pairs(REPO_ROOT)[0]
+        excerpt = (REPO_ROOT / "tests/fixtures/ci/nested_libtest/ci-7244-child-stdout.txt").read_text()
+        primary = "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        child_ignored = f"test {child} ... ignored\n"
+        original_run = subprocess.run
+
+        def invoke(ids, text):
+            def execute(command, **kwargs):
+                return original_run(command, capture_output=True, text=True, **kwargs)
+            with mock.patch.object(ts.subprocess, "run", side_effect=execute):
+                return ts.run_lane(REPO_ROOT, "non-pg-sweep", ids,
+                                   [sys.executable, "-c", f"print({text!r})"])
+
+        self.assertEqual(invoke([parent, child], excerpt + child_ignored + primary), 0)
+        child_summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        self.assertEqual(invoke([parent, child], excerpt + child_summary + child_ignored + primary), 1)
+        other = "unrelated::test"
+        without_parent = "\n".join(line for line in excerpt.splitlines()
+                                   if not line.startswith((f"test {parent} ", "test result:"))) + "\n"
+        self.assertEqual(invoke([child, other], without_parent + child_ignored
+                                + f"test {other} ... ok\n" + primary), 1)
+
+    def test_workflows_parallelize_sweep_and_preserve_required_contexts(self):
+        main, pr = (yaml.safe_load(path.read_text())["jobs"]
+                    for path in (MAIN_WORKFLOW, PR_WORKFLOW))
+        for jobs, name, matrix in ((main, "full_non_pg", "sweep_shards.outputs.matrix"),
+                                   (pr, "library_sweep", "pg_shards.outputs.sweep_matrix")):
+            self.assertIn("strategy", jobs[name], "sweep must execute parallel shards")
+            self.assertEqual(jobs[name]["strategy"], {
+                "fail-fast": False, "matrix": "${{ fromJSON(needs." + matrix + ") }}"})
+        aggregate = main["full_non_pg_required_context"]
+        self.assertEqual(aggregate["name"], "Full tests (ubuntu-latest)")
+        self.assertEqual(aggregate["needs"], "full_non_pg")
+        self.assertEqual(aggregate["if"], "always()")
+        step = aggregate["steps"][0]
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            rc = subprocess.run(["bash", "-c", step["run"]],
+                                env={**os.environ, "SWEEP_RESULT": result}).returncode
+            self.assertEqual(rc == 0, result == "success")
+        self.assertEqual(pr["library_sweep_required_context"]["name"],
+                         "Library test sweep (ubuntu-latest)")
+
+    def test_full_and_selected_sweep_shards_execute_the_original_set_once(self):
+        for full in (False, True):
+            with self.subTest(full=full):
+                ids = (ts.sweep_population(self.repo.root) if full else
+                       self.repo.selected(self.plan, "sweep"))
+                parts = ts.sweep_partition(ids)
+                self.assertEqual(len(parts), min(ts.SWEEP_SHARD_COUNT, len(ids)))
+                self.assertTrue(all(parts))
+                self.assertEqual(sorted(item for part in parts for item in part), sorted(ids))
+                with mock.patch.object(ts, "ROOT", self.repo.root), \
+                        mock.patch.dict(os.environ, {ts.PLAN_ENV: json.dumps(self.plan),
+                                                     "SWEEP_SHARD_TOTAL": str(len(parts))}), \
+                        mock.patch.object(ts, "run_sweep", return_value=0) as run:
+                    for shard, mine in enumerate(parts):
+                        args = ["run", "--lane", "sweep", "--shard", str(shard)]
+                        self.assertEqual(ts.main(args + (["--full"] if full else [])), 0)
+                        self.assertEqual(run.call_args.args, (self.repo.root, mine))
+                    self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard",
+                                              str(len(parts)), *(["--full"] if full else [])]), 1)
+                    self.assertEqual(run.call_count, len(parts))
+
+    def test_corrupt_partition_fails_before_any_test_runs(self):
+        ids = self.repo.selected(self.plan, "sweep")
+        parts = ts.sweep_partition(ids)
+        corrupt = (parts[:-1], [*parts, parts[0]], [*parts, []],
+                   [[*parts[0], "not::planned"], *parts[1:]])
+        for bad in corrupt:
+            with self.subTest(parts=bad), mock.patch.object(ts, "ROOT", self.repo.root), \
+                    mock.patch.dict(os.environ, {ts.PLAN_ENV: json.dumps(self.plan),
+                                                 "SWEEP_SHARD_TOTAL": str(len(parts))}), \
+                    mock.patch.object(ts, "sweep_partition", return_value=bad), \
+                    mock.patch.object(ts, "run_sweep", return_value=0) as run:
+                self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "0"]), 1)
+                run.assert_not_called()
+        with self.assertRaises(ValueError):
+            ts.checked_sweep_partition([])
+        with self.assertRaises(ValueError):
+            ts.checked_sweep_partition([ids[0], ids[0]])
+
+    def test_small_selected_plan_schedules_only_nonempty_shards(self):
+        self.repo.base = git(self.repo.root, "rev-parse", "HEAD")
+        self.repo.plan({"src/beta/far/mod.rs": "// a narrow selection\n"})
+        output = Path(self.tmp.name) / "output"
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), **self.repo.env()}):
+            self.assertEqual(ts.main(["plan", "--root", str(self.repo.root),
+                                      "--base", self.repo.base]), 0)
+        lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(json.loads(lines["sweep_matrix"]), {"shard": [0]})
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.dict(os.environ, {ts.PLAN_ENV: lines["plan"], "SWEEP_SHARD_TOTAL": "1"}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "0"]), 0)
+            self.assertEqual(run.call_args.args[1], ["beta::far::tests::far"])
+            self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "1"]), 1)
+            self.assertEqual(run.call_count, 1)
+
+    def test_shards_keep_execution_set_gate_and_reject_zero_test_success(self):
+        ids = [f"gamma::tests::g{index:02}" for index in range(12)]
+        ledger = Path(self.tmp.name) / "ledger"
+        ledger.write_text("")
+        real = subprocess.run
+        for reported in (ids, ids[1:], [], [*ids, "gamma::tests::extra"]):
+            def execute(command, **kwargs):
+                # Feed successful libtest output through the real adjudicator.
+                expected = command[:command.index("--")]
+                output = transcript([test_id for test_id in reported
+                                     if test_id in ids[::ts.SWEEP_SHARD_COUNT]
+                                     or test_id == "gamma::tests::extra"])
+                return real([sys.executable, str(RUN_TEST_LANE), *expected[2:],
+                             "--ledger", str(ledger), "--", sys.executable, "-c",
+                             f"print({output!r})"], cwd=kwargs["cwd"],
+                            capture_output=True, text=True)
+            with self.subTest(reported=reported), mock.patch.object(ts, "ROOT", self.repo.root), \
+                    mock.patch.object(ts, "load_plan", return_value=({"mode": "selected"}, ids)), \
+                    mock.patch.dict(os.environ, {"SWEEP_SHARD_TOTAL": str(ts.SWEEP_SHARD_COUNT)}), \
+                    mock.patch.object(ts.subprocess, "run", execute):
+                self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "0"]),
+                                 0 if reported == ids else 1)
+
+    def test_main_sweep_matrix_dropped_shard_is_rejected_before_execution(self):
+        ids = self.repo.selected(self.plan, "sweep")
+        output = io.StringIO()
+        with mock.patch.object(ts, "ROOT", self.repo.root), redirect_stdout(output):
+            self.assertEqual(ts.main(["sweep-matrix"]), 0)
+        matrix = json.loads(output.getvalue())["shard"]
+        self.assertGreater(len(matrix), 1)
+        for total in ("", "invalid", "0", str(len(matrix) - 1), str(len(matrix) + 1)):
+            for shard in matrix[:-1]:
+                with self.subTest(total=total, shard=shard), \
+                        mock.patch.object(ts, "ROOT", self.repo.root), \
+                        mock.patch.dict(os.environ, {"SWEEP_SHARD_TOTAL": total}), \
+                        mock.patch.object(ts, "run_sweep", return_value=0) as run:
+                    self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", str(shard),
+                                              "--full"]), 1)
+                    run.assert_not_called()
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.dict(os.environ, {"SWEEP_SHARD_TOTAL": str(len(matrix))}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            for shard in matrix:
+                self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", str(shard),
+                                          "--full"]), 0)
+            self.assertEqual(run.call_count, len(matrix))
+
+    def test_declared_ignored_ids_never_form_a_shard_without_a_runnable_id(self):
+        for ids, ignored in ((["a", "b"], {"b"}),
+                             (["a", "b", "c", "d", "e"], {"b", "d", "e"}),
+                             (["a", "b", "c", "d", "e", "f"], {"a", "c"})):
+            with self.subTest(ids=ids, ignored=ignored):
+                parts = ts.sweep_partition(ids, ignored)
+                self.assertEqual(len(parts), min(ts.SWEEP_SHARD_COUNT, len(set(ids) - ignored)))
+                self.assertEqual(sorted(test_id for part in parts for test_id in part), ids)
+                self.assertTrue(all(set(part) - ignored for part in parts))
+                self.assertEqual(parts, ts.checked_sweep_partition(ids, ignored))
+                self.assertEqual(parts, ts.sweep_partition(list(reversed(ids)), ignored))
+        for replay in (set(), {"b", "d"}):
+            with mock.patch.object(ts, "sweep_partition", return_value=[["a", "c"], ["b", "d"]]):
+                with self.assertRaises(ValueError):
+                    ts.checked_sweep_partition(["a", "b", "c", "d"], {"b", "d"}, replay)
+
+    def test_held_judged_ids_share_a_shard_with_a_runnable_judged_id(self):
+        ids = ["a::judged", "b::held", "c::held", "z::replay"]
+        ignored, replay = {"b::held", "c::held"}, {"z::replay"}
+        parts = ts.sweep_partition(ids, ignored, replay)
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), ids)
+        self.assertTrue(all(not (set(part) & ignored) or set(part) - ignored - replay
+                            for part in parts))
+        self.assertEqual(ts.checked_sweep_partition(ids, ignored, replay), parts)
+        with mock.patch.object(ts, "sweep_partition", return_value=[
+                ["a::judged", "b::held"], ["c::held", "z::replay"]]):
+            with self.assertRaises(ValueError):
+                ts.checked_sweep_partition(ids, ignored, replay)
+        # The pre-existing all-held judged subrun still fails execution adjudication.
+        self.assertEqual(ts.checked_sweep_partition(["b::held", "z::replay"], ignored, replay),
+                         [["b::held", "z::replay"]])
+
+    def test_plan_and_replay_use_declared_ignores_to_choose_the_same_shards(self):
+        ids = self.repo.selected(self.plan, "sweep")
+        ignored = set(ids[1:])
+        self.repo.write({ts.LEDGER: ledger_rows("non-pg-sweep", ignored)})
+        output = Path(self.tmp.name) / "ignore-output"
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), **self.repo.env()}):
+            self.assertEqual(ts.main(["plan", "--root", str(self.repo.root),
+                                      "--base", self.repo.base]), 0)
+        lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(json.loads(lines["sweep_matrix"]), {"shard": [0]})
+        with mock.patch.object(ts, "ROOT", self.repo.root), \
+                mock.patch.dict(os.environ, {ts.PLAN_ENV: lines["plan"], "SWEEP_SHARD_TOTAL": "1"}), \
+                mock.patch.object(ts, "run_sweep", return_value=0) as run:
+            self.assertEqual(ts.main(["run", "--lane", "sweep", "--shard", "0"]), 0)
+            self.assertEqual(set(run.call_args.args[1]), set(ids))
+
+    def test_all_ignored_partition_still_fails_the_real_execution_gate(self):
+        ids = ["alpha::changed::tests::own", "alpha::sibling::tests::near"]
+        ledger = ledger_rows("non-pg-sweep", ids)
+        parts = ts.checked_sweep_partition(ids, set(ids))
+        self.assertEqual(sorted(test_id for part in parts for test_id in part), ids)
+        for part in parts:
+            rc, stderr = ExpectedIdsTests().run_lane(part, [], ledger, ignored=part)
+            self.assertEqual(rc, 1, stderr)
+            self.assertIn("no planned test executed", stderr)
+
+    def test_replay_only_shard_cannot_pass_with_only_declared_ignores(self):
+        replay = "alpha::changed::tests::pg_named_but_free"
+        rc, _, _ = ReplayTests.run_sweep(
+            self, [replay], ignored=[replay], ledger=ledger_rows("pg", [replay]))
+        self.assertEqual(rc, 1)
 
 
 class ExpectedIdsTests(unittest.TestCase):
@@ -641,6 +913,32 @@ class RepositoryTests(unittest.TestCase):
     def test_shared_test_helpers_equal_the_source_s_reexports(self) -> None:
         self.assertEqual(self.reexported_helpers(), set(ts.SHARED_TEST_HELPERS))
 
+    def test_production_sweep_keeps_inherited_subprocess_pairs_in_one_primary_harness(self):
+        ids = ts.sweep_population(REPO_ROOT)
+        parts = ts.checked_sweep_partition(ids, *ts.sweep_partition_inputs(REPO_ROOT))
+        declarations = ts._module("nested_libtest", REPO_ROOT / "scripts/ci/nested_libtest.py")
+        for parent, child in declarations.inherited_pairs(REPO_ROOT):
+            if parent in ids:
+                with self.subTest(parent=parent, child=child):
+                    self.assertTrue(any({parent, child} <= set(part) for part in parts))
+                    self.assertEqual(sum(child in part for part in parts), 1)
+
+    def test_sweep_shards_equal_the_previous_canonical_filter_and_replay(self):
+        runner, coverage = ts.tools()[:2]
+        filtered, errors = runner.derive_expected_selection(
+            REPO_ROOT / "scripts/lib_test_inventory_manifest.txt", "linux",
+            coverage.load_non_pg_skip_args(REPO_ROOT))
+        self.assertEqual(errors, [])
+        runtime, errors = runner.derive_expected_selection(
+            REPO_ROOT / "scripts/lib_test_inventory_manifest.txt", "linux", [])
+        self.assertEqual(errors, [])
+        replay = set(coverage.load_non_pg_filter_replay(REPO_ROOT)) & runtime
+        ids = ts.sweep_population(REPO_ROOT)
+        parts = ts.checked_sweep_partition(ids, *ts.sweep_partition_inputs(REPO_ROOT))
+        self.assertEqual(set(ids), filtered | replay)
+        self.assertEqual(set(ids), self.inv.population["sweep"])
+        self.assertEqual(sum(map(len, parts)), len(filtered | replay))
+
     def test_the_observability_helper_runs_full_and_without_it_misses_its_consumers(self) -> None:
         helper = "src/services/observability/test_support.rs"
         self.assertEqual(ts.scopes(self.inv, [helper], [])[1], f"full-trigger: {helper}")
@@ -720,7 +1018,6 @@ class WorkflowGateTests(unittest.TestCase):
         self.assertIn("ci-full label from the next push or reopen", comment)
         self.assertEqual(self.text.count("vars.ADK_CI_SELECT"), 1)
         main = MAIN_WORKFLOW.read_text("utf-8")
-        self.assertNotIn("test-selection", main)
         self.assertNotIn(ts.PLAN_ENV, main)
 
 

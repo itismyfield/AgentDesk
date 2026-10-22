@@ -67,6 +67,7 @@ async fn tick_with(
         (0u64, None, None, None);
     let (mut heartbeat, mut long_run_heartbeat) =
         (std::time::Instant::now(), std::time::Instant::now());
+    let actor_nonce = baseline.turn_nonce.clone();
     let outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
             shared_owned: shared.clone(),
@@ -75,6 +76,7 @@ async fn tick_with(
             provider: &ProviderKind::Codex,
             turn_id: "c1a-adoption-tick",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::ZERO,
             single_message_panel_footer_mode: footer,
             footer_owner:

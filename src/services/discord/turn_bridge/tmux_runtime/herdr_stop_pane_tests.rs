@@ -131,7 +131,27 @@ fn stop_on(
     n: u64,
     screen: &str,
 ) -> (&'static str, usize, Vec<String>) {
+    stop_after(pool, root, runtime, provider, n, screen, &[])
+}
+
+/// `stop_on` with `records` appended to the fresh turn's transcript first.
+fn stop_after(
+    pool: &sqlx::PgPool,
+    root: &Path,
+    runtime: &tokio::runtime::Runtime,
+    provider: ProviderKind,
+    n: u64,
+    screen: &str,
+    records: &[serde_json::Value],
+) -> (&'static str, usize, Vec<String>) {
     let case = runtime.block_on(Case::new(pool, root, provider, n));
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&case.path)
+        .unwrap();
+    for record in records {
+        writeln!(transcript, "{record}").unwrap();
+    }
     let _registry = case.rig.registry_on_this_thread();
     let strips = HerdrStrips::over(&case.rig);
     case.rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":screen,"revision":3,"truncated":false}}));
@@ -249,6 +269,188 @@ fn herdr_claude_stop_shares_the_tmux_pane_evidence() {
             let seen = stop_on(pool, root, runtime, ProviderKind::Claude, n, screen);
             observed.push((name, seen));
             expected.push((name, (reply, escapes, plain_read())));
+        }
+        assert_eq!(observed, expected);
+    });
+}
+
+// A Claude stop refused as idle logs once what it read and judged, after the same reply and no
+// Escape; a sent stop logs none.
+#[test]
+fn herdr_claude_idle_refusal_logs_its_judged_inputs_once() {
+    use sha2::Digest;
+    with_pool(|pool, root, runtime| {
+        let rows = [
+            ("thinking", claude_capture!("thinking"), sent(), 1, 0),
+            (
+                "tool-running",
+                claude_capture!("tool-running"),
+                sent(),
+                1,
+                0,
+            ),
+            ("busy-draft", claude_capture!("busy-draft"), idle(), 0, 1),
+            ("done", claude_capture!("done"), idle(), 0, 1),
+            ("interrupted", claude_capture!("interrupted"), idle(), 0, 1),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (n, (name, screen, reply, escapes, lines)) in rows.into_iter().enumerate() {
+            let (logs, _capture) = capture_stop_events();
+            let n = 720 + n as u64;
+            let (text, sent_escapes, _) =
+                stop_on(pool, root, runtime, ProviderKind::Claude, n, screen);
+            let evidence: Vec<String> = logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.contains("herdr_stop_idle_evidence"))
+                .cloned()
+                .collect();
+            observed.push((name, text, sent_escapes, evidence.len()));
+            expected.push((name, reply, escapes, lines));
+            let read = crate::services::codex_tui::input::strip_ansi_escape_sequences(screen);
+            let sha = format!("{:x}", sha2::Sha256::digest(read.as_bytes()));
+            for line in &evidence {
+                for field in [
+                    "structured=Some(Streaming)".to_owned(),
+                    format!("draft={}", name == "busy-draft"),
+                    format!("screen_sha=\"{}\"", &sha[..12]),
+                    "phase=\"ambiguous\"".to_owned(),
+                    "runtime_kind=\"claude_tui\"".to_owned(),
+                    "sources_same=true".to_owned(),
+                    "truncated=false".to_owned(),
+                ] {
+                    // The collector lists each field as one Debug-quoted element.
+                    let element = format!("{field:?}");
+                    assert!(line.contains(&element), "{name}: {field} missing in {line}");
+                }
+                for field in [
+                    "ready=",
+                    "active=",
+                    "modal=",
+                    "veto=",
+                    "legacy_active=",
+                    "foreground_tool_running=",
+                    "exact_empty_composer=",
+                    "tail=[",
+                    "turn_nonce=",
+                ] {
+                    assert!(line.contains(field), "{name}: {field} missing in {line}");
+                }
+            }
+        }
+        assert_eq!(observed, expected);
+    });
+}
+
+// A Claude tool call trailed by the session records Claude writes mid-turn stops from the
+// production screen; the screen still fences idle and draft panes, and a finished turn stays idle.
+#[test]
+fn herdr_claude_stop_reads_a_tool_turn_past_trailing_session_metadata() {
+    let probe = include_str!(
+        "../../../../../tests/fixtures/tui_input/claude-herdr-sleep90-update-notice.txt"
+    );
+    let pane = super::super::super::claude_stop_pane::legacy_evidence(probe);
+    let fenced = super::super::super::claude_stop_pane::veto(probe);
+    let foreground = super::super::super::claude_stop_pane::foreground_tool_running(probe);
+    let judged = (
+        claude_tui_stop_pane_evidence(probe),
+        pane.1,
+        fenced,
+        foreground,
+    );
+    assert_eq!(judged, ((true, true, false), true, false, false));
+    let tool = json!({"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"python3 -c \"import time; time.sleep(90)\""}}],"stop_reason":"tool_use"}});
+    let meta = [
+        json!({"type":"last-prompt","lastPrompt":"run the 90 second sleep probe","sessionId":"s1"}),
+        json!({"type":"ai-title","aiTitle":"Sleep probe","sessionId":"s1"}),
+        json!({"type":"mode","mode":"normal","sessionId":"s1"}),
+        json!({"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s1"}),
+        json!({"type":"atis-latch","sessionId":"s1"}),
+    ];
+    let running: Vec<_> = std::iter::once(tool.clone()).chain(meta.clone()).collect();
+    let finished: Vec<_> = [
+        tool,
+        json!({"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}]}}),
+        json!({"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"DONE"}],"stop_reason":"end_turn"}}),
+        json!({"type":"system","subtype":"stop_hook_summary"}),
+        json!({"type":"system","subtype":"turn_duration","durationMs":93000}),
+    ]
+    .into_iter()
+    .chain(meta)
+    .collect();
+    with_pool(|pool, root, runtime| {
+        let rows = [
+            ("running tool", probe, &running, sent(), 1, None),
+            (
+                "done",
+                claude_capture!("done"),
+                &running,
+                idle(),
+                0,
+                Some("Streaming"),
+            ),
+            (
+                "idle",
+                claude_capture!("idle"),
+                &running,
+                idle(),
+                0,
+                Some("Streaming"),
+            ),
+            (
+                "busy-draft",
+                claude_capture!("busy-draft"),
+                &running,
+                idle(),
+                0,
+                Some("Streaming"),
+            ),
+            (
+                "finished turn",
+                probe,
+                &finished,
+                idle(),
+                0,
+                Some("Unknown"),
+            ),
+        ];
+        let (mut observed, mut expected) = (Vec::new(), Vec::new());
+        for (n, (name, screen, records, reply, escapes, structured)) in rows.into_iter().enumerate()
+        {
+            let (logs, _capture) = capture_stop_events();
+            let n = 740 + n as u64;
+            let seen = stop_after(
+                pool,
+                root,
+                runtime,
+                ProviderKind::Claude,
+                n,
+                screen,
+                records,
+            );
+            // The refusal names what the transcript read, so a screen fence is told from a transcript one.
+            let refused: Vec<Option<String>> = logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.contains("herdr_stop_idle_evidence"))
+                .map(|event| {
+                    ["Streaming", "Unknown", "Idle", "UserSubmitted"]
+                        .into_iter()
+                        .find(|state| {
+                            event.contains(&format!("{:?}", format!("structured=Some({state})")))
+                        })
+                        .map(str::to_owned)
+                })
+                .collect();
+            observed.push((name, seen, refused));
+            let structured = structured.map(|state: &str| Some(state.to_owned()));
+            expected.push((
+                name,
+                (reply, escapes, plain_read()),
+                structured.into_iter().collect(),
+            ));
         }
         assert_eq!(observed, expected);
     });

@@ -228,6 +228,31 @@ class RequiredPrParityTests(unittest.TestCase):
     def test_fixture_passes_every_axis(self) -> None:
         self.assert_clean(Repo())
 
+    def test_main_sweep_matrix_proves_the_canonical_skip_and_replay_union(self):
+        repo = Repo()
+        repo.pr.pop("sweep")
+        repo.mirrors.pop("sweep")
+        repo.just = ["cargo test --lib"]
+        repo.modules["gamma"] = ("local", "reads_pg_env")
+        repo.replay.append("gamma::reads_pg_env")
+        command = ('python3 scripts/ci/test-selection.py run --lane sweep --full '
+                   '--shard "${{ matrix.shard }}"')
+        rel = ".github/workflows/ci-main.yml"
+        repo.files[rel] = "jobs:\n" + job("full_non_pg", command)
+        self.assert_clean(repo)
+        for broken in (command.replace(" --full", ""),
+                       command.replace('"${{ matrix.shard }}"', '"0"')):
+            with self.subTest(command=broken):
+                repo.files[rel] = "jobs:\n" + job("full_non_pg", broken)
+                rc, output = repo.check()
+                self.assertEqual(rc, 1, output)
+                self.assertIn("required-pr-uncovered", output)
+        repo.files[rel] = "jobs:\n" + job("full_non_pg", command)
+        repo.replay.remove("gamma::reads_pg_env")
+        rc, output = repo.check()
+        self.assertEqual(rc, 1, output)
+        self.assertIn("gamma::reads_pg_env", output)
+
     def test_justfile_only_filter_fails_parity_although_the_sweep_covers_it(self) -> None:
         repo = Repo()
         repo.just.append("cargo test --lib gamma -- --skip _pg")

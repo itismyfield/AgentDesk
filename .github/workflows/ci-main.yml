@@ -26,11 +26,70 @@ env:
   POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
-  full_non_pg:
-    # The whole non-PG library, adjudicated exactly as the PR `library_sweep`;
-    # fmt/clippy/policy JS run in the separate `lint` job.
-    name: Full tests (ubuntu-latest)
+  lib_test_prepare:
+    name: Prepare shared lib tests
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+      - name: Prepare and verify lib tests
+        timeout-minutes: 45
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+        run: |
+          python3 scripts/ci/lib-test-artifact.py prepare --directory "$ADK_LIB_TEST_ARTIFACT"
+          python3 scripts/ci/lib-test-artifact.py validate --directory "$ADK_LIB_TEST_ARTIFACT"
+          python3 scripts/check_test_target_integrity.py --verify-lib-inventory
+          tar -C "$ADK_LIB_TEST_ARTIFACT" -czf "$RUNNER_TEMP/lib-test-artifact.tar.gz" .
+      - name: Upload shared lib tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sweep_shards:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        run: |
+          matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  full_non_pg:
+    # Every shard proves its exact execution set; the aggregate retains the required context.
+    name: Library test sweep (main shard ${{ matrix.shard }})
+    needs: [sweep_shards, lib_test_prepare]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.sweep_shards.outputs.matrix) }}
     env:
       RUST_BACKTRACE: 1
       # The id filters miss PG-dependent tests that carry no pg substring, so the
@@ -47,6 +106,21 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
@@ -86,19 +160,17 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
-      # Same budget as ci-pr.yml; this step ran 35-40 min on main and a 45 min
-      # cap cut a run whose lib tests had all passed, during the filter replay.
+      # Compare complete expected/executed ID sets rather than an execution-count floor.
       - name: Library sweep (selection-set gated)
         timeout-minutes: 60
         shell: bash
         env:
+          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_replay
+        run: python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"
 
       - name: Stop PostgreSQL service
         if: always()
@@ -107,6 +179,20 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+
+  full_non_pg_required_context:
+    name: Full tests (ubuntu-latest)
+    needs: full_non_pg
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every library sweep shard
+        shell: bash
+        env:
+          SWEEP_RESULT: ${{ needs.full_non_pg.result }}
+        run: |
+          echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"
+          test "$SWEEP_RESULT" = success
 
   lint:
     # The rest of `just check`: fmt, clippy (covers `cargo check`), policy JS, and
@@ -215,7 +301,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
-      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -289,6 +374,7 @@ jobs:
         timeout-minutes: 75
         run: just test-postgres-shard
         env:
+          PG_INCLUDE_SHARD: ${{ matrix.shard }}
           # #4245: see Full tests lane — keep test debuginfo off so the build
           # and serial PostgreSQL suite retain headroom in the bounded step.
           CARGO_PROFILE_TEST_DEBUG: "0"
@@ -419,6 +505,8 @@ jobs:
         run: ./scripts/ci-script-checks.sh
         env:
           GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REF: ${{ github.ref }}
+          GFP_REF_PROTECTED: ${{ github.ref_protected }}
           GFP_REPOSITORY: ${{ github.repository }}
           GFP_CANDIDATE_SHA: ${{ github.sha }}
           # Main-push CI verifies current coverage drift, but relative anti-growth
@@ -463,6 +551,8 @@ jobs:
         run: ./scripts/ci-script-checks.sh
         env:
           GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REF: ${{ github.ref }}
+          GFP_REF_PROTECTED: ${{ github.ref_protected }}
           GFP_REPOSITORY: ${{ github.repository }}
           GFP_CANDIDATE_SHA: ${{ github.sha }}
           TEST_LANE_BASELINE_REF: HEAD
@@ -491,6 +581,8 @@ jobs:
         run: ./scripts/ci-script-checks.sh
         env:
           GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REF: ${{ github.ref }}
+          GFP_REF_PROTECTED: ${{ github.ref_protected }}
           GFP_REPOSITORY: ${{ github.repository }}
           GFP_CANDIDATE_SHA: ${{ github.sha }}
           TEST_LANE_BASELINE_REF: HEAD

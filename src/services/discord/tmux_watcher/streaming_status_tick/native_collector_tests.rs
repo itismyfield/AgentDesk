@@ -186,7 +186,6 @@ fn native_collector_case(test_name: &str, mode: u8) {
             turn_result_relayed: false,
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
             host: Arc::new(HostSnapshot::new(WatchHost::Legacy)),
-            legacy_mode: WatcherLegacyMode::Legacy,
             watcher_instance_id: 1,
         };
         shared.tmux_watchers.insert(
@@ -302,7 +301,6 @@ fn native_collector_case(test_name: &str, mode: u8) {
             &fx.tmux,
             &fx.output_path,
             &ctx.cancel,
-            WatcherLegacyMode::Legacy,
         )
         .await
         .unwrap();
@@ -419,7 +417,6 @@ fn native_collector_case(test_name: &str, mode: u8) {
                     &fx.tmux,
                     &fx.output_path,
                     &ctx.cancel,
-                    WatcherLegacyMode::Legacy,
                 )
                 .await
                 .unwrap();

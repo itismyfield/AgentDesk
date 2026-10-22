@@ -113,7 +113,6 @@ async fn collect_turn_stream_body(
     );
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
-    let mut clean_decoded_provenance = !decoded_data.mixed_read_provenance;
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
@@ -420,13 +419,7 @@ async fn collect_turn_stream_body(
         stale_resume_detected |= turn.stale_resume_detected;
         assistant_text_seen |= turn.assistant_text_seen;
         fresh_assistant_text_seen |= turn.fresh_assistant_text_seen;
-        task_notification_context = if ctx.legacy_mode.is_legacy() {
-            turn.task_notification_context.clone()
-        } else if let Some(fresh) = task_notification_context.take() {
-            merge_context(turn.task_notification_context.clone(), fresh)
-        } else {
-            turn.task_notification_context.clone()
-        };
+        task_notification_context = turn.task_notification_context.clone();
         auto_compaction_lifecycle_attempted = turn.auto_compaction_lifecycle_attempted;
         monitor_auto_turn_preamble_injected = turn.monitor_auto_turn_preamble_injected;
     }
@@ -451,8 +444,7 @@ async fn collect_turn_stream_body(
     }
     #[cfg(test)]
     o_test::initial(watcher_provider.clone(), channel_id, task_notification_kind);
-    if ctx.legacy_mode.is_legacy()
-        && !monitor_auto_turn_claimed
+    if !monitor_auto_turn_claimed
         && !cancel.load(Ordering::Acquire)
         && matches!(
             task_notification_kind,
@@ -583,7 +575,6 @@ async fn collect_turn_stream_body(
                             ready_for_input_tracker: &mut ready_for_input_tracker,
                             utf8_decoder,
                             all_data: &mut all_data,
-                            clean_decoded_provenance: &mut clean_decoded_provenance,
                             all_data_start_offset: &mut all_data_start_offset,
                             state: &mut state,
                             full_response: &mut full_response,
@@ -618,12 +609,10 @@ async fn collect_turn_stream_body(
                             std::ops::ControlFlow::Break(()) => continue,
                             std::ops::ControlFlow::Continue(processed) => processed,
                         };
-                    if ctx.legacy_mode.is_legacy()
-                        && matches!(
-                            task_notification_kind,
-                            Some(TaskNotificationKind::MonitorAutoTurn)
-                        )
-                    {
+                    if matches!(
+                        task_notification_kind,
+                        Some(TaskNotificationKind::MonitorAutoTurn)
+                    ) {
                         if !monitor_auto_turn_claimed {
                             #[cfg(test)]
                             o_test::start(watcher_provider.clone(), channel_id);
@@ -702,7 +691,6 @@ async fn collect_turn_stream_body(
                     .await
                     {
                         idle_read::IdleReadOutcome::Break => break,
-                        idle_read::IdleReadOutcome::Continue => continue,
                         idle_read::IdleReadOutcome::Fallthrough => {}
                     }
                 }
@@ -741,7 +729,6 @@ async fn collect_turn_stream_body(
                     output_path: &output_path,
                     turn_delivered: &turn_delivered,
                     host: &ctx.host,
-                    legacy_mode: ctx.legacy_mode,
                 },
                 StreamingStatusTickTurn {
                     data_start_offset,
@@ -797,8 +784,10 @@ async fn collect_turn_stream_body(
     }
 
     commit_collect_state!();
-    #[rustfmt::skip]
-    let source_authority = WatcherSourceAuthority { source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance { None } else { source_authority.source_stamp }, ..source_authority };
+    let source_authority = WatcherSourceAuthority {
+        source_stamp: None,
+        ..source_authority
+    };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
         source_authority,

@@ -318,7 +318,7 @@ fn write_record(record: &TuiDirectPendingStart) -> Result<(), String> {
     };
     let path = root.join(format!("{}.json", record.file_stem()));
     let data = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
-    runtime_store::critical_atomic_write(
+    runtime_store::critical_publish(
         &path,
         &data,
         runtime_store::AtomicWriteContext::new("tui_direct_pending_start")
@@ -355,7 +355,7 @@ fn delete_locked(record: &TuiDirectPendingStart) {
     mark_absent(&record.key());
     if let Some(root) = root() {
         let path = root.join(format!("{}.json", record.file_stem()));
-        let _ = unlink_record_file(&path);
+        let _ = unlink_record_file(&path).map(|()| runtime_store::sync_removed(&path));
     }
 }
 

@@ -201,6 +201,9 @@ enum Successor {
     Admitted,
     /// B also saved its own row for the same message.
     RowSaved,
+    /// B saved its row within A's start second: the rows share every identity field and only
+    /// the turn nonce tells B's episode from A's.
+    RowSavedSameSecond,
 }
 
 /// Runs episode A's fresh turn to its failure and its bridge to its exit; a `successor` takes
@@ -305,11 +308,12 @@ async fn run_case(
         );
         assert!(started.await);
         crate::services::discord::increment_global_active(&shared, "successor_admission");
-        if matches!(stage, Successor::RowSaved) {
+        if matches!(stage, Successor::RowSaved | Successor::RowSavedSameSecond) {
+            let same_second = matches!(stage, Successor::RowSavedSameSecond);
             // A successor starts after A's launch failed, so its row's start second differs.
             let second = || chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while second() == started_at && std::time::Instant::now() < deadline {
+            while !same_second && second() == started_at && std::time::Instant::now() < deadline {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             let mut successor_row = InflightTurnState::new(
@@ -318,7 +322,7 @@ async fn run_case(
                 None,
                 1,
                 MESSAGE,
-                19,
+                if same_second { 18 } else { 19 },
                 "hello".to_string(),
                 None,
                 Some(NAME.to_string()),
@@ -328,7 +332,12 @@ async fn run_case(
             );
             successor_row.turn_nonce = next.turn_nonce().map(str::to_owned);
             successor_row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
-            assert_ne!(successor_row.started_at, started_at);
+            if same_second {
+                successor_row.started_at.clone_from(&started_at);
+                assert_eq!(InflightTurnIdentity::from_state(&successor_row), a_identity);
+            } else {
+                assert_ne!(successor_row.started_at, started_at);
+            }
             // The claim that frees A's mailbox clears A's row; intake then creates B's row anew.
             let cleared =
                 crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
@@ -440,33 +449,50 @@ async fn a_failed_fresh_start_leaves_a_successor_episode_untouched() {
     ] {
         let b = Arc::new(CancelToken::new());
         let (_, outcome) = run_case(channel, Some((b.clone(), stage))).await;
-        assert_torn_down(&outcome);
-        assert!(
-            outcome
-                .holder
-                .as_ref()
-                .is_some_and(|token| Arc::ptr_eq(token, &b)),
-            "{stage:?}: B keeps the channel: holder {:?}, message {:?}",
-            outcome.holder.as_ref().map(|token| token.turn_nonce()),
-            outcome.active_message
-        );
-        assert_eq!(
-            outcome.active_message,
-            Some(MessageId::new(MESSAGE)),
-            "{stage:?}"
-        );
-        assert!(!b.cancelled.load(Ordering::Relaxed), "{stage:?}");
-        assert_eq!(
-            outcome.global_active, 2,
-            "{stage:?}: B's and the other channel's slots stay"
-        );
-        assert_eq!(outcome.queued, 1, "{stage:?}");
-        match (stage, outcome.successor_row) {
-            (Successor::RowSaved, Some((saved, after))) => {
-                assert_eq!(after.as_ref(), Some(&saved), "B's durable row is untouched");
-            }
-            (Successor::Admitted, None) => {}
-            (stage, row) => panic!("{stage:?}: successor row saved = {}", row.is_some()),
+        assert_successor_untouched(stage, &b, outcome);
+    }
+}
+
+/// B's row saved in A's start second carries A's exact identity; A's failed bridge must still
+/// leave B's token, slot, queue and row bytes alone, told apart by the nonce alone.
+#[tokio::test(flavor = "current_thread")]
+async fn same_second_fresh_failure_keeps_b_episode_7219() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let _endpoint = published_endpoint();
+    let b = Arc::new(CancelToken::new());
+    let stage = Successor::RowSavedSameSecond;
+    let (_, outcome) = run_case(6_333_514, Some((b.clone(), stage))).await;
+    assert_successor_untouched(stage, &b, outcome);
+}
+
+fn assert_successor_untouched(stage: Successor, b: &Arc<CancelToken>, outcome: Outcome) {
+    assert_torn_down(&outcome);
+    assert!(
+        outcome
+            .holder
+            .as_ref()
+            .is_some_and(|token| Arc::ptr_eq(token, b)),
+        "{stage:?}: B keeps the channel: holder {:?}, message {:?}",
+        outcome.holder.as_ref().map(|token| token.turn_nonce()),
+        outcome.active_message
+    );
+    assert_eq!(
+        outcome.active_message,
+        Some(MessageId::new(MESSAGE)),
+        "{stage:?}"
+    );
+    assert!(!b.cancelled.load(Ordering::Relaxed), "{stage:?}");
+    assert_eq!(
+        outcome.global_active, 2,
+        "{stage:?}: B's and the other channel's slots stay"
+    );
+    assert_eq!(outcome.queued, 1, "{stage:?}");
+    match (stage, outcome.successor_row) {
+        (Successor::RowSaved | Successor::RowSavedSameSecond, Some((saved, after))) => {
+            assert_eq!(after.as_ref(), Some(&saved), "B's durable row is untouched");
         }
+        (Successor::Admitted, None) => {}
+        (stage, row) => panic!("{stage:?}: successor row saved = {}", row.is_some()),
     }
 }

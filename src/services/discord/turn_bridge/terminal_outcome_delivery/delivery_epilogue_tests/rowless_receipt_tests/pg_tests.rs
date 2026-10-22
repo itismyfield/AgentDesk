@@ -312,7 +312,9 @@ async fn bridge_background_tool_child_closes_by_its_launching_tool_use_id_pg() {
         DRIVER_CHANNEL_ID,
     )
     .await;
-    let cancel = Arc::new(CancelToken::new());
+    let cancel = Arc::new(CancelToken::from_persisted_turn_nonce(
+        driver.inflight.turn_nonce.clone(),
+    ));
     let user_msg = MessageId::new(DRIVER_USER_MSG_ID);
     assert!(
         crate::services::discord::mailbox_try_start_turn(

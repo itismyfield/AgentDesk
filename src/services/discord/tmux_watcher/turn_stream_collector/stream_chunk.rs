@@ -20,7 +20,6 @@ pub(super) struct StreamChunkState<'a> {
     pub(super) ready_for_input_tracker: &'a mut crate::services::provider::ReadyForInputIdleTracker,
     pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
     pub(super) all_data: &'a mut String,
-    pub(super) clean_decoded_provenance: &'a mut bool,
     pub(super) all_data_start_offset: &'a mut u64,
     pub(super) state: &'a mut StreamLineState,
     pub(super) full_response: &'a mut String,
@@ -74,7 +73,6 @@ pub(super) fn process_stream_chunk(
         ready_for_input_tracker,
         utf8_decoder,
         all_data,
-        clean_decoded_provenance,
         all_data_start_offset,
         state,
         full_response,
@@ -131,7 +129,6 @@ pub(super) fn process_stream_chunk(
     let decoded_chunk =
         utf8_decoder.decode_source_for_buffer(chunk, chunk_start, authority, all_data);
     let authority = authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
-    *clean_decoded_provenance &= !decoded_chunk.mixed_read_provenance;
     // Defer forwarding until parsing attaches the terminal fence.
     let chunk_buffer_was_empty = all_data.is_empty();
     if chunk_buffer_was_empty {

@@ -1,0 +1,208 @@
+{
+  "schema": 1,
+  "children": [
+    {
+      "id": "cli::discord_thread_create::tests::thread_create_lock_cancel_child_process",
+      "source": "src/cli/discord_thread_create.rs",
+      "platform": "windows",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/cli/discord_thread_create.rs",
+          "function": "windows_cancelled_async_holder_releases_before_runtime_exit",
+          "stdout": "null",
+          "sha256": "577acc06cbf0e62f503a6f1ec53dec47286650755ca1546d720bfc965fff3e8d",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "cli::discord_thread_create::tests::thread_create_lock_child_process",
+      "source": "src/cli/discord_thread_create.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/cli/discord_thread_create.rs",
+          "function": "async_os_file_lock_serializes_actual_child_processes",
+          "stdout": "null",
+          "sha256": "ceea9c433bf4872c1fba30f9b76eb7a7b25864dabd40059e6d8badc9e67c199e",
+          "ignored_args": 2
+        },
+        {
+          "source": "src/cli/discord_thread_create.rs",
+          "function": "windows_async_waiter_recovers_abandoned_owner",
+          "stdout": "null",
+          "sha256": "d247004e1fe81a8b333cf67f301740261df6f9c70913fdf0a7c440d82e507fe1",
+          "ignored_args": 2
+        },
+        {
+          "source": "src/cli/discord_thread_create.rs",
+          "function": "windows_cancelled_async_holder_releases_before_runtime_exit",
+          "stdout": "null",
+          "sha256": "577acc06cbf0e62f503a6f1ec53dec47286650755ca1546d720bfc965fff3e8d",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "db::postgres::test_db_reclaim::tests::pg_reclaim_fresh_process_child",
+      "source": "src/db/postgres/test_db_reclaim.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/db/postgres/test_db_reclaim.rs",
+          "function": "spawn_in",
+          "stdout": "piped",
+          "sha256": "2b454863aa66df475e95d3d8302dcd1d27e2188e1bb9b614f8715afc96a03437",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::claude_tui::hook_relay::ordered_queue::tests::producer_lock_holder_subprocess_entry",
+      "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
+          "function": "producer_waits_for_retention_lock_and_preserves_event",
+          "stdout": "null",
+          "sha256": "c10a562841b30350643dde9c1e92c107c3fdc011d4ddbb49b4d4e1dd11683721",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::claude_tui::hook_relay::tests::failure_marker_parent_subprocess_entry",
+      "source": "src/services/claude_tui/hook_relay.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/claude_tui/hook_relay.rs",
+          "function": "failure_marker_worker_survives_parent_process_exit",
+          "stdout": "null",
+          "sha256": "cc6df222fae498ef49cbd211e9393d05de7d5509be7d69c3d737dff8fcb60661",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::claude_tui::hook_relay::tests::failure_marker_worker_subprocess_entry",
+      "source": "src/services/claude_tui/hook_relay.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/claude_tui/hook_relay.rs",
+          "function": "handoff_hook_relay_failure",
+          "stdout": "null",
+          "sha256": "40af63e2da134adc2f7de92008efe42c19ceef5bdcef4627519d57fc85b67b62",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::claude_tui::hook_relay::tests::non_wait_relay_parent_subprocess_entry",
+      "source": "src/services/claude_tui/hook_relay.rs",
+      "platform": "linux",
+      "parents": [
+        "services::claude_tui::hook_relay::tests::claude_non_wait_hanging_transport_returns_after_stdout_within_750ms"
+      ],
+      "calls": [
+        {
+          "source": "src/services/claude_tui/hook_relay.rs",
+          "function": "claude_non_wait_hanging_transport_returns_after_stdout_within_750ms",
+          "stdout": "inherited",
+          "sha256": "67f88fe3fa923efced31fbbeab6384357a82307fdcbdc5b175491b858488bc30",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::claude_tui::hook_relay::tests::non_wait_relay_worker_subprocess_entry",
+      "source": "src/services/claude_tui/hook_relay.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
+          "function": "spawn_worker_process",
+          "stdout": "null",
+          "sha256": "e70a4c292c1ab913ac03e9934ddf92673c6914f240a79fc1e098fbc636fc39da",
+          "ignored_args": 1
+        },
+        {
+          "source": "src/services/claude_tui/hook_relay/ordered_queue.rs",
+          "function": "start_ordered_hook_relay_worker",
+          "stdout": "null",
+          "sha256": "d90fe73a45206a5cdc87edb5ee0777a5c29d1faeeb6177ca38732a8fc7058a4f",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child",
+      "source": "src/services/cluster/intake_worker/s3_real_tests/mod.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
+          "function": "spawn_at",
+          "stdout": "file",
+          "sha256": "bf887ef662602ab7964d496fd085d48ece9dc8bc4e88e91e5e4e343d242ae856",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_child",
+      "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
+          "function": "committed_child",
+          "stdout": "null",
+          "sha256": "436e5d881f1185e19971e0853e64540d905b27026aca911dd2cca683e611dce4",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::os_sigterm_child",
+      "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
+          "function": "an_os_sigterm_joins_the_writer_before_exit",
+          "stdout": "null",
+          "sha256": "5a89683d268f6be4b34060a2c1408de9c826f1d49646d2643ac76c6f7e1e298e",
+          "ignored_args": 1
+        }
+      ]
+    },
+    {
+      "id": "services::discord::session_relay_sink::tests::dc1_isolated_scanner_child",
+      "source": "src/services/discord/session_relay_sink/tests.rs",
+      "platform": "linux",
+      "parents": [],
+      "calls": [
+        {
+          "source": "src/services/discord/session_relay_sink/tests.rs",
+          "function": "dc1_actual_scanner_contract",
+          "stdout": "captured",
+          "sha256": "9f3bdb89e7edd4b44bcf985abe1ead0d04f15d2e8ebc69ccfeeccc37e7606df7",
+          "ignored_args": 1
+        }
+      ]
+    }
+  ]
+}
