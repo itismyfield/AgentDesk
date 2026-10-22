@@ -632,6 +632,18 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
                         item.reply_context.as_deref(),
                         Some("original reply boundary")
                     );
+                    crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                        &shared,
+                        &provider,
+                        channel,
+                        item.message_id,
+                        taken
+                            .dispatch_lease
+                            .as_ref()
+                            .expect("fake executor owns dequeue lease")
+                            .clone(),
+                    )
+                    .await;
                     count.fetch_add(1, Ordering::SeqCst);
                 }
                 Some(IdleQueueKickoffChannelOutcome { started: true })
