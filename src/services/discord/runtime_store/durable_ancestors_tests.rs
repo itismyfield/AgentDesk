@@ -220,7 +220,7 @@ fn every_chain_link_flushed_after_its_identity() {
     let witness = Mutex::new(Witness::default());
     let mut born = Born(HashMap::new());
     let tokens = |provider: &str, token: &str| root.join("store").join(provider).join(token);
-    let mut publish = |born: &mut Born, dir: PathBuf| {
+    let publish = |born: &mut Born, dir: PathBuf| {
         born.create(&watch, &dir);
         let target = dir.join("1.json");
         fsync_ancestors_with(&witness, &root, &target).unwrap();
