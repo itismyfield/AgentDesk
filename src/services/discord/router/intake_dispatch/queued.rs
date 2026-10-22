@@ -123,7 +123,7 @@ pub(crate) async fn admit_queued_intake(
         IntakeAdmission::ConsentHeld(hold) => {
             let Some(dispatch_lease) = dispatch_lease else { return QueuedAdmissionDisposition::RejectedRestore; };
             let owner = QueuedRestoreOwner { original: intervention.clone(), provider: submission.provider.clone(), channel_id, dispatch_lease };
-            if owner.restore(deps).await == super::super::IntakeExecution::Deferred {
+            if Box::pin(owner.restore(deps)).await == super::super::IntakeExecution::Deferred {
                 let result = match *hold {
                     Ok(hold) => super::super::herdr_consent::admission::register_mailbox(deps, &submission.provider, &submission.request, hold, false).await,
                     Err(error) => Err(error),
@@ -269,7 +269,7 @@ pub(crate) async fn finish_admitted_queued_intake(
                 {
                     Ok(hold) => {
                         let provider = owner.provider.clone();
-                        let outcome = owner.restore(deps).await;
+                        let outcome = Box::pin(owner.restore(deps)).await;
                         if outcome == super::super::IntakeExecution::Deferred
                             && let Ok(hold) = hold.0
                             && let Err(error) =

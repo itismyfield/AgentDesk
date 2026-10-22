@@ -219,53 +219,55 @@ impl Hold {
     }
 }
 
-pub(in crate::services::discord::router) async fn register_mailbox(
-    deps: &IntakeDeps<'_>,
-    provider: &ProviderKind,
-    request: &IntakeRequest,
+pub(in crate::services::discord::router) fn register_mailbox<'a, 'b: 'a>(
+    deps: &'a IntakeDeps<'b>,
+    provider: &'a ProviderKind,
+    request: &'a IntakeRequest,
     hold: Hold,
     explicit: bool,
-) -> Result<(), String> {
-    let (provider_read, token_hash, channel) = (
-        provider.clone(),
-        deps.shared.token_hash.clone(),
-        request.channel_id,
-    );
-    let (items, _) = tokio::task::spawn_blocking(move || {
-        crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-            &provider_read,
-            &token_hash,
-            channel,
-        )
+) -> impl std::future::Future<Output = Result<(), String>> + Send + 'a {
+    Box::pin(async move {
+        let (provider_read, token_hash, channel) = (
+            provider.clone(),
+            deps.shared.token_hash.clone(),
+            request.channel_id,
+        );
+        let (items, _) = tokio::task::spawn_blocking(move || {
+            crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+                &provider_read,
+                &token_hash,
+                channel,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let mut wanted = request.source_message_ids.clone();
+        wanted.push(request.user_msg_id);
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut intents = Vec::new();
+        for source in wanted {
+            let found = items
+                .iter()
+                .flat_map(|item| item.source_message_queued_generations())
+                .find(|s| s.message_id == source)
+                .ok_or("original source not durably queued; checkpoint remains unread")?;
+            intents.push(IntentRef {
+                store: "mailbox".into(),
+                id: format!("{}:{}", source.get(), found.queued_generation),
+                provider: provider.as_str().into(),
+                channel: channel.get(),
+                source_message: source.get(),
+                fifo: found.queued_generation,
+            });
+        }
+        let consent = hold.record(intents).await?;
+        // Card failure never relinquishes custody or retries a send whose response was lost.
+        if let Err(error) = hold.effect(deps, provider, consent, explicit).await {
+            tracing::warn!(%error, "consent card held after durable input");
+        }
+        Ok(())
     })
-    .await
-    .map_err(|e| e.to_string())??;
-    let mut wanted = request.source_message_ids.clone();
-    wanted.push(request.user_msg_id);
-    wanted.sort_unstable();
-    wanted.dedup();
-    let mut intents = Vec::new();
-    for source in wanted {
-        let found = items
-            .iter()
-            .flat_map(|item| item.source_message_queued_generations())
-            .find(|s| s.message_id == source)
-            .ok_or("original source not durably queued; checkpoint remains unread")?;
-        intents.push(IntentRef {
-            store: "mailbox".into(),
-            id: format!("{}:{}", source.get(), found.queued_generation),
-            provider: provider.as_str().into(),
-            channel: channel.get(),
-            source_message: source.get(),
-            fifo: found.queued_generation,
-        });
-    }
-    let consent = hold.record(intents).await?;
-    // Card failure never relinquishes custody or retries a send whose response was lost.
-    if let Err(error) = hold.effect(deps, provider, consent, explicit).await {
-        tracing::warn!(%error, "consent card held after durable input");
-    }
-    Ok(())
 }
 
 // Keep the custody enqueue future out of callers that take the unchanged Legacy branch.

@@ -167,6 +167,13 @@ async fn legacy_actual_intake_and_attachment_gates_preserve_all_origins_without_
         "legacy_consent_future_frame_contract: custody {frame} bytes"
     );
     drop(held);
+    let registered = register_mailbox(&deps, &ProviderKind::Claude, &original, f.hold(), false);
+    let frame = std::mem::size_of_val(&registered);
+    assert!(
+        frame <= 2 * std::mem::size_of::<usize>(),
+        "legacy_consent_future_frame_contract: registration {frame} bytes"
+    );
+    drop(registered);
     for (index, origin) in [
         IntakeOrigin::LiveMessage,
         IntakeOrigin::SlashSkill,
