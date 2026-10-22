@@ -69,6 +69,6 @@ pub(in crate::services::discord::inflight) fn save_inflight_delivery_rewind_if_m
     updated.updated_at = now_string();
     bump_save_generation_for_write(&path, &mut updated)?;
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)?;
+    store::publish_row(&path, &json)?;
     Ok(true)
 }

@@ -282,7 +282,7 @@ use chrono::TimeZone;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightRestartMode;
-use super::runtime_store::{atomic_write, discord_inflight_root};
+use super::runtime_store::{discord_inflight_root, sync_removed};
 use crate::dispatch::Source;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 // #3552: short alias for the invariant-severity hint forwarded to observability.
@@ -547,7 +547,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     }
     #[cfg(test)]
     policy_op_unlink_hook::before(path);
-    match fs::remove_file(path) {
+    match fs::remove_file(path).map(|()| sync_removed(path)) {
         Ok(()) => Outcome::Removed,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Outcome::Missing,
         Err(error) => Outcome::Io(error.to_string()),
@@ -782,7 +782,7 @@ fn set_inflight_restart_mode_under_lock(
         return Failed;
     }
     match serde_json::to_string_pretty(&state) {
-        Ok(json) if atomic_write(path, &json).is_ok() => Marked,
+        Ok(json) if store::publish_row(path, &json).is_ok() => Marked,
         _ => Failed,
     }
 }
@@ -1243,7 +1243,7 @@ mod stall_recovery_tests {
             std::fs::create_dir_all(parent).expect("create provider dir");
         }
         let json = serde_json::to_string_pretty(state).expect("serialize state");
-        super::atomic_write(&path, &json).expect("force write state");
+        super::super::runtime_store::atomic_write(&path, &json).expect("force write state");
     }
 
     // ---- #3859: failure-path abandon-request (durable handoff, row deleted) ----

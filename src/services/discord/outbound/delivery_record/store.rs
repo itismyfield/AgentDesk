@@ -272,8 +272,8 @@ pub(in crate::services::discord) fn read_record_at(path: &Path) -> Option<Delive
 
 pub(super) fn write_record_at(path: &Path, record: &DeliveryRecord) -> Result<(), String> {
     let data = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
-    // Reuse the existing temp+rename+fsync helper (I4) — do not hand-roll.
-    runtime_store::atomic_write(path, &data)
+    // Durable temp+rename+fsync helper (I4), also flushing the directories — do not hand-roll.
+    runtime_store::durable_publish::publish_store_row(path, &data)
 }
 
 /// flock-guarded read-modify-write. Creates the record (default: both fields
