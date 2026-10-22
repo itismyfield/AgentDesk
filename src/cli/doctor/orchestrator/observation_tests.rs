@@ -633,49 +633,125 @@ async fn doctor_session_lookup_timeout_never_posts_repair() {
 }
 
 /// A snapshot read that did not answer leaves its row out of `mailboxes`, so the active count is
-/// withheld as a warning; a complete reading's excess and every row's own finding still fail.
+/// withheld as a warning whatever its excess, and that warning repairs nothing; a complete
+/// reading's excess and every row's own finding and repair still stand.
 #[test]
 fn unanswered_snapshot_read_withholds_only_the_active_count() {
-    let failure = |read: &str| {
-        json!([{"provider": "discord", "channel_id": 43, "read": read,
+    let failure = |provider: &str, read: &str| {
+        json!([{"provider": provider, "channel_id": 43, "read": read,
             "observation_failure": "unreachable"}])
     };
     let row_failure = (Fail, "mailbox_busy_without_active_turn");
     let excess = (Fail, "global_active_without_active_turn");
     let withheld = (Warn, "mailbox_observation_unavailable");
-    for (failures, complete, expected) in [
+    let options = repair_response_options(RunContext::ManualCli);
+    // `(failures, this provider complete, another provider complete, count withheld)`.
+    let cases = [
         (
-            Some(failure("snapshot")),
+            Some(failure("discord", "snapshot")),
             Some(false),
-            vec![row_failure, withheld],
+            None,
+            true,
         ),
-        (Some(failure("snapshot")), None, vec![row_failure, withheld]),
-        (None, Some(false), vec![row_failure, withheld]),
-        (Some(json!({})), None, vec![row_failure, withheld]),
+        (Some(failure("discord", "snapshot")), None, None, true),
+        (None, Some(false), None, true),
+        (Some(json!({})), None, None, true),
+        // Another provider's unanswered read or incomplete state withholds the shared count.
+        (
+            Some(failure("codex", "snapshot")),
+            Some(true),
+            Some(true),
+            true,
+        ),
+        (None, Some(true), Some(false), true),
         // A failed second read keeps its row, so the count is still complete.
         (
-            Some(failure("reconfirm")),
+            Some(failure("discord", "reconfirm")),
             Some(true),
-            vec![row_failure, excess],
+            None,
+            false,
         ),
-        (None, Some(true), vec![row_failure, excess]),
+        (
+            Some(failure("codex", "thread_proof")),
+            Some(true),
+            Some(true),
+            false,
+        ),
+        (None, Some(true), Some(true), false),
         // A dcserver predating both fields.
-        (None, None, vec![row_failure, excess]),
-    ] {
-        let mut body = fixture();
-        body["global_active"] = json!(2);
-        replace(&mut body, "mailbox_observation_failures", failures);
-        replace(
-            &mut body["providers"][0],
-            "runtime_state_complete",
-            complete.map(Value::from),
-        );
-        let checks = check_mailbox_consistency(&snapshot(body.clone()));
-        let actual: Vec<_> = checks
-            .iter()
-            .map(|check| (check.status, check.id))
-            .collect();
-        assert_eq!(actual, expected, "{body}");
+        (None, None, None, false),
+    ];
+    // The fixture row is one active turn, so these exceed it by 0, 1 and 49.
+    for global in [1, 2, 50] {
+        for row_fails in [true, false] {
+            for (failures, complete, other, incomplete) in cases.clone() {
+                let mut body = fixture();
+                body["global_active"] = json!(global);
+                if !row_fails {
+                    body["mailboxes"][0]["tmux_present"] = json!(true);
+                    body["mailboxes"][0]["watcher_attached"] = json!(true);
+                }
+                replace(&mut body, "mailbox_observation_failures", failures);
+                replace(
+                    &mut body["providers"][0],
+                    "runtime_state_complete",
+                    complete.map(Value::from),
+                );
+                if let Some(other) = other {
+                    let codex = json!({"name": "codex", "connected": true,
+                        "runtime_state_complete": other});
+                    body["providers"].as_array_mut().unwrap().push(codex);
+                }
+                let mut expected: Vec<_> = row_fails.then_some(row_failure).into_iter().collect();
+                if incomplete {
+                    expected.push(withheld);
+                } else if global > 1 {
+                    expected.push(excess);
+                }
+                let checks = check_mailbox_consistency(&snapshot(body.clone()));
+                let actual: Vec<_> = checks
+                    .iter()
+                    .map(|check| (check.status, check.id))
+                    .collect();
+                assert_eq!(actual, expected, "{body}");
+                let mut posted = Vec::new();
+                let actions = apply_stale_mailbox_fixes_with_post(
+                    &snapshot(body.clone()),
+                    &options,
+                    |_, request| {
+                        posted.push(request["channel_id"].clone());
+                        Ok(json!({"status": "applied"}))
+                    },
+                );
+                let own_repair: Vec<_> = row_fails.then_some(json!(42)).into_iter().collect();
+                assert_eq!(
+                    posted, own_repair,
+                    "only the row's own repair posts: {body}"
+                );
+                // `ok` means no failure, so a withheld count leaves it true and stays a warning.
+                let report =
+                    serde_json::to_value(build_json_report(&options, &checks, &actions)).unwrap();
+                let warned: Vec<_> = report["checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|check| check["id"] == withheld.1)
+                    .map(|check| (check["status"].clone(), check["fix_safety"].clone()))
+                    .collect();
+                let expected_warned: Vec<_> = incomplete
+                    .then(|| (json!("warn"), json!("not_fixable")))
+                    .into_iter()
+                    .collect();
+                assert_eq!(warned, expected_warned, "{report}");
+                let fails = row_fails || (!incomplete && global > 1);
+                assert_eq!(report["ok"], !fails, "{report}");
+                assert_eq!(
+                    report["summary"]["warned"],
+                    usize::from(incomplete),
+                    "{report}"
+                );
+            }
+        }
     }
 }
 
