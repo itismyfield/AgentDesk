@@ -15,6 +15,8 @@ use crate::services::session_host::herdr::model::{HerdrProcessInfo, HerdrResult}
 use crate::services::session_host::herdr::{pane_probe::start_text, provenance};
 
 const PINNED_SHA256: &str = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157";
+// The macOS sh launcher execs bash, so select the native shell for an exact OS identity.
+const T19_SHELL: &str = "/bin/bash";
 
 fn sha(path: &Path) -> String {
     format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
@@ -183,7 +185,7 @@ impl T19Server {
             .env("HERDR_LOG", "herdr=debug")
             .env("TERM", "xterm-256color")
             .env("LANG", "en_US.UTF-8")
-            .env("SHELL", "/bin/sh")
+            .env("SHELL", T19_SHELL)
             .current_dir(at("work"))
             .process_group(0);
         command
@@ -210,7 +212,7 @@ impl T19Server {
         );
         let mut child = self
             .sandboxed()
-            .args(["/bin/sh", "-l", "-c", &script])
+            .args([T19_SHELL, "-l", "-c", &script])
             .stdin(Stdio::piped())
             .stdout(std::fs::File::create(&stdout).unwrap())
             .stderr(std::fs::File::create(&stderr).unwrap())
@@ -933,7 +935,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         let shell_start = provenance::process_start(shell).unwrap().identity;
         let shell_exe = provenance::process_exec_path(shell).expect("T19 shell exec is readable");
         assert_eq!(
-            shell_exe, "/bin/sh",
+            shell_exe, T19_SHELL,
             "T19 restored root is the configured shell"
         );
         assert_eq!(

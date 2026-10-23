@@ -952,7 +952,7 @@ async fn bound_live_hook_without_watcher(
     h.use_mock_notify_bot(WAIT).await;
     let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
     let logical = "herdr-prompt-registry-miss";
-    let nonce = "7263000123456789abcdef0123456789ab";
+    let nonce = "00112233445566778899aabbccddee13";
     let session = "7d4a7a0e-d052-488b-9a89-d0f3aac426cc";
     let path = h.root.path().join("bound-live-native.jsonl");
     std::fs::write(&path, b"").unwrap();
