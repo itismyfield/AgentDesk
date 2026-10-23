@@ -10643,6 +10643,7 @@ services::discord::turn_bridge::tmux_runtime::judged_stop::tests::an_idle_skip_r
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_offline_closed_verdict_uses_failed_handle_not_registry_replacement
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::c1_unreachable_mailbox_keeps_confirmed_session_without_fallback_or_interrupt
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg
+services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::reader_liveness_wait_rejects_accumulated_probes
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_completed_owner_keeps_natural_first
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_concurrent_attempt_shares_delivery_and_rejects_previous_native_proof
 services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues
