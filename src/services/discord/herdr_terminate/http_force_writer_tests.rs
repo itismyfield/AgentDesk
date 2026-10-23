@@ -140,9 +140,8 @@ impl Launched {
         launched
     }
 
-    /// The fake host's pane provider as a launch leaves it, its environment naming this
-    /// execution's binding context. The rig sets that up through an idle Codex row of another bot
-    /// namespace, which no force path here can select.
+    /// Points the fake pane provider's environment at this launch's binding context, set up
+    /// through an idle Codex row of another bot namespace that no force path here can select.
     async fn provider_names_its_context(
         &self,
         rig: &herdr::P11TerminationRig,
