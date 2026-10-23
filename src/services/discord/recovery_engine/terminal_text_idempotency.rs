@@ -370,7 +370,6 @@ impl RecoveryDeliveryContext {
         shared: &SharedData,
         anchor: MessageId,
         text: &str,
-
         captured: Option<&mut inflight::InflightTurnState>,
     ) -> inflight::GuardedSaveOutcome {
         let bind = if let Some(captured) = captured {
