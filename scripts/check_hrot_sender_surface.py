@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Fail unless the operator route is the transition cleanup's only production sender: it alone looks
-up the port, builds an operation, Apply included, sends it and consumes the reply; `request_as`
-stays in the port. Test files and `#[cfg(test)]` items are left out."""
+"""Keep transition cleanup requests inside the automatic sweep and require the old operator route
+to stay removed. Test files and `#[cfg(test)]` items are left out; `request_as` stays in the port.
+The actor may apply a sweep job internally without constructing or sending another operation.
+"""
 import functools
 import re
 import sys
@@ -11,14 +12,15 @@ from check_o_shadow_write_zero import TOKEN, blank, brace_end
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = "src/services/tui_o/writer/transition_port.rs"
-ROUTE = "src/server/routes/o_transition.rs"
+AUTOMATIC = "src/services/discord/health/o_transition/automatic.rs"
+RETIRED_ROUTE = "src/server/routes/o_transition.rs"
 HOST = "src/services/tui_o/writer/host/transition.rs"
 WRITER = "src/services/tui_o/writer/"
-# Outside the writer only the route and the context it sends name the port's module.
-IMPORTERS = {ROUTE, "src/services/discord/health/o_transition.rs"}
+# Outside the writer only the automatic sweep and its checked context name the port's module.
+IMPORTERS = {AUTOMATIC, "src/services/discord/health/o_transition.rs"}
 CFG_TEST = re.compile(r"#\[cfg\((?:test|all\(test[^\]]*)\)\]")
 ATTR = re.compile(r"\s*#\[[^\]]*\]")
-BUILT = re.compile(r"Operation::(Inspect|Apply)\s*\(")
+BUILT = re.compile(r"Operation::(Inspect|Apply|AutomaticApply)\s*\(")
 READINESS = re.compile(r"tui_o::writer::host\b[^;]*\b(?:Readiness|process_readiness)\b")
 # A port send in either call form: a method call, or a path to the method however it is named.
 SEND = re.compile(r"\.\s*request(?P<method_as>_as)?\s*\(|::\s*request(?P<path_as>_as)?\b")
@@ -54,29 +56,27 @@ def file_errors(path, code):
     errors = []
     names_port = "transition_port" in code or "TransitionPort" in code
     if names_port and not path.startswith(WRITER) and path not in IMPORTERS:
-        errors.append("names the transition port outside the writer and its route")
+        errors.append("names the transition port outside the writer and automatic sweep")
     if names_port and re.search(r"\bOperation\s+as\b", code):
         errors.append("renames the transition operation")
     sends = list(SEND.finditer(code))
     if any(send["method_as"] or send["path_as"] for send in sends) and path != PORT:
         errors.append("calls request_as outside the port")
-    if (path.startswith(WRITER) or names_port) and path not in (ROUTE, PORT) and sends:
-        errors.append("sends on a transition port outside the route")
-    if re.search(r"(?<!fn )\bwith_transition_reply\s*\(", code) and path != ROUTE:
-        errors.append("consumes a transition reply outside the route")
+    if (path.startswith(WRITER) or names_port) and path not in (AUTOMATIC, PORT) and sends:
+        errors.append("sends on a transition port outside the automatic sweep")
+    if re.search(r"(?<!fn )\bwith_transition_reply\s*\(", code) and path != AUTOMATIC:
+        errors.append("consumes a transition reply outside the automatic sweep")
     if re.search(r"\bTransitionPort::new\s*\(", code) and path != HOST:
         errors.append("opens a transition port outside the host")
-    if READINESS.search(code) and re.search(r"\.transition\s*\(", code) and path != ROUTE:
-        errors.append("looks up a transition port outside the route")
+    if READINESS.search(code) and re.search(r"\.transition\s*\(", code) and path != AUTOMATIC:
+        errors.append("looks up a transition port outside the automatic sweep")
     for built in BUILT.finditer(code):
         # A match arm or or-pattern destructures an operation rather than building one.
         after = code[paren_end(code, built.end() - 1) + 1:].lstrip()
         if after.startswith(("=>", "|")):
             continue
-        if path != ROUTE:
-            errors.append(f"builds Operation::{built.group(1)} outside the route")
-    if path == ROUTE and len(sends) != 1:
-        errors.append("the route must send exactly once")
+        if path != AUTOMATIC:
+            errors.append(f"builds Operation::{built.group(1)} outside the automatic sweep")
     return [f"{path}: {error}" for error in errors]
 
 
@@ -87,8 +87,10 @@ def errors(sources):
         if name.endswith("tests.rs") or name == "test_support.rs" or "/tests/" in path:
             continue
         found.extend(file_errors(path, production(source)))
-    if ROUTE not in sources:
-        found.append(f"{ROUTE}: missing")
+    if AUTOMATIC not in sources:
+        found.append(f"{AUTOMATIC}: missing automatic cleanup sweep")
+    if RETIRED_ROUTE in sources:
+        found.append(f"{RETIRED_ROUTE}: retired operator route must remain absent")
     return found
 
 

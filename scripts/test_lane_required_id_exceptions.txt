@@ -1,5 +1,7 @@
 # exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
 # Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
+db::session_transcripts::native_clear_record | helper-module | #6325 | expires=2027-10-17 | reads back the stored native clear correlation for the clear and admission tests; input_runtime was its last production reader and it holds no test of its own
+db::session_transcripts::native_clear_seed | helper-module | #6995 | expires=2027-10-16 | seeds the native clear boundary an earlier build left unresolved for the admission tests; it holds no test of its own
 server::routes::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts the transition route's sends and runs a probe between reply and consumption for the route tests; it holds no test of its own
 services::claude_tui::host_input::guarded_submission::test_support | helper-module | #6325 | expires=2026-10-26 | Scoped request and result fixtures used by executor_tests; this helper declares no test id.
 services::cluster::channel_home_boot::home_writers::events | helper-module | #5340 | expires=2027-10-18 | records the watches' and writers' mounts, starts, joins and leaves in order and parks a watch for the home writer tests; it holds no test of its own
