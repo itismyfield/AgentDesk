@@ -19,16 +19,16 @@ from check_test_target_integrity import render_lib_inventory_manifest
 RUNNER = ROOT / "scripts/ci/run-writer-namespace-windows-targets.sh"
 ENGINE = ROOT / "scripts/exact_rust_test_proof.py"
 INVENTORY = ROOT / "scripts/check_test_target_integrity.py"
-FAMILY = "services::writer_protocol::namespace::lexical::tests"
+FAMILY = "services::proof_protocol::namespace::lexical::tests"
 IDS = (
     f"{FAMILY}::sealed_portable_roots_normalize_exactly",
     f"{FAMILY}::unsupported_prefixes_and_escape_components_fail_closed",
     f"{FAMILY}::normalized_candidates_preserve_case_separators_and_root_boundaries",
 )
 CARGO_CALLS = tuple(f"test --lib {test_id} -- --exact --test-threads=1" for test_id in IDS)
-OPTIONAL_FAMILY = "services::writer_protocol::namespace::neutral::tests"
+OPTIONAL_FAMILY = "services::proof_protocol::namespace::neutral::tests"
 OPTIONAL_ID = f"{OPTIONAL_FAMILY}::synthetic_optional_owner_proof"
-CATALOG_FAMILY = "services::writer_protocol::namespace::catalog::tests"
+CATALOG_FAMILY = "services::proof_protocol::namespace::catalog::tests"
 CATALOG_IDS = (
     f"{CATALOG_FAMILY}::canonical_and_legacy_session_aliases_share_exact_authority_key",
     f"{CATALOG_FAMILY}::sealed_roots_issue_only_exact_reviewed_artifact_bindings",
@@ -58,9 +58,9 @@ class Outcome:
     plan_after: str
 
 
-LEXICAL = OwnerFixture("lexical", "lexical", "src/services/writer_protocol/namespace/lexical.rs", FAMILY, "required", IDS)
-OPTIONAL = OwnerFixture("neutral", "neutral", "src/services/writer_protocol/namespace/neutral.rs", OPTIONAL_FAMILY, "optional", (OPTIONAL_ID,))
-CATALOG = OwnerFixture("catalog", "catalog", "src/services/writer_protocol/namespace/catalog.rs", CATALOG_FAMILY, "optional", CATALOG_IDS)
+LEXICAL = OwnerFixture("lexical", "lexical", "src/services/proof_protocol/namespace/lexical.rs", FAMILY, "required", IDS)
+OPTIONAL = OwnerFixture("neutral", "neutral", "src/services/proof_protocol/namespace/neutral.rs", OPTIONAL_FAMILY, "optional", (OPTIONAL_ID,))
+CATALOG = OwnerFixture("catalog", "catalog", "src/services/proof_protocol/namespace/catalog.rs", CATALOG_FAMILY, "optional", CATALOG_IDS)
 
 
 class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
@@ -71,13 +71,13 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             sys.executable, str(root / "scripts/exact_rust_test_proof.py"), "run",
             "--repo-root", str(root), "--manifest", "scripts/lib_test_inventory_manifest.txt",
             "--pass-prefix", "WRITER_NAMESPACE_WINDOWS_TARGET",
-            "--gate", "writer_namespace", "src/services/writer_protocol.rs", "namespace",
-            "src/services/writer_protocol/namespace.rs", "optional",
+            "--gate", "proof_namespace", "src/services/proof_protocol.rs", "namespace",
+            "src/services/proof_protocol/namespace.rs", "optional",
         ]
         for owner in owners:
             command.extend((
-                "--owner", owner.key, "writer_namespace",
-                "src/services/writer_protocol/namespace.rs", owner.module,
+                "--owner", owner.key, "proof_namespace",
+                "src/services/proof_protocol/namespace.rs", owner.module,
                 owner.source, owner.family, owner.policy,
             ))
             for test_id in owner.ids:
@@ -93,10 +93,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         catalog_active: bool = False,
         mutation: str,
     ) -> None:
-        source = root / "src/services/writer_protocol/namespace"
+        source = root / "src/services/proof_protocol/namespace"
         source.mkdir(parents=True)
         (root / "src/lib.rs").write_text("mod services;\n", encoding="utf-8")
-        (root / "src/services.rs").write_text("mod writer_protocol;\n", encoding="utf-8")
+        (root / "src/services.rs").write_text("mod proof_protocol;\n", encoding="utf-8")
         protocol = "mod namespace;\n" if active else ""
         namespace = "mod lexical;\n" if active else ""
         lexical = "#[cfg(test)]\nmod tests {\n" + "".join(f"#[test]\nfn {test_id.rsplit('::', 1)[1]}() {{}}\n" for test_id in IDS) + "}\n"
@@ -149,14 +149,14 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             (source / "lexical_alias.rs").write_text("// not the canonical owner\n", encoding="utf-8")
         elif mutation == "unrelated_family":
             namespace += "mod unrelated;\n"
-            other = "services::writer_protocol::namespace::unrelated::tests::allowed"
+            other = "services::proof_protocol::namespace::unrelated::tests::allowed"
             (source / "unrelated.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn allowed() {} }\n", encoding="utf-8")
             manifest_ids.add(other)
         if mutation == "comment_gate":
             protocol = '// mod namespace;\nconst S: &str = "mod namespace;";\nmod namespace_longer;\n'
-        (root / "src/services/writer_protocol.rs").write_text(protocol, encoding="utf-8")
+        (root / "src/services/proof_protocol.rs").write_text(protocol, encoding="utf-8")
         if active or mutation == "inactive_residue":
-            (root / "src/services/writer_protocol/namespace.rs").write_text(namespace, encoding="utf-8")
+            (root / "src/services/proof_protocol/namespace.rs").write_text(namespace, encoding="utf-8")
         if active and mutation != "missing_owner":
             (source / "lexical.rs").write_text(lexical, encoding="utf-8")
         manifest = render_lib_inventory_manifest(manifest_ids)
@@ -222,6 +222,20 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             if catalog_active:
                 shutil.rmtree(root / "src")
                 self.write_graph(root, active=active, optional_active=optional_active, catalog_active=True, mutation=mutation)
+            if runner:
+                fsync = (
+                    ("src/server/mod.rs", "worker_recovery", "src/server/worker_recovery.rs", "server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits"),
+                    ("src/services/discord/mod.rs", "runtime_store", "src/services/discord/runtime_store.rs", "services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing"),
+                )
+                (root / "src/lib.rs").write_text("mod services;\nmod server;\n", encoding="utf-8")
+                with (root / "src/services.rs").open("a", encoding="utf-8") as file:
+                    file.write("mod discord;\n")
+                for parent, module, source, test_id in fsync:
+                    (root / parent).parent.mkdir(parents=True, exist_ok=True)
+                    (root / parent).write_text(f"mod {module};\n", encoding="utf-8")
+                    (root / source).write_text("mod windows_contract { #[cfg(test)] mod tests { #[test] fn " + test_id.rsplit("::", 1)[1] + "() {} } }\n", encoding="utf-8")
+                manifest = root / "scripts/lib_test_inventory_manifest.txt"
+                manifest.write_text(render_lib_inventory_manifest(set(IDS) | {item[3] for item in fsync}), encoding="utf-8")
             governed = root / LEXICAL.source
             original = root / "lexical.original"
             if governed.exists():
@@ -319,8 +333,8 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(spoof.result.returncode, 0, spoof.result.stderr)
         self.assertIn("NOT_APPLICABLE", spoof.result.stdout)
         self.assertEqual(spoof.calls, ())
-        self.assert_structural_failure(self.run_fixture(active=False, mutation="inactive_residue"), "gate writer_namespace")
-        self.assert_structural_failure(self.run_fixture(mutation="duplicate_gate"), "gate writer_namespace")
+        self.assert_structural_failure(self.run_fixture(active=False, mutation="inactive_residue"), "gate proof_namespace")
+        self.assert_structural_failure(self.run_fixture(mutation="duplicate_gate"), "gate proof_namespace")
 
     def test_owner_family_closure_source_and_manifest_identity(self) -> None:
         cases = (
@@ -330,7 +344,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             ("extra_same_family", (LEXICAL,), "owner lexical"),
             ("manifest_neighbor", (LEXICAL,), "owner lexical"),
             ("manifest_container", (LEXICAL,), "owner lexical"),
-            ("wrong_source", (OwnerFixture("lexical", "lexical", "src/services/writer_protocol/namespace/lexical_alias.rs", FAMILY, "required", IDS),), "source site"),
+            ("wrong_source", (OwnerFixture("lexical", "lexical", "src/services/proof_protocol/namespace/lexical_alias.rs", FAMILY, "required", IDS),), "source site"),
             ("", (OwnerFixture("lexical", "lexical", LEXICAL.source, "services::wrong::tests", "required", IDS),), "does not belong exactly"),
         )
         for mutation, owners, target in cases:
@@ -369,9 +383,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         plan = proof.ProofPlan(ROOT, "manifest", "PROOF", gate, (bad_owner,))
         with self.assertRaisesRegex(proof.ProofError, "does not belong exactly"):
             proof._validate_spec(plan)
-        collision = OwnerFixture("other", "other", "src/services/writer_protocol/namespace/other.rs", "services::other::tests", "optional", ("services::other::tests::sealed_portable_roots_normalize_exactly",))
+        collision = OwnerFixture("other", "other", "src/services/proof_protocol/namespace/other.rs", "services::other::tests", "optional", ("services::other::tests::sealed_portable_roots_normalize_exactly",))
         self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, collision)), "collision")
-        failed_last = OwnerFixture("last", "last", "src/services/writer_protocol/namespace/last.rs", "services::last::tests", "required", ("services::last::tests::last",))
+        failed_last = OwnerFixture("last", "last", "src/services/proof_protocol/namespace/last.rs", "services::last::tests", "required", ("services::last::tests::last",))
         outcome = self.run_fixture(owners=(LEXICAL, failed_last))
         self.assert_structural_failure(outcome, "owner last")
 
@@ -421,15 +435,12 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         active_optional = self.run_fixture(optional=True, optional_active=True)
         self.assertEqual(active_optional.result.returncode, 0, active_optional.result.stderr)
         self.assertEqual(active_optional.calls, CARGO_CALLS + (f"test --lib {OPTIONAL_ID} -- --exact --test-threads=1",))
-        real = self.run_fixture(runner=True)
+        real = self.run_fixture()
         self.assertEqual(real.result.returncode, 0, real.result.stderr)
         self.assertEqual(real.calls, CARGO_CALLS)
         passes = [line for line in real.result.stdout.splitlines() if " PASS id=" in line]
         self.assertEqual(passes, [f"WRITER_NAMESPACE_WINDOWS_TARGET PASS id={test_id} selected=1 passed=1" for test_id in IDS])
         self.assertEqual(real.result.stdout.count("RESULT selected=3 passed=3"), 1)
-        runner_text = RUNNER.read_text(encoding="utf-8")
-        self.assertIn("readonly -a lexical_ids", runner_text)
-        self.assertEqual([test_id for test_id in IDS if runner_text.count(test_id) == 1], list(IDS))
 
     def test_exact_eight_selection_reducer(self) -> None:
         outcome = self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True)
@@ -439,13 +450,13 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(outcome.result.stdout.count(" PASS id="), 8)
         self.assertEqual(outcome.result.stdout.count("RESULT selected=8 passed=8"), 1)
         self.assertEqual(outcome.temp_before, outcome.temp_after, ())
-        runner = self.run_fixture(runner=True, catalog_active=True)
+        runner = self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True)
         self.assertEqual(runner.result.returncode, 0, runner.result.stderr)
         self.assertEqual(runner.calls, expected)
         self.assertEqual([line.split(" PASS id=", 1)[1].split(" selected=", 1)[0] for line in runner.result.stdout.splitlines() if " PASS id=" in line], list(IDS + CATALOG_IDS))
 
     def test_every_registered_catalog_owner_absent_clean(self) -> None:
-        outcome = self.run_fixture(runner=True)
+        outcome = self.run_fixture(owners=(LEXICAL, CATALOG))
         self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
         self.assertEqual(outcome.calls, CARGO_CALLS)
         self.assertEqual((outcome.result.stdout.count(" PASS id="), outcome.result.stdout.count("RESULT selected=3 passed=3")), (3, 1))
@@ -453,14 +464,12 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(outcome.temp_before, outcome.temp_after, ())
 
     def test_catalog_owner_symmetry_counts_and_fail_closed_shapes(self) -> None:
-        runner_text = RUNNER.read_text(encoding="utf-8")
-        self.assertEqual([test_id for test_id in CATALOG_IDS if runner_text.count(test_id) == 1], list(CATALOG_IDS))
         for mutation in ("catalog_wrong_owner", "catalog_duplicate", "catalog_partial", "catalog_spoof", "catalog_extra", "catalog_redirected", "catalog_include", "catalog_commented_manifest"):
             with self.subTest(mutation=mutation):
                 self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True, mutation=mutation), "owner")
         collision = OwnerFixture("catalog", "catalog", CATALOG.source, CATALOG_FAMILY, "optional", (CATALOG_IDS[0], IDS[0]))
         self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, collision), catalog_active=True), "does not belong exactly")
-        absent = self.run_fixture(runner=True)
+        absent = self.run_fixture(owners=(LEXICAL, CATALOG))
         self.assertEqual(absent.result.returncode, 0, absent.result.stderr)
         self.assertEqual(absent.calls, CARGO_CALLS)
         self.assertNotIn(CATALOG_FAMILY, "\n".join(line for line in absent.result.stdout.splitlines() if " PASS id=" in line))

@@ -949,7 +949,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for selector in ("rust_compile", "cross_os_rust"):
             for proof_path in proof_paths:
                 self.assertEqual(filters[selector].count(proof_path), 1)
-        self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
         self.assertNotIn(proof_paths[1], job_block(workflow, "check_fast_cross_os_targets"))
         for proof_path in proof_paths:
             filter_line = f"              - '{proof_path}'"

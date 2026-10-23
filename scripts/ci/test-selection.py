@@ -61,7 +61,6 @@ FULL_TRIGGERS = (
     "scripts/check-ci-runner-hardening.sh", "scripts/test_lane_*",
     "scripts/test_target_integrity_*",
     "src/db/mod.rs", "src/db/postgres.rs", "src/db/postgres/*", "src/db/fixture_target.rs",
-    "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/*", "src/services/turn_orchestrator.rs",
     "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",

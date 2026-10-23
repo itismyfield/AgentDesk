@@ -145,8 +145,6 @@ pub mod tmux_diagnostics;
 pub(crate) mod tmux_turn_liveness;
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
-#[allow(dead_code)]
-pub(crate) mod writer_protocol;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 #[allow(dead_code)]
 pub(crate) mod tui_o {

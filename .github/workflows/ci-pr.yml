@@ -857,7 +857,6 @@ jobs:
               - 'src/utils/**'
               - 'src/voice/**'
               - 'src/services/*'
-              - 'src/services/writer_protocol/**'
               - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
