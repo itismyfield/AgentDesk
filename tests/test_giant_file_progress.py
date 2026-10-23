@@ -361,11 +361,7 @@ class GiantRealSnapshotTest(unittest.TestCase):
                 self.assertIn("WARNING:", err)
 
     def test_real_snapshot_new_giant_is_blocked(self):
-        registry = (self.repo / P.REGISTRY).read_text() + (
-            '[[entry]]\nfile="src/new.rs"\ndecision="shrink"\nowner="team"\n'
-            'deadline="2026-08-31"\ndecompose_issue="#4712"\n')
-        rc, evidence, _ = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000,
-                                      P.REGISTRY: registry})
+        rc, evidence, _ = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000})
         self.assertEqual(rc, 2, evidence)
         self.assertIn("new or growing giant", evidence["reason"])
 

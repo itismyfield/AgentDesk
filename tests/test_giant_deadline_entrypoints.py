@@ -11,7 +11,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -165,12 +165,12 @@ class DeadlineEntrypointsTest(unittest.TestCase):
                 "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_BASE_SHA": self.base,
                 "GFP_HEAD_SHA": head, "GFP_CANDIDATE_SHA": candidate, "GFP_REFRESH_DOCS": "1"}
 
-    def assert_warning_pass(self, result, *, count=1):
+    def assert_warning_pass(self, result, *, count=1, fixture=True):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         warnings = [line for line in output.splitlines() if line.startswith(OVERDUE_PREFIX)]
         self.assertEqual(len(warnings), count, output)
-        if count == 1:
+        if fixture:
             for detail in (GIANT, DEADLINE, ISSUE):
                 self.assertIn(detail, warnings[0])
             stale = next(line for line in output.splitlines() if "older than 30 days" in line)
@@ -232,18 +232,20 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("stale generated doc: " + path, result.stdout)
 
-    def test_same_expired_fixture_still_requires_new_giant_registration(self):
-        self.put_at(self.repo, "src/cli/unregistered.rs", "pub fn new_giant() {}\n" * 1000)
-        result = self.command_at(self.repo, [sys.executable, "scripts/generate_inventory_docs.py"])
+    def test_same_expired_fixture_still_rejects_unregistered_new_giant(self):
+        env = self.candidate({"src/cli/unregistered.rs": "pub fn new_giant() {}\n" * 1000})
+        result = self.command_at(self.repo, [sys.executable, "scripts/giant_file_progress.py"], env)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("new or growing giant", result.stderr)
         self.assertIn("src/cli/unregistered.rs", result.stderr)
 
-    def test_current_registry_november_first_emits_five_warnings_in_all_entrypoints(self):
+    def test_current_registry_warnings_match_overdue_entries_in_all_entrypoints(self):
         # Use checked-in planning inputs with small measured files, keeping the test cheap.
         registry = (ROOT / "scripts/giant_file_registry.toml").read_text()
         entries = tomllib.loads(registry)["entry"]
-        expected = [entry for entry in entries if entry.get("deadline") == "2026-10-31"]
-        self.assertEqual(len(expected), 5)
+        expected = [entry for entry in entries
+                    if entry.get("decision", "shrink") == "shrink"
+                    and date.fromisoformat(entry["deadline"]) < date.fromisoformat(EVALUATION_DATE)]
         for entry in entries:
             path = self.repo / entry["file"]
             content = path.read_text() if path.exists() else ""
@@ -272,7 +274,7 @@ class DeadlineEntrypointsTest(unittest.TestCase):
         for name, command, overrides in commands:
             with self.subTest(entrypoint=name):
                 result = self.command_at(self.repo, command, {**env, **overrides})
-                self.assert_warning_pass(result, count=5)
+                self.assert_warning_pass(result, count=len(expected), fixture=False)
                 warning_lines = [line for line in result.stderr.splitlines()
                                  if line.startswith(OVERDUE_PREFIX)]
                 for entry in expected:

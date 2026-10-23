@@ -913,12 +913,12 @@ class RegistryValidationTest(MetadataWarningAssertions, unittest.TestCase):
             )
         )
 
-    def test_unregistered_giant_fails(self) -> None:
+    def test_unregistered_giant_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig

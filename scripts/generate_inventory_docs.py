@@ -1281,8 +1281,7 @@ def build_giant_registrations(
     """Build measured giant rows and warn about planning metadata drift.
 
     Unreadable or malformed inputs still raise; size gates consume measurements
-    independently of owner, deadline and issue bookkeeping. Missing giant
-    registrations remain errors.
+    independently of owner, deadline, registration and issue bookkeeping.
     """
 
     grandfathered, entries, baseline_paths = load_giant_file_registry()
@@ -1423,14 +1422,14 @@ def build_giant_registrations(
         )
 
     unregistered = sorted(set(prod_giants) - seen)
-    if unregistered:
-        raise ParseError("; ".join(
+    for path in unregistered:
+        problems.append(
             f"unregistered giant: {path!r} has {prod_giants[path]} prod lines "
             f"(>= {GIANT_FILE_THRESHOLD}) but is missing from "
             f"{rel_posix(GIANT_FILE_REGISTRY)}; add an [[entry]] with "
             "shrink(owner + deadline + issue) or keep(owner + reason)"
-            for path in unregistered
-        ))
+        )
+        registrations.append(GiantFileRegistration(path, "", "", "", "", "", prod_giants[path]))
 
     awaiting_backfill = [reg.file_path for reg in registrations if not reg.decision]
     if awaiting_backfill:
