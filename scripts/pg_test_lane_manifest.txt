@@ -63,6 +63,8 @@ src/engine/ops/config_ops.rs
 src/engine/ops/db_ops.rs
 src/engine/ops/kanban_ops.rs
 src/engine/ops/message_ops.rs
+src/engine/ops/read_bridge/contract_tests.rs
+src/engine/ops/read_bridge/epoch_tests.rs
 src/engine/ops/timeouts_ops/host_repair_tests.rs
 src/github/sync.rs
 src/high_risk_recovery.rs
@@ -480,6 +482,8 @@ engine::ops::config_ops::tests
 engine::ops::db_ops::tests
 engine::ops::kanban_ops::tests
 engine::ops::message_ops::tests
+engine::ops::read_bridge::contract_tests
+engine::ops::read_bridge::epoch_tests
 engine::ops::timeouts_ops::host_repair::tests
 github::sync::terminal_open_alert_tests
 high_risk_recovery
@@ -1344,6 +1348,10 @@ engine::ops::kanban_ops::tests::set_status_raw_pg_blocks_when_review_entered_at_
 engine::ops::kanban_ops::tests::set_status_raw_pg_matches_intent_reference_across_matrix
 engine::ops::kanban_ops::tests::set_status_raw_pg_windows_rework_over_stale_pass
 engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
+engine::ops::read_bridge::contract_tests::policy_read_bridge_bounds_connecting_by_the_acquire_timeout_or_an_earlier_deadline
+engine::ops::read_bridge::contract_tests::policy_read_bridge_deadline_and_context_isolation
+engine::ops::read_bridge::contract_tests::policy_read_bridge_reuses_context_resources
+engine::ops::read_bridge::epoch_tests::policy_read_bridge_returns_connections_and_threads_across_engine_epochs
 engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
 engine::ops::timeouts_ops::host_repair::tests::non_legacy_rows_defer_without_probe_write_or_tmux_command_pg
 engine::ops::timeouts_ops::host_repair::tests::repair_after_a_new_turn_on_the_same_row_writes_nothing_pg

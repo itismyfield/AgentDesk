@@ -276,6 +276,8 @@ jobs:
               - 'src/engine/ops/db_ops.rs'
               - 'src/engine/ops/kanban_ops.rs'
               - 'src/engine/ops/message_ops.rs'
+              - 'src/engine/ops/read_bridge/contract_tests.rs'
+              - 'src/engine/ops/read_bridge/epoch_tests.rs'
               - 'src/engine/ops/timeouts_ops/host_repair_tests.rs'
               - 'src/github/sync.rs'
               - 'src/high_risk_recovery.rs'
