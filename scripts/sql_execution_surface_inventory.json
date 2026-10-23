@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f91e866ed520030a48df3d0640a62da8cdd0ce56",
+  "measured_at_sha": "0b403e30994b0f9b99de7915bcc0a0478e1866af",
   "records": [
     {
       "root": "migrations/postgres",
@@ -36496,6 +36496,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:0fd0453a7ee7028ffbb5e2ea4c7c06793692eca9a9432395cbd158f55d17530d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:529fc1bffaa23dbdfac96dd6768485a49b61311a4095b4579ec566ef99dce8ec"
     },
     {
       "root": "src",

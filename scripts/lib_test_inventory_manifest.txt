@@ -9623,7 +9623,8 @@ services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_keeps_its_distinct_pane_channel
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_survives_an_explicit_primary_discard
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_unresolved_alias_is_not_a_same_pane_clone
-services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_without_live_authority_is_unverified_and_posts_nothing
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::input_queued_into_a_running_prompt_does_not_reannounce_its_opening
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::tmux_hook_prompt_registry_miss_still_warns_and_drops
 services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it

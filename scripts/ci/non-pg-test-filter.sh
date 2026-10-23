@@ -796,6 +796,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_injected_new_turn_hook_first_delivers_its_answer

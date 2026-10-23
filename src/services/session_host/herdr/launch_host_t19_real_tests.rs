@@ -930,10 +930,16 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             foreground.iter().all(|process| process.pid == shell),
             "T19 restored AgentDesk pane is shell only: {info:?}"
         );
+        let shell_start = provenance::process_start(shell).unwrap().identity;
+        let shell_exe = provenance::process_exec_path(shell).expect("T19 shell exec is readable");
         assert_eq!(
-            ps(shell, "comm="),
-            "/bin/sh",
+            shell_exe, "/bin/sh",
             "T19 restored root is the configured shell"
+        );
+        assert_eq!(
+            provenance::process_start(shell).unwrap().identity,
+            shell_start,
+            "T19 shell identity is unchanged across the OS exec read"
         );
         assert_eq!(
             std::fs::read(server.dir.join(format!("{provider}.starts"))).unwrap(),
@@ -945,7 +951,8 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             "T19 resume sentinel stayed absent"
         );
         server.append(json!({"event":"restored", "provider":provider, "pane":pane, "shell":shell,
-            "foreground":foreground.iter().map(|process| process.pid).collect::<Vec<_>>(), "resumes":0, "provider_starts":1}));
+            "foreground":foreground.iter().map(|process| process.pid).collect::<Vec<_>>(), "shell_exec":shell_exe,
+            "shell_comm":ps(shell, "comm="), "resumes":0, "provider_starts":1}));
     }
     assert!(server.stop(), "T19 second server stops without escalation");
 }

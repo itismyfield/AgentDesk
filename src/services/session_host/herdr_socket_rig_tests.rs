@@ -248,30 +248,61 @@ impl HerdrRig {
         at: &Path,
         session: &str,
     ) -> ForcedRegistry {
-        let endpoint = |socket: &Path| {
-            HerdrEndpoint::new(node, key, socket, session)
-                .and_then(|endpoint| endpoint.with_herdr_home(Path::new("/adk/herdr")))
-                .unwrap()
-        };
-        let config = HerdrSocketConfig {
-            io_timeout: Duration::from_millis(500),
-            read_deadline: Duration::from_millis(500),
-            retry_backoff: Duration::from_millis(50),
-            max_frame_bytes: MAX_FRAME_BYTES,
-        };
-        let servers = self.servers.clone();
-        let socket = HerdrSocketTransport::new(&endpoint(&self.path), config, LineJsonFraming)
-            .with_peer_reader(Box::new(move |_| {
-                let mut servers = servers.lock().unwrap();
-                let pid = match servers.len() {
-                    1 => servers[0],
-                    _ => servers.pop_front().unwrap(),
-                };
-                Ok((pid, start(1_000)))
-            }));
-        let registry = HerdrRegistry::with_transport(endpoint(at), Arc::new(socket));
-        let os: Arc<dyn ProcessOs> = self.os.clone();
-        herdr_registry::force_for_test(registry.with_reads((off_where_dialled, os)))
+        herdr_registry::force_for_test(self.registry_builder(node, key, at, session)())
+    }
+
+    /// Installs the same fake endpoint on each async worker and blocking executor thread.
+    pub(crate) fn thread_installer(
+        &self,
+        node: &str,
+        key: &str,
+        at: &Path,
+        session: &str,
+    ) -> impl Fn() + Send + Sync + 'static {
+        let build = self.registry_builder(node, key, at, session);
+        move || std::mem::forget(herdr_registry::force_for_test(build()))
+    }
+
+    fn registry_builder(
+        &self,
+        node: &str,
+        key: &str,
+        at: &Path,
+        session: &str,
+    ) -> impl Fn() -> HerdrRegistry + Send + Sync + 'static {
+        let (node, key, at, session) = (
+            node.to_owned(),
+            key.to_owned(),
+            at.to_owned(),
+            session.to_owned(),
+        );
+        let (path, servers, os) = (self.path.clone(), self.servers.clone(), self.os.clone());
+        move || {
+            let endpoint = |socket: &Path| {
+                HerdrEndpoint::new(&node, &key, socket, &session)
+                    .and_then(|endpoint| endpoint.with_herdr_home(Path::new("/adk/herdr")))
+                    .unwrap()
+            };
+            let config = HerdrSocketConfig {
+                io_timeout: Duration::from_millis(500),
+                read_deadline: Duration::from_millis(500),
+                retry_backoff: Duration::from_millis(50),
+                max_frame_bytes: MAX_FRAME_BYTES,
+            };
+            let servers = servers.clone();
+            let socket = HerdrSocketTransport::new(&endpoint(&path), config, LineJsonFraming)
+                .with_peer_reader(Box::new(move |_| {
+                    let mut servers = servers.lock().unwrap();
+                    let pid = match servers.len() {
+                        1 => servers[0],
+                        _ => servers.pop_front().unwrap(),
+                    };
+                    Ok((pid, start(1_000)))
+                }));
+            let registry = HerdrRegistry::with_transport(endpoint(&at), Arc::new(socket));
+            let os: Arc<dyn ProcessOs> = os.clone();
+            registry.with_reads((off_where_dialled, os))
+        }
     }
 
     /// Writes launch context `nonce`'s file, as a launch does, and returns its path.

@@ -302,6 +302,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
@@ -744,6 +745,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
@@ -2603,6 +2605,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_restored_shell_retire_then_next_input_launches_a_new_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::host_evidence_on_the_registered_name_holds_the_first_catch_up_input_pg
