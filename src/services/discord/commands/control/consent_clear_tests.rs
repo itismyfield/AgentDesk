@@ -260,15 +260,10 @@ async fn actual_user_default_clear_settlement(retired: bool) {
     sentinel_question.intent.id = format!("{SOURCE}:{}", sentinel_question.intent.fifo);
     let sentinel = store.hold(sentinel_question, 100).unwrap().into_consent();
     let http = std::sync::Arc::new(poise::serenity_prelude::Http::new(""));
-    let report = super::super::clear_channel_session_state(
-        &http,
-        &shared,
-        &provider,
-        channel,
-        "/clear",
-    )
-    .await
-    .unwrap();
+    let report =
+        super::super::clear_channel_session_state(&http, &shared, &provider, channel, "/clear")
+            .await
+            .unwrap();
     assert!(
         !report.failed.contains(&"consent_discard"),
         "actual_clear_consent_settlement_has_no_failure_contract"
