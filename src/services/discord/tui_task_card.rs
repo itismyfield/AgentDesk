@@ -22,6 +22,10 @@ use serde_json::Value;
 
 use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
 
+#[cfg(test)]
+#[path = "tui_task_card/completion_card_tests.rs"]
+mod completion_card_tests;
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.

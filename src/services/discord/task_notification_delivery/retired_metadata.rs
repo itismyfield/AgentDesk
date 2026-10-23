@@ -109,6 +109,8 @@ pub(in crate::services::discord) async fn replace_confirmed_missing_card<T: Task
     event: &TaskCardEvent,
     missing_message_id: u64,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
+    let restored=store::restore_completion_event(pool,event).await.map_err(CardEnsureError::Store)?;
+    let event=&restored;
     let outcome = super::replace_confirmed_missing_card_inner(
         pool,
         clients,

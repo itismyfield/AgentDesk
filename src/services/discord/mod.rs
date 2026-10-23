@@ -137,6 +137,7 @@ mod status_panel_singleton_store;
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod synthetic_headless_message_id;
+mod session_notice;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
 mod terminal_coordinate;
@@ -157,7 +158,6 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
 }
 mod turn_completion_events;
 mod turn_end_summary;
-
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::stamp_spawn_markers;

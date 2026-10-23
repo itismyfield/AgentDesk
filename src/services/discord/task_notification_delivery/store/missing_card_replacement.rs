@@ -52,7 +52,7 @@ async fn claim_missing_card_replacement_pg(
 ) -> Result<MissingCardReplacementClaim, String> {
     let channel_id = db_id(scope.channel_id, "channel_id")?;
     let current = sqlx::query(
-        "SELECT delivery_state, bot_key, discord_message_id, revision, rendered_content, content_hash, update_count,
+        "SELECT delivery_state, bot_key, discord_message_id, revision, rendered_content, content_hash, update_count, post_started_at,
                 (lease_owner IS NOT NULL AND lease_expires_at > NOW()) AS lease_active
          FROM task_notification_card_state
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4",
@@ -82,9 +82,23 @@ async fn claim_missing_card_replacement_pg(
             return Ok(MissingCardReplacementClaim::Busy { bot_key });
         }
         let lease_owner = uuid::Uuid::new_v4().to_string();
+        let content = payload.map_or_else(
+            || current.get::<String, _>("rendered_content"),
+            |payload| {
+                payload.render(u64::try_from(current.get::<i64, _>("update_count")).unwrap_or(1))
+            },
+        );
+        let desired = payload
+            .filter(|payload| !payload.is_completion_card())
+            .map(|_| super::super::provider_bot_key(&scope.provider))
+            .unwrap_or_else(|| bot_key.clone());
+        let hash = super::super::content_hash(&content);
         let row = sqlx::query(
             "UPDATE task_notification_card_state
              SET lease_owner = $5,
+                 bot_key=CASE WHEN post_started_at IS NULL THEN $7 ELSE bot_key END,
+                 rendered_content=CASE WHEN post_started_at IS NULL THEN $8 ELSE rendered_content END,
+                 content_hash=CASE WHEN post_started_at IS NULL THEN $9 ELSE content_hash END,
                  lease_expires_at = NOW() + make_interval(secs => $6),
                  updated_at = NOW()
              WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
@@ -98,6 +112,7 @@ async fn claim_missing_card_replacement_pg(
         .bind(&scope.event_key)
         .bind(&lease_owner)
         .bind(LEASE_SECONDS)
+        .bind(&desired).bind(&content).bind(&hash)
         .fetch_optional(pool)
         .await
         .map_err(|error| format!("resume missing task card replacement: {error}"))?;
@@ -122,17 +137,17 @@ async fn claim_missing_card_replacement_pg(
     let original_hash: String = current.get("content_hash");
     let count =
         u64::try_from(current.get::<i64, _>("update_count")).map_err(|error| error.to_string())?;
-    let rendered_content = payload
-        .and_then(|payload| {
-            super::super::retired_metadata::without_metadata(&original, payload, count)
-        })
-        .unwrap_or(original);
+    let rendered_content = payload.map_or(original, |payload| payload.render(count));
+    let desired_bot = payload
+        .filter(|payload| !payload.is_completion_card())
+        .map(|_| super::super::provider_bot_key(&scope.provider))
+        .unwrap_or_else(|| bot_key.clone());
     let hash = super::super::content_hash(&rendered_content);
     let lease_owner = uuid::Uuid::new_v4().to_string();
     let row = sqlx::query(
         "UPDATE task_notification_card_state
          SET delivery_state = 'posting', discord_message_id = NULL,
-             rendered_content = $11, content_hash = $12,
+             rendered_content = $11, content_hash = $12, bot_key = $15,
              revision = $7, discord_nonce = $8, lease_owner = $9,
              lease_expires_at = NOW() + make_interval(secs => $10),
              post_started_at = NULL, last_error = NULL, updated_at = NOW()
@@ -156,6 +171,7 @@ async fn claim_missing_card_replacement_pg(
     .bind(&hash)
     .bind(&original_hash)
     .bind(&bot_key)
+    .bind(&desired_bot)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("claim missing task card replacement: {error}"))?;
@@ -210,15 +226,13 @@ fn claim_missing_card_replacement_memory(
         });
     }
     let lease_owner = uuid::Uuid::new_v4().to_string();
-    if let Some(content) = payload.and_then(|payload| {
-        super::super::retired_metadata::without_metadata(
-            &row.rendered_content,
-            payload,
-            row.update_count,
-        )
-    }) {
+    if let Some(payload) = payload {
+        let content = payload.render(row.update_count);
         row.content_hash = super::super::content_hash(&content);
         row.rendered_content = content;
+        if !payload.is_completion_card() {
+            row.bot_key = super::super::provider_bot_key(&scope.provider);
+        }
     }
     row.revision = row.revision.saturating_add(1);
     row.nonce = stable_nonce(scope, row.revision);
