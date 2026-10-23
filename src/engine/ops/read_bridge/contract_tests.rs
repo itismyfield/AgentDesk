@@ -96,45 +96,6 @@ pub(super) async fn until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// A second database: a `TestPostgresDb` holds the test lifecycle lock until it drops.
-struct OtherDb {
-    admin_url: String,
-    name: String,
-    pool: sqlx::PgPool,
-}
-
-impl OtherDb {
-    const LABEL: &str = "read bridge pg tests";
-
-    async fn create() -> Self {
-        let admin_url = crate::dispatch::test_support::postgres_admin_database_url();
-        let name = format!("agentdesk_read_bridge_{}", uuid::Uuid::new_v4().simple());
-        let url = format!(
-            "{}/{name}",
-            crate::dispatch::test_support::postgres_base_database_url()
-        );
-        crate::db::postgres::create_test_database(&admin_url, &name, Self::LABEL)
-            .await
-            .unwrap();
-        let pool = crate::db::postgres::connect_test_pool(&url, Self::LABEL)
-            .await
-            .unwrap();
-        crate::db::postgres::migrate(&pool).await.unwrap();
-        Self {
-            admin_url,
-            name,
-            pool,
-        }
-    }
-
-    async fn drop(self) {
-        self.pool.close().await;
-        crate::db::postgres::drop_test_database(&self.admin_url, &self.name, Self::LABEL)
-            .await
-            .unwrap();
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_read_bridge_reuses_context_resources() {
     let db = TestPostgresDb::create().await;
@@ -244,25 +205,33 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
     assert_eq!(js.eval(GET_LIVE), r#""v1""#);
     assert_eq!(proxy.accepted(), 3);
 
-    // Two engines on two databases keep their own values.
-    let other = OtherDb::create().await;
-    seed(&other.pool, "t1", "w1");
+    // Two engines on two pools read through their own pool's source, never through another's.
+    let side = PgWireProxy::start(&db.database_url, Duration::ZERO).await;
+    let side_pool = side.pool(2);
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from("/nonexistent");
     config.policies.hot_reload = false;
     let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
-    let tick =
-        crate::engine::PolicyEngine::new_for_tick(&config, Some(other.pool.clone())).unwrap();
+    let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(side_pool.clone())).unwrap();
+    proxy.reset_executions();
+    side.reset_executions();
     for _ in 0..3 {
         assert_eq!(
             main.eval_js::<String>(READ_ALL).unwrap(),
             r#"["s1",7,"v1","later",null]"#
         );
+    }
+    for _ in 0..3 {
         assert_eq!(
             tick.eval_js::<String>(READ_ALL).unwrap(),
-            r#"["t1",7,"w1","later",null]"#
+            r#"["s1",7,"v1","later",null]"#
         );
     }
+    assert_eq!(
+        (policy_selects(&proxy), policy_selects(&side)),
+        (18, 18),
+        "each engine's six SELECTs per read go to its own pool"
+    );
     drop((main, tick));
 
     // A Context whose SELECT is held does not hold up another Context.
@@ -279,7 +248,7 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
     })
     .await;
     let (free_tx, free_rx) = mpsc::channel();
-    let free_pool = other.pool.clone();
+    let free_pool = side_pool.clone();
     let free = std::thread::spawn(move || {
         let js = Js::new(&free_pool);
         free_tx.send(js.eval(RAW_LIVE)).unwrap();
@@ -288,7 +257,7 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
         free_rx
             .recv_timeout(WAIT)
             .expect("the other Context answers"),
-        r#"{"found":true,"value":"w1"}"#
+        r#"{"found":true,"value":"v1"}"#
     );
     assert!(held_rx.try_recv().is_err(), "the held read is still held");
     proxy.release();
@@ -301,10 +270,10 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
 
     drop(js);
     pool.close().await;
+    side_pool.close().await;
     direct.close().await;
-    drop(proxy);
+    drop((proxy, side));
     db.drop().await;
-    other.drop().await;
 }
 
 /// Runs reads on a thread with no runtime, as the policy actor does, each with its budget.
