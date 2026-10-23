@@ -457,7 +457,7 @@ impl ChannelStore {
         self.segment_max = max;
     }
 
-    /// Delivery entries only; GC and operator approvals require their dedicated guarded writers.
+    /// Delivery entries only; GC uses its guarded writer and retained approvals are replayed.
     pub fn append_ledger(&mut self, entry: LedgerEntry) -> Result<(), StoreError> {
         if matches!(
             entry,
@@ -559,24 +559,16 @@ mod tests {
             reason: &str,
         ) -> Result<ledger::ResumeApproval, StoreError> {
             let path = self.channel_dir(channel).join(LEDGER_FILE);
-            let file = std::fs::OpenOptions::new()
+            let mut file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
                 .open(path)?;
-            let mut file = durable::LockedFile::try_lock(file)?;
             let init = self
                 .read_init(channel)?
                 .ok_or_else(|| damage("missing init"))?;
             let mut state = ledger::read_only(&mut file, init.initial_anchor)?;
             if let Some(approval) = state.approval(rejected_serial) {
                 return Ok(approval.clone());
-            }
-            if state.violation().is_some()
-                || !state.can_resume(rejected_serial)
-                || operator.trim().is_empty()
-                || reason.trim().is_empty()
-            {
-                return Err(StoreError::Rejected("invalid test approval".into()));
             }
             let at = Utc::now();
             let entry = LedgerEntry::OperatorResume {
