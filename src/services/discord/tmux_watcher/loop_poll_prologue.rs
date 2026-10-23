@@ -613,7 +613,8 @@ pub(super) async fn poll_watcher_output_or_continue(
             watcher_thread_channel_id,
             "post_terminal_suppressed_output_while_tmux_alive",
             "tmux_watcher.rs:post_terminal_no_inflight_suppressed_output",
-        );
+        )
+        .await;
         loop_poll_state.utf8_decoder.clear_pending();
         commit_poll_state!();
         return PollOutcome::ContinueWatcherLoop;
@@ -625,7 +626,8 @@ pub(super) async fn poll_watcher_output_or_continue(
         tmux_session_name,
         watcher_thread_channel_id,
         &mut *loop_poll_state.last_activity_heartbeat_at,
-    );
+    )
+    .await;
     commit_poll_state!();
     PollOutcome::OutputReady {
         data,

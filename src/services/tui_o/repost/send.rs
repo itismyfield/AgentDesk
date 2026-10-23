@@ -137,7 +137,7 @@ pub(crate) struct AttemptGuard {
 }
 
 impl AttemptGuard {
-    /// Refuses once a counted request went out or `live` (switch, holder, deadline) says stop.
+    /// Refuses once a counted request went out or `live` (holder, source, deadline) says stop.
     pub(crate) fn begin(&self) -> Result<(), String> {
         if self.count.counted.load(Ordering::SeqCst) > 0 {
             return Err("this dispatch already sent its counted POST".into());

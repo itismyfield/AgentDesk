@@ -88,7 +88,7 @@ multi-GB `target/debug/incremental` per-worktree hit is pure waste.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SCCACHE_DIR` | `$HOME/.cache/sccache` | Cache location |
-| `SCCACHE_CACHE_SIZE` | `40G` | Adjustable local disk-cache ceiling |
+| `SCCACHE_CACHE_SIZE` | `15G` | Adjustable local disk-cache ceiling |
 | `SCCACHE_IDLE_TIMEOUT` | `0` | Disable idle daemon exit; retain counters between builds |
 | `RUSTC_WRAPPER` | resolved `sccache` binary | Signals Cargo to wrap rustc |
 | `PATH` | inherited path, with `/opt/homebrew/bin` conditionally prepended (§1) | Exported when that discovery branch runs, before later success/failure |
@@ -105,10 +105,10 @@ different precedence rule. See §2.4.
 
 For cache size and idle timeout, unset or empty values use the defaults; nonempty
 caller values are passed through, including `10G`, `20G`, `900`, or idle `0`.
-These helpers do not validate nonempty values. The 40G ceiling allows up to 30G
-more local disk use than the previous 10G ceiling without preallocating it.
-It aims to reduce cache eviction; a build-speed or hit-rate improvement has not
-been measured for this change.
+These helpers do not validate nonempty values. The ceiling was lowered from 40G
+to 15G on 2026-10-23: the lane builds observed that day bypassed sccache, and
+38G of the 40G cache had not been used for a day while the MacBook ran short of
+disk. The ceiling does not preallocate space.
 
 Size and idle settings take effect when the daemon starts. Exporting them does
 not resize or reconfigure an already running daemon. A deliberate restart in a
@@ -145,7 +145,7 @@ On successful activation, `apply_sccache_env` writes five keys on
 the child environment only, on POSIX only (after the `win32` early return):
 `RUSTC_WRAPPER`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and
 `PATH`. The defaults match the shell helper: resolved absolute `sccache`,
-`$HOME/.cache/sccache`, `40G`, and `0`; `PATH` carries the `/opt/homebrew/bin`
+`$HOME/.cache/sccache`, `15G`, and `0`; `PATH` carries the `/opt/homebrew/bin`
 prepend of §1 under the same condition.
 
 Its precedence rule is deliberately **not** `setup_sccache_env`'s. That helper is
@@ -194,7 +194,7 @@ harness assignment/clearing sites:
 |----------|------------------------|
 | `.cargo/config.toml:27` | `rustc-wrapper = ""`: Cargo configuration baseline, no wrapper (§2.1). |
 | `scripts/_defaults.sh:33`, `scripts/_defaults.sh:44-47` | Conditional Homebrew `PATH` prepend; exports `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and resolved `RUSTC_WRAPPER` (§2.2). |
-| `scripts/build-release.sh:71-74` | Defaults `SCCACHE_CACHE_SIZE` to `40G`; helper failure exports empty `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
+| `scripts/build-release.sh:71-74` | Defaults `SCCACHE_CACHE_SIZE` to `15G`; helper failure exports empty `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
 | `scripts/deploy-release.sh:2128-2138` | Same size default and empty wrapper pair on helper failure. |
 | `scripts/build_token.py:622-631` | Eligible POSIX child only: writes `PATH`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_IDLE_TIMEOUT`, and `RUSTC_WRAPPER` (§2.4). |
 | `scripts/ci/run-writer-namespace-windows-targets.sh:8` | Defaults `SCCACHE_IDLE_TIMEOUT` to `0`, preserving nonempty overrides. |
@@ -225,10 +225,10 @@ Mozilla action's installed binary and runtime-provided cache environment
 |-------|-----------------|-------------|---------------|----------------------|------------------------|--------|
 | Local dev (bare `cargo build`) | none by default | disabled | n/a | n/a | n/a | `.cargo/config.toml` |
 | Local dev (manual opt-in) | `sccache` | disabled | inherited or sccache platform default | inherited or upstream `10G` | inherited or upstream `600` | shell env |
-| Campaign worktree build (activation eligible) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `build_token.py :: apply_sccache_env` (§2.4) |
-| `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
-| `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
-| Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `40G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
+| Campaign worktree build (activation eligible) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `build_token.py :: apply_sccache_env` (§2.4) |
+| `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
+| `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `.cargo/config.toml` + `setup_sccache_env` |
+| Installer source build (helper available) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `15G` | `0` | `scripts/install.sh` + `setup_sccache_env` |
 | CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | inherited/upstream | workflow env + action |
 | CI Windows exact targets (`ci-pr.yml` `check_fast_cross_os_targets`) | `sccache` | disabled | provided by `sccache-action` | workflow `10G` | `0` unless set | `scripts/ci/run-writer-namespace-windows-targets.sh` |
 | CI macOS hosted | none | disabled | n/a | n/a | n/a | workflow clears `RUSTC_WRAPPER` + `SCCACHE_GHA_ENABLED` |

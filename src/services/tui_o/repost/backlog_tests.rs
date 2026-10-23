@@ -28,14 +28,13 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Reports {
 }
 
 fn turn_with(
-    switch: RepostSwitch,
     pool: PgPool,
     io: &Arc<Io>,
     path: &std::path::Path,
     opened: &Arc<AtomicUsize>,
 ) -> ChannelTurn<Io> {
     ChannelTurn::new(
-        Runner::new(switch, pool, BOT, run()),
+        Runner::new(pool, BOT, run()),
         {
             let (io, opened) = (Arc::clone(io), Arc::clone(opened));
             Box::new(move || {
@@ -65,7 +64,7 @@ fn old_backlog(writer: &mut Writer) {
 }
 
 #[tokio::test]
-async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_pg() {
+async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let dir = tempfile::tempdir().unwrap();
@@ -82,30 +81,7 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_p
     let path = dir.path().join("backlog-provenance.jsonl");
     let reports = Reports::default();
     let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(reports.clone()));
-    let config = |enabled| {
-        Arc::new(
-            serde_yaml::from_str::<crate::config::Config>(&format!(
-                "server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n    channels: [{CHANNEL}]\n"
-            ))
-            .unwrap(),
-        )
-    };
-    let (tx, rx) = tokio::sync::watch::channel(Some(config(false)));
-    let mut turn = turn_with(
-        RepostSwitch::new(None, rx.clone()),
-        pool.clone(),
-        &io,
-        &path,
-        &opened,
-    );
-    turn.turn(&mut writer)
-        .with_subscriber(subscriber.clone())
-        .await;
-    assert!(!path.exists(), "OFF creates no report sidecar");
-    assert_eq!(opened.load(Ordering::SeqCst), 0);
-    assert!(reports.0.lock().unwrap().is_empty());
-
-    tx.send_replace(Some(config(true)));
+    let mut turn = turn_with(pool.clone(), &io, &path, &opened);
     turn.turn(&mut writer)
         .with_subscriber(subscriber.clone())
         .await;
@@ -116,7 +92,11 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_p
     );
     assert_eq!(state.state().pending().count(), 0);
     let events = reports.0.lock().unwrap().clone();
-    assert_eq!(events.len(), 1, "first ON produces one operational report");
+    assert_eq!(
+        events.len(),
+        1,
+        "first turn produces one operational report"
+    );
     assert_eq!(events[0]["count"], "2");
     assert_eq!(events[0]["channel"], CHANNEL.to_string());
     for name in ["old-not-found", "old-unresolved", "BeforeActivation"] {
@@ -130,32 +110,15 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_p
         .with_subscriber(subscriber.clone())
         .await;
     drop(turn);
-    let mut turn = turn_with(
-        RepostSwitch::new(None, rx),
-        pool.clone(),
-        &io,
-        &path,
-        &opened,
-    );
+    let mut turn = turn_with(pool.clone(), &io, &path, &opened);
     turn.turn(&mut writer)
         .with_subscriber(subscriber.clone())
         .await;
-    let after_reopen = std::fs::read(&path).unwrap();
-    tx.send_replace(Some(config(false)));
-    turn.turn(&mut writer)
-        .with_subscriber(subscriber.clone())
-        .await;
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        after_reopen,
-        "OFF adds no report or activation"
-    );
-    tx.send_replace(Some(config(true)));
     turn.turn(&mut writer).with_subscriber(subscriber).await;
     assert_eq!(
         reports.0.lock().unwrap().len(),
         1,
-        "repeat/reopen/re-ON never duplicate a report"
+        "repeat/reopen never duplicate a report"
     );
     assert_eq!(io.posts.load(Ordering::SeqCst), 0);
     assert_eq!(writer.prepared, 0);
@@ -203,7 +166,7 @@ async fn d4act3_backlog_append_failure_blocks_ready_repost_and_retries_after_reo
     let io = Arc::new(Io::new());
     let opened = Arc::new(AtomicUsize::new(0));
     let path = dir.path().join("backlog-provenance.jsonl");
-    let mut turn = turn_with(switch(true), pool.clone(), &io, &path, &opened);
+    let mut turn = turn_with(pool.clone(), &io, &path, &opened);
     turn.runner
         .probes
         .insert(ready.clone(), ready_probe(&pool, &ready, &io).await);

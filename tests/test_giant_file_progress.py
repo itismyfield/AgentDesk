@@ -358,7 +358,7 @@ class GiantRealSnapshotTest(unittest.TestCase):
             if expected:
                 self.assertIn("new or growing giant", evidence["reason"])
             else:
-                self.assertIn("WARN:", err)
+                self.assertIn("WARNING:", err)
 
     def test_real_snapshot_new_giant_is_blocked(self):
         rc, evidence, _ = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000})

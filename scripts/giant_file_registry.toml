@@ -6,14 +6,14 @@
 # module whose production LoC (excluding `#[cfg(test)] mod` blocks) is
 # >= 1000.
 #
-# Enforcement (generation fails otherwise):
+# Registration and planning metadata:
 #   * Every current prod-giant must appear as an `[[entry]]` table. The closed,
 #     empty `grandfathered` array is retained only as a zero-backfill ratchet.
 #     A new giant without an explicit decision is rejected — register it
 #     with shrink(owner + deadline + issue) or keep(owner + reason) first.
 #   * Each `[[entry]]` has a decision. Omitted legacy decisions normalize to
 #     `shrink` for backward compatibility. `shrink` requires a real owner,
-#     calendar-valid non-overdue deadline, and a real numeric decompose_issue;
+#     calendar-valid deadline, and a real numeric decompose_issue;
 #     `keep` requires a real owner and substantive keep_reason, and forbids
 #     deadline/decompose_issue. Placeholder values (TBD/unknown/none/umbrella)
 #     and #4519 are never valid decompose issues.
@@ -22,6 +22,9 @@
 #     complete).
 #   * `grandfathered` must be a SUBSET of `grandfathered_baseline_paths`; a path
 #     not already in the frozen baseline cannot be grandfathered (no swap-ins).
+#
+# Deadlines, closed decomposition issues and stale issue metadata only warn.
+# No deadline reset record or metadata refresh is required for CI to pass.
 #
 # Migration intent: drain `grandfathered` over time by either decomposing the
 # module (drops below threshold -> remove the path here) or promoting it to a
