@@ -22,7 +22,8 @@ pub(super) async fn admit_uncaptured_terminal(
             kind: crate::services::agent_protocol::NativeTerminalKind::Aborted,
             ..
         }
-    ) || matches!(&message, StreamMessage::CodexTuiTerminalDone { result, .. } if result.is_empty());
+    ) || ((can_deliver_directly || mutant("headless_admission"))
+        && matches!(&message, StreamMessage::CodexTuiTerminalDone { result, .. } if result.is_empty()));
     let mut owned_local = local.clone();
     let mut owned_baseline = baseline.clone();
     let expected = expected.clone();
@@ -40,7 +41,7 @@ pub(super) async fn admit_uncaptured_terminal(
     .map_err(|_| GuardedSaveOutcome::IoError)?;
     *local = owned_local;
     *baseline = owned_baseline;
-    // Empty completions and aborts keep their obligation when the source proof is rejected.
+    // Direct empty completions and aborts keep their obligation when source proof is rejected.
     match admitted {
         (_, None, _) if requires_admission => Err(GuardedSaveOutcome::AuthorityPinned),
         admitted => Ok(admitted),

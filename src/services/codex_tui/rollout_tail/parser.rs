@@ -491,7 +491,12 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             if (state.native_seeded
                 || state.managed_turn.is_some()
                 || state.discord_origin_prompt.is_some())
-                && !started_turn_named_by(state, payload) =>
+                && !(started_turn_named_by(state, payload)
+                    || (!managed_empty::mutant("managed_complete")
+                        && same_codex_turn(
+                            state.managed_turn.as_deref(),
+                            codex_payload_turn_id(payload),
+                        ))) =>
         {
             state.lifecycle_activity = true;
             None

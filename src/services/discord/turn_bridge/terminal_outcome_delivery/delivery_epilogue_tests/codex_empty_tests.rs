@@ -80,7 +80,12 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
     let mut rows = records();
     let complete = rows.pop().unwrap();
     match case {
-        "previous" => rows[0] = event("task_started", "previous-turn"),
+        "previous" | "previous_nonempty" => {
+            rows[0] = event("task_started", "previous-turn");
+            if case == "previous_nonempty" {
+                rows[7]["payload"]["content"][0]["text"] = json!("current native answer");
+            }
+        }
         "open_tool" => rows.push(json!({"type":"response_item","payload":{
             "type":"function_call","name":"exec","call_id":"open-tool","arguments":"{}"}})),
         "stale_origin" => {
@@ -143,7 +148,7 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
     ready_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("managed tail reaches native EOF");
-    if case != "hook_after" {
+    if !matches!(case, "hook_after" | "previous_nonempty") {
         hook(tmux);
     }
     if !matches!(case, "hook_only" | "late_before_origin") {
@@ -202,6 +207,31 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
             )),
             "{case}: unverified terminal {messages:?}"
         );
+    } else if case == "previous_nonempty" {
+        assert!(
+            matches!(
+                result.read_result,
+                ReadOutputResult::Completed { offset: END }
+            ),
+            "previous_nonempty: managed nonempty completion finishes promptly: {messages:?}"
+        );
+        assert_eq!(
+            messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result == "current native answer")).count(),
+            1,
+            "previous_nonempty: one Done retains the current answer"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| matches!(
+                    m,
+                    StreamMessage::Done { .. } | StreamMessage::CodexTuiTerminalDone { .. }
+                ))
+                .count(),
+            1,
+            "previous_nonempty: exactly one terminal"
+        );
+        assert!(messages.iter().all(|m| !matches!(m, StreamMessage::Text { content } if content != "current native answer")), "previous_nonempty: no previous or synthesized text");
     } else {
         assert!(
             matches!(
@@ -256,6 +286,7 @@ async fn managed_empty_native_turn_rejects_unrelated_completion_and_open_tools()
         "open_tool",
         "stale_origin",
         "late_before_origin",
+        "previous_nonempty",
     ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
         let _state = lock_dedupe();
@@ -322,12 +353,17 @@ async fn drive_bridge(
 #[tokio::test]
 async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_notice() {
     for (o, order) in [
+        (false, "headless"),
         (false, "hook_before"),
         (false, "commentary_only"),
         (true, "hook_before"),
         (true, "hook_after"),
     ] {
-        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+        if order == "headless" {
+            driver.gateway = Arc::new(crate::services::discord::gateway::HeadlessGateway);
+            assert!(!driver.gateway.can_deliver_directly());
+        }
         let _state = lock_dedupe();
         let selected = [(DRIVER_CHANNEL_ID, RuntimeHandoffKind::CodexTui)];
         let _o = crate::services::tui_o::cutover::test_override::force_channels(if o {
@@ -347,7 +383,7 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
         assert_eq!(
             signal,
             discord::turn_bridge::BridgeCompletionSignal::Finalized,
-            "o={o} order={order}"
+            "managed empty terminal reaches finalizer: o={o} order={order}"
         );
         let snapshot = discord::mailbox_snapshot(&driver.shared, channel).await;
         assert!(
@@ -362,51 +398,53 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
             inflight::load_inflight_state(&ProviderKind::Codex, DRIVER_CHANNEL_ID).is_none(),
             "inflight removed"
         );
-        let bodies = driver.published_bodies.lock().unwrap().clone();
-        let writes = driver.observations();
-        assert_eq!(
-            writes
-                .iter()
-                .filter(|write| write.content.contains("응답 내용 없이 턴을 종료"))
-                .count(),
-            usize::from(order != "commentary_only"),
-            "send, edit and replace show one empty-response notice"
-        );
-        assert_eq!(
-            bodies
-                .iter()
-                .filter(|body| body.contains("응답 내용 없이 턴을 종료"))
-                .count(),
-            usize::from(order != "commentary_only"),
-            "one visible empty-response notice on o={o}: {bodies:?}"
-        );
-        assert!(
-            !bodies.iter().any(|body| body.contains("previous answer")),
-            "never reuse a previous answer"
-        );
-        if order == "commentary_only" {
-            assert!(
+        if order != "headless" {
+            let bodies = driver.published_bodies.lock().unwrap().clone();
+            let writes = driver.observations();
+            assert_eq!(
+                writes
+                    .iter()
+                    .filter(|write| write.content.contains("응답 내용 없이 턴을 종료"))
+                    .count(),
+                usize::from(order != "commentary_only"),
+                "send, edit and replace show one empty-response notice"
+            );
+            assert_eq!(
                 bodies
                     .iter()
-                    .any(|body| body.contains("current commentary")),
-                "current commentary remains visible"
+                    .filter(|body| body.contains("응답 내용 없이 턴을 종료"))
+                    .count(),
+                usize::from(order != "commentary_only"),
+                "one visible empty-response notice on o={o}: {bodies:?}"
             );
-        }
-        if o {
-            assert_eq!(footer_posts.len(), 1, "O posts the native completion once");
-            assert!(footer_posts[0].starts_with("-# ✅"));
             assert!(
-                !writes.iter().any(|write| write.content.contains("-# ✅")),
-                "bridge does not duplicate O's footer"
+                !bodies.iter().any(|body| body.contains("previous answer")),
+                "never reuse a previous answer"
+            );
+            if order == "commentary_only" {
+                assert!(
+                    bodies
+                        .iter()
+                        .any(|body| body.contains("current commentary")),
+                    "current commentary remains visible"
+                );
+            }
+            if o {
+                assert_eq!(footer_posts.len(), 1, "O posts the native completion once");
+                assert!(footer_posts[0].starts_with("-# ✅"));
+                assert!(
+                    !writes.iter().any(|write| write.content.contains("-# ✅")),
+                    "bridge does not duplicate O's footer"
+                );
+            }
+            assert!(
+                driver
+                    .observations()
+                    .iter()
+                    .any(|call| call.call == DriverCall::Replace),
+                "placeholder ends on terminal delivery"
             );
         }
-        assert!(
-            driver
-                .observations()
-                .iter()
-                .any(|call| call.call == DriverCall::Replace),
-            "placeholder ends on terminal delivery"
-        );
         assert!(
             discord::mailbox_try_start_turn(
                 &driver.shared,
