@@ -69,6 +69,7 @@ pub(crate) enum OperatorRetryClass {
 }
 
 impl IntakeOutboxStatus {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 9] = [
         Self::Pending,
         Self::Claimed,
