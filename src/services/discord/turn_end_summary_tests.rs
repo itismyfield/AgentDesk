@@ -142,6 +142,8 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = 7_271_002;
+    let mut state = row(channel, 1, "quota-boundary");
+    state.started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let overlay =
         super::super::org_schema::spawn_auth_overlay(ProviderKind::Codex, Some(channel)).unwrap();
     let now = chrono::Utc::now();
@@ -158,9 +160,6 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
         }
     }
     let _cleanup = Cleanup(overlay.profile_id);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let mut state = row(channel, 1, "quota-boundary");
-    state.started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let summary = LiveSummary::bridge(
         ChannelId::new(channel),
         &state,

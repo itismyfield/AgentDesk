@@ -227,7 +227,7 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
     let quota = quota::snapshot(
         provider.as_str(),
         summary.key.channel_id.get(),
-        summary.started,
+        summary.started.map(quota::Selected::Within),
     );
     let text = render(
         summary.outcome,

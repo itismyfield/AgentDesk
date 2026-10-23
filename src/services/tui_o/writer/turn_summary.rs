@@ -207,7 +207,11 @@ impl TurnSummaryRun {
             ShadowProvider::Claude => "claude",
             ShadowProvider::Codex => "codex",
         };
-        let quota = quota::snapshot(provider, key.channel_id, turn.started);
+        let quota = quota::snapshot(
+            provider,
+            key.channel_id,
+            turn.started.map(quota::Selected::Before),
+        );
         vec![Derived::Piece(PieceWork {
             unit_key: key,
             index: 0,

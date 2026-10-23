@@ -15,6 +15,13 @@ pub(crate) struct Quota {
     seven_day: Option<Window>,
 }
 
+// Native starts follow launch selection; Legacy intake timestamps precede it.
+#[derive(Clone, Copy)]
+pub(crate) enum Selected {
+    Before(DateTime<Utc>),
+    Within(DateTime<Utc>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Window {
     percent: u8,
@@ -178,23 +185,23 @@ pub(crate) fn publish(provider: &str, profile: &str, data: &str, fetched_at: i64
 fn cached_codex(
     cache: &RwLock<Cache>,
     channel: u64,
-    started: DateTime<Utc>,
+    selection: Selected,
     now: DateTime<Utc>,
 ) -> Option<Quota> {
     let cache = cache.try_read().ok()?;
     let selected = cache.profiles.get(&("codex".to_string(), channel))?;
-    if selected.at > started {
+    let allowed = match selection {
+        Selected::Before(started) => selected.at <= started,
+        Selected::Within(started) => (started..=now).contains(&selected.at),
+    };
+    if !allowed {
         return None;
     }
     let (fetched, quota) = cache.quotas.get(&selected.profile)?;
     fresh(*fetched, now).then_some(*quota)?.current(now)
 }
 
-pub(crate) fn snapshot(
-    provider: &str,
-    channel: u64,
-    started: Option<DateTime<Utc>>,
-) -> Option<Quota> {
+pub(crate) fn snapshot(provider: &str, channel: u64, selection: Option<Selected>) -> Option<Quota> {
     let now = Utc::now();
     match provider {
         "claude" => {
@@ -208,7 +215,7 @@ pub(crate) fn snapshot(
             }
             claude(&CswapService::global().cached_accounts_for_summary()?, now)
         }
-        "codex" => cached_codex(&CACHE, channel, started?, now),
+        "codex" => cached_codex(&CACHE, channel, selection?, now),
         _ => None,
     }
 }

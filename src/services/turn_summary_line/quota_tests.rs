@@ -188,21 +188,72 @@ fn cache() -> RwLock<Cache> {
 #[test]
 fn codex_requires_the_selected_profile_and_a_fresh_cache() {
     let cache = cache();
-    let quota = cached_codex(&cache, 42, now(), now()).unwrap();
+    let quota = cached_codex(&cache, 42, Selected::Before(now()), now()).unwrap();
     assert_eq!(quota.five_hour.unwrap().percent, 15);
-    assert_eq!(cached_codex(&cache, 43, now(), now()), None);
     assert_eq!(
-        cached_codex(&cache, 42, now() - chrono::Duration::milliseconds(1), now()),
+        cached_codex(&cache, 43, Selected::Before(now()), now()),
         None
     );
-    assert!(cached_codex(&cache, 42, now(), now() + chrono::Duration::seconds(900)).is_some());
     assert_eq!(
-        cached_codex(&cache, 42, now(), now() + chrono::Duration::seconds(901)),
+        cached_codex(
+            &cache,
+            42,
+            Selected::Before(now() - chrono::Duration::milliseconds(1)),
+            now()
+        ),
         None
     );
+    assert!(
+        cached_codex(
+            &cache,
+            42,
+            Selected::Before(now()),
+            now() + chrono::Duration::seconds(900)
+        )
+        .is_some()
+    );
+    assert_eq!(
+        cached_codex(
+            &cache,
+            42,
+            Selected::Before(now()),
+            now() + chrono::Duration::seconds(901)
+        ),
+        None
+    );
+    assert!(cached_codex(&cache, 42, Selected::Within(now()), now()).is_some());
+    assert!(
+        cached_codex(
+            &cache,
+            42,
+            Selected::Within(now() - chrono::Duration::milliseconds(1)),
+            now()
+        )
+        .is_some()
+    );
+    let key = ("codex".to_string(), 42);
+    cache.write().unwrap().profiles.get_mut(&key).unwrap().at =
+        now() - chrono::Duration::milliseconds(1);
+    assert_eq!(
+        cached_codex(&cache, 42, Selected::Within(now()), now()),
+        None
+    );
+    cache.write().unwrap().profiles.get_mut(&key).unwrap().at =
+        now() + chrono::Duration::milliseconds(1);
+    assert_eq!(
+        cached_codex(&cache, 42, Selected::Within(now()), now()),
+        None
+    );
+    cache.write().unwrap().profiles.get_mut(&key).unwrap().at = now();
     cache.write().unwrap().quotas.remove("named");
-    assert_eq!(cached_codex(&cache, 42, now(), now()), None);
-    assert_eq!(snapshot("unsupported", 42, Some(now())), None);
+    assert_eq!(
+        cached_codex(&cache, 42, Selected::Before(now()), now()),
+        None
+    );
+    assert_eq!(
+        snapshot("unsupported", 42, Some(Selected::Before(now()))),
+        None
+    );
 }
 
 #[test]
@@ -238,7 +289,7 @@ fn contended_quota_cache_still_renders_without_waiting_for_its_writer() {
     let (sent, received) = std::sync::mpsc::channel();
     let reader = cache.clone();
     let thread = std::thread::spawn(move || {
-        let quota = cached_codex(&reader, 42, now(), now());
+        let quota = cached_codex(&reader, 42, Selected::Before(now()), now());
         sent.send(render(Outcome::Completed, Some(1000), None, quota))
             .unwrap();
     });
@@ -325,5 +376,8 @@ fn recorded_profile_and_collected_quota_reach_the_o_summary_boundary() {
     assert!(lines[0].starts_with("-# ⏱️ 2초 · 5h 15% ("), "{lines:?}");
     assert!(lines[0].contains(" · 7d 38% ("), "{lines:?}");
     publish("codex", &overlay.profile_id, "{}", started.timestamp());
-    assert_eq!(snapshot("codex", channel, Some(started)), None);
+    assert_eq!(
+        snapshot("codex", channel, Some(Selected::Before(started))),
+        None
+    );
 }
