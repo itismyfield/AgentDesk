@@ -128,9 +128,11 @@ impl Forwarding {
 
     /// The single request the owner received: the operation's path and body, and the forwarding
     /// headers naming this origin, the session's owner and the shared bearer.
-    fn only(&self, path: &str, body: Value) -> Received {
+    fn only(&self, path: &str, body: Value, origin: (StatusCode, &Value)) -> Received {
         let received = self.received();
-        assert_eq!(received.len(), 1, "one request reached the owner");
+        let (status, reply) = origin;
+        let reached = "one request reached the owner; the origin answered";
+        assert_eq!(received.len(), 1, "{reached} {status} {reply}");
         let request = received[0].clone();
         assert_eq!(
             (request.method.as_str(), request.path.as_str()),
@@ -338,7 +340,11 @@ fn e08_non_owner_real_forward_once_pg() {
                 _ => probe_before_postlude(forwarding.inside_owner(effects.clone(), None)),
             }
             let (status, reply) = forwarding.post(&path(&node.key), body.clone()).await;
-            let received = forwarding.only(&format!("/api{}", path(&node.key)), body.clone());
+            let received = forwarding.only(
+                &format!("/api{}", path(&node.key)),
+                body.clone(),
+                (status, &reply),
+            );
             let after = node.killed(&rig).await;
             let retired_once = |after: &Killed| {
                 assert_eq!(after.closes(), 1, "{name}: the owner closed once");
@@ -463,7 +469,7 @@ fn e07_non_owner_real_forward_once_pg() {
                 probe_before_postlude(forwarding.inside_owner(flag.clone(), None));
             }
             let (status, reply) = forwarding.post(&uri, body.clone()).await;
-            let received = forwarding.only(&format!("/api{uri}"), body.clone());
+            let received = forwarding.only(&format!("/api{uri}"), body.clone(), (status, &reply));
             assert!(flag.load(Ordering::SeqCst), "{name}: the owner's probe ran");
             let after = node.effects(&rig).await;
             if name == "cancel-forward-retires" {
