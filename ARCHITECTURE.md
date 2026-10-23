@@ -57,7 +57,6 @@ src/
 │   │   ├── apply_config_tests.rs
 │   │   ├── plan.rs
 │   │   └── source.rs
-│   ├── o_transition/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
