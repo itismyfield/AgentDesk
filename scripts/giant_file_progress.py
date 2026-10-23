@@ -95,8 +95,6 @@ def new_or_growing_errors(base: dict[str, object],
 def planning_warnings(base: dict[str, object], candidate: dict[str, object],
                       facts: dict[str, object]) -> list[str]:
     warnings = []
-    if candidate["overdue"]:
-        warnings.append("overdue giant plans: " + ", ".join(candidate["overdue"]))
     changed = facts["changed"] & LEDGER
     if changed:
         warnings.append("giant planning ledger changed: " + ", ".join(sorted(changed)))
@@ -168,6 +166,9 @@ def main() -> int:
             candidate_root = Path(temporary) / "candidate"
             candidate_root.mkdir(); archive(candidate_sha, candidate_root)
             candidate = inventory.giant_file_snapshot(candidate_root, evaluation_date=today)
+            for path in candidate["overdue"]:
+                _, _, deadline, issue, _ = candidate["registrations"][path]
+                print(inventory.giant_deadline_warning(path, deadline, issue), file=sys.stderr)
             if event == "pull_request":
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
@@ -178,7 +179,7 @@ def main() -> int:
                 warnings = planning_warnings(base, candidate, facts)
                 payload["warnings"] = warnings
                 for warning in warnings:
-                    print(f"WARN: {warning}", file=sys.stderr)
+                    print(f"WARNING: {warning}", file=sys.stderr)
                 base_evaluator = base_root / EVALUATOR
                 base_evaluator_sha256 = (hashlib.sha256(base_evaluator.read_bytes()).hexdigest()
                                          if base_evaluator.exists() else "")
