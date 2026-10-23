@@ -162,3 +162,28 @@ test("an old binary missing http.get repeats unavailable WARN hourly and resets 
   assert.equal(f.state.logs.warn.length, 3);
   assert.deepEqual(f.state.logs.error, []);
 });
+
+test("timeouts 5min sweep leaves idle sessions without recap notifications", () => {
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 12345 },
+    dbQuery(sql) {
+      if (sql.includes("FROM sessions") && sql.includes("idle_recap_posted_at")) {
+        return [{
+          session_key: "claude/test:AgentDesk-claude-idle",
+          provider: "claude",
+          thread_channel_id: null,
+          last_heartbeat: new Date(Date.now() - 10 * 60 * 1000).toISOString()
+        }];
+      }
+      return [];
+    }
+  });
+
+  policy.onTick5min({});
+
+  assert.ok(state.executions.some(({ sql }) => sql.includes("DELETE FROM kv_meta")),
+    "the shared five-minute sweep still runs");
+  assert.equal(state.httpPosts.filter(({ url }) => url.endsWith("/idle-recap")).length, 0,
+    "idle sessions must never request a recap card");
+  assert.deepEqual(state.logs.error, [], "the sweep must not hide a missing recap module error");
+});

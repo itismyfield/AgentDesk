@@ -720,16 +720,6 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ),
         ep(
             "POST",
-            "/api/sessions/{session_key}/idle-recap",
-            "sessions",
-            "Trigger an idle-recap card for a resumable dispatched session.",
-        )
-        .with_params([(
-            "session_key",
-            path_param("Dispatched session key to recap"),
-        )]),
-        ep(
-            "POST",
             "/api/sessions/{session_key}/reconcile-stale-turn",
             "sessions",
             "Reset a stale busy session to idle only when it has no active dispatch and an expired heartbeat.",

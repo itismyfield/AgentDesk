@@ -199,12 +199,7 @@ pub(crate) async fn resolve_agent_id_for_session_pg(
         return Some(agent_id);
     }
 
-    // #2097: callers (e.g. `save_provider_session_id`) know the originating
-    // Discord channel ID at hook time. The session_key-derived path can only
-    // recover the channel *name* ("adk-cc"), which never matches the numeric
-    // `agents.discord_channel_*` columns, so without this explicit channel id
-    // hop the upsert leaves `sessions.agent_id` NULL and downstream features
-    // (idle-recap, etc.) silently skip.
+    // Prefer the persisted channel id so hooks bind sessions to the numeric agent channel.
     if let Some(channel_id) = normalize_thread_channel_id(channel_id) {
         if let Some(agent_id) = resolve_agent_id_from_channel_name_pg(pool, &channel_id).await {
             return Some(agent_id);

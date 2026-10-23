@@ -427,7 +427,6 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
             &ProviderKind::Codex,
             serenity::ChannelId::new(CANARY_CHANNEL),
             "!clear",
-            SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();

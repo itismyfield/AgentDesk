@@ -497,7 +497,6 @@ src/
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
-│   │   ├── idle_recap.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs
@@ -1244,11 +1243,6 @@ src/
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
-│   │   ├── idle_recap/
-│   │   │   ├── card.rs
-│   │   │   ├── context_display.rs
-│   │   │   ├── relay_integrity.rs
-│   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
@@ -2659,8 +2653,6 @@ src/
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
-│   │   ├── idle_recap.rs
-│   │   ├── idle_recap_interaction.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
