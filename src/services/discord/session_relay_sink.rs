@@ -549,10 +549,7 @@ impl SessionBoundDiscordRelaySink {
                     provider.clone(),
                     None,
                 );
-                #[cfg(test)]
-                let controller_gateway = gateway.unwrap_or(&live_gateway);
-                #[cfg(not(test))]
-                let controller_gateway: &dyn super::gateway::TurnGateway = &live_gateway;
+                let controller_gateway = short_controller::choose_gateway(gateway, &live_gateway);
                 return short_controller::deliver_short_replace_via_controller(
                     controller_gateway,
                     short_controller::SinkShortReplaceCtx {
