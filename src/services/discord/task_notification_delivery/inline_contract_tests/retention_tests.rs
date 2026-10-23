@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn monitor_receipt_retention_is_bounded_and_outlives_card_retention_pg() {
-    let (_database, pool) = database("bounded Monitor receipt retention").await;
+    let (database, pool) = database("bounded Monitor receipt retention").await;
     sqlx::query(
         "INSERT INTO task_notification_monitor_receipt
          (channel_id,provider,session_key,event_key,payload_fingerprint,discord_message_id,bot_key,observed_at)
@@ -57,11 +57,13 @@ async fn monitor_receipt_retention_is_bounded_and_outlives_card_retention_pg() {
         remaining, 2,
         "expired receipts are eventually removed; recent receipts survive"
     );
+    pool.close().await;
+    database.drop().await;
 }
 
 #[tokio::test]
 async fn monitor_receipt_many_payloads_preserve_new_event_and_replay_pg() {
-    let (_database, pool) = database("indexed Monitor receipt candidate lookup").await;
+    let (database, pool) = database("indexed Monitor receipt candidate lookup").await;
     let transport = Transport::default();
     let first = monitor(Some("indexed-first"), 0);
     deliver(&pool, &transport, &first).await;
@@ -91,15 +93,15 @@ async fn monitor_receipt_many_payloads_preserve_new_event_and_replay_pg() {
     );
     assert_eq!(snapshot(&pool, &next).await.count, 2);
     pool.close().await;
-    drop(_database);
+    database.drop().await;
     {
-        let _database = DispatchPostgresTestDb::try_create(
+        let database = DispatchPostgresTestDb::try_create(
             "adk_inline_tc",
             "exact receipt lookup bypasses legacy candidates",
         )
         .await
         .expect("receipt lock fixture requires isolated PostgreSQL");
-        let pool = _database.connect_and_migrate_with_max_connections(2).await;
+        let pool = database.connect_and_migrate_with_max_connections(2).await;
         assert_eq!(
             pool.options().get_max_connections(),
             2,
@@ -147,5 +149,7 @@ async fn monitor_receipt_many_payloads_preserve_new_event_and_replay_pg() {
                 "exact receipt replay must make no transport call"
             );
         }
+        pool.close().await;
+        database.drop().await;
     }
 }
