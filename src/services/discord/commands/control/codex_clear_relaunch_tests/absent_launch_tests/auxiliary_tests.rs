@@ -45,7 +45,7 @@ pub(in crate::services::discord) async fn restore_instructions(
         .mailbox(channel)
         .replace_queue(instructions, persistence.clone())
         .await;
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,
@@ -713,7 +713,7 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
         SpawnNonceMarker::Known(n2.execution_nonce.clone())
     );
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         serenity::ChannelId::new(CANARY_CHANNEL),
@@ -762,7 +762,7 @@ async fn recovery_diagnostic(
         })
     });
     let durable_pending =
-        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+        crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
             &ProviderKind::Codex,
             &fixture.shared.token_hash,
             channel,
@@ -770,7 +770,7 @@ async fn recovery_diagnostic(
         .map(|marker| {
             marker.map(|(item, override_channel)| (QueueIdentity::of(&item), override_channel))
         });
-    let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let disk = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,
@@ -911,7 +911,7 @@ pub(in crate::services::discord) async fn wait_recovery_custody_settled(
                 CANARY_CHANNEL,
             );
             let pending =
-                crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+                crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
                     &ProviderKind::Codex,
                     &fixture.shared.token_hash,
                     channel,

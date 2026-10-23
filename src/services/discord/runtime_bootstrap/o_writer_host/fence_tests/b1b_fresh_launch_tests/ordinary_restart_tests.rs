@@ -149,6 +149,12 @@ async fn restart_with_binding(
     channel.set_binding_checkpoint(proof.seq).unwrap();
     drop(channel);
     let output = Discord::start().await;
+    assert!(output.http.get_gateway().await.is_err());
+    assert_eq!(
+        output.history_reads.load(Ordering::SeqCst),
+        0,
+        "an unrelated GET is not a history read-back"
+    );
     let preserved = if fresh {
         Some(fresh_scope_restart_tests::install(&mut fixture, &store, &era, &output).await)
     } else {
@@ -229,7 +235,7 @@ async fn restart_with_binding(
     if let Some(fault) = fault {
         fresh_scope_restart_tests::corrupt(&fixture, fault);
     }
-    let mut prepared = parts(
+    let mut prepared = parts_with_rest(
         &fixture.shared,
         &ProviderKind::Codex,
         None,

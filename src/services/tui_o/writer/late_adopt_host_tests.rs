@@ -1,11 +1,82 @@
 //! Late binding, transient refusal, rotation and live OFF use the actual managed host.
 
-use super::late_delegated::{Legacy, closed, seed};
 use super::*;
+use crate::config::Config;
+use crate::services::tui_o::channel_policy;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, intake_route};
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, start_managed};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+
+pub(super) const GATEWAY: &str = "late-adopt-gateway";
+pub(super) const WORKER: &str = "late-adopt-worker";
+
+pub(super) fn config(foreign: bool) -> Config {
+    serde_json::from_value(serde_json::json!({
+        "server": {},
+        "cluster": {
+            "enabled": true,
+            "instance_id": if foreign { WORKER } else { GATEWAY },
+            "gateway_preferred_instance_id": GATEWAY
+        },
+        "tui_o": {"writer": {"channels": [CHANNEL], "late_adopt": true}},
+        "agents": [{"id": "late", "name": "Late", "channels": {
+            "claude": {"id": CHANNEL.to_string(), "runtime": "tui"}
+        }}]
+    }))
+    .unwrap()
+}
+
+/// Never installs a state by hand: seed the actual temporary store through production code.
+pub(super) fn seed(harness: &Harness, foreign: bool) -> test_override::ChannelsGuard {
+    let config = config(foreign);
+    let snapshot = BootChannels::validate(&config)
+        .unwrap()
+        .seeded(true, &config, |channels, _| {
+            Ok(channel_policy::stored(
+                Some(harness._runtime.path()),
+                channels,
+            ))
+        })
+        .unwrap();
+    crate::config_live_reload::install(config);
+    test_override::force_boot(snapshot)
+}
+
+pub(super) struct Legacy {
+    pub(super) path: PathBuf,
+    pub(super) frontier: AtomicU64,
+}
+
+impl LegacyView for Legacy {
+    fn started(&self) -> bool {
+        true
+    }
+
+    fn cursor(&self, _: &str) -> LegacyCursor {
+        LegacyCursor::Bound {
+            path: self.path.clone(),
+            offset: std::fs::metadata(&self.path).unwrap().len(),
+        }
+    }
+
+    fn late_cursor(&self, tmux: &str) -> Result<LegacyCursor, String> {
+        Ok(self.cursor(tmux))
+    }
+
+    fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+        Some(self.frontier.load(Ordering::SeqCst))
+    }
+
+    fn tail_running(&self, _: &str) -> bool {
+        false
+    }
+}
+
+pub(super) fn closed() -> Vec<u8> {
+    let row = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
+    format!("{row}\n").into_bytes()
+}
 
 struct Late {
     harness: Harness,

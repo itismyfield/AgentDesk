@@ -1318,11 +1318,11 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
 #[path = "codex_stop_source_guard_tests.rs"]
 mod source_guard_tests;
 
-#[path = "codex_stop_delivery_home_stop_tests.rs"]
-mod home_stop;
-
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;
 
 #[path = "herdr_stop_pane_tests.rs"]
 mod herdr_stop_pane;
+
+#[path = "herdr_http_cancel_tests.rs"]
+mod http_cancel;

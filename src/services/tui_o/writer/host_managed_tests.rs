@@ -1,10 +1,7 @@
 //! A managed writer stops with its actor and admitted POST joined, and only then frees its channel
-//! for the next writer; a supervisor runs one writer generation of a channel at a time.
+//! for the next writer.
 
 use super::*;
-use crate::services::cluster::home_supervisor::{
-    Generation, HomeBundle, Phase, Refused, Settled, StopReason, Supervisor,
-};
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, WriterStopped, start_managed};
 
 #[tokio::test(start_paused = true)]
@@ -424,8 +421,6 @@ async fn a_stop_during_port_wait_releases_the_claim_without_starting_an_actor() 
     }
 }
 
-struct Writers(Vec<ManagedWriterHandle>);
-
 #[tokio::test(start_paused = true)]
 async fn dropping_a_managed_handle_stops_its_writer_and_keeps_the_legacy_adapter_detached() {
     let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
@@ -447,73 +442,4 @@ async fn dropping_a_managed_handle_stops_its_writer_and_keeps_the_legacy_adapter
     );
     detached.abort();
     let _ = detached.await;
-}
-
-impl HomeBundle for Writers {
-    async fn stop_and_join(self, _: StopReason) -> Settled {
-        for writer in self.0 {
-            if let Err(detail) = writer.stop_and_join().await {
-                return Settled::Stuck(detail);
-            }
-        }
-        Settled::Joined
-    }
-}
-
-// Overlapping starts of a channel build one writer generation; a replacement joins the old writer
-// before the new one is built, and a stale generation's stop leaves the current one running.
-#[tokio::test(start_paused = true)]
-async fn a_supervised_channel_runs_one_writer_generation_at_a_time() {
-    let _selected = test_override::force_candidates(&[(CHANNEL, ClaudeTui)]);
-    let (harness, path) = fresh(startup);
-    harness.gate.acquired();
-    p5::set_test_root(Some(harness._runtime.path()));
-    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-    let supervisor = Arc::new(Supervisor::<Writers>::default());
-    // Each build records whether the channel was still hosted when it began.
-    let builds = Arc::new(Mutex::new(Vec::new()));
-    let build = || {
-        let (io, ready, builds) = (Arc::clone(&io), Arc::clone(&ready), Arc::clone(&builds));
-        let (root, gate) = (root(&harness), Arc::clone(&harness.gate));
-        move |generation: Generation| async move {
-            builds
-                .lock()
-                .unwrap()
-                .push((generation, ready.is_hosted(CHANNEL)));
-            let parts = || HostParts {
-                io,
-                runtime_root: Some(root),
-                gate,
-                readiness: ready,
-            };
-            let owned = cutover::boot_ownership();
-            let writers = start_managed(ShadowProvider::Claude, true, owned, parts);
-            let hosted = writers.len() == 1;
-            hosted
-                .then_some(Writers(writers))
-                .ok_or("not hosted".into())
-        }
-    };
-
-    let first = supervisor.start(CHANNEL, build());
-    let second = supervisor.start(CHANNEL, build());
-    assert_eq!(first.await, Ok(1));
-    assert_eq!(second.await, Err(Refused::Busy(Phase::Starting(1))));
-    polls(3).await;
-    append(&path, &row("m1", "first"));
-    polls(3).await;
-
-    assert_eq!(supervisor.start(CHANNEL, build()).await, Ok(2));
-    assert_eq!(*builds.lock().unwrap(), [(1, false), (2, false)]);
-    let stale = supervisor.stop(CHANNEL, Some(1), StopReason::RowGone).await;
-    assert_eq!(stale, Some(Phase::Running(2)));
-    polls(3).await;
-    append(&path, &row("m2", "second"));
-    polls(3).await;
-    assert_eq!(harness.port.posts(), ["first", "second"]);
-    assert!(ready.accepts(CHANNEL), "the current generation still runs");
-
-    let stopped = supervisor.stop(CHANNEL, None, StopReason::Sigterm).await;
-    assert_eq!(stopped, None);
-    assert!(!ready.is_hosted(CHANNEL));
 }

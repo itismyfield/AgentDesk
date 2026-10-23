@@ -4,6 +4,8 @@ use super::*;
 use crate::services::discord::commands::stop::{remote_cancel_reply, run_slash_stop};
 use crate::services::discord::turn_bridge::tmux_runtime::judged_stop::AFTER_HERDR_JUDGE;
 use crate::services::provider::cancel_token_claude_interrupt::HERDR_CANCEL_OVERRIDE;
+use axum::http::StatusCode;
+use serde_json::Value;
 
 const AUTH: &str = "herdr-http-cancel-token";
 const NODE_ID: &str = "mini-http";

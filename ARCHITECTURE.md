@@ -777,9 +777,6 @@ src/
 │   │   │   ├── epoch_tests.rs
 │   │   │   ├── ingress_snapshot.rs
 │   │   │   └── intake.rs
-│   │   ├── channel_home_boot/
-│   │   │   ├── home_writers.rs
-│   │   │   └── home_writers_tests.rs
 │   │   ├── channel_ingress/
 │   │   │   └── tests.rs
 │   │   ├── execution_capacity/
@@ -801,14 +798,6 @@ src/
 │   │   │   ├── placement.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   ├── s3_real_tests/
-│   │   │   │   ├── drain_pg_tests.rs
-│   │   │   │   ├── force_pg_tests.rs
-│   │   │   │   ├── fresh_drain_pg_tests.rs
-│   │   │   │   ├── harness_tests.rs
-│   │   │   │   ├── holder_pg_tests.rs
-│   │   │   │   ├── mod.rs
-│   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
@@ -849,8 +838,6 @@ src/
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── channel_home.rs
-│   │   ├── channel_home_boot.rs
-│   │   ├── channel_home_boot_tests.rs
 │   │   ├── channel_home_claim_tests.rs
 │   │   ├── channel_home_drain.rs
 │   │   ├── channel_home_drain_tests.rs
@@ -861,8 +848,6 @@ src/
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
 │   │   ├── home_availability.rs
-│   │   ├── home_supervisor.rs
-│   │   ├── home_supervisor_tests.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -1800,7 +1785,6 @@ src/
 │   │   │   │       │   │   ├── boot_gate_alarm_tests.rs
 │   │   │   │       │   │   ├── fresh_process_tests.rs
 │   │   │   │       │   │   └── fresh_scope_restart_tests.rs
-│   │   │   │       │   ├── delegated_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs
 │   │   │   │       ├── b1b_joint_owner_tests.rs
@@ -1814,7 +1798,6 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
-│   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_handback_breaker.rs
@@ -1839,7 +1822,6 @@ src/
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
-│   │   │   ├── queued_recovery_boot_restore_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
 │   │   │   ├── queued_recovery_held.rs
 │   │   │   ├── queued_recovery_held_tests.rs
@@ -2366,7 +2348,6 @@ src/
 │   │   │   │   ├── claude_stop_pane_tests.rs
 │   │   │   │   ├── codex_stop_delivery.rs
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
-│   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
 │   │   │   │   ├── codex_stop_idle_evidence.rs
 │   │   │   │   ├── codex_stop_idle_evidence_tests.rs
@@ -3323,7 +3304,6 @@ src/
 │   │   │   ├── late_adopt.rs
 │   │   │   ├── late_adopt_binding_tests.rs
 │   │   │   ├── late_adopt_cleanup_tests.rs
-│   │   │   ├── late_adopt_delegated_tests.rs
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs

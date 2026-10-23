@@ -102,7 +102,7 @@ async fn absent_pin_warm_on_without_session_reaches_fresh_provider_pg() {
 async fn restore_disk_head(fixture: &mut CanaryFixture) -> QueueIdentity {
     let channel = serenity::ChannelId::new(CANARY_CHANNEL);
     clear_persist_failure_tests::seed_backlog(&fixture.shared, &ProviderKind::Codex, channel).await;
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,
@@ -370,7 +370,7 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
     let after = fixture.shared.mailbox(channel).snapshot().await;
     assert!(after.intervention_queue.is_empty() && after.pending_user_dispatch.is_none());
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,

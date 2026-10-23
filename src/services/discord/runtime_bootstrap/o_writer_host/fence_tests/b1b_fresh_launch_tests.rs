@@ -28,7 +28,6 @@ const FIRST_REPLY: &str = "B1b fresh O first reply";
 const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
-mod delegated_tests;
 #[path = "b1b_joint_owner_tests.rs"]
 mod joint_foreign;
 #[path = "b1b_terminal_tests.rs"]
@@ -82,7 +81,9 @@ impl Discord {
                             "discriminator":"0001", "avatar":null, "bot":true})).into_response();
                     }
                     if method == Method::GET {
-                        reads.fetch_add(1, Ordering::SeqCst);
+                        if uri.path() == format!("/api/v10/channels/{CANARY_CHANNEL}/messages") {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                        }
                         return axum::Json(json!(*recorded.lock().unwrap())).into_response();
                     }
                     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -368,7 +369,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
             &fixture.old_source.path,
         )
     });
-    let prepared = parts(
+    let prepared = parts_with_rest(
         &fixture.shared,
         &ProviderKind::Codex,
         None,
@@ -407,7 +408,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
                 .expect("the pre-proof host must stop")
                 .unwrap();
                 assert!(!readiness.is_hosted(CANARY_CHANNEL));
-                let restarted = parts(
+                let restarted = parts_with_rest(
                     &fixture.shared,
                     &ProviderKind::Codex,
                     None,
@@ -933,7 +934,7 @@ async fn run_fifo(
         new_io.stats().read_bytes > 0,
         "actual fresh consumer must exercise the IO oracle"
     );
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         serenity::ChannelId::new(CANARY_CHANNEL),

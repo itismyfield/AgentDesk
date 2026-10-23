@@ -44,8 +44,6 @@ pub(crate) trait DrainPort {
 pub(crate) enum ResetRefused {
     /// No reset path reaches the drain yet.
     NotWired,
-    /// The existing reset path refused to touch the session, for the reason given.
-    Refused(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

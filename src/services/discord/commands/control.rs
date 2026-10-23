@@ -205,9 +205,7 @@ mod codex_verified_clear_tests;
 
 #[allow(clippy::too_many_arguments)]
 mod provider_reset;
-pub(in crate::services::discord) use provider_reset::{
-    reset_channel_provider_state, reset_channel_provider_state_for_home_drain,
-};
+pub(in crate::services::discord) use provider_reset::reset_channel_provider_state;
 
 /// The reset a pending flag asked for, if any. A refused one keeps its flags and is reported;
 /// the caller's turn runs on the session as it is, as with any turn the host guard admits.

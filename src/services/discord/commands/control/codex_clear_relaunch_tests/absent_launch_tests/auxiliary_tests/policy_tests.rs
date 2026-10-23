@@ -95,7 +95,7 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
     );
     assert_eq!(persisted_queue_bytes(&fixture), queue_before);
     assert!(snapshot.cancel_token.is_none() && snapshot.pending_user_dispatch.is_none());
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,
@@ -209,7 +209,7 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
     .unwrap();
     assert_no_retirement_warning(&cleared);
     assert!(queue_identities(&fixture).await.is_empty());
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,

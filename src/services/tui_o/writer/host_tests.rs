@@ -16,8 +16,6 @@ use super::*;
 mod late_binding;
 #[path = "late_adopt_cleanup_tests.rs"]
 mod late_cleanup;
-#[path = "late_adopt_delegated_tests.rs"]
-mod late_delegated;
 #[path = "late_adopt_host_tests.rs"]
 mod late_host;
 use crate::services::tui_prompt_dedupe::binding_events as p5;

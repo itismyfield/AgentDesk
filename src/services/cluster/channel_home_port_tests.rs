@@ -1,7 +1,7 @@
 //! The production drain port read against a hosted O writer and the channel's mailbox.
 
+use super::writer_mutant;
 use super::*;
-use crate::services::cluster::channel_home_boot;
 use crate::services::tui_o::writer::actor::{Owing, Undelivered};
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
@@ -92,7 +92,7 @@ async fn only_a_channel_never_stored_nor_bound_here_reads_as_nothing_owed() {
     std::fs::write(log.join(format!("{BOUND}.log")), p5_line(BOUND)).unwrap();
     std::fs::write(flat.path().join(STORE_DIR_NAME), b"not a directory").unwrap();
     let saved = p5::test_root();
-    if !channel_home_boot::writer_mutant("p5_root_unset") {
+    if !writer_mutant("p5_root_unset") {
         p5::set_test_root(Some(root.path()));
     }
     let under = |root: &tempfile::TempDir, channel| {

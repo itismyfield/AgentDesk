@@ -142,19 +142,6 @@ async fn d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed() {
             .unwrap(),
         &token
     ));
-    let reset = super::super::reset_channel_provider_state_for_home_drain(
-        &http,
-        &shared,
-        &provider,
-        channel,
-        "channel home release",
-        true,
-        false,
-        false,
-    )
-    .await;
-    assert!(matches!(reset, super::super::ManagedReset::Applied(_)));
-    assert_eq!(session_state(&shared, channel).await.0, None);
 }
 
 #[tokio::test(flavor = "current_thread")]

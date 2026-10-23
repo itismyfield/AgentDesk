@@ -255,7 +255,7 @@ async fn restored_head_stays_held(refusal: Refusal) {
     assert_eq!(after.intervention_queue.len(), 1);
     assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
     assert!(after.cancel_token.is_none() && after.pending_user_dispatch.is_none());
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
         &fixture.shared.token_hash,
         channel,

@@ -64,7 +64,6 @@ FULL_TRIGGERS = (
     "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/*", "src/services/turn_orchestrator.rs",
-    "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
     # Re-exported as `busy_inject_support`; its e2e consumer never names this path.
     "src/services/discord/router/intake_gate/busy_inject.rs", *SHARED_TEST_HELPERS,
 )

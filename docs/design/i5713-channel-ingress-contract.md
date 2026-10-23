@@ -143,7 +143,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/lib.rs` | readiness | `home_availability::{Availability, Unavailable, state}` 재노출 :291 |
 | `src/services/cluster/mod.rs` | 배선 | 모듈 선언 |
 | `src/services/cluster/channel_home.rs` | 생성·변경·admission | 관측 표본 child 모듈 선언, gate `confirm` :340, `admit_unattributed` :182, `admit_command` :195, `HomeGate::admit*` :498–590, `refusal` :592·:759, `register`·`unregister`·`registered` :671–749, `intake_hold` :819, `boot_home` :858, `run_lease` :916 |
-| `src/services/cluster/channel_home_boot.rs` | 생성·변경 | `start` :97(registry 등록 :133, lease :188), `listed` :77, `delegated_boot_ownership` :288 |
 | `src/services/cluster/channel_home_drain.rs` | 변경 | `drain_round` :133(renew :117, read :138), `run_drain` :212, `finish_return` :235 |
 | `src/services/cluster/channel_home_port.rs` | 변경 | drain 의무 포트 :12 |
 | `src/services/cluster/home_availability.rs` | readiness | `preflight` :56, `install_enabled` :94, `refusal` :173. 소유권을 발급하지 않는 별도 가드 |

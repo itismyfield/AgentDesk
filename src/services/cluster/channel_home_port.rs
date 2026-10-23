@@ -12,7 +12,9 @@ use std::time::Duration;
 use poise::serenity_prelude::ChannelId;
 
 #[cfg(test)]
-use super::channel_home_boot;
+fn writer_mutant(name: &str) -> bool {
+    std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some(name)
+}
 use super::channel_home_drain::{DrainPort, Owed, ResetRefused};
 use crate::services::tui_o::store;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
@@ -48,12 +50,6 @@ impl ChannelHomePort {
         }
     }
 
-    /// Also reads the channel's persisted queue and marker, so a missing actor is not empty.
-    pub(crate) fn persisted_by(mut self, persisted: PersistedInput) -> Self {
-        self.persisted = Some(persisted);
-        self
-    }
-
     /// Reads a missing actor or POST count as nothing owed when `runtime_root` (the writer host's
     /// own) holds no store of the channel and this node's P5 log no event of it.
     pub(crate) fn stored_under(mut self, runtime_root: Option<PathBuf>) -> Self {
@@ -69,12 +65,12 @@ impl ChannelHomePort {
         };
         let unbound = || {
             #[cfg(test)]
-            if channel_home_boot::writer_mutant("binding_ignored") {
+            if writer_mutant("binding_ignored") {
                 return true;
             }
             let events = BindingLog.binding_events_since(self.channel, 0);
             #[cfg(test)]
-            if channel_home_boot::writer_mutant("p5_err_as_empty") {
+            if writer_mutant("p5_err_as_empty") {
                 return events.unwrap_or_default().is_empty();
             }
             events.is_ok_and(|events| events.is_empty())
@@ -116,7 +112,7 @@ impl DrainPort for ChannelHomePort {
     fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
         let view = self.readiness.undelivered(self.channel);
         #[cfg(test)]
-        let skip_store = channel_home_boot::writer_mutant("owed_ignores_store");
+        let skip_store = writer_mutant("owed_ignores_store");
         #[cfg(not(test))]
         let skip_store = false;
         let never_held = view.is_none() && self.never_held(skip_store);
@@ -158,7 +154,7 @@ impl DrainPort for ChannelHomePort {
     fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {
         let count = deliver::posts_in_flight(self.channel);
         #[cfg(test)]
-        if count.is_none() && channel_home_boot::writer_mutant("posts_ignore_store") {
+        if count.is_none() && writer_mutant("posts_ignore_store") {
             return std::future::ready(Some(0));
         }
         let count = count.or_else(|| self.never_held(false).then_some(0));

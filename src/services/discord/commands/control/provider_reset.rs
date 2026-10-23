@@ -44,43 +44,6 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     .await
 }
 
-pub(in crate::services::discord) async fn reset_channel_provider_state_for_home_drain(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    reset_source: &str,
-    reset_provider_state: bool,
-    clear_history: bool,
-    recreate_tmux: bool,
-) -> ManagedReset {
-    #[cfg(test)]
-    if home_fence::mutant("drain_reset_uses_admitted_sink") {
-        return reset_channel_provider_state(
-            http,
-            shared,
-            provider,
-            channel_id,
-            reset_source,
-            reset_provider_state,
-            clear_history,
-            recreate_tmux,
-        )
-        .await;
-    }
-    reset_body(
-        http,
-        shared,
-        provider,
-        channel_id,
-        reset_source,
-        reset_provider_state,
-        clear_history,
-        recreate_tmux,
-    )
-    .await
-}
-
 async fn reset_body(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,

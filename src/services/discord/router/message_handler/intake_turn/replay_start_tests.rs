@@ -365,12 +365,15 @@ mod kickoff_tests {
         head_card: MessageId,
         merged_card: MessageId,
     ) {
-        let (checked, role_override) = turn_orchestrator::load_channel_pending_queue_checked(
-            &ProviderKind::Claude,
-            &host.shared.token_hash,
-            channel,
-        )
-        .expect("checked durable queue loader must succeed, never treat a read failure as empty");
+        let (checked, role_override) =
+            turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
+                &ProviderKind::Claude,
+                &host.shared.token_hash,
+                channel,
+            )
+            .expect(
+                "checked durable queue loader must succeed, never treat a read failure as empty",
+            );
         assert!(role_override.is_none());
         assert_eq!(checked.len(), 2);
         assert_full_item(&checked[0], original);
@@ -905,7 +908,7 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
+                let (restored, role) = turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
                     &ProviderKind::Claude,
                     &host.shared.token_hash,
                     channel,
@@ -1059,7 +1062,7 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
+                let (restored, role) = turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
                     &ProviderKind::Claude,
                     &host.shared.token_hash,
                     channel,

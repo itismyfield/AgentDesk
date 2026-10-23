@@ -110,7 +110,6 @@ AUTHORITIES = (
     "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/teardown_probe.rs", "src/services/turn_orchestrator.rs",
-    "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
     "src/services/discord/router/intake_gate/busy_inject.rs", *ts.SHARED_TEST_HELPERS,
 )
 
@@ -486,15 +485,12 @@ class ReplayTests(unittest.TestCase):
         ids = self.repo.selected(self.plan, "sweep")
         held = {"ignored": [replay]}
         self.assertEqual(self.run_sweep(ids, **held, ledger="")[0], 1)  # a new #[ignore]
-        for lane in ("pg", "non-pg-sweep"):  # a declared helper, as s3_node_child is for pg
+        for lane in ("pg", "non-pg-sweep"):  # a declared helper
             self.assertEqual(self.run_sweep(ids, **held, ledger=ledger_rows(lane, [replay]))[0], 0)
         other = ledger_rows("pg", ["alpha::changed::tests::own"])
         self.assertEqual(self.run_sweep(ids, **held, ledger=other)[0], 1)
         with self.assertRaises(ValueError):
             self.run_sweep(ids, **held, ledger=f"ignored | {replay} | lane=pg\n")
-        child = "services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child"
-        self.assertIn(child, set(ts.tools()[1].load_non_pg_filter_replay(REPO_ROOT)))
-        self.assertIn(child, ts.declared_ignored(REPO_ROOT))
 
     def test_full_mode_runs_mains_commands_and_plan_writes_its_outputs(self) -> None:
         full = json.loads(json.dumps(self.plan))

@@ -59,7 +59,8 @@ pub(super) fn act7_slash_stop_enters_through_run_slash_stop() {
     assert_eq!(stop_entry_gaps(CONTROL), Vec::<String>::new());
 }
 
-pub(super) fn slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there() {
+#[test]
+fn slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there() {
     assert_eq!(home_first_gaps(CONTROL), Vec::<String>::new());
 }
 

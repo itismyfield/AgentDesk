@@ -3,7 +3,8 @@ use crate::services::discord::commands::control::{
     ClearReport, SoftClearNotifyMode, clear_channel_session_state_with_session_key,
 };
 use crate::services::turn_orchestrator::{
-    ClaimObservation, QueuePersistenceContext, load_channel_pending_dispatch_marker_checked,
+    ClaimObservation, QueuePersistenceContext,
+    pending_queue_persistence::load_channel_pending_dispatch_marker_checked,
     save_channel_pending_dispatch_marker,
 };
 

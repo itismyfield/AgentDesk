@@ -895,7 +895,7 @@ mod claim {
                 head.identity.primary, head.phase
             ));
         }
-        let marker = load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id);
+        let marker = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id);
         if marker?.is_some() {
             return Err("a dispatch marker stands".to_string());
         }
