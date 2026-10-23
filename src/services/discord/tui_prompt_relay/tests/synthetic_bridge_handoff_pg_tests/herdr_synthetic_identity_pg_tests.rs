@@ -237,7 +237,11 @@ impl Fixture {
         next.execution_nonce = nonce.into();
         next.source_ref.execution_nonce = nonce.into();
         next.expected = Some(self.rig.expected(nonce));
-        let context = self.rig.context(nonce);
+        let context = if nonce == self.execution.execution_nonce {
+            self.incarnation.clone()
+        } else {
+            self.rig.context(nonce)
+        };
         self.rig.run_provider(&context, false);
         canonical_fixture::set_raw(
             &self.pool,
