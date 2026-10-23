@@ -152,11 +152,17 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
         hook(tmux);
     }
     if !matches!(case, "hook_only" | "late_before_origin") {
-        let terminal = if case == "foreign" {
+        let mut terminal = if case == "foreign" {
             event("task_complete", "foreign-turn")
         } else {
             complete
         };
+        if case == "unnamed" {
+            terminal["payload"]
+                .as_object_mut()
+                .unwrap()
+                .remove("turn_id");
+        }
         let mut bytes = encode(&[terminal]);
         let padding = END as usize - START as usize - head.len() - bytes.len();
         bytes.splice(0..0, std::iter::repeat_n(b' ', padding));
@@ -168,7 +174,13 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
     }
     let negative = matches!(
         case,
-        "previous" | "foreign" | "open_tool" | "hook_only" | "stale_origin" | "late_before_origin"
+        "previous"
+            | "foreign"
+            | "unnamed"
+            | "open_tool"
+            | "hook_only"
+            | "stale_origin"
+            | "late_before_origin"
     );
     let mut messages = Vec::new();
     let deadline =
@@ -282,6 +294,7 @@ async fn managed_empty_native_turn_rejects_unrelated_completion_and_open_tools()
     for case in [
         "previous",
         "foreign",
+        "unnamed",
         "hook_only",
         "open_tool",
         "stale_origin",

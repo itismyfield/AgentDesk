@@ -486,11 +486,13 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             state.lifecycle_activity = true;
             None
         }
-        // Managed inputs and seeded readers take no other turn's completion or fallback body.
+        // Ignore a different named turn; legacy unnamed completion still finishes a body.
         "task_complete"
             if (state.native_seeded
                 || state.managed_turn.is_some()
                 || state.discord_origin_prompt.is_some())
+                && (codex_payload_turn_id(payload).is_some()
+                    || managed_empty::mutant("unnamed_complete"))
                 && !(started_turn_named_by(state, payload)
                     || (!managed_empty::mutant("managed_complete")
                         && same_codex_turn(
