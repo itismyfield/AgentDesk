@@ -106,9 +106,9 @@ different precedence rule. See §2.4.
 For cache size and idle timeout, unset or empty values use the defaults; nonempty
 caller values are passed through, including `10G`, `20G`, `900`, or idle `0`.
 These helpers do not validate nonempty values. The ceiling was lowered from 40G
-to 15G on 2026-10-23: lane builds bypass sccache (`rustc-wrapper=""` and
-incremental builds), and 38G of the 40G cache had not been used for a day while
-the MacBook ran short of disk. The ceiling does not preallocate space.
+to 15G on 2026-10-23: the lane builds observed that day bypassed sccache, and
+38G of the 40G cache had not been used for a day while the MacBook ran short of
+disk. The ceiling does not preallocate space.
 
 Size and idle settings take effect when the daemon starts. Exporting them does
 not resize or reconfigure an already running daemon. A deliberate restart in a
