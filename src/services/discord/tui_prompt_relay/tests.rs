@@ -2238,10 +2238,20 @@ fn system_continuation_note_is_neutral_not_active_turn() {
     assert!(!note.contains("터미널에 직접 주입된 입력"));
     assert_eq!(
         note,
-        r"-# 🧩 Session continued (compact/resume) · tmux: \`AgentDesk-claude-adk-cc\`"
+        "-# 🧩 Session continued (compact/resume) · tmux: AgentDesk-claude-adk-cc"
     );
     assert!(!note.contains("```text"));
     assert!(!note.contains("Summary:"));
+    let slash = format_slash_command_control_note(
+        "AgentDesk-claude-adk-cc",
+        "/compact",
+        "<command-name>/compact</command-name>",
+    );
+    assert!(slash.contains("tmux: AgentDesk-claude-adk-cc"));
+    assert!(
+        !slash.contains('`'),
+        "slash tmux name must be plain text without literal backticks"
+    );
 }
 
 #[cfg(unix)]

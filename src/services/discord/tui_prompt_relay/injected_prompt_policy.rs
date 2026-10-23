@@ -352,7 +352,7 @@ pub(super) fn format_slash_command_control_note(
         "/compact" => ("🧹", "컨텍스트 정리(/compact)"),
         _ => ("⚙️", "머신 슬래시 명령"),
     };
-    let header = format!("{label} (tmux : `{tmux_session_name}`) — 시스템 주입 (활성 턴 아님)");
+    let header = format!("{label} (tmux: {tmux_session_name}) — 시스템 주입 (활성 턴 아님)");
     let body = match kind {
         "/loop" => extract_loop_body(raw_prompt),
         "local-command-stdout" => extract_local_command_stdout_body(raw_prompt),
@@ -411,7 +411,7 @@ fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
 pub(super) fn format_system_continuation_note(tmux_session_name: &str, _prompt: &str) -> String {
     super::super::session_notice::subtext(
         "🧩",
-        &format!("Session continued (compact/resume) · tmux: `{tmux_session_name}`"),
+        &format!("Session continued (compact/resume) · tmux: {tmux_session_name}"),
     )
 }
 

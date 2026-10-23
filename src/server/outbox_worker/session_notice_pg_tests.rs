@@ -328,6 +328,41 @@ async fn eligible_lifecycle_notice_pins_provider_display_and_deduplicates_after_
         "a sent row survives normal pool/worker restart without another post"
     );
     assert_eq!(designation(&reopened, id).await, Some(display));
+    let stall = message_outbox::enqueue_outbox_pg_returning_id(
+        &pool,
+        OutboxMessage {
+            target: TARGET,
+            content: "⚠️ 스톨 의심: 요청자 <@343742347365974026>",
+            bot: "notify",
+            source: "stall_watchdog",
+            reason_code: Some("stall_watchdog_suspected_stall"),
+            session_key: Some(SESSION),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("stall fixture must enqueue");
+    assert_eq!(
+        drain_message_outbox_once(&pool, &registry, "inline-stall-worker").await,
+        1
+    );
+    let posts = discord.posts();
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[1].0, format!("Bot {PROVIDER}"));
+    let content = posts[1].1["content"].as_str().unwrap();
+    assert_inline(content);
+    assert!(
+        content.contains("<@343742347365974026>"),
+        "stall provider POST must preserve the requester user mention"
+    );
+    assert!(
+        !content.contains("‹@"),
+        "stall provider POST must not escape the requester user mention"
+    );
+    assert_eq!(
+        posts[1].1["content"],
+        designation(&pool, stall).await.unwrap()["content"]
+    );
     reopened.close().await;
     pool.close().await;
     db.drop().await;
@@ -508,6 +543,7 @@ async fn user_content_ops_and_unlisted_sources_remain_sql_null_display_pg() {
         ("routine-runtime", Some("routine.result")),
         ("github_sync", Some("github_sync.terminal_open_issue")),
         ("lifecycle_notifier", Some("lifecycle.not-a-session-status")),
+        ("lifecycle_notifier", Some("lifecycle.soft_clear")),
     ] {
         let id = message_outbox::enqueue_outbox_pg_returning_id(
             &pool,
@@ -534,7 +570,6 @@ async fn user_content_ops_and_unlisted_sources_remain_sql_null_display_pg() {
         ("lifecycle_notifier", "lifecycle.session_resume_failed"),
         ("lifecycle_notifier", "lifecycle.context_compacted"),
         ("lifecycle_notifier", "lifecycle.mcp_credential_change"),
-        ("lifecycle_notifier", "lifecycle.soft_clear"),
         ("lifecycle_notifier", "codex_goal_clear_active_turn"),
         ("lifecycle_notifier", "codex_goal_clear"),
         ("lifecycle_notifier", "codex_goal_pause_ignored"),
@@ -554,7 +589,7 @@ async fn user_content_ops_and_unlisted_sources_remain_sql_null_display_pg() {
             &pool,
             OutboxMessage {
                 target: TARGET,
-                content: ORIGINAL,
+                content: "⚠️ requester <@343742347365974026> · <@!343742347365974026> · <@&343742347365974026> · <@123>\nmore",
                 bot: "notify",
                 source,
                 reason_code: Some(reason),
@@ -575,8 +610,17 @@ async fn user_content_ops_and_unlisted_sources_remain_sql_null_display_pg() {
         let content = display["content"].as_str().unwrap();
         assert_inline(content);
         assert!(
-            content.contains("(+2줄)"),
+            content.contains("(+1줄)"),
             "matrix preview preserves omitted-line count: {source}/{reason}"
+        );
+        assert_eq!(
+            content.contains("<@343742347365974026>"),
+            source == "stall_watchdog",
+            "only stall source may preserve strict requester mentions"
+        );
+        assert!(
+            !content.contains("<@!") && !content.contains("<@&") && !content.contains("<@123>"),
+            "non-user and malformed mentions must stay escaped"
         );
     }
     sqlx::query(

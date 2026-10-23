@@ -18,7 +18,6 @@ fn eligible(message: OutboxMessage<'_>) -> bool {
                     | "lifecycle.session_resume_failed"
                     | "lifecycle.context_compacted"
                     | "lifecycle.mcp_credential_change"
-                    | "lifecycle.soft_clear"
                     | "codex_goal_clear_active_turn"
                     | "codex_goal_clear"
                     | "codex_goal_pause_ignored"
@@ -127,6 +126,23 @@ fn display_content(content: &str, completion: bool) -> String {
     session_notice::subtext(icon, detail)
 }
 
+fn preserve_stall_user_mentions(original: &str, mut display: String) -> String {
+    static MENTIONS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"<@[0-9]{15,21}>").expect("strict user mention pattern")
+    });
+    for mention in MENTIONS.find_iter(original) {
+        let raw = mention.as_str();
+        let escaped = format!("‹{}›", &raw[1..raw.len() - 1]);
+        if display.contains(&escaped) {
+            display = display.replace(&escaped, raw);
+        } else if !display.contains(raw) {
+            display.push(' ');
+            display.push_str(raw);
+        }
+    }
+    session_notice::finish(display)
+}
+
 pub(super) async fn designation(
     connection: &mut PgConnection,
     message: OutboxMessage<'_>,
@@ -144,10 +160,17 @@ pub(super) async fn designation(
         return Ok(None);
     };
     let provider = provider_hint(connection, &channel, message.session_key).await?;
+    let display = display_content(message.content, completion);
+    // Watchdog paging restores only producer-authored strict user mentions.
+    let display = if message.source == "stall_watchdog" {
+        preserve_stall_user_mentions(message.content, display)
+    } else {
+        display
+    };
     Ok(Some(json!({
         "version": 1,
         "provider_hint": provider.map(|provider| provider.as_str().to_string()),
-        "content": display_content(message.content, completion),
+        "content": display,
     })))
 }
 
