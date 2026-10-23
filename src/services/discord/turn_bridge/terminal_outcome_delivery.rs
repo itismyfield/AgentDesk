@@ -380,8 +380,10 @@ pub(super) async fn run_terminal_outcome_delivery(
         );
         // O posts only native answers, so on its channel the bridge still shows its own failure
         // notice in full; like other bridge chrome it is no answer and sends without a claim.
-        let o_notice = provider_failure && direct && o_body_cut == Ok(true);
-        if o_notice {
+        let o_notice = (provider_failure || terminal_empty_response_notice.is_some())
+            && direct
+            && o_body_cut == Ok(true);
+        if o_notice && provider_failure {
             delivery_response = full_response.clone();
         }
         // An empty-response notice or TUI chrome is no answer, so it sends without a claim.

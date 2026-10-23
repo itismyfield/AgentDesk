@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 127
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 128
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -27,6 +27,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
 | `ADK_COLDSTOP_MUTANT` | `src/services/provider/herdr_before_start.rs` |  |
+| `ADK_EMPTY_TERMINAL_MUTANT` | `src/services/codex_tui/rollout_tail/parser/managed_empty.rs`, `src/services/discord/inflight/save_store/identity_gate/runtime_stamp/captured_terminal_admission.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
