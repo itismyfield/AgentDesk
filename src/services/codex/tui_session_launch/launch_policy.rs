@@ -1,5 +1,37 @@
 use super::*;
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static ISOLATED_HERDR_PATH: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+pub(crate) struct IsolatedHerdrPath(Option<String>);
+
+// The real-client fixture controls its execution environment without changing provider resolution.
+#[cfg(all(test, unix))]
+pub(crate) fn isolated_herdr_path_for_test(root: &std::path::Path) -> IsolatedHerdrPath {
+    let root = root.canonicalize().unwrap();
+    assert_eq!(root.parent(), Some(std::path::Path::new("/private/tmp")));
+    let owner = root
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("adk-e-t14-")
+        .unwrap();
+    assert!(!owner.is_empty() && owner.bytes().all(|c| c.is_ascii_digit()));
+    let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
+    IsolatedHerdrPath(ISOLATED_HERDR_PATH.with_borrow_mut(|slot| slot.replace(path)))
+}
+
+#[cfg(all(test, unix))]
+impl Drop for IsolatedHerdrPath {
+    fn drop(&mut self) {
+        ISOLATED_HERDR_PATH.with_borrow_mut(|slot| *slot = self.0.take());
+    }
+}
+
 #[cfg(unix)]
 pub(in crate::services::codex) fn tui_preflight_with_policy(
     tmux: &str,
@@ -150,6 +182,10 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
         &launchable.codex_bin,
         launchable.resolution.exec_path.as_deref(),
     );
+    #[cfg(test)]
+    let isolated_path = ISOLATED_HERDR_PATH.with_borrow(Clone::clone);
+    #[cfg(test)]
+    let exec_path = isolated_path.as_deref().or(exec_path);
     let channel = prepared.context.channel_id;
     let mut env_lines = build_tmux_launch_env_lines(exec_path, channel, Some(ProviderKind::Codex));
     env_lines

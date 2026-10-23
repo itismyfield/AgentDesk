@@ -662,3 +662,6 @@ impl HerdrRig {
         }
     }
 }
+
+#[path = "herdr_t14_client_tests.rs"]
+pub(crate) mod t14_client;

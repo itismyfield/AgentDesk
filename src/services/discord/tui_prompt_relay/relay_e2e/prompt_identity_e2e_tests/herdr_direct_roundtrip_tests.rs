@@ -29,6 +29,9 @@ const FIRST: &str = "T14 first Discord input";
 const FOLLOWUP: &str = "T14 Discord followup after the direct turn";
 const TIMEOUT: Duration = Duration::from_secs(45);
 
+#[path = "herdr_direct_actual_client_tests.rs"]
+mod real_tests;
+
 #[test]
 fn discord_direct_prompt_and_followup_keep_one_live_execution_source_pg() {
     let exact = concat!(
