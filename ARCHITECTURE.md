@@ -1913,10 +1913,16 @@ src/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
+│   │   │   ├── inline_contract_tests/
+│   │   │   │   └── replacement_receipt_tests.rs
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
+│   │   │   │   ├── inline_claim.rs
+│   │   │   │   ├── memory_claim.rs
 │   │   │   │   ├── metadata_retirement_authority_tests.rs
 │   │   │   │   ├── missing_card_replacement.rs
+│   │   │   │   ├── monitor.rs
+│   │   │   │   ├── monitor_memory.rs
 │   │   │   │   ├── response_chunks.rs
 │   │   │   │   ├── response_fence.rs
 │   │   │   │   ├── response_identity.rs
@@ -1928,7 +1934,10 @@ src/
 │   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── footer_retirement_tests.rs
+│   │   │   ├── footer_surface_tests.rs
 │   │   │   ├── gateway.rs
+│   │   │   ├── inline_contract_tests.rs
+│   │   │   ├── inline_delivery.rs
 │   │   │   ├── metadata_retirement_pg_tests.rs
 │   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
@@ -2250,6 +2259,9 @@ src/
 │   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
+│   │   ├── tui_task_card/
+│   │   │   ├── completion_card.rs
+│   │   │   └── completion_card_tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
@@ -2715,6 +2727,7 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_notice.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs

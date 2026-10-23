@@ -32,7 +32,7 @@ impl TaskCardPayload {
 
     pub(super) fn legacy_render(&self, count: u64) -> String {
         match self {
-            Self::Task(note) => card::format_task_notification_card(note, count),
+            Self::Task(note) => card::format_legacy(note, count),
             Self::Subagent(text) => text.clone(),
         }
     }
@@ -53,14 +53,12 @@ impl TaskCardPayload {
                         .unwrap_or(&summary)
                         .trim()
                         .trim_matches('"');
+                    let description =
+                        card::truncate_chars_ascii(&inline::preview(description), 200);
                     let detail = if result.trim().is_empty() {
-                        inline::preview(description)
+                        description
                     } else {
-                        format!(
-                            "{}: {}",
-                            inline::preview(description),
-                            inline::preview(&result)
-                        )
+                        format!("{description}: {}", inline::preview(&result))
                     };
                     inline::finish(format!("-# 📡 {detail} · {count}회"))
                 } else {
@@ -76,7 +74,15 @@ impl TaskCardPayload {
                     inline::subtext(card::status_icon(status), &detail)
                 }
             }
-            Self::Subagent(text) if self.is_completion_card() => text.clone(),
+            Self::Subagent(text) if self.is_completion_card() => {
+                let (header, body) = text.split_once('\n').unwrap_or((text, ""));
+                let (icon, title) = header.split_once(' ').unwrap_or(("📋", header));
+                if title.starts_with("**") && title.ends_with("**") {
+                    text.clone()
+                } else {
+                    format!("{icon} **{title}**\n{body}")
+                }
+            }
             Self::Subagent(text) => {
                 let mut lines = text.lines();
                 let header = lines.next().unwrap_or("📋 Subagent notification");
@@ -102,7 +108,7 @@ impl TaskCardPayload {
         metadata: &super::super::completion_footer_metadata::CompletionFooterMetadata,
     ) -> String {
         let rendered = self.render(count);
-        if !self.is_completion_card() {
+        if !self.is_completion_card() || !matches!(self, Self::Task(_)) {
             return rendered;
         }
         let lines = metadata.subtext_lines();

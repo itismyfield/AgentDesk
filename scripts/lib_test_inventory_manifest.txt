@@ -8292,6 +8292,10 @@ services::discord::task_notification_delivery::inline_contract_tests::monitor_wi
 services::discord::task_notification_delivery::inline_contract_tests::provider_pinned_never_posted_old_bytes_are_canonicalized_pg
 services::discord::task_notification_delivery::inline_contract_tests::provider_pinned_started_old_bytes_and_nonce_are_immutable_pg
 services::discord::task_notification_delivery::inline_contract_tests::public_missing_card_replacement_canonicalizes_legacy_and_ignores_stale_ids_pg
+services::discord::task_notification_delivery::inline_contract_tests::replacement_receipt_tests::legacy_body_card_binds_its_first_source_without_reposting_pg
+services::discord::task_notification_delivery::inline_contract_tests::replacement_receipt_tests::modern_completion_title_containing_task_survives_stream_promotion_pg
+services::discord::task_notification_delivery::inline_contract_tests::replacement_receipt_tests::public_missing_monitor_rebinds_persistent_receipt_pg
+services::discord::task_notification_delivery::inline_contract_tests::replacement_receipt_tests::recovered_pending_source_free_monitor_retains_old_event_receipt_pg
 services::discord::task_notification_delivery::inline_contract_tests::short_subagent_without_result_is_provider_subtext_pg
 services::discord::task_notification_delivery::inline_contract_tests::subagent_notify_card_preserves_body_pg
 services::discord::task_notification_delivery::inline_contract_tests::summary_then_body_completion_preserves_both_delivery_receipts_pg
@@ -8762,6 +8766,7 @@ services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_m
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::source_span_splits_at_the_same_boundary_as_the_payload
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
 services::discord::tmux::tmux_watcher::task_response_authority::tests::a_watcher_task_response_that_sends_no_body_leaves_a_pending_adoption
+services::discord::tmux::tmux_watcher::task_response_authority::tests::persisted_notify_recovery_keeps_the_known_provider_client_for_replacement
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b
@@ -10011,6 +10016,7 @@ services::discord::tui_task_card::completion_card_tests::completion_entry_combin
 services::discord::tui_task_card::completion_card_tests::completion_entry_omits_unavailable_or_malformed_tokens_and_cost
 services::discord::tui_task_card::completion_card_tests::completion_entry_token_total_is_scoped_to_structured_usage
 services::discord::tui_task_card::completion_card_tests::failed_workflow_entry_uses_one_header_and_preserves_latest_report
+services::discord::tui_task_card::completion_card_tests::monitor_report_keeps_legacy_renderer_bytes_and_stays_outside_completion_cards
 services::discord::tui_task_card::tests::card_decode_removes_exactly_one_escape_layer
 services::discord::tui_task_card::tests::card_decodes_harness_xml_escaped_prose_once
 services::discord::tui_task_card::tests::card_render_is_invariant_across_streaming_edits

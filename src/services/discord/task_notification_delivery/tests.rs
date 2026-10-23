@@ -826,7 +826,13 @@ async fn promotion_first_edit_then_new_completion_preserves_original_replay_hash
         return;
     };
     let pool = pg_db.connect_and_migrate().await;
-    let clients = clients();
+    let clients = CardDeliveryClients::new([
+        CardBot::new("notify", Arc::new(serenity::Http::new("notify-test-token"))),
+        CardBot::new(
+            "provider:claude",
+            Arc::new(serenity::Http::new("provider-test-token")),
+        ),
+    ]);
     let transport = FakeTransport::new();
     let session_key = "AgentDesk-claude-4295-promotion-edit-replay";
     let task_id = "promotion-edit-replay-task";
@@ -841,16 +847,17 @@ async fn promotion_first_edit_then_new_completion_preserves_original_replay_hash
     )
     .await
     .expect("promotion-first card without source fingerprint");
+    assert_eq!(first.bot_key, "provider:claude");
 
     let edited = TaskCardEvent::from_task_prompt(
         44_295,
         "claude",
         session_key,
         &format!(
-            "<task-notification><task-id>{task_id}</task-id><status>completed</status><summary>Agent completed</summary><result>later pane detail</result></task-notification>"
+            "<task-notification><task-id>{task_id}</task-id><status>completed</status><summary>Agent completed with later pane detail</summary></task-notification>"
         ),
     );
-    ensure_card(
+    let edited_outcome = ensure_card(
         Some(&pool),
         &clients,
         &transport,
@@ -859,6 +866,10 @@ async fn promotion_first_edit_then_new_completion_preserves_original_replay_hash
     )
     .await
     .expect("fingerprint-less duplicate edits promoted card");
+    assert_eq!(edited_outcome.disposition, CardDisposition::Edited);
+    assert_eq!(edited_outcome.message_id, first.message_id);
+    assert_eq!(edited_outcome.bot_key, "provider:claude");
+    assert_eq!(transport.edit_calls.load(Ordering::Acquire), 1);
     assert_ne!(edited.payload.render(2), original_content);
 
     let followup = sourced_event(
@@ -1509,43 +1520,73 @@ async fn footer_only_observation_posts_nothing_until_response_promotion() {
 
 #[tokio::test]
 async fn unavailable_pinned_bot_releases_lease_for_immediate_retry() {
-    let transport = FakeTransport::new();
-    let notify_clients = clients();
-    let event = event("pinned-bot-retry");
-    ensure_card(
-        None,
-        &notify_clients,
-        &transport,
-        &event,
-        EnsureIntent::Observation,
-    )
-    .await
-    .expect("first card");
+    for (case, posted) in [("posted", true), ("never-posted", false)] {
+        let transport = FakeTransport::new();
+        let notify_clients = clients();
+        let event = event(&format!("pinned-bot-retry-{case}"));
+        if posted {
+            ensure_card(
+                None,
+                &notify_clients,
+                &transport,
+                &event,
+                EnsureIntent::Observation,
+            )
+            .await
+            .expect("first body card");
+        } else {
+            let content = event.payload.render(1);
+            let claim = store::claim_card(
+                None,
+                &event.scope,
+                "notify",
+                &content,
+                &content_hash(&content),
+                StoreIntent::Observation,
+            )
+            .await
+            .expect("claim the original notify body card before its POST");
+            let CardClaim::Owned(claim) = claim else {
+                panic!("an isolated unposted body fixture must own its lease: {claim:?}");
+            };
+            store::mark_post_failure(None, &claim, "fixture never crossed the POST boundary")
+                .await
+                .expect("release only the original fixture lease for immediate retry");
+        }
 
-    let provider_only = CardDeliveryClients::new([CardBot::new(
-        "provider:claude",
-        Arc::new(serenity::Http::new("provider-test-token")),
-    )]);
-    assert!(
+        let provider_only = CardDeliveryClients::new([CardBot::new(
+            "provider:claude",
+            Arc::new(serenity::Http::new("provider-test-token")),
+        )]);
+        let post_calls = transport.post_calls.load(Ordering::Acquire);
+        assert!(
+            ensure_card(
+                None,
+                &provider_only,
+                &transport,
+                &event,
+                EnsureIntent::Observation,
+            )
+            .await
+            .is_err(),
+            "{case}: an existing body card must keep its original notify authority"
+        );
+        assert_eq!(transport.post_calls.load(Ordering::Acquire), post_calls);
         ensure_card(
             None,
-            &provider_only,
+            &notify_clients,
             &transport,
             &event,
             EnsureIntent::Observation,
         )
         .await
-        .is_err()
-    );
-    ensure_card(
-        None,
-        &notify_clients,
-        &transport,
-        &event,
-        EnsureIntent::Observation,
-    )
-    .await
-    .expect("pinned bot can retry without waiting for stale lease expiry");
+        .expect("pinned bot can retry without waiting for stale lease expiry");
+        assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
+        assert_eq!(
+            transport.edit_calls.load(Ordering::Acquire),
+            usize::from(posted)
+        );
+    }
 }
 
 #[tokio::test]

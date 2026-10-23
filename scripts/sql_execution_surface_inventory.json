@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "6f3f00c37b3705e13d7eeca748cd87a8bfde5846",
+  "measured_at_sha": "aa734e92697fb97901a83895092d88edd41d4253",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1333,6 +1333,15 @@
       "symbol": "file",
       "classification": "STATIC_FILE",
       "fingerprint": "sha256:4ca6c555865fd31e23ce7080e603ea68d40b0eaa1f2eb2587736e893ae75b583"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0146_task_notification_monitor_receipt.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:9c30ab816ab0869fbb4b5b0ad60c5b10d9e9fd1e962d6ca2909b758fdeb3b6a3"
     },
     {
       "root": "migrations/postgres",
@@ -34979,6 +34988,60 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/footer_surface_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:426f2cf7f15a9d2d8e6e5273fdebd95132d5b7d4e61603653a0ef6b1c8c81d82"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/inline_contract_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2542cdaa2e13790246e1bd6f4674aa7245dc0c759db9ae262593ad85b0e8056a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/inline_contract_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d0942341f7beb841adac39fc37c3a676dab12cac2b310dd0da7b0a0dcdd1115c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/inline_contract_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d82810794d96bb467ea6ec6bd3e5bf8b6c81eef62cee1e063a906bc8b6062258"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/inline_contract_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f1dc5e524bd1506b9cc7ac766bc5db4eed6a0a4c4fe0564fcafbcd91131113ac"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/inline_contract_tests/replacement_receipt_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e9004f9c10cdcf72d30178649eddfd56174a554f3d77f0576f4a166441bcbe40"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -35047,6 +35110,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:a168c3d59019cc3346449a6acfc303d32bbcd7578c1b5717ba138f3ebdc065fd"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d4276ea681cdd74f408517660901ca2f6390e86264c2bb52aa5842f40800b63c"
     },
     {
       "root": "src",
@@ -35177,11 +35249,38 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/task_notification_delivery/store/missing_card_replacement.rs",
+      "path": "src/services/discord/task_notification_delivery/store/inline_claim.rs",
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:1708e581be692976c7c710fb60f0941257e4eafc909f3c3a0b5d6c7a968b28e0"
+      "fingerprint": "sha256:0b8c1a03d5140344564d0a269d21a72455de8391068bba7e74d0e2c38cdec090"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/inline_claim.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2cf576826b472a71ee70d00dc17de6b7438258d151d92b73d863a085402f1ada"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/inline_claim.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f1f600632a1dc932231a3c8df360fcbf8e47d1f2f43cbd0f05cbf5aaa6bc6ac0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/inline_claim.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e7c2afda70faa807119b1fe1613d9283fa9bd9dd6a73d0dfe3b06c652c595a40"
     },
     {
       "root": "src",
@@ -35190,7 +35289,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:3b6b34d37ac3ff4c8b0c91a1b797f0bcfd78b7a93a9749c8ac7d0610336542e0"
+      "fingerprint": "sha256:40cad241e6c98a08bb337d63ad949f77b998b275f63be33d75f386f235f6c2f6"
     },
     {
       "root": "src",
@@ -35199,7 +35298,106 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d444ee750397363bc49cb60110e8ec1460a74d694dc090f84b2979dca9b1d3a0"
+      "fingerprint": "sha256:4366fa95b5ff2b6e80fd9ba44e51f2b4eaf62794a9dba6a1c99920b0db9a7155"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/missing_card_replacement.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e70305da370d8b277f9ac55981c810190ea2f5a16a5bc933183d7f023d38f7d1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:17b0ea8fa47e86ba16d2f38220c00d75895afb65b9d902d845ca0c0db05b5aa2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5e2f0d888c2d7f924a42b4dda9f4c3a754cf7f2b687f3cf8f3bc628c8ab329b8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:605e96be82752cb5e5663ee9ed279daa0395a9125408117109f4af2113f0bac2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:72ce9ecf8a04196d505a1f944ea789f6d0327e6dfa8add54eefc164cb9344a06"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7d532a48206cf8932636b72f9dca7c5e1e028d1bf8faeb1a7a171b7340c415cb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8dff063cd9d188a5c897e08312ccc01e4701d55712c0e92689b9aecb00d4cc13"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cb7a907580983499238a4ca122f269c2e8b372e0036026b2c25e6ec822b71f30"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d650953eb515b35b2e9c9ca61294c73a53244b2941d099957f511eaa5e82b83f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d800af104d59e36ae03b96e7183cee2e9a0c4a8f806848b6ce1824c87e7cc521"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/task_notification_delivery/store/monitor.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:feecd34175b4b7e2c99977ea971a8a7c6da76c7033c4a0b99a196e95e6c858df"
     },
     {
       "root": "src",

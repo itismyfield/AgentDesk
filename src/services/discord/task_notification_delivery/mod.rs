@@ -6,18 +6,18 @@
 
 mod card_post;
 mod card_render;
-mod inline_delivery;
 mod footer_only_marker;
 mod gateway;
+mod inline_delivery;
 mod response_chunks;
 mod retired_metadata;
 mod store;
 mod terminal_identity;
 
 #[cfg(test)]
-mod inline_contract_tests;
-#[cfg(test)]
 mod footer_retirement_tests;
+#[cfg(test)]
+mod inline_contract_tests;
 #[cfg(test)]
 mod tests;
 
@@ -166,9 +166,11 @@ impl TaskNotificationContext {
             tool_use_id: self.tool_use_id.clone(),
             status: clean_optional(Some(&self.status)),
             summary: clean_optional(Some(&self.summary)).map(|summary| {
-                if self.kind=="monitor_auto_turn" && !summary.starts_with("Monitor event") {
+                if self.kind == "monitor_auto_turn" && !summary.starts_with("Monitor event") {
                     format!("Monitor event: \"{summary}\"")
-                } else {summary}
+                } else {
+                    summary
+                }
             }),
             ..Default::default()
         };
@@ -708,13 +710,17 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
     metadata: Option<&super::completion_footer_metadata::CompletionFooterMetadata>,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
     let restored;
-    let event=if intent==EnsureIntent::Promotion {
-        restored=store::restore_completion_event(pool,event).await.map_err(CardEnsureError::Store)?;
+    let event = if intent == EnsureIntent::Promotion {
+        restored = store::restore_completion_event(pool, event)
+            .await
+            .map_err(CardEnsureError::Store)?;
         &restored
-    } else {event};
-    let preferred = if event.payload.is_completion_card() { clients.preferred() }
-        else { clients.by_key(&provider_bot_key(&event.scope.provider)) }
-        .ok_or_else(|| CardEnsureError::Transient("required task surface bot is unavailable".to_string()))?;
+    } else {
+        event
+    };
+    let preferred = clients.for_event(event).ok_or_else(|| {
+        CardEnsureError::Transient("required task surface bot is unavailable".to_string())
+    })?;
     for attempt in 0..20 {
         let claim = store::claim_event(
             pool,
@@ -724,6 +730,7 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
                 EnsureIntent::Observation => StoreIntent::Observation,
                 EnsureIntent::Promotion => StoreIntent::Promotion,
             },
+            metadata,
         )
         .await
         .map_err(CardEnsureError::Store)?;
@@ -739,8 +746,16 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
                 });
             }
             CardClaim::Owned(claimed) => {
-                return deliver_claim(pool, clients, transport, event, intent, claimed, metadata)
-                    .await;
+                let pending_other_monitor = event.payload.is_monitor()
+                    && intent == EnsureIntent::Observation
+                    && claimed.monitor.is_none();
+                let outcome =
+                    deliver_claim(pool, clients, transport, event, intent, claimed, metadata)
+                        .await?;
+                if pending_other_monitor {
+                    continue;
+                }
+                return Ok(outcome);
             }
             CardClaim::Busy { .. } if attempt < 19 => {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -795,9 +810,16 @@ async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
                     "another worker owns the missing-card replacement lease (bot={bot_key})"
                 )));
             }
-            store::MissingCardReplacementClaim::Owned(claimed) => {
+            store::MissingCardReplacementClaim::Owned(mut claimed) => {
+                if event.payload.is_monitor() {
+                    claimed.monitor = Some(store::monitor::Observation {
+                        payload: event.payload.monitor_fingerprint(),
+                        source: event.scope.terminal_delivery_fingerprint.clone(),
+                    });
+                }
                 if inline_delivery::needs_reconciliation(event, clients, &claimed) {
-                    return inline_delivery::reconcile_legacy(pool, clients, transport, &claimed).await;
+                    return inline_delivery::reconcile_legacy(pool, clients, transport, &claimed)
+                        .await;
                 }
                 let Some(bot) = clients.by_key(&claimed.bot_key) else {
                     let error = format!(
@@ -824,7 +846,6 @@ async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
     }
     unreachable!("bounded missing-card replacement loop returns on its last attempt")
 }
-
 
 fn map_transport_error(error: TaskCardTransportError) -> CardEnsureError {
     match error {

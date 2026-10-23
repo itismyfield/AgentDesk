@@ -10,6 +10,8 @@ use crate::dispatch::test_support::DispatchPostgresTestDb;
 
 #[path = "footer_surface_tests.rs"]
 mod footer_surface_tests;
+#[path = "inline_contract_tests/replacement_receipt_tests.rs"]
+mod replacement_receipt_tests;
 
 const CHANNEL: u64 = 72_280_100;
 const LEGACY_MESSAGE: u64 = 72_280_900;
@@ -677,7 +679,11 @@ async fn monitor_failed_edit_retry_counts_the_event_once_pg() {
         "{failed:?}"
     );
     assert_eq!(transport.counts(), (1, 1));
-    assert_eq!(snapshot(&pool, &next).await.count, 2);
+    assert_eq!(
+        snapshot(&pool, &next).await.count,
+        1,
+        "failed PATCH cannot commit an observation count"
+    );
     let attempted_content = transport.latest().content;
     assert!(attempted_content.ends_with(" · 2회"));
 

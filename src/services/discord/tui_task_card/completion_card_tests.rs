@@ -24,7 +24,10 @@ fn completion_entry_combines_header_and_keeps_quoted_report_with_real_usage() {
     );
     assert!(!card.contains("Task completed"), "{card}");
     assert!(!card.contains("completion-private-id"), "{card}");
-    assert!(!card.contains('$'), "aggregate tokens cannot determine cost: {card}");
+    assert!(
+        !card.contains('$'),
+        "aggregate tokens cannot determine cost: {card}"
+    );
 }
 
 #[test]
@@ -40,8 +43,14 @@ fn failed_workflow_entry_uses_one_header_and_preserves_latest_report() {
         card.lines().next(),
         Some("❌ **Dynamic workflow \"verify\" failed** · updated 3x")
     );
-    assert!(card.contains("> Latest: Compile failed.\n> Retry after fixing the type."), "{card}");
-    assert!(card.ends_with("-# 3 agents · 8 tools · ⏱ 2m · 🪙 1.3m tok"), "{card}");
+    assert!(
+        card.contains("> Latest: Compile failed.\n> Retry after fixing the type."),
+        "{card}"
+    );
+    assert!(
+        card.ends_with("-# 3 agents · 8 tools · ⏱ 2m · 🪙 1.3m tok"),
+        "{card}"
+    );
     assert!(!card.contains("task workflow"), "{card}");
 }
 
@@ -50,7 +59,10 @@ fn completion_entry_omits_unavailable_or_malformed_tokens_and_cost() {
     for usage in ["", "<subagent_tokens>unknown</subagent_tokens>"] {
         let raw = completed("Useful report.", usage);
         let card = format_task_notification_card(&parse_task_notification(&raw), 1);
-        assert!(card.starts_with("✅ **Agent \"verify <T>\" completed**\n\n> "), "{card}");
+        assert!(
+            card.starts_with("✅ **Agent \"verify <T>\" completed**\n\n> "),
+            "{card}"
+        );
         assert!(!card.contains("🪙"), "{card}");
         assert!(!card.contains('$'), "{card}");
         assert!(!card.contains("-# task "), "{card}");
@@ -76,4 +88,20 @@ fn completion_entry_collapses_summary_newlines_without_expanding_discord_body() 
     let card = format_task_notification_card(&parse_task_notification(raw), 1);
     assert_eq!(card.lines().next(), Some("✅ **First line second line**"));
     assert!(card.contains("\n\n> Quoted detail."), "{card}");
+}
+
+#[test]
+fn monitor_report_keeps_legacy_renderer_bytes_and_stays_outside_completion_cards() {
+    let raw = "<task-notification><task-id>monitor-private-id</task-id>\
+        <summary>Monitor event: &quot;resident daemon&quot;</summary>\
+        <result>Trigger one.\nTrigger two.</result>\
+        <usage><subagent_tokens>177612</subagent_tokens><tool_uses>4</tool_uses>\
+        <duration_ms>45000</duration_ms></usage></task-notification>";
+    let note = parse_task_notification(raw);
+    assert!(!super::has_completion_body(&note));
+    assert_eq!(
+        format_task_notification_card(&note, 2),
+        "📋 Task event · updated 2x\n**Monitor event: \"resident daemon\"**\n\n\
+         > Latest: Trigger one.\n> Trigger two.\n\n-# task monitor- · 4 tools · ⏱ 45s"
+    );
 }

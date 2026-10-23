@@ -7,6 +7,9 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
     event: &TaskCardEvent,
     bot: &str,
     intent: StoreIntent,
+    metadata: Option<
+        &crate::services::discord::completion_footer_metadata::CompletionFooterMetadata,
+    >,
 ) -> Result<CardClaim, String> {
     if event.payload.is_monitor() && intent == StoreIntent::Observation {
         return match pool {
@@ -15,7 +18,10 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
             None => Err(memory_fallback_unavailable()),
         };
     }
-    let content = event.payload.render(1);
+    let content = metadata.map_or_else(
+        || event.payload.render(1),
+        |metadata| event.payload.render_with_completion_metadata(1, metadata),
+    );
     let hash = content_hash(&content);
     if let Some(pool) = pool {
         if let Some((message_id, bot_key)) =
@@ -26,88 +32,110 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
                 bot_key,
             });
         }
-        repin(pool, event, bot, &content, &hash, intent, false).await?;
+        if event.payload.is_completion_card() && event.scope.terminal_delivery_fingerprint.is_some()
+        {
+            let legacy_hash = content_hash(&event.payload.legacy_render(1));
+            if let Some((message_id, bot_key)) =
+                find_terminal_delivery_pg(pool, &event.scope, &legacy_hash).await?
+            {
+                return Ok(CardClaim::Existing {
+                    message_id,
+                    bot_key,
+                });
+            }
+        }
+        if let Some(claim) = repin(pool, event, bot, &content, &hash, intent).await? {
+            return Ok(claim);
+        }
     } else if cfg!(any(test, debug_assertions)) {
+        if event.payload.is_completion_card() && event.scope.terminal_delivery_fingerprint.is_some()
+        {
+            let legacy_hash = content_hash(&event.payload.legacy_render(1));
+            if let Some((message_id, bot_key)) =
+                find_terminal_delivery_memory(&event.scope, &legacy_hash)?
+            {
+                return Ok(CardClaim::Existing {
+                    message_id,
+                    bot_key,
+                });
+            }
+        }
         repin_memory(event, bot, &content, &hash, intent);
     }
     claim_card(pool, &event.scope, bot, &content, &hash, intent).await
 }
 
-pub(super) async fn repin(
+async fn repin(
     pool: &PgPool,
     event: &TaskCardEvent,
     bot: &str,
     content: &str,
     hash: &str,
     intent: StoreIntent,
-    missing: bool,
-) -> Result<(), String> {
+) -> Result<Option<CardClaim>, String> {
     let scope = &event.scope;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let row = sqlx::query(
-        "SELECT *, (lease_owner IS NOT NULL AND lease_expires_at > NOW()) AS lease_active
-         FROM task_notification_card_state WHERE channel_id=$1 AND provider=$2
-           AND session_key=$3 AND event_key=$4 FOR UPDATE",
-    )
-    .bind(scope.channel_id as i64)
-    .bind(&scope.provider)
-    .bind(&scope.session_key)
-    .bind(&scope.event_key)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    let row=sqlx::query("SELECT *, (lease_owner IS NOT NULL AND lease_expires_at>NOW()) AS lease_active FROM task_notification_card_state WHERE channel_id=$1 AND provider=$2 AND session_key=$3 AND event_key=$4 FOR UPDATE")
+        .bind(scope.channel_id as i64).bind(&scope.provider).bind(&scope.session_key).bind(&scope.event_key)
+        .fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(None);
     };
     if row.get::<bool, _>("lease_active") {
-        return Ok(());
+        return Ok(Some(CardClaim::Busy {
+            bot_key: row.get("bot_key"),
+        }));
     }
     let state: String = row.get("delivery_state");
     let old_bot: String = row.get("bot_key");
-    let never_started = row
-        .get::<Option<DateTime<Utc>>, _>("post_started_at")
-        .is_none();
-    let same_source = scope.terminal_delivery_fingerprint.is_some()
+    let same = scope.terminal_delivery_fingerprint.is_some()
         && scope.terminal_delivery_fingerprint
             == row.get::<Option<String>, _>("terminal_delivery_fingerprint");
-    let new_revision = state == "card_posted"
+    let can_change_owner = !event.payload.is_completion_card()
+        || super::super::super::session_notice::is_inline(
+            &row.get::<String, _>("rendered_content"),
+        );
+    let target_bot = if can_change_owner || old_bot.is_empty() {
+        bot
+    } else {
+        &old_bot
+    };
+    let next = state == "card_posted"
         && old_bot != bot
-        && !same_source
+        && can_change_owner
+        && !same
         && intent == StoreIntent::Observation;
-    if missing && state == "card_posted" {
-        sqlx::query("UPDATE task_notification_card_state SET bot_key=$2, rendered_content=$3, content_hash=$4 WHERE id=$1")
-            .bind(row.get::<i64,_>("id")).bind(bot).bind(content).bind(hash)
-            .execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    } else if new_revision {
-        sqlx::query(
-            "INSERT INTO task_notification_terminal_delivery
-             (channel_id,provider,session_key,event_key,terminal_delivery_fingerprint,discord_message_id,bot_key,content_hash)
-             SELECT channel_id,provider,session_key,event_key,terminal_delivery_fingerprint,discord_message_id,bot_key,content_hash
-             FROM task_notification_card_state WHERE id=$1 ON CONFLICT DO NOTHING",
-        ).bind(row.get::<i64,_>("id")).execute(&mut *tx).await.map_err(|e|e.to_string())?;
-        let revision = row.get::<i32, _>("revision").saturating_add(1);
-        sqlx::query(
-            "UPDATE task_notification_card_state SET delivery_state='posting', surface_owner='card',
-             bot_key=$2, rendered_content=$3, content_hash=$4, discord_message_id=NULL,
-             revision=$5, discord_nonce=$6, update_count=1, terminal_delivery_fingerprint=$7,
-             post_started_at=NULL, updated_at=NOW() WHERE id=$1",
-        ).bind(row.get::<i64,_>("id")).bind(bot).bind(content).bind(hash)
-            .bind(revision).bind(stable_nonce(scope,revision)).bind(&scope.terminal_delivery_fingerprint)
-            .execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    } else if state != "card_posted" && never_started {
-        sqlx::query(
-            "UPDATE task_notification_card_state SET surface_owner='card',delivery_state='posting',
-             bot_key=$2,rendered_content=$3,content_hash=$4,updated_at=NOW() WHERE id=$1",
-        )
-        .bind(row.get::<i64, _>("id"))
-        .bind(bot)
-        .bind(content)
-        .bind(hash)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let unused = state != "card_posted"
+        && row
+            .get::<Option<DateTime<Utc>>, _>("post_started_at")
+            .is_none();
+    if !next && !unused {
+        return Ok(None);
     }
-    tx.commit().await.map_err(|e| e.to_string())
+    if next {
+        sqlx::query("INSERT INTO task_notification_terminal_delivery (channel_id,provider,session_key,event_key,terminal_delivery_fingerprint,discord_message_id,bot_key,content_hash) SELECT channel_id,provider,session_key,event_key,terminal_delivery_fingerprint,discord_message_id,bot_key,content_hash FROM task_notification_card_state WHERE id=$1 ON CONFLICT DO NOTHING")
+            .bind(row.get::<i64,_>("id")).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+    }
+    let owner = uuid::Uuid::new_v4().to_string();
+    let revision = row
+        .get::<i32, _>("revision")
+        .saturating_add(i32::from(next));
+    let fingerprint = if next {
+        scope.terminal_delivery_fingerprint.clone()
+    } else {
+        row.get::<Option<String>, _>("terminal_delivery_fingerprint")
+            .or_else(|| scope.terminal_delivery_fingerprint.clone())
+    };
+    let changed=sqlx::query("UPDATE task_notification_card_state SET surface_owner='card',delivery_state='posting',bot_key=$2,rendered_content=$3,content_hash=$4,discord_message_id=NULL,revision=$5,discord_nonce=$6,update_count=CASE WHEN $7 THEN 1 ELSE update_count END,terminal_delivery_fingerprint=$8,lease_owner=$9,lease_expires_at=NOW()+make_interval(secs=>$10),updated_at=NOW() WHERE id=$1 RETURNING bot_key,discord_nonce,revision,update_count,rendered_content")
+        .bind(row.get::<i64,_>("id")).bind(target_bot).bind(content).bind(hash).bind(revision)
+        .bind(stable_nonce(scope,revision)).bind(next).bind(&fingerprint).bind(&owner).bind(LEASE_SECONDS)
+        .fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+    let mut actual_scope = scope.clone();
+    actual_scope.terminal_delivery_fingerprint = fingerprint;
+    let mut claim = claimed_from_row(&actual_scope, owner, &changed, ClaimAction::Post)?;
+    claim.new_terminal_completion = next;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Some(CardClaim::Owned(claim)))
 }
 
 fn repin_memory(event: &TaskCardEvent, bot: &str, content: &str, hash: &str, intent: StoreIntent) {
@@ -122,8 +150,11 @@ fn repin_memory(event: &TaskCardEvent, bot: &str, content: &str, hash: &str, int
     }
     let same = event.scope.terminal_delivery_fingerprint.is_some()
         && event.scope.terminal_delivery_fingerprint == row.terminal_delivery_fingerprint;
+    let can_change_owner = !event.payload.is_completion_card()
+        || super::super::super::session_notice::is_inline(&row.rendered_content);
     if row.state == MemoryState::CardPosted
         && row.bot_key != bot
+        && can_change_owner
         && !same
         && intent == StoreIntent::Observation
     {
@@ -137,7 +168,9 @@ fn repin_memory(event: &TaskCardEvent, bot: &str, content: &str, hash: &str, int
     }
     if row.state != MemoryState::CardPosted && row.post_started_at.is_none() {
         row.state = MemoryState::Posting;
-        row.bot_key = bot.to_string();
+        if can_change_owner || row.bot_key.is_empty() {
+            row.bot_key = bot.to_string();
+        }
         row.rendered_content = content.to_string();
         row.content_hash = hash.to_string();
     }
@@ -176,17 +209,20 @@ pub(in crate::services::discord::task_notification_delivery) async fn restore_co
     Ok(event)
 }
 
-fn normalize_completion(content: &str) -> String {
+pub(super) fn normalize_completion(content: &str) -> String {
     let mut lines = content.lines();
     let first = lines.next().unwrap_or("");
-    let mut result = if first.contains("Task ") {
+    let legacy = first
+        .split_once(' ')
+        .is_some_and(|(_, title)| title.starts_with("Task "));
+    let mut result = if legacy {
         let icon = first.split_whitespace().next().unwrap_or("📋");
         format!("{icon} {}", lines.next().unwrap_or("Task notification"))
     } else {
         first.to_string()
     };
     for line in lines {
-        let line = if let Some(footer) = line.strip_prefix("-# ") {
+        let line = if let Some(footer) = line.strip_prefix("-# ").filter(|_| legacy) {
             let items = footer
                 .split(" · ")
                 .filter(|item| !item.trim_start().starts_with("task "))

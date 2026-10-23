@@ -4,7 +4,7 @@ mod card_claim;
 mod memory_claim;
 use memory_claim::claim_card_memory;
 mod inline_claim;
-mod monitor;
+pub(super) mod monitor;
 pub(super) use inline_claim::{claim_event, restore_completion_event};
 mod retired_metadata;
 pub(super) use retired_metadata::claim_retired_metadata;
@@ -246,9 +246,10 @@ pub(super) async fn prepare_replacement(
         }
         None => Err(memory_fallback_unavailable()),
     }?;
-    replacement.monitor=claimed.monitor.clone();
-    replacement.update_count=claimed.update_count;
-    replacement.scope.terminal_delivery_fingerprint=claimed.scope.terminal_delivery_fingerprint.clone();
+    replacement.monitor = claimed.monitor.clone();
+    replacement.update_count = claimed.update_count;
+    replacement.scope.terminal_delivery_fingerprint =
+        claimed.scope.terminal_delivery_fingerprint.clone();
     Ok(replacement)
 }
 
@@ -410,7 +411,9 @@ async fn mark_posted_pg(
         .await
     };
     journal.map_err(|error| format!("journal terminal card delivery: {error}"))?;
-    monitor::record(&mut transaction, claimed, message_id).await.map_err(|e| e.to_string())?;
+    monitor::record(&mut transaction, claimed, message_id)
+        .await
+        .map_err(|e| e.to_string())?;
     transaction
         .commit()
         .await
@@ -426,7 +429,9 @@ async fn mark_edited_pg(
     content: &str,
     content_hash: &str,
 ) -> Result<(), String> {
-    if claimed.monitor.is_some() { return monitor::mark_edited(pool, claimed, message_id, content, content_hash).await; }
+    if claimed.monitor.is_some() {
+        return monitor::mark_edited(pool, claimed, message_id, content, content_hash).await;
+    }
     let changed = sqlx::query(
         "UPDATE task_notification_card_state
          SET rendered_content = $7, content_hash = $8,
@@ -717,7 +722,6 @@ fn record_footer_only_memory(
     Ok(())
 }
 
-
 fn begin_card_post_memory(claimed: &ClaimedCard) -> Result<CardPostAttempt, String> {
     let mut rows = MEMORY_STORE
         .lock()
@@ -800,7 +804,10 @@ fn mark_edited_memory(
         if row.state != MemoryState::CardPosted || row.message_id != Some(message_id) {
             return Err("memory task card edit lost exact message".to_string());
         }
-        if claimed.monitor.is_some() { row.update_count=claimed.update_count; row.terminal_delivery_fingerprint=claimed.scope.terminal_delivery_fingerprint.clone(); }
+        if claimed.monitor.is_some() {
+            row.update_count = claimed.update_count;
+            row.terminal_delivery_fingerprint = claimed.scope.terminal_delivery_fingerprint.clone();
+        }
         row.rendered_content = content.to_string();
         row.content_hash = content_hash.to_string();
         row.lease_owner = None;
@@ -808,7 +815,7 @@ fn mark_edited_memory(
         row.last_error = None;
         Ok(())
     })?;
-    monitor::record_memory(claimed,message_id)
+    monitor::record_memory(claimed, message_id)
 }
 
 fn mark_failure_memory(

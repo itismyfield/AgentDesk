@@ -6,6 +6,55 @@ use crate::services::tui_o::cutover::test_override;
 
 const BODY: &str = "ADK-C1A-watcher-task-response-body";
 
+#[tokio::test]
+async fn persisted_notify_recovery_keeps_the_known_provider_client_for_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let provider_http = Arc::new(serenity::Http::new("offline-provider"));
+    let notify_http = Arc::new(serenity::Http::new("offline-notify"));
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    registry
+        .set_utility_bot_http_for_tests(
+            crate::services::discord::bot_role::UtilityBotRole::Notify,
+            notify_http.clone(),
+        )
+        .await;
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+    let clients = watcher_card_clients(
+        &provider_http,
+        &shared,
+        &ProviderKind::Claude,
+        Some("notify"),
+    )
+    .await
+    .expect("persisted notify recovery must retain both original and replacement owners");
+    assert!(Arc::ptr_eq(
+        &clients
+            .by_key("notify")
+            .expect("original notify owner")
+            .http,
+        &notify_http
+    ));
+    assert!(Arc::ptr_eq(
+        &clients
+            .by_key("provider:claude")
+            .expect("the known provider must be available for a canonical replacement")
+            .http,
+        &provider_http
+    ));
+    assert!(matches!(
+        watcher_card_clients(
+            &provider_http,
+            &shared,
+            &ProviderKind::Claude,
+            Some("provider:codex"),
+        )
+        .await,
+        Err(PrepareWatcherTaskResponseError::Permanent(_))
+    ));
+}
+
 /// A watcher task response that sends no body (failed preparation, a sink-held claim, a delivered
 /// or sent response, an owned one whose bot identity lookup fails) leaves a pending adoption.
 #[tokio::test]

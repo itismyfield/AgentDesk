@@ -134,10 +134,10 @@ mod startup_reclaim;
 mod status_panel_orphan_store;
 mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
+mod session_notice;
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod synthetic_headless_message_id;
-mod session_notice;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
 mod terminal_coordinate;

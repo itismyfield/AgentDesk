@@ -28,6 +28,7 @@ pub(super) fn preview(text: &str) -> String {
             _ => escaped.push(ch),
         }
     }
+    let mut escaped = tui_task_card::truncate_chars_ascii(&escaped, 600);
     if remaining > 0 {
         escaped.push_str(&format!(" (+{remaining}줄)"));
     }

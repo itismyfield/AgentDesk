@@ -85,7 +85,11 @@ async fn claim_missing_card_replacement_pg(
         let content = payload.map_or_else(
             || current.get::<String, _>("rendered_content"),
             |payload| {
-                payload.render(u64::try_from(current.get::<i64, _>("update_count")).unwrap_or(1))
+                replacement_content(
+                    &current.get::<String, _>("rendered_content"),
+                    payload,
+                    u64::try_from(current.get::<i64, _>("update_count")).unwrap_or(1),
+                )
             },
         );
         let desired = payload
@@ -137,7 +141,10 @@ async fn claim_missing_card_replacement_pg(
     let original_hash: String = current.get("content_hash");
     let count =
         u64::try_from(current.get::<i64, _>("update_count")).map_err(|error| error.to_string())?;
-    let rendered_content = payload.map_or(original, |payload| payload.render(count));
+    let rendered_content = payload.map_or_else(
+        || original.clone(),
+        |payload| replacement_content(&original, payload, count),
+    );
     let desired_bot = payload
         .filter(|payload| !payload.is_completion_card())
         .map(|_| super::super::provider_bot_key(&scope.provider))
@@ -213,6 +220,16 @@ fn claim_missing_card_replacement_memory(
         row.lease_owner = Some(lease_owner.clone());
         row.lease_expires_at = Some(now + Duration::from_secs(LEASE_SECONDS as u64));
         row.last_error = None;
+        if row.post_started_at.is_none()
+            && let Some(payload) = payload
+        {
+            row.rendered_content =
+                replacement_content(&row.rendered_content, payload, row.update_count);
+            row.content_hash = super::super::content_hash(&row.rendered_content);
+            if !payload.is_completion_card() {
+                row.bot_key = super::super::provider_bot_key(&scope.provider);
+            }
+        }
         return Ok(MissingCardReplacementClaim::Owned(memory_claim(
             scope,
             &lease_owner,
@@ -227,7 +244,7 @@ fn claim_missing_card_replacement_memory(
     }
     let lease_owner = uuid::Uuid::new_v4().to_string();
     if let Some(payload) = payload {
-        let content = payload.render(row.update_count);
+        let content = replacement_content(&row.rendered_content, payload, row.update_count);
         row.content_hash = super::super::content_hash(&content);
         row.rendered_content = content;
         if !payload.is_completion_card() {
@@ -248,4 +265,17 @@ fn claim_missing_card_replacement_memory(
         row,
         ClaimAction::Post,
     )))
+}
+
+fn replacement_content(
+    original: &str,
+    payload: &super::super::TaskCardPayload,
+    count: u64,
+) -> String {
+    if !payload.is_completion_card() {
+        return payload.render(count);
+    }
+    let clean = super::super::retired_metadata::without_metadata(original, payload, count)
+        .unwrap_or_else(|| original.to_string());
+    super::inline_claim::normalize_completion(&clean)
 }

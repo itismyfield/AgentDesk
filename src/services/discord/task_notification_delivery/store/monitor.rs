@@ -8,8 +8,8 @@ pub(super) use memory::{claim as claim_memory, record as record_memory};
 
 #[derive(Clone, Debug)]
 pub(in crate::services::discord::task_notification_delivery) struct Observation {
-    pub(super) payload: String,
-    pub(super) source: Option<String>,
+    pub(in crate::services::discord::task_notification_delivery) payload: String,
+    pub(in crate::services::discord::task_notification_delivery) source: Option<String>,
 }
 
 async fn receipt(
@@ -208,7 +208,7 @@ pub(super) async fn claim(
              (channel_id,provider,session_key,event_key,payload_fingerprint,source_fingerprint,discord_message_id,bot_key,legacy_render_count)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
         ).bind(scope.channel_id as i64).bind(&scope.provider).bind(&scope.session_key)
-            .bind(&scope.event_key).bind(row.get::<String,_>("content_hash"))
+            .bind(&scope.event_key).bind(old_fingerprint.clone().unwrap_or_else(|| row.get::<String,_>("content_hash")))
             .bind(&old_fingerprint).bind(old_message).bind(&current_bot)
             .bind(if old_fingerprint.is_none() {Some(count)} else {None})
             .execute(&mut *tx).await.map_err(|e| e.to_string())?;

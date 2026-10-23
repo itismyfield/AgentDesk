@@ -144,8 +144,11 @@ async fn resolve_manual_bot_http(
     options: &ManualOutboundOptions,
 ) -> Result<std::sync::Arc<serenity::Http>, (&'static str, String)> {
     if let Some(provider) = options.channel_owner_provider.as_ref() {
-        return crate::services::discord::session_notice::provider_http(registry, provider, channel_id)
-            .await.map_err(|error| ("503 Service Unavailable", error));
+        return crate::services::discord::session_notice::provider_http(
+            registry, provider, channel_id,
+        )
+        .await
+        .map_err(|error| ("503 Service Unavailable", error));
     }
     resolve_bot_http(registry, bot).await
 }

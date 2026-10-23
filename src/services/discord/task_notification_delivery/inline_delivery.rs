@@ -6,11 +6,7 @@ pub(super) fn needs_reconciliation(
     clients: &CardDeliveryClients,
     claimed: &ClaimedCard,
 ) -> bool {
-    let desired = if event.payload.is_completion_card() {
-        clients.preferred()
-    } else {
-        clients.by_key(&provider_bot_key(&event.scope.provider))
-    };
+    let desired = clients.for_event(event);
     desired.is_none_or(|bot| bot.key != claimed.bot_key)
         || (!event.payload.is_completion_card()
             && !super::super::session_notice::is_inline(&claimed.rendered_content))
