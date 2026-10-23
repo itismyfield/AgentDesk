@@ -143,21 +143,29 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
         request.nonce,
         request.text,
     );
+    let expected =
+        super::super::super::format_ssh_direct_prompt_notification("claude", &session, &frame);
     submit_hook(&tx, &session, &frame);
     assert!(
         wait_until(WAIT, || {
-            let found = rt.notices().iter().any(|text| text.contains(request.text));
+            let found = rt.notices().iter().any(|text| text == &expected);
             Box::pin(async move { found })
         })
-        .await
+        .await,
+        "the external frame must be announced: {:?}",
+        rt.notices()
     );
     let notices = rt.notices();
     rt.finish().await;
-    assert_eq!(
-        notices
-            .iter()
-            .filter(|text| text.contains(request.text))
-            .count(),
-        1
-    );
+    let matching: Vec<_> = notices
+        .iter()
+        .filter(|text| text.contains(request.nonce))
+        .collect();
+    assert_eq!(matching.len(), 1, "one external frame notice: {notices:?}");
+    let notice = matching[0];
+    assert_eq!(notice, &expected);
+    assert!(notice.starts_with("-# ⌨️ "), "{notice}");
+    assert_eq!(notice.lines().count(), 1, "{notice}");
+    assert!(notice.ends_with(" (+1줄)"), "{notice}");
+    assert!(!notice.contains(request.text), "{notice}");
 }
