@@ -737,7 +737,7 @@ mod tests {
 
     fn clients() -> CardDeliveryClients {
         CardDeliveryClients::new([CardBot::new(
-            "notify",
+            "claude",
             Arc::new(serenity::Http::new("test-token")),
         )])
     }
