@@ -422,7 +422,12 @@ async fn unverified_herdr_claims_do_not_publish_poll_owner_contract_pg() {
                     )
                     .await;
                 }
-                "dead" => fixture.rig.provider_seen(&fixture.incarnation, false),
+                "dead" => {
+                    fixture.rig.provider_seen(&fixture.incarnation, false);
+                    fixture.rig.foreground(&[
+                        crate::services::session_host::herdr_socket_rig_tests::SHELL,
+                    ]);
+                }
                 "nonce" => {
                     let marker = crate::services::tmux_common::session_temp_path(
                         &fixture.logical,
