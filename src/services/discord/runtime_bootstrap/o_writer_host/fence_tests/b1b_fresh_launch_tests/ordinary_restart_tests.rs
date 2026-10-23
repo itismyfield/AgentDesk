@@ -410,11 +410,7 @@ async fn restart_with_binding(
                 expected,
                 "saved piece appears once across the restart"
             );
-            assert_eq!(
-                output.history_reads.load(Ordering::SeqCst),
-                usize::from(matches!(pending, Pending::Prepared)),
-                "only the open Prepared performs one history read-back"
-            );
+            output.assert_history_reads(usize::from(matches!(pending, Pending::Prepared)));
         }
     })
     .catch_unwind()
