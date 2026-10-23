@@ -134,8 +134,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | 파일 | 구분 | 직접 소비 지점 |
 |---|---|---|
 | `src/db/o_channel_homes.rs` | 관측·시험 fixture | `read_home_at`·`read_home`, 조건부 renewal·drain 전이. `delegate`·`adopt`·`begin_reclaim`·`force_orphan`·`abort_release`는 보존된 core/drain/worker 시험 fixture 전용. |
-| `src/db/intake_outbox.rs` | 라우팅 | claim SQL :674–683. epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch row에서만 |
-| `src/db/intake_outbox/worker_status.rs` | 라우팅 | worker status 쓰기 펜스 `HOME_CLAIM_FENCE` :87. claim SQL과 같은 조건: epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch worker row에서만 |
 | `src/db/mod.rs` | 배선 | 모듈 선언 :32 |
 | `src/lib.rs` | readiness | `home_availability::{Availability, Unavailable, state}` 재노출 :291 |
 | `src/services/cluster/mod.rs` | 배선 | 모듈 선언 |
@@ -144,12 +142,8 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/cluster/channel_home_port.rs` | 변경 | drain 의무 포트 :12 |
 | `src/services/cluster/channel_home/ingress_snapshot.rs` | 관측 | `try_sample`·`sample_gate`: registry·local·inner gate를 `try_lock` 한 번씩 읽어 복사만 한다. expire·prune·close·초기화 없음 |
 | `src/services/cluster/channel_ingress.rs` | 관측 | 이 계약. 호출자는 shadow worker뿐 |
-| `src/services/cluster/intake_router_hook.rs` | readiness·라우팅 | `home_availability::refusal` :130, `read_home` :135 → `route_to_home` :162 |
-| `src/services/cluster/intake_router_hook/o_input.rs` | readiness·입력 placement | `home_availability::refusal` :10, 매 입력 `read_home` :15 → `route_to_home` :17을 fresh writer admission보다 먼저 확인 |
-| `src/services/cluster/intake_worker/o_input.rs` | claimed 입력 admission | exact SQL claim 재확인 뒤 `channel_home::intake_hold` :46을 first/final O eligibility보다 먼저 확인; 거절은 해당 claim만 pending으로 반환 |
 | `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
 | `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
-| `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
 | `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
 | `src/server/routes/health_api/runtime_profile.rs` | 진단 | `channel_home::health` :10(메모리 읽기만) |
 

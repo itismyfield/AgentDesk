@@ -788,7 +788,6 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         preserve_on_cancel: false,
         agent_id: "b1b-input-worker".into(),
         provider: "codex".into(),
-        home_epoch: None,
     };
     let parent = insert_pending(pool, &payload, 1, None).await.unwrap();
     let claimed = crate::db::intake_outbox::claim_pending_for_target(

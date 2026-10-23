@@ -28,7 +28,6 @@ fn payload(channel: &str, msg: &str) -> InsertPendingPayload {
         wait_for_completion: false,
         preserve_on_cancel: false,
         agent_id: "agent-x".to_string(),
-        home_epoch: None,
     }
 }
 
@@ -1662,4 +1661,187 @@ async fn intake_outbox_terminal_retention_index_catalog_pg() {
 
     pool.close().await;
     pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn residual_home_rows_do_not_route_new_input_and_historical_stamps_stay_held_pg()
+-> Result<(), sqlx::Error> {
+    use crate::services::cluster::intake_router_hook::{
+        IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis, IntakeRoutingMode,
+        try_route_intake,
+    };
+
+    let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _live = crate::config_live_reload::test_live_guard(lock);
+    let root = tempfile::tempdir().expect("isolated configuration root");
+    let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let _config_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &root.path().join("missing-config"),
+    );
+    let mut config = crate::config::Config::default();
+    config.data.dir = root.path().join("data");
+    crate::config_live_reload::install(config);
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    seed_default_test_agent(&pool).await;
+    sqlx::query(
+        "INSERT INTO worker_nodes (instance_id,status,labels,capabilities,last_heartbeat_at)
+        VALUES ('worker-1','online','[\"unreal\"]',$1,NOW())",
+    )
+    .bind(json!({"intake_worker":{"enabled":true,"providers":["claude"]}}))
+    .execute(&pool)
+    .await?;
+
+    for (index, state) in [
+        "releasing",
+        "released",
+        "worker",
+        "reclaiming",
+        "reclaimed",
+        "orphaned",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = (4_380_701 + index).to_string();
+        let p = payload(&channel, "new-message");
+        sqlx::query("UPDATE agents SET discord_channel_id=$1 WHERE id='agent-x'")
+            .bind(&channel)
+            .execute(&pool)
+            .await?;
+        let holding = matches!(state, "releasing" | "worker" | "reclaiming");
+        // Poison values conflict with normal placement, but satisfy the retained schema.
+        sqlx::query(
+            "INSERT INTO o_channel_homes (channel_id,provider,state,holder,target,epoch,renewed_at)
+            VALUES ($1,'codex',$2,$3,$4,900001,NOW()-INTERVAL '1 day')",
+        )
+        .bind(&channel)
+        .bind(state)
+        .bind(holding.then_some("wrong-holder"))
+        .bind((state != "worker").then_some("wrong-target"))
+        .execute(&pool)
+        .await?;
+        let before: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(h) FROM o_channel_homes h WHERE channel_id=$1")
+                .bind(&channel)
+                .fetch_one(&pool)
+                .await?;
+        let ctx = IntakeRouterContext {
+            mode: IntakeRoutingMode::Enforce,
+            leader_instance_id: &p.forwarded_by_instance_id,
+            provider: &p.provider,
+            channel_id: &channel,
+            policy_channel_id: &channel,
+            user_msg_id: &p.user_msg_id,
+            replay_source_message_ids: None,
+            request_owner_id: &p.request_owner_id,
+            request_owner_name: p.request_owner_name.as_deref(),
+            user_text: &p.user_text,
+            reply_context: p.reply_context.as_deref(),
+            has_reply_boundary: p.has_reply_boundary,
+            dm_hint: p.dm_hint,
+            turn_kind: &p.turn_kind,
+            merge_consecutive: p.merge_consecutive,
+            reply_to_user_message: p.reply_to_user_message,
+            defer_watcher_resume: p.defer_watcher_resume,
+            wait_for_completion: p.wait_for_completion,
+            preserve_on_cancel: p.preserve_on_cancel,
+            node_override_instance_id: Some("worker-1"),
+            has_nonportable_uploads: false,
+            attachment_refs: &[],
+        };
+        let decision = try_route_intake(&pool, &ctx).await;
+        let id = match decision {
+            IntakeRouterDecision::Forwarded {
+                target_instance_id,
+                outbox_id,
+                basis: IntakeRoutingBasis::NodeOverride,
+            } if target_instance_id == "worker-1" => outbox_id,
+            other => {
+                panic!("residual {state} home must not replace ordinary /node routing: {other:?}")
+            }
+        };
+        let epoch: Option<i64> =
+            sqlx::query_scalar("SELECT home_epoch FROM intake_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(epoch, None, "new routing never stamps a home epoch");
+        for held in [vec![], vec!["unrelated".into()]] {
+            let row = claim_pending_for_target_except(&pool, "worker-1", "claude", "o", &held)
+                .await?
+                .expect("NULL input must claim despite every residual home state");
+            assert_eq!(row.id, id);
+            assert!(return_claimed_to_pending(&pool, id, "o").await?);
+        }
+        let mut tx = pool.begin().await?;
+        assert!(
+            confirm_claim(&mut tx, id, "o").await?.is_some(),
+            "NULL confirm ignores residual home"
+        );
+        tx.rollback().await?;
+        let after: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(h) FROM o_channel_homes h WHERE channel_id=$1")
+                .bind(&channel)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            before, after,
+            "routing and claim never mutate residual home rows"
+        );
+
+        // Even a perfectly matching old Worker row must not revive a historical input.
+        sqlx::query("UPDATE o_channel_homes SET provider='claude',state='worker',holder='worker-1',target=NULL WHERE channel_id=$1")
+            .bind(&channel).execute(&pool).await?;
+        sqlx::query("UPDATE intake_outbox SET home_epoch=900001 WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await?;
+        for held in [vec![], vec!["unrelated".into()]] {
+            assert!(
+                claim_pending_for_target_except(&pool, "worker-1", "claude", "o", &held)
+                    .await?
+                    .is_none(),
+                "historical stamp stays held at candidate SELECT"
+            );
+        }
+        let mut tx = pool.begin().await?;
+        assert!(
+            confirm_claim(&mut tx, id, "o").await?.is_none(),
+            "historical stamp stays held at confirm UPDATE"
+        );
+        tx.rollback().await?;
+        sqlx::query("UPDATE intake_outbox SET status='claimed',claim_owner='o',claimed_at=NOW() WHERE id=$1")
+            .bind(id).execute(&pool).await?;
+        assert!(
+            !mark_accepted(&pool, id, "o").await?,
+            "historical stamp stays held before accept"
+        );
+        sqlx::query(
+            "UPDATE intake_outbox SET status='failed_pre_accept',completed_at=NOW() WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await?;
+        assert_eq!(
+            sweep_failed_pre_accept_once(&pool, "leader-1", 5, 300, None).await?,
+            FailedPreAcceptSweepOutcome::Empty,
+            "historical stamp never becomes an automatic retry"
+        );
+        let stored: (Option<i64>, i64) = sqlx::query_as(
+            "SELECT home_epoch,(SELECT COUNT(*) FROM intake_outbox WHERE parent_outbox_id=$1) FROM intake_outbox WHERE id=$1")
+            .bind(id).fetch_one(&pool).await?;
+        assert_eq!(
+            stored,
+            (Some(900001), 0),
+            "old stamp and lack of children remain intact"
+        );
+    }
+    pool.close().await;
+    fixture.drop().await;
+    Ok(())
 }

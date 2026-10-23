@@ -1240,7 +1240,6 @@ mod worker_entry_tests {
             preserve_on_cancel: true,
             agent_id: format!("input-b-{channel}"),
             provider: "claude".into(),
-            home_epoch: None,
         };
         let id = insert_pending(&host.pool, &payload, 1, None).await.unwrap();
         // Seed SQL directly to cover rows written by older delivery producers.

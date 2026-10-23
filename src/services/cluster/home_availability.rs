@@ -1,6 +1,6 @@
 //! Residual delegation status reads retained until their callers are removed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
 /// Why delegated homes cannot run; each holds the channels it names.
@@ -54,7 +54,6 @@ pub enum Availability {
 #[derive(Default)]
 struct Provider {
     unavailable: Option<Unavailable>,
-    channels: BTreeSet<u64>,
 }
 
 type Providers = BTreeMap<String, Provider>;
@@ -84,14 +83,5 @@ pub fn state(provider: &str) -> Availability {
             ..
         }) => Availability::Unavailable(*reason),
         Some(_) => Availability::PreflightPassed,
-    })
-}
-
-/// Why `channel` takes no turn and no POST here; `None` for every channel while nothing was
-/// recorded, as with the switch off.
-pub(crate) fn refusal(channel: u64) -> Option<Unavailable> {
-    with_providers(|providers| {
-        let mut held = providers.values().filter(|p| p.channels.contains(&channel));
-        held.find_map(|provider| provider.unavailable)
     })
 }

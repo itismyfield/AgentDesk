@@ -64,8 +64,6 @@ pub(crate) struct IntakeOutboxRow {
     pub owner_generation: Option<i64>,
     pub owner_instance_id: Option<String>,
     pub admission_kind: String,
-    /// The delegated home epoch this row was routed under; `None` is a gateway-rule row.
-    pub home_epoch: Option<i64>,
 }
 
 /// Per-message payload required to INSERT a fresh row. Mirrors the
@@ -98,7 +96,6 @@ pub(crate) struct InsertPendingPayload {
     /// eligibility is scoped on this, not on `agents.provider`, because a
     /// cc/cdx paired agent has one `agents.provider` but two bots.
     pub provider: String,
-    pub home_epoch: Option<i64>,
 }
 
 /// INSERT a fresh `pending` row into `intake_outbox` for the given
@@ -128,7 +125,7 @@ pub(crate) async fn insert_pending(
             merge_consecutive, reply_to_user_message, defer_watcher_resume,
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
-            home_epoch, replay_source_message_ids
+            replay_source_message_ids
         ) VALUES (
             $1, $2, $3,
             $4, $5, $6, $7,
@@ -136,7 +133,7 @@ pub(crate) async fn insert_pending(
             $13, $14, $15,
             $16, $17, $18, $19,
             $20, $21, $22, $23, $24,
-            $25, $26
+            $25
         )
         RETURNING id
         "#,
@@ -165,7 +162,6 @@ pub(crate) async fn insert_pending(
     .bind(parent_outbox_id)
     .bind(&payload.execution_requirements)
     .bind(&payload.attachment_refs)
-    .bind(payload.home_epoch)
     .bind(payload.replay_source_message_ids.as_deref())
     .fetch_one(pool)
     .await?;
@@ -248,13 +244,8 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
     },
 }
 
-/// A home-stamped source is retried only while its exact Worker home stands;
-/// otherwise it stays terminal instead of becoming an unclaimable child.
-const SOURCE_HOME_STAMP_SQL: &str = "(parent.home_epoch IS NULL OR EXISTS (
-    SELECT 1 FROM o_channel_homes home
-     WHERE home.channel_id = parent.channel_id AND home.provider = parent.provider
-       AND home.state = 'worker' AND home.epoch = parent.home_epoch
-       AND home.holder IS NOT NULL))";
+/// Historical delegated inputs stay terminal; retry never replays their old target.
+const SOURCE_HOME_STAMP_SQL: &str = "parent.home_epoch IS NULL";
 
 pub(crate) async fn sweep_failed_pre_accept_once(
     pool: &PgPool,
@@ -423,8 +414,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             .await?;
     }
 
-    // Re-check capability after the source lock (a worker may have re-heartbeated);
-    // a home-stamped source may target only the holder of its exact Worker home.
+    // Re-check capability after the source lock (a worker may have re-heartbeated).
     let targets: Vec<Value> = sqlx::query_scalar(
         r#"
         SELECT to_jsonb(worker) || jsonb_build_object('api_base_url', worker.capabilities->'agentdesk_api'->>'base_url')
@@ -471,11 +461,6 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                        AND owner.owner_instance_id = $5
                        AND owner.generation = $6
                 )))
-           AND ($9::BIGINT IS NULL OR EXISTS (
-                SELECT 1 FROM o_channel_homes home
-                 WHERE home.channel_id = $7 AND home.provider = $2
-                   AND home.state = 'worker' AND home.epoch = $9
-                   AND home.holder = worker.instance_id))
          ORDER BY worker.last_heartbeat_at DESC, worker.instance_id ASC
          FOR SHARE
         "#,
@@ -488,7 +473,6 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(source.owner_generation)
     .bind(&source.channel_id)
     .bind(&source.required_labels)
-    .bind(source.home_epoch)
     .fetch_all(&mut *tx)
     .await?;
     let requirements =
@@ -536,10 +520,10 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             wait_for_completion, preserve_on_cancel, agent_id, provider,
             owner_instance_id, owner_generation, admission_kind,
             status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
-            home_epoch, replay_source_message_ids
+            replay_source_message_ids
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-                  $23, $24, $25, $26, $27, $28, $29)
+                  $23, $24, $25, $26, $27, $28)
         RETURNING id"#,
     )
     .bind(&target)
@@ -569,7 +553,6 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(source.id)
     .bind(&source.execution_requirements)
     .bind(&source.attachment_refs)
-    .bind(source.home_epoch)
     .bind(source.replay_source_message_ids.as_deref())
     .fetch_one(&mut *tx)
     .await?;
@@ -625,6 +608,7 @@ pub(crate) async fn list_recent_rows(
 }
 
 /// Whether the channel still has an intake row in an open status; that row owes Legacy execution.
+#[cfg(test)]
 pub(crate) async fn channel_has_open_row(
     pool: &PgPool,
     channel_id: &str,
@@ -662,10 +646,6 @@ pub(crate) async fn list_accepted_unspawned_sla(
     .await?;
     Ok(rows)
 }
-
-#[cfg(test)]
-#[path = "intake_outbox_home_tests.rs"]
-mod home_tests;
 
 #[cfg(test)]
 mod migration_pg_tests {

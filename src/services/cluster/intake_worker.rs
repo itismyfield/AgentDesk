@@ -12,7 +12,7 @@
 //!
 //! Critical invariants enforced here:
 //!   - Workers MUST abort before spawning when `mark_accepted` returns `Ok(false)`:
-//!     the claim, channel home, replay authority, or stamped owner generation no longer admits it.
+//!     the claim, replay authority, or stamped owner generation no longer admits it.
 //!   - Once a row reaches `accepted`, auto-retry is forbidden
 //!     (round-2 P0 #2). Post-accept failures call `mark_failed_post_accept`
 //!     and the operator alert path takes over.
@@ -442,7 +442,7 @@ pub(crate) async fn run_intake_worker_tick(
             tracing::warn!(
                 row_id = row.id,
                 channel_id = row.channel_id,
-                "[intake_worker] channel home refused the accept — returned to pending"
+                "[intake_worker] authority refused the accept — returned to pending"
             );
             return Ok(TickOutcome::Held);
         }
@@ -772,7 +772,6 @@ mod tests {
             owner_generation: None,
             owner_instance_id: None,
             admission_kind: "forwarded".to_string(),
-            home_epoch: None,
         }
     }
 
@@ -963,12 +962,6 @@ mod tests {
 #[path = "intake_worker/dispatch_stamp_tests.rs"]
 mod dispatch_stamp_tests;
 
-#[cfg(test)]
-#[path = "intake_worker/home_accept_tests.rs"]
-mod home_accept_tests;
-#[cfg(test)]
-#[path = "intake_worker/home_route_tests.rs"]
-mod home_route_tests;
 #[cfg(test)]
 #[path = "intake_worker/o_route_tests.rs"]
 mod o_route_tests;

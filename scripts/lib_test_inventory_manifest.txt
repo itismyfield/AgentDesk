@@ -637,7 +637,6 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
-db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
 db::intake_outbox::migration_pg_tests::intake_outbox_attempt_no_check_rejects_zero
@@ -688,6 +687,7 @@ db::intake_outbox::postgres_tests::mark_accepted_returns_false_when_sweep_alread
 db::intake_outbox::postgres_tests::mark_failed_post_accept_works_from_accepted_or_spawned
 db::intake_outbox::postgres_tests::mark_failed_pre_accept_records_error_and_bumps_retry_count
 db::intake_outbox::postgres_tests::preserve_on_cancel_round_trips_true_false_and_legacy_null
+db::intake_outbox::postgres_tests::residual_home_rows_do_not_route_new_input_and_historical_stamps_stay_held_pg
 db::intake_outbox::postgres_tests::sweep_stale_pre_accept_claims_resets_only_stale_rows
 db::intake_outbox_delivery_proof::tests::list_stale_dispatched_is_strict_ordered_and_bounded_pg
 db::intake_outbox_delivery_proof::tests::mark_done_from_delivery_proof_is_idempotent_and_preserves_dispatch_audit_fields_pg
@@ -2659,7 +2659,6 @@ services::cluster::intake_router_hook::edge_case_tests::per_agent_primary_race_r
 services::cluster::intake_router_hook::edge_case_tests::primary_readiness_loss_and_removed_registration_only_use_compatible_fallback_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_block_fallback_and_survive_recovery_pg
 services::cluster::intake_router_hook::execution_requirement_tests::execution_requirements_reject_incompatible_existing_owner_without_reassignment_pg
-services::cluster::intake_router_hook::home_route_tests::a_channel_routes_by_its_home_row_and_as_before_without_one_pg
 services::cluster::intake_router_hook::o_route_tests::an_o_channel_is_placed_only_on_its_ready_gateway_pg
 services::cluster::intake_router_hook::owner_record::tests::acquire_covers_each_generation_rule
 services::cluster::intake_router_hook::owner_record::tests::admission_idempotency_conflict_returns_prior_row
@@ -2747,8 +2746,6 @@ services::cluster::intake_worker::drain_tests::drain_registers_before_checking_a
 services::cluster::intake_worker::drain_tests::last_tick_completes_both_pending_waiters
 services::cluster::intake_worker::drain_tests::late_waiter_completes_without_another_notification
 services::cluster::intake_worker::drain_tests::nonfinal_tick_does_not_complete_drain
-services::cluster::intake_worker::home_accept_tests::a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_open_pg
-services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
@@ -6847,7 +6844,6 @@ services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
 services::discord::router::intake_dispatch::attachment::tests::local_attachment_admission_runs_materialization_once
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
-services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg
 services::discord::router::intake_dispatch::home_order_tests::dormant_owner_admission_primitive_preserves_full_sources_without_receipt_key_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_active_foreign_delivery_carries_every_source_to_the_actual_claim_fence_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_dormant_forwarding_and_old_null_source_delivery_keep_the_legacy_claim_path_pg

@@ -670,6 +670,7 @@ pub(crate) fn intake_held_channels() -> Vec<String> {
 
 /// Why a claimed row must return to pending: a row routed at a home epoch runs only while this
 /// gate holds that epoch with intake open; a gateway-rule row never runs on a registered channel.
+#[cfg(test)]
 pub(crate) fn intake_hold(channel_id: &str, home_epoch: Option<i64>) -> Option<String> {
     let home = registered(channel_id);
     let ownership = home.as_ref().map(|home| home.ownership());
