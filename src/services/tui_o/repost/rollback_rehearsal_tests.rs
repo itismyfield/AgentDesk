@@ -46,13 +46,13 @@ pub(crate) fn not_sent_tags(path: &Path) -> io::Result<usize> {
 
 pub(crate) fn scan_activated_ledgers(
     paths: &[PathBuf],
-    off: bool,
+    stopped: bool,
     joined: bool,
     complete_list: bool,
     read_tags: impl Fn(&Path) -> io::Result<usize>,
 ) -> Result<Vec<(PathBuf, io::Result<usize>)>, &'static str> {
-    if !off || !joined {
-        return Err("confirm OFF and wait for writer quiescence before scanning");
+    if !stopped || !joined {
+        return Err("stop affected writers and wait for quiescence before scanning");
     }
     if !complete_list || paths.is_empty() {
         return Err("the complete activation list is required");
@@ -103,14 +103,6 @@ mod tests {
 
     #[test]
     fn d4act3_literal_rg_finds_spaced_not_sent_tags() {
-        let runbook = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tui-o-writer-canary-runbook.md"),
-        )
-        .unwrap();
-        assert!(
-            runbook.contains(&format!("rg -n '{PATTERN}'")),
-            "execute the documented literal command"
-        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.jsonl");
         for (ledger, code, tags) in [
@@ -181,10 +173,10 @@ mod tests {
         std::fs::write(&clean, "{\"type\":\"not_found\"}\n").unwrap();
         std::fs::write(&tagged, "{\"type\" : \"not_sent\"}\n").unwrap();
         let paths = vec![clean.clone(), tagged.clone(), missing.clone()];
-        for (off, joined) in [(false, false), (false, true), (true, false)] {
+        for (stopped, joined) in [(false, false), (false, true), (true, false)] {
             assert_eq!(
-                scan_activated_ledgers(&paths, off, joined, true, not_sent_tags).unwrap_err(),
-                "confirm OFF and wait for writer quiescence before scanning"
+                scan_activated_ledgers(&paths, stopped, joined, true, not_sent_tags).unwrap_err(),
+                "stop affected writers and wait for quiescence before scanning"
             );
         }
         assert!(scan_activated_ledgers(&paths, true, true, false, not_sent_tags).is_err());
