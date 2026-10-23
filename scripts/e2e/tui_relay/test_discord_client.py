@@ -38,7 +38,7 @@ class _Response:
 
 
 class DiscordClientTurnActivityRetry(unittest.TestCase):
-    def run_activity_transition(self, *, known_at, budget, status=409, body=None, oversleep=0):
+    def run_activity_transition(self, *, known_at, budget, status=409, body=None, oversleep=0, latency=0.25):
         clock = [0.0]
         health = {"activity": "unknown"}
         attempts, sleeps = [], []
@@ -50,7 +50,7 @@ class DiscordClientTurnActivityRetry(unittest.TestCase):
             self.assertEqual(json.loads(request.data)["channel_id"], "222")
             attempts.append((clock[0], timeout))
             health["activity"] = "idle" if clock[0] >= known_at else "unknown"
-            clock[0] += 0.25
+            clock[0] += latency
             if health["activity"] == "unknown":
                 error = urllib.error.HTTPError(request.full_url, status, "refused", {}, BytesIO(raw))
                 self.addCleanup(error.close)
@@ -100,6 +100,18 @@ class DiscordClientTurnActivityRetry(unittest.TestCase):
                 self.assertGreaterEqual(elapsed, 2)
                 if not oversleep:
                     self.assertEqual(elapsed, 2, "activity wait must not overshoot its budget")
+
+        with self.subTest(budget=2, latency=2.0):
+            response, error, attempts, sleeps, elapsed = self.run_activity_transition(
+                known_at=float("inf"), budget=2, latency=2.0)
+            self.assertEqual(sleeps, [], "exhausted request budget must not schedule a retry sleep")
+            self.assertEqual(len(attempts), 1)
+            self.assertIsNone(response)
+            self.assertIsInstance(error, RuntimeError)
+            self.assertIn("turn/start HTTP 409:", str(error))
+            self.assertIn("turn_activity_unknown", str(error))
+            self.assertIsInstance(error.__cause__, urllib.error.HTTPError)
+            self.assertEqual(elapsed, 2)
 
     def test_other_refusals_fail_immediately(self):
         cases = [(409, {"reason": reason}) for reason in
