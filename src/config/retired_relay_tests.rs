@@ -29,6 +29,23 @@ fn retired_delivery_journal_keys_are_ignored_without_enabling_runtime_work() {
 
 #[test]
 fn retired_intake_settlement_key_is_ignored_without_enabling_runtime_work() {
+    let declaration = concat!("intake_delivery", "_settlement:");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pending: Vec<_> = ["src", "policies", "dashboard/src", "agentdesk.example.yaml"]
+        .iter()
+        .map(|path| root.join(path))
+        .collect();
+    let mut declarations = Vec::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(std::fs::read_dir(path).unwrap().map(|entry| entry.unwrap().path()));
+        } else if path != root.join("src/config/retired_relay_tests.rs")
+            && std::fs::read_to_string(&path).is_ok_and(|text| text.contains(declaration))
+        {
+            declarations.push(path.strip_prefix(root).unwrap().to_owned());
+        }
+    }
+    assert!(declarations.is_empty(), "retired intake key declared again: {declarations:?}");
     for stage in ["off", "observe", "settle", "enforce", "future_stage"] {
         let yaml = format!("intake_delivery_settlement: {stage}\n");
         let runtime: RuntimeSettingsConfig = serde_yaml::from_str(&yaml).unwrap();
