@@ -315,7 +315,7 @@ enum DriverCall {
 /// published. Completion is counted separately, by
 /// [`TerminalDeliveryDriver::completed_publications`], and every invariant
 /// about "an answer is already out there" has to be built on THAT.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DriverObservation {
     call: DriverCall,
     marker_at_entry: bool,
