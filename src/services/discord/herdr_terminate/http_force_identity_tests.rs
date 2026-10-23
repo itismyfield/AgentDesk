@@ -3,7 +3,7 @@
 
 use crate::db::dispatched_sessions::hosted_execution::{
     self as hosted, ExpectedExecution, HostedCasOutcome, HostedExecution, HostedLookup,
-    HostedLookupKey, HostedObservation, HostedRecord,
+    HostedLookupKey, HostedObservation, HostedOwner, HostedRecord,
 };
 use crate::services::discord::herdr_terminate::http_force::Expected;
 use crate::services::herdr_launch::{
@@ -348,6 +348,22 @@ fn successor_launched(
 /// B's fresh launch over `a`'s retired row on `a`'s endpoint, for the same owner.
 async fn launch_successor(pool: &sqlx::PgPool, a: &HostedExecution) -> String {
     let location = a.location.as_ref().expect("a recorded pane");
+    let endpoint = HerdrLaunchEndpoint {
+        execution_node: location.execution_node.clone(),
+        config_key: location.endpoint_config_key.clone(),
+        socket_addr: location.socket_addr.clone(),
+        herdr_session: location.named_session.clone(),
+    };
+    launch_fresh(pool, endpoint, a.owner.clone(), Arc::new(Successor)).await
+}
+
+/// A fresh production launch of `owner`'s row on `endpoint` through `host`; its nonce.
+async fn launch_fresh(
+    pool: &sqlx::PgPool,
+    endpoint: HerdrLaunchEndpoint,
+    owner: HostedOwner,
+    host: Arc<dyn HerdrLaunchHost>,
+) -> String {
     let cwd = crate::config::runtime_root().unwrap().join("successor-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
     let session = uuid::Uuid::new_v4().to_string();
@@ -372,19 +388,14 @@ async fn launch_successor(pool: &sqlx::PgPool, a: &HostedExecution) -> String {
         })
     };
     let launch = HerdrLaunch {
-        endpoint: Some(HerdrLaunchEndpoint {
-            execution_node: location.execution_node.clone(),
-            config_key: location.endpoint_config_key.clone(),
-            socket_addr: location.socket_addr.clone(),
-            herdr_session: location.named_session.clone(),
-        }),
-        owner: a.owner.clone(),
+        endpoint: Some(endpoint),
+        owner,
         channel_id: Some(CHANNEL),
         expected_native_session_id: Some(session.clone()),
         resume: false,
         provider_root: None,
     };
-    let outcome = launch_herdr_session(pool, launch, prepare, Arc::new(Successor)).await;
+    let outcome = launch_herdr_session(pool, launch, prepare, host).await;
     let Ok(HerdrLaunchOutcome::Launched {
         execution_nonce,
         evidence: Ok(()),
@@ -419,3 +430,6 @@ impl HerdrLaunchHost for Successor {
 
 #[path = "http_force_forward_tests.rs"]
 mod forward;
+
+#[path = "http_force_writer_tests.rs"]
+mod writer;
