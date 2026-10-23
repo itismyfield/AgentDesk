@@ -63,7 +63,11 @@ impl Owner {
             if self.fault == Fault::Sync {
                 return Err("candidate sync unavailable".into());
             }
-            std::fs::File::open(&self.path)
+            // Flush a writable file handle; parent directories use the shared sync helper.
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.path)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| e.to_string())?;
             runtime_store::fsync_parent_and_ancestors(&self.path).map_err(|e| e.to_string())?;

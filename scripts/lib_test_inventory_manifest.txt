@@ -14925,6 +14925,7 @@ services::turn_orchestrator::queued_head::tests::restore_cancel_and_purge_keep_a
 services::turn_orchestrator::queued_head::tests::the_downgrade_converts_only_a_resolved_snapshot
 services::turn_orchestrator::queued_head::tests::without_a_claim_the_queue_file_stays_the_legacy_array
 services::turn_orchestrator::queued_head::tests::write_failures_issue_no_ticket_or_leave_the_head_unknown
+services::turn_orchestrator::queued_head::v2::tests::pg_tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 services::turn_orchestrator::queued_head::v2::tests::v2_adoption_reapplies_slots_after_crash_between_commit_and_projection
 services::turn_orchestrator::queued_head::v2::tests::v2_commit_readback_requires_full_candidate_and_sync_before_permit
 services::turn_orchestrator::queued_head::v2::tests::v2_exact_attempt_checks_every_source_and_target_field
@@ -14932,7 +14933,6 @@ services::turn_orchestrator::queued_head::v2::tests::v2_late_success_and_failure
 services::turn_orchestrator::queued_head::v2::tests::v2_legacy_restore_uses_positive_reserved_proof_and_retains_unknown_without_ledger
 services::turn_orchestrator::queued_head::v2::tests::v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exactly
 services::turn_orchestrator::queued_head::v2::tests::v2_parked_and_slot_projection_preserve_uncertainty_and_late_identity
-services::turn_orchestrator::queued_head::v2::tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 services::turn_orchestrator::queued_head::v2::tests::v2_restart_adopts_reserved_and_unknown_without_reset_or_resend
 services::turn_orchestrator::queued_head::v2::tests::v2_retained_snapshot_cost_is_measured_without_compacting_originals
 services::turn_orchestrator::queued_head::v2::tests::v2_source_fences_ignore_generation_and_terminal_age_begins_at_settlement
