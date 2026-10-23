@@ -68,16 +68,6 @@ pub struct RuntimeSettingsConfig {
     /// Claude additionally caps busy-turn waits at 900s; Codex does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup_prompt_ready_timeout_secs: Option<u64>,
-    /// Live read-only DB mismatch audit switch; defaults on.
-    /// False skips the query and reports disabled with no candidates.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_session_audit_enabled: Option<bool>,
-    /// Heartbeat grace before mismatch auditing; unset/zero uses 120s.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_session_audit_stale_secs: Option<u64>,
-    /// Audit row and SQL LIMIT cap; unset uses 50, otherwise clamps to 1..=500.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_session_audit_max_candidates: Option<u64>,
     /// Buffered hook TTL; unset/zero uses 30s. Expired hooks are not replayed.
     /// Captured on first GLOBAL access; changes require a process restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,9 +164,6 @@ impl RuntimeSettingsConfig {
             && self.session_context_recent_pairs.is_none()
             && self.stream_json_startup_output_timeout_secs.is_none()
             && self.followup_prompt_ready_timeout_secs.is_none()
-            && self.active_session_audit_enabled.is_none()
-            && self.active_session_audit_stale_secs.is_none()
-            && self.active_session_audit_max_candidates.is_none()
             && self.tui_hook_buffer_ttl_secs.is_none()
             && self.tui_unclaimed_stop_delay_ms.is_none()
             && self.tui_hook_registry_enabled.is_none()

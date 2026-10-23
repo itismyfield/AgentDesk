@@ -96,7 +96,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         source = root / "src/services/proof_protocol/namespace"
         source.mkdir(parents=True)
         (root / "src/lib.rs").write_text("mod services;\n", encoding="utf-8")
-        (root / "src/services.rs").write_text("mod proof_protocol;\n", encoding="utf-8")
+        (root / "src/services/mod.rs").write_text("mod proof_protocol;\n", encoding="utf-8")
         protocol = "mod namespace;\n" if active else ""
         namespace = "mod lexical;\n" if active else ""
         lexical = "#[cfg(test)]\nmod tests {\n" + "".join(f"#[test]\nfn {test_id.rsplit('::', 1)[1]}() {{}}\n" for test_id in IDS) + "}\n"
@@ -228,7 +228,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                     ("src/services/discord/mod.rs", "runtime_store", "src/services/discord/runtime_store.rs", "services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing"),
                 )
                 (root / "src/lib.rs").write_text("mod services;\nmod server;\n", encoding="utf-8")
-                with (root / "src/services.rs").open("a", encoding="utf-8") as file:
+                with (root / "src/services/mod.rs").open("a", encoding="utf-8") as file:
                     file.write("mod discord;\n")
                 for parent, module, source, test_id in fsync:
                     (root / parent).parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,3 @@
-
 use serde::Serialize;
 
 use poise::serenity_prelude::ChannelId;
@@ -8,8 +7,8 @@ use crate::services::discord::relay_health::{
     FrontierProvenanceReport, RelayHealthSnapshot, RelayStallState,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
+use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 
 use super::HealthRegistry;
 // #5071 T4-B6: `health::reachability` is `#[cfg(unix)]`, so every item this file

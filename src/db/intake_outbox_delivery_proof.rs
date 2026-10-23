@@ -139,11 +139,8 @@ pub(crate) async fn list_stale_spawned(
         .await
 }
 
-/// Whether any row is still open in `spawned` or `dispatched`.
-///
-/// "Debt" here means unsettled, not anomalous: `spawned` is the initial status of every locally
-/// admitted row, so this is true on any node currently carrying traffic. Callers using it as a
-/// disjunct get a no-debt short-circuit for an idle table, not a signal that something is wrong.
+/// Whether any spawned or dispatched row remains unsettled.
+/// The sweep uses this to skip an idle table; open debt alone is not anomalous.
 pub(crate) async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM public.intake_outbox

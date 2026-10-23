@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "e98790a6012e8a181845a41e48c2612d6851daa1",
+  "measured_at_sha": "62a298b29698f1cf02c71d35e2efde46ee18cd6e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -38539,15 +38539,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:cf6ac479ebdd3787f074a642081e2e535fba8d2e9cba53f72f7bb7712011c77c"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:fcc27f3e078e55b8ef45b4e2280aaa9b56c48800cb515d68b054c2f1ce0fcc27"
     },
     {
       "root": "src",

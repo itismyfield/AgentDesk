@@ -6,8 +6,6 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
-// Imported under its own name, never aliased, so every call site below reads the
-// platform bound in the identifier itself.
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
 use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
 use crate::services::discord::{

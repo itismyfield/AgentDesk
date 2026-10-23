@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Keep strict episode metadata behind its registered journal writer."""
-import json
 import re
 import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-SYMBOL = "append_delivery_journal_batch"
 CALL = re.compile(r"\bappend_delivery_journal_batch\s*\(")
 BASELINE = 1
 ALLOWLIST = Counter({"src/services/discord/session_relay_sink/journal.rs": 1})

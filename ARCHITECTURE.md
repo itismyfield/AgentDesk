@@ -1505,9 +1505,6 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
-│   │   ├── queue_park_ledger/
-│   │   │   ├── cancel_park_tests.rs
-│   │   │   └── promote_hold.rs
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
@@ -2661,7 +2658,6 @@ src/
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
 │   │   ├── queue_overflow_dlq.rs
-│   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
@@ -3543,12 +3539,6 @@ src/
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs
-│   ├── writer_protocol/
-│   │   ├── namespace/
-│   │   │   ├── catalog.rs
-│   │   │   └── lexical.rs
-│   │   ├── authority.rs
-│   │   └── namespace.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -3576,7 +3566,6 @@ src/
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
-│   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
 │   ├── herdr_admission.rs
 │   ├── herdr_admission_tests.rs
@@ -3656,8 +3645,7 @@ src/
 │   ├── turn_orchestrator.rs
 │   ├── turn_summary_line.rs
 │   ├── turn_summary_line_tests.rs
-│   ├── voice_conductor.rs
-│   └── writer_protocol.rs
+│   └── voice_conductor.rs
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/

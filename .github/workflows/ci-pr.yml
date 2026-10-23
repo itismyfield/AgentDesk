@@ -203,7 +203,6 @@ jobs:
               # own comment declares itself temporary.
               - 'src/config_live_reload.rs'
               - 'src/services/dispatch_gate.rs'
-              - 'src/services/health_active_session_audit.rs'
               - 'src/services/platform/mod.rs'
               - 'src/services/session_activity.rs'
             pg_db:
@@ -926,8 +925,6 @@ jobs:
               - 'src/services/discord/queue_dispatch/**'
               - 'src/services/discord/queue_io.rs'
               - 'src/services/discord/queue_io/**'
-              - 'src/services/discord/queue_park_ledger.rs'
-              - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
               - 'src/services/discord/recovery_paths/**'
@@ -2325,7 +2322,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=dd375cc2cefb56fc40766524963629ca446d444daeb705d54b18432b3954049d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2578,7 +2575,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=dd375cc2cefb56fc40766524963629ca446d444daeb705d54b18432b3954049d
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

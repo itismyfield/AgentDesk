@@ -884,8 +884,7 @@ pub(super) async fn build_health_snapshot_with_options(
         fully_recovered = false;
     }
 
-    let first_reads =
-        health_observation::first_reads(&providers, deadline).await;
+    let first_reads = health_observation::first_reads(&providers, deadline).await;
     for (entry, observations) in providers.iter().zip(&first_reads) {
         let provider_probe = provider_probe::probe_provider(entry, observations);
 
