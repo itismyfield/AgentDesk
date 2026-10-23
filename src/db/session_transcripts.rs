@@ -1495,3 +1495,7 @@ mod clear_fence_pg_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "session_transcripts_retired_boundary_pg_tests.rs"]
+mod retired_boundary_pg_tests;

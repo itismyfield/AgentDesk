@@ -300,7 +300,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 channel,
                 serial,
                 status,
-                "[tui_o] latest rejected piece needs operator approval"
+                "[tui_o] output blocked; fix the refusal and use /clear for a fresh session"
             );
             writer.stop(WriterAlarm::Blocked { status });
         }
@@ -517,7 +517,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let (piece, approved) = match disposition {
             PieceDisposition::Blocked { serial, status } => {
                 tracing::warn!(channel = self.channel, serial, status, unit_key = ?piece.unit_key,
-                    "[tui_o] latest rejected piece needs operator approval");
+                    "[tui_o] output blocked; fix the refusal and use /clear for a fresh session");
                 return self.stop(WriterAlarm::Blocked { status });
             }
             PieceDisposition::Settled => return Step::Done,
@@ -733,7 +733,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }) {
                     "local retry budget exhausted"
                 } else {
-                    "this serial needs a new operator approval"
+                    "blocked serial; fix the refusal and use /clear for a fresh session"
                 };
                 tracing::warn!(
                     channel = self.channel,

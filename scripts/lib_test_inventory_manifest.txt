@@ -867,6 +867,7 @@ db::session_transcripts::clear_fence_pg_tests::pre_clear_turn_committed_after_bo
 db::session_transcripts::clear_fence_pg_tests::sa2_exact_routine_attempt_proof_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_failed_observation_survives_recovery_pg
 db::session_transcripts::clear_fence_pg_tests::sa2_own_clear_and_midturn_clear_pg
+db::session_transcripts::retired_boundary_pg_tests::unresolved_retired_marker_preserves_general_clear_readers_and_turn_fences_pg
 db::session_transcripts::tests::discord_message_start_millis_uses_serenity_snowflake_timestamp
 db::session_transcripts::tests::goal_fresh_boundary_blocks_prior_pairs_after_restart_through_fetch_pipeline
 db::session_transcripts::tests::persisted_clear_boundary_filters_preclear_pairs_without_in_memory_flag
@@ -13319,9 +13320,6 @@ services::tui_o::store::durable::tests::a_create_once_retry_leaves_the_published
 services::tui_o::store::ledger::local_retry_tests::local_retry_delay_starts_at_the_terminal_line_time_instead_of_prepared_time
 services::tui_o::store::ledger::local_retry_tests::local_retry_reducer_rejects_duplicate_mismatched_or_ineligible_children
 services::tui_o::store::ledger::lock_tests::a_recovery_lock_ends_with_the_recovery_while_a_forked_child_still_holds_the_file
-services::tui_o::store::ledger::lock_tests::operator_child
-services::tui_o::store::ledger::lock_tests::recovery_excludes_an_operator_in_a_separate_process
-services::tui_o::store::ledger::lock_tests::successful_operator_append_survives_recovery_tail_truncation
 services::tui_o::store::ledger::operator_resume_tests::operator_resume_exact_evidence_and_frontiers_survive_approval_and_read_only_replay
 services::tui_o::store::ledger::operator_resume_tests::operator_resume_first_prepared_connection_uses_row_order_and_never_rebinds
 services::tui_o::store::ledger::operator_resume_tests::operator_resume_invalid_and_duplicate_records_neither_grant_nor_violate

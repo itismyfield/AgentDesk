@@ -1,7 +1,7 @@
 use super::*;
 #[path = "tool_card_fork_tests.rs"]
 mod tool_cards;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom};
+use crate::services::tui_o::store::rotation::Boundary;
 
 fn prompt(uuid: &str, text: &str) -> Vec<u8> {
     codex_line(serde_json::json!({"type": "user", "uuid": uuid, "message": {"content": text}}))
@@ -69,12 +69,7 @@ async fn pending_parent_resolved_past_row_rebuilds_child_debt_once() {
     halt(stop, task).await;
     let resolution = harness
         .store
-        .record_boundary_resolved(
-            CHANNEL,
-            &p_path.display().to_string(),
-            &ResolveFrom::Offset(parent_from),
-            "op",
-        )
+        .seed_boundary_resolved(CHANNEL, &p, parent_from)
         .unwrap();
     assert_eq!(resolution, (p.clone(), parent_from));
     harness.lease.busy.store(false, Ordering::SeqCst);
@@ -437,12 +432,7 @@ async fn excluded_parent_consumed_prefix_still_decides_a_new_fork() {
     let from = body.len() as u64;
     harness
         .store
-        .record_boundary_resolved(
-            CHANNEL,
-            &p_path.display().to_string(),
-            &ResolveFrom::Offset(from),
-            "op",
-        )
+        .seed_boundary_resolved(CHANNEL, &p, from)
         .unwrap();
     let fresh = prompt("fresh", "new");
     let (_, b) = transcript(

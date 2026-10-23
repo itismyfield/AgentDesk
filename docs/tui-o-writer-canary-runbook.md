@@ -249,9 +249,13 @@ verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 ## 7. Recover a piece Discord refused
 
 A POST refused with 400, 403 or 404 blocks the channel's O output with a `Blocked` alarm.
-The operator status and approval CLI has been removed. Fix the refusal's cause and investigate
-the retained ledger; this build provides no operator command to approve another POST.
-Existing durable approvals remain readable by the writer. Do not edit the ledger to bypass a hold.
+The operator status and approval CLI was retired (#7266). Fix the refusal's cause and use
+ordinary `/clear` to start a fresh session. The blocked piece stays in the retained ledger;
+`/clear` does not approve or retry that piece. Existing durable approvals remain readable.
+Do not edit the ledger to bypass a hold.
+
+If `o_store/operator_resume.floor` exists, deployment rejects source or rollback targets
+without `OPERATOR_RESUME_SUPPORTED = true`; the retained approval reader still requires it.
 
 Enable re-post for a canary with both `tui_o.repost.enabled: true` and an explicit
 `tui_o.repost.channels: [<CHANNEL_ID>]` allowlist. An empty or missing `channels` list denies
@@ -325,7 +329,8 @@ untrimmed text hash. The extractor only selects real input. Incomplete native ev
 registration to a later tick. See the [fresh conditions](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary).
 This does not automatically resolve old Pending links, including the investigated sequence 122.
 
-The operator boundary-resolution CLI has been removed. Keep an unresolved source Pending;
+The operator boundary-resolution CLI was retired (#7266). Use ordinary `/clear` for a fresh
+session; keep the old unresolved source Pending;
 this build provides no command to choose its delivery start. Do not edit its ledger or cursor.
 
 Automatic resume byte boundaries and automatic re-evaluation of existing resume Pending states

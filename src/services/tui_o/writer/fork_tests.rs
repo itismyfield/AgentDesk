@@ -1,7 +1,7 @@
 use super::switch_tests::{link, spool};
 use super::*;
 use crate::services::tui_o::store::StoreError;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, Rotation};
+use crate::services::tui_o::store::rotation::{Boundary, Rotation};
 use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 
 fn line(value: serde_json::Value) -> Vec<u8> {
@@ -445,11 +445,7 @@ async fn a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator() {
     assert_eq!(harness.alarms.taken(), [pending], "{tag} alarm");
     assert!(harness.port.posts().is_empty(), "{tag} posts");
     halt(stop, task).await;
-    let path = b_path.display().to_string();
-    let from = ResolveFrom::Offset(end);
-    let recorded = harness
-        .store
-        .record_boundary_resolved(CHANNEL, &path, &from, "op");
+    let recorded = harness.store.seed_boundary_resolved(CHANNEL, b, end);
     assert_eq!(recorded.unwrap(), (b.clone(), end), "{tag} resolvable");
     let (stop, task) = spawn_with(
         harness.writer(),

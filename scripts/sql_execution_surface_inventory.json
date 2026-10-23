@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "bda38fd44407bb02ec9532ba45f53430537dc4de",
+  "measured_at_sha": "88030950475ccd5c08b3a39e995c6324544d4147",
   "records": [
     {
       "root": "migrations/postgres",
@@ -16714,6 +16714,42 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e27089c0e5ae82320c0fcebdb4127f304688879f10b8214e457010a4e10e11ca"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c89d98306b7cfd1ea8aacb9aff8a558a5fe16a7780c0aca14d9553e469f31269"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:da62f762b9076d196458531ae6197bc0d909c29cb9b1fcc852c96d71bf6f20b8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fca2787dcd926b8d30f1ce27d599acc3e5f8cf33f4e094fd076bbe8bdefd83f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b98a5118f82b883351472df3fa49cf475b685904d0960134230786c268b77da3"
     },
     {
       "root": "src",

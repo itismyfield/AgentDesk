@@ -525,6 +525,31 @@ mod tests {
     use super::*;
 
     impl OStore {
+        pub(crate) fn seed_boundary_resolved(
+            &self,
+            channel: u64,
+            source: &SourceId,
+            from: u64,
+        ) -> Result<(SourceId, u64), StoreError> {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(self.channel_dir(channel).join(LEDGER_FILE))?;
+            let at = Utc::now();
+            ledger::append_to(
+                &mut file,
+                at,
+                &LedgerEntry::BoundaryResolved {
+                    source: source.clone(),
+                    from,
+                    excluded_range: 0..from,
+                    operator: "replay-fixture".into(),
+                    at,
+                    evidence: None,
+                },
+            )?;
+            Ok((source.clone(), from))
+        }
+
         /// Seeds a durable approval for writer replay tests without an operator command.
         pub(crate) fn record_operator_resume(
             &self,
