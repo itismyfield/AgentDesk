@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f8bf8af7eab2ca084a1190469b6030956e5134d0",
+  "measured_at_sha": "c75b48e07bac723e0dfddf10e6392d997d4d1d52",
   "records": [
     {
       "root": "migrations/postgres",
@@ -30754,6 +30754,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:040f1f35d8482719595d610e4e11fb0b09190ddf724b22e7c40ec5e4f5ad3712"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/cluster/intake_worker/home_route_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e71e674c18d934ced284d232d602e71c6662a904ce53e2d301d5a3152bd77aab"
     },
     {
       "root": "src",

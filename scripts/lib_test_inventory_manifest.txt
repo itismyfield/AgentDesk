@@ -2591,7 +2591,6 @@ services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_iden
 services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
 services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::channel_home::b3a2_epoch_tests::s3act_b3a2_epoch_check_and_permit_share_lock
-services::cluster::channel_home::claim_tests::a_drain_close_never_lands_between_the_placement_check_and_the_adoption_claim
 services::cluster::channel_home::ingress_snapshot::tests::a_sample_never_mixes_two_states_of_one_gate
 services::cluster::channel_home::ingress_snapshot::tests::a_taken_or_poisoned_lock_gives_no_sample
 services::cluster::channel_home::ingress_snapshot::tests::sampling_expires_prunes_closes_and_initializes_nothing

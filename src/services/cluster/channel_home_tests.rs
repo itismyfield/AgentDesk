@@ -538,22 +538,6 @@ async fn a_final_close_after_a_lapse_still_retires_the_last_epoch() {
     assert_eq!(next, Ok(owned(7, 2, HomeIntake::Open)));
 }
 
-/// Routing answers for one channel and an unparseable destination on the current thread.
-fn routing(channel: u64) -> impl PartialEq + std::fmt::Debug {
-    use crate::services::tui_o::cutover::{boot_ownership, intake_route};
-    let ownership: Vec<_> = boot_ownership()
-        .into_iter()
-        .map(|(channel, kind, candidate)| (channel, kind, candidate.map(|c| c.peek())))
-        .collect();
-    (
-        intake_route::route("claude", channel),
-        intake_route::route_text("claude", "x"),
-        intake_route::route_for_placement("claude", channel),
-        intake_route::held_channels("claude"),
-        ownership,
-    )
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn command_permit_drop_panic_and_blocking_abort_are_not_unknown() {
     let home = register_for_test(9200000000000102, Some(HomeState::Worker));

@@ -12,7 +12,7 @@ use crate::services::cluster::intake_router_hook::{
 use crate::services::cluster::intake_routing_config::{
     IntakeRoutingMode, OwnerAuthorityChannelOptIn,
 };
-use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
+use crate::services::tui_o::cutover::test_override;
 
 const C: u64 = 4_380_401;
 const PLAIN: u64 = 4_380_402;
@@ -130,7 +130,6 @@ async fn a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg() {
     let tick = || run_intake_worker_tick(&pool, &shared, MINI, "claude", "o", &not_cancelled);
     // Keep O unselected while the home SQL acceptance guard is exercised.
     let _legacy = test_override::force_channels(&[]);
-    let _ready = test_probe::answer_with(|_| true);
 
     // A channel without a home row: the gateway routes it here and it reaches accept as before.
     let plain = route(&pool, GW, PLAIN, "1").await;
@@ -188,11 +187,22 @@ async fn a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg() {
     let (row, status, stamped) = open_row(&pool, C).await;
     assert_eq!((status.as_str(), stamped), ("pending", Some(epoch)));
 
-    // The holder's gate is still Lost: the row is held, never claimed.
+    // Without O's held-channel filter, the home gate returns the claim to pending.
     let gate = std::sync::Arc::new(HomeGate::new(&C.to_string(), MINI));
     home_gate::register(std::sync::Arc::clone(&gate));
-    assert_eq!(tick().await.unwrap(), TickOutcome::QueueEmpty);
+    assert_eq!(tick().await.unwrap(), TickOutcome::Held);
     assert_eq!(open_row(&pool, C).await.1, "pending");
+    let held: (Option<String>, bool) =
+        sqlx::query_as("SELECT claim_owner, accepted_at IS NULL FROM intake_outbox WHERE id=$1")
+            .bind(row)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        held,
+        (None, true),
+        "home refusal leaves no accepted or owned claim"
+    );
 
     let renewal = |epoch| HeldHome::for_test(&C.to_string(), MINI, epoch, HomeState::Worker);
     let now = tokio::time::Instant::now;
@@ -206,14 +216,18 @@ async fn a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg() {
 
     // The gate moves to another epoch between claim and accept: the row goes back to pending.
     let moved = std::sync::Arc::clone(&gate);
-    let mut reads = 0;
-    let _moving = test_probe::answer_with(move |_| {
-        reads += 1;
-        if reads == 2 {
-            moved.confirm(&renewal(epoch + 100), now()).unwrap();
-        }
-        true
-    });
+    let _moving = test_executor::hook(Box::new(move |seen| {
+        let moved = std::sync::Arc::clone(&moved);
+        Box::pin(async move {
+            if seen == test_executor::Checkpoint::AfterClaim {
+                let renewal =
+                    HeldHome::for_test(&C.to_string(), MINI, epoch + 100, HomeState::Worker);
+                moved
+                    .confirm(&renewal, tokio::time::Instant::now())
+                    .unwrap();
+            }
+        })
+    }));
     assert_eq!(tick().await.unwrap(), TickOutcome::Held);
     assert_eq!(
         open_row(&pool, C).await,

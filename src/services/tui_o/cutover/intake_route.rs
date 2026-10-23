@@ -57,8 +57,7 @@ fn placed_with(
     route_parsed_with(provider, || channel, judge)
 }
 
-/// O-owned channels this process must not claim for `provider`, and delegated channels whose
-/// home takes no intake here, as stored in intake rows.
+/// O-owned channels this process must not claim for `provider`, as stored in intake rows.
 pub(crate) fn held_channels(provider: &str) -> Vec<String> {
     held_with(provider, judge)
 }

@@ -794,10 +794,6 @@ pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
 pub(crate) mod tests;
 
 #[cfg(test)]
-#[path = "channel_home_claim_tests.rs"]
-mod claim_tests;
-
-#[cfg(test)]
 pub(crate) fn command_mutant(name: &str) -> bool {
     std::env::var("ADK_TEST_HOME_COMMAND_MUTANT")
         .ok()
