@@ -41,10 +41,13 @@ struct Lane {
     dir: tempfile::TempDir,
     _rotations: MutexGuard<'static, ()>,
     _state: MutexGuard<'static, ()>,
+    _env: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 impl Lane {
     fn new() -> Self {
+        // Source-authority keys include the runtime root; keep it stable across worker threads.
+        let env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let rotations = lock_claude_session_rotations_for_tests();
         reset_state_for_tests();
@@ -58,6 +61,7 @@ impl Lane {
             dir,
             _rotations: rotations,
             _state: state,
+            _env: env,
         }
     }
 
@@ -946,19 +950,17 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     retry_deferred_claude_adoptions();
     assert!(clear_claude_session_rotation(tmux));
 
-    // B leaves the queue on the next retry. The probe stands in for the artifact write; B holds it until C finishes or 300ms pass.
+    // Release B only once C contends for its authority or finishes without that authority.
     let (paused_tx, paused_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel::<()>();
+    let (contended_tx, contended_rx) = mpsc::channel();
     let done_rx = Mutex::new(done_rx);
     let written = Arc::new(Mutex::new(Vec::<String>::new()));
     let (probe_b, probe_c, log) = (b.clone(), c.clone(), written.clone());
     set_artifact_probe(Some(Arc::new(move |session: &str| {
         if session == probe_b {
             paused_tx.send(()).unwrap();
-            let _ = done_rx
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_millis(300));
+            done_rx.lock().unwrap().recv().unwrap();
         }
         if session == probe_b || session == probe_c {
             log.lock().unwrap().push(session.to_owned());
@@ -974,6 +976,13 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
     let (live_a, live_c, clear_c) = (a.clone(), c.clone(), named(&c, &clear));
     let live = std::thread::spawn(move || {
         set_test_root(Some(&root));
+        let release = done_tx.clone();
+        crate::services::tmux_common::SOURCE_AUTHORITY_CONTENDED.with_borrow_mut(|probe| {
+            *probe = Some(Box::new(move || {
+                contended_tx.send(()).unwrap();
+                release.send(()).unwrap();
+            }));
+        });
         let report = adopt_from_hook(&live_a, &live_c, &clear_c);
         done_tx.send(()).ok();
         report
@@ -989,6 +998,9 @@ fn a_retry_paused_before_its_artifacts_cannot_overwrite_a_later_hooks_cutover() 
         [b, c],
         "the last cutover is the bound C"
     );
+    contended_rx
+        .try_recv()
+        .expect("C must contend with B's authority");
 }
 
 #[test]
