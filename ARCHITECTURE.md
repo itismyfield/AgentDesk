@@ -1014,8 +1014,6 @@ src/
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── herdr_recovery.rs
 │   │   │   │   ├── herdr_report_tests.rs
-│   │   │   │   ├── home_fence.rs
-│   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_policy_tests.rs
@@ -3526,6 +3524,7 @@ src/
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
+│   │   ├── test_support_tests.rs
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs

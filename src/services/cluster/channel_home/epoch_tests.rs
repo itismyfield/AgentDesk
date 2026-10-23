@@ -53,3 +53,26 @@ async fn s3act_b3a2_epoch_check_and_permit_share_lock() {
     home.close();
     assert!(home.admit_at_epoch("claude", 2, true).is_none());
 }
+
+impl HomeGate {
+    pub(crate) fn admit_command(&self, _provider: &str) -> Option<CommandPermit> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        matches!(
+            self.read(&local),
+            HomeOwnership::Owned {
+                intake: HomeIntake::Open,
+                ..
+            }
+        )
+        .then(|| CommandPermit::new(&local.commands))
+    }
+    pub(crate) fn admit_recovery(&self, _provider: &str) -> Option<CommandPermit> {
+        let mut local = self.locked();
+        self.expire(&mut local, Instant::now());
+        let held = local.held.as_ref()?;
+        self.gate
+            .admit(|epoch| (epoch == held.gate_epoch).then(|| CommandPermit::new(&local.commands)))
+            .flatten()
+    }
+}

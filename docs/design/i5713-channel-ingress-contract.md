@@ -154,7 +154,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
 | `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
 | `src/services/discord/commands/control.rs` | admission | `home_fence::admit` :354·:641, `home_fence::refused` :582·:637 |
-| `src/services/discord/commands/control/home_fence.rs` | admission | `admit` :27 → `channel_home::admit_command`, `check` :36, `refused` :41(거절 시 사용자 응답) |
 | `src/services/discord/commands/control/provider_reset.rs` | admission | `home_fence::admit` :27 |
 | `src/services/discord/commands/restart.rs` | admission | `admit_command` :196·:257 |
 | `src/services/discord/commands/skill.rs` | admission | `admit_command` :183 |

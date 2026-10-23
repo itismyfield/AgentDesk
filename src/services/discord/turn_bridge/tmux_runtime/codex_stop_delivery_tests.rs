@@ -260,7 +260,6 @@ impl Case {
 impl Drop for Case {
     fn drop(&mut self) {
         dedupe::clear_tmux_runtime_binding(&self.owner.logical_key);
-        crate::services::cluster::channel_home::unregister(&self.channel.to_string());
     }
 }
 
@@ -390,14 +389,6 @@ fn herdr_typed_refusals_have_no_escape_effects() {
             HerdrDelivery::NotSent(HerdrNotSent::SwitchOff)
         );
         HERDR_CANCEL_OVERRIDE.set(Some(true));
-        let home =
-            crate::services::cluster::channel_home::register_for_test(case.channel.get(), None);
-        assert_eq!(
-            runtime.block_on(case.delivery("/stop")),
-            HerdrDelivery::NotSent(HerdrNotSent::Holder)
-        );
-        drop(home);
-        crate::services::cluster::channel_home::unregister(&case.channel.to_string());
         case.screen(false);
         assert_eq!(
             runtime.block_on(case.delivery("/stop")),
@@ -615,7 +606,7 @@ fn herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing() {
 }
 
 #[test]
-fn herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg() {
+fn herdr_cancel_generation_adds_no_cleanup_authority_pg() {
     let fx = Fixture::new();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _switch = Switch::on();
@@ -630,14 +621,6 @@ fn herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_
         {
             let case = Case::new(&pool, root.path(), provider, 400 + n as u64).await;
             let _registry = case.rig.registry_on_this_thread();
-            let home = crate::services::cluster::channel_home::register_for_test(
-                case.channel.get(),
-                Some(crate::db::o_channel_homes::HomeState::Reclaiming),
-            );
-            assert_eq!(
-                home.refusal(),
-                Some(crate::services::cluster::channel_home::HomeRefusal::Draining)
-            );
             assert_eq!(case.delivery("/cc stop").await, HerdrDelivery::Sent);
             assert_eq!(case.escapes(), 1);
             case.token.cancel_with_tmux_cleanup();

@@ -102,7 +102,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
-  --skip services::discord::commands::control::home_fence::tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
@@ -424,9 +423,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
   services::cluster::channel_home::tests::a_restore_finishing_after_its_home_was_lost_opens_no_intake
   services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
-  services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
   services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
-  services::cluster::channel_home::tests::command_permit_linearizes_close_and_preserves_children
   services::cluster::channel_home::tests::command_registration_never_discards_a_preexisting_local_execution
   services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
   services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
@@ -450,11 +447,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
-  services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
-  services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
-  services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
-  services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
-  services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session

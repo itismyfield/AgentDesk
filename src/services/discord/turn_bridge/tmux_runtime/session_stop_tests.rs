@@ -743,6 +743,14 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
                 held.recv_timeout(std::time::Duration::from_secs(3))
                     .unwrap();
             }
+            if matches!(case, OwnerCase::Slash) {
+                let home =
+                    crate::services::cluster::channel_home::register_for_test(channel.get(), None);
+                assert_eq!(
+                    home.refusal(),
+                    Some(crate::services::cluster::channel_home::HomeRefusal::NotHeld)
+                );
+            }
             let request = run_slash_stop(&shared, &provider, channel);
             let change = async {
                 let Some(release) = release else {
@@ -782,8 +790,15 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             if let Some(worker) = worker {
                 worker.join().unwrap();
             }
-            assert_eq!(reply.text(), expected);
+            assert_eq!(
+                reply.text(),
+                expected,
+                "residual home must not refuse slash stop"
+            );
             reply.finish(&shared, &provider, channel).await;
+            if matches!(case, OwnerCase::Slash) {
+                crate::services::cluster::channel_home::unregister(&channel.get().to_string());
+            }
         }
         let calls = fx.take_calls();
         if matches!(case, OwnerCase::Slash | OwnerCase::CodexText) {

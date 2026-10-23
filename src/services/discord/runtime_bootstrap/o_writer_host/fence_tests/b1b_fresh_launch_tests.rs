@@ -934,12 +934,13 @@ async fn run_fifo(
         new_io.stats().read_bytes > 0,
         "actual fresh consumer must exercise the IO oracle"
     );
-    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        serenity::ChannelId::new(CANARY_CHANNEL),
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            serenity::ChannelId::new(CANARY_CHANNEL),
+        )
+        .unwrap();
     assert!(disk.is_empty());
     fresh
 }

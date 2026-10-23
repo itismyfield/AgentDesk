@@ -660,40 +660,6 @@ fn e08_force_kill_non_owner_forwards_pg() {
 
 // The home command a force-kill was admitted under stays open while its detached run lives,
 // past a dropped request, and closes once the run ends.
-#[test]
-fn e08_force_kill_home_permit_survives_http_abort_pg() {
-    let Some((rig, runtime)) = rig_e08("e08_force_kill_home_permit_survives_http_abort_pg", false)
-    else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        use crate::db::o_channel_homes::HomeState;
-        use crate::services::cluster::channel_home;
-        let home = channel_home::register_for_test(CHANNEL, Some(HomeState::Worker));
-        let node = Node::bind_e08(&rig, herdr::HostedState::Bound).await;
-        node.start(51, "turn-a", Some(DISPATCH)).await;
-        let mut hold = rig.hold_next_write();
-        let request = node.spawn_kill(false);
-        tokio::time::timeout(Duration::from_secs(10), &mut hold.reached)
-            .await
-            .expect("the close reached Herdr")
-            .unwrap();
-        request.abort();
-        assert!(request.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            home.commands_in_flight(),
-            1,
-            "the detached run holds the command"
-        );
-        hold.release.send(()).unwrap();
-        wait_for("the run's end", async || home.commands_in_flight() == 0).await;
-        assert_eq!(node.killed(&rig).await.session, kept("disconnected", None));
-        channel_home::unregister(home.channel_id());
-        drop(hold);
-        node.finish().await;
-    });
-}
 
 // The force-kill's own read binds the run: when its turn ended and the successor's dispatch took
 // the channel right after that read, the run is refused before any close and the successor lives.

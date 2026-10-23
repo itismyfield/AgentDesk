@@ -1186,7 +1186,7 @@ pub(super) mod exhausted_recovery_tests {
     use super::super::too_old_drop_pg_tests::{StoredDeadLetter, stored_dead_letters};
     use super::*;
     use crate::services::turn_orchestrator::{
-        QueuePersistenceContext, pending_queue_persistence::load_channel_pending_queue_checked,
+        QueuePersistenceContext, test_support::load_channel_pending_queue_checked,
     };
 
     struct RecoveryClock(Mutex<(chrono::DateTime<chrono::Utc>, Instant)>);

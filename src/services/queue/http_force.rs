@@ -9,7 +9,6 @@ use sqlx::PgPool;
 
 use super::cancel_effects::herdr::{HERDR_TERMINATE, HerdrForceEffects, herdr_force_effects};
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
-use crate::services::cluster::channel_home::current_command;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::http_force::terminate_for_http;
 use crate::services::discord::herdr_terminate::{
@@ -57,9 +56,8 @@ pub(super) async fn herdr_force(
         execution_nonce: record.execution_nonce,
     };
     let (effects_pool, key) = (pool.clone(), info.session_key.clone());
-    let permit = current_command(channel_id, "cancel_turn");
     let bound = (request, dispatch.map(str::to_string));
-    let (result, effects) = terminate_for_http(registry, pool.clone(), bound, permit, REASON, {
+    let (result, effects) = terminate_for_http(registry, pool.clone(), bound, REASON, {
         move |exclusion| herdr_force_effects(exclusion, effects_pool, key).boxed()
     })
     .await;

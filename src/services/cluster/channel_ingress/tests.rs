@@ -443,8 +443,6 @@ async fn an_earlier_candidate_admits_nothing_after_a_handoff() {
 
 #[derive(Debug, PartialEq)]
 struct EntryPoints {
-    unattributed: Result<bool, HomeRefusal>,
-    commands: Vec<Result<bool, HomeRefusal>>,
     refusals: Vec<Option<HomeRefusal>>,
     turn_refusals: Vec<Option<crate::services::turn_host::HerdrRefusal>>,
     claim_holds: Vec<(bool, bool)>,
@@ -473,13 +471,6 @@ async fn entry_points(open: &HomeGate, channels: &[u64]) -> EntryPoints {
     }
     let text = |channel: &u64| channel.to_string();
     EntryPoints {
-        unattributed: channel_home::admit_unattributed().map(|permit| permit.is_some()),
-        commands: channels
-            .iter()
-            .map(|channel| {
-                channel_home::admit_command(&text(channel), "codex").map(|p| p.is_some())
-            })
-            .collect(),
         refusals: channels
             .iter()
             .map(|channel| channel_home::refusal(*channel))
@@ -516,9 +507,15 @@ async fn observing_leaves_every_existing_home_entry_point_unchanged() {
     let calls = observed_calls();
     let before = entry_points(&open, &channels).await;
     assert_eq!(observed_calls(), calls, "no entry point observes");
-    let (not_held, closed) = (Err(HomeRefusal::NotHeld), Err(HomeRefusal::Draining));
-    assert_eq!(before.commands, vec![Ok(true), closed, not_held, Ok(false)]);
-    assert_eq!(before.unattributed, not_held);
+    assert_eq!(
+        before.refusals,
+        vec![
+            None,
+            Some(HomeRefusal::Draining),
+            Some(HomeRefusal::NotHeld),
+            None
+        ]
+    );
     assert_eq!(
         before.claim_holds,
         vec![(false, true), (true, true), (true, true), (true, false)]

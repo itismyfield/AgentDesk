@@ -152,7 +152,6 @@ src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_t
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs
 src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs
 src/services/discord/commands/control/codex_clear_retirement_tests.rs
-src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
@@ -560,7 +559,6 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::negative_tests
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::source_boundary_tests
 services::discord::commands::control::codex_clear_retirement_tests
-services::discord::commands::control::home_fence::tests
 services::discord::commands::control::native::tests
 services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
@@ -1348,7 +1346,6 @@ server::outbox_worker::attachment_pg_tests::partial_outbox_image_never_invokes_t
 server::outbox_worker::attachment_pg_tests::stale_processing_reclaim_follows_the_same_prefix_rule_pg
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
-server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg
 server::routes::agents::host_guard_tests::command_unattributed_legacy_stop_and_dispatch_keep_off_fallback_pg
 server::routes::agents::host_guard_tests::diagnostics_routes_never_probe_a_non_legacy_session_pg
 server::routes::agents::host_guard_tests::stop_routes_keep_a_runtime_turn_on_another_host_pg
@@ -1794,7 +1791,6 @@ services::discord::commands::control::codex_clear_retirement_tests::legacy_codex
 services::discord::commands::control::codex_clear_retirement_tests::relaunch_predicate_closes_on_any_live_or_newer_evidence_pg
 services::discord::commands::control::codex_clear_retirement_tests::unretired_pin_in_shadow_mode_parks_restored_input_until_clear_pg
 services::discord::commands::control::codex_clear_retirement_tests::unretired_pin_with_an_old_boundary_parks_restored_input_until_clear_pg
-services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
 services::discord::commands::control::native::tests::a_switched_on_clear_ends_the_session_and_frees_an_unresolved_native_boundary_pg
 services::discord::commands::control::native::tests::policy_tests::admission_outside_the_scoped_channels_reads_no_native_state_pg
 services::discord::commands::control::native::tests::policy_tests::composer_failure_keeps_native_boundary_unresolved_and_next_input_held_pg
@@ -1870,14 +1866,12 @@ services::discord::herdr_terminate::http_force::tests::e07_selection_change_refu
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_failure_matrix_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_failure_matrix_provider_alive_pg
-services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_owner_forwards_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_target_equivalence_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_retires_then_applies_effects_once_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_terminated_handler_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
-services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg
 services::discord::herdr_terminate::http_force::tests::force_o_and_legacy_output_continuity_pg
 services::discord::herdr_terminate::http_force::tests::force_postlude_runs_before_transition_release_pg
@@ -2570,13 +2564,13 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_s
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_stop_after_a_normal_exit_seal_sends_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut::restart_real_cutpoints_reach_their_runtime_boundaries_pg
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_cancel_generation_adds_no_cleanup_authority_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_claude_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_generation_only_stale_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_identity_only_changed_sends_no_escape
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_codex_rollout_ending_mid_record_is_unobserved_not_idle
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_delivery_sends_once_for_both_providers
-services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_draining_holder_still_cancels_and_generation_adds_no_cleanup_authority_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off

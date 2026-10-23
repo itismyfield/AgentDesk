@@ -5,7 +5,6 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
@@ -89,12 +88,10 @@ impl Drop for CommandEffect {
 #[derive(Clone)]
 pub(crate) struct CommandPermit {
     _effect: Arc<CommandEffect>,
-    channel: String,
-    provider: String,
 }
 
 impl CommandPermit {
-    fn new(count: &Arc<CommandCount>, channel: &str, provider: &str) -> Self {
+    fn new(count: &Arc<CommandCount>) -> Self {
         count.count.fetch_add(1, Ordering::AcqRel);
         #[cfg(test)]
         if command_mutant("admission_increment_after_lock") {
@@ -102,128 +99,8 @@ impl CommandPermit {
         }
         Self {
             _effect: Arc::new(CommandEffect(Arc::clone(count))),
-            channel: channel.into(),
-            provider: provider.into(),
         }
     }
-
-    fn names(&self, channel: &str, provider: &str) -> bool {
-        self.channel == channel && self.provider == provider
-    }
-}
-
-tokio::task_local! { static COMMAND: Option<CommandPermit>; }
-thread_local! {
-    static COMMAND_WORKER: std::cell::RefCell<Option<Option<CommandPermit>>> = const { std::cell::RefCell::new(None) };
-    #[cfg(test)]
-    static COMMAND_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-pub(crate) fn current_command(channel: &str, provider: &str) -> Option<CommandPermit> {
-    COMMAND_WORKER
-        .with(|held| held.borrow().clone())
-        .unwrap_or_else(|| COMMAND.try_with(Clone::clone).ok().flatten())
-        .filter(|permit| permit.names(channel, provider))
-}
-
-pub(crate) struct CommandWorkerScope(Option<Option<CommandPermit>>);
-impl Drop for CommandWorkerScope {
-    fn drop(&mut self) {
-        COMMAND_WORKER.with(|held| *held.borrow_mut() = self.0.take());
-    }
-}
-
-pub(crate) fn command_worker_scope(permit: Option<CommandPermit>) -> CommandWorkerScope {
-    CommandWorkerScope(COMMAND_WORKER.with(|held| held.replace(Some(permit))))
-}
-
-pub(crate) fn command_scope<F: Future>(
-    permit: Option<CommandPermit>,
-    work: F,
-) -> impl Future<Output = F::Output> {
-    #[cfg(test)]
-    let permit = if command_mutant("permit_not_moved_into_child") {
-        None
-    } else {
-        permit
-    };
-    if permit.is_some() {
-        futures::future::Either::Right(COMMAND.scope(
-            permit.clone(),
-            CommandFuture {
-                future: Some(Box::pin(work)),
-                permit,
-            },
-        ))
-    } else {
-        futures::future::Either::Left(work)
-    }
-}
-
-struct CommandFuture<F: Future> {
-    future: Option<std::pin::Pin<Box<F>>>,
-    permit: Option<CommandPermit>,
-}
-impl<F: Future> Future for CommandFuture<F> {
-    type Output = F::Output;
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<F::Output> {
-        let _scope = command_worker_scope(self.permit.clone());
-        self.future.as_mut().unwrap().as_mut().poll(cx)
-    }
-}
-impl<F: Future> Drop for CommandFuture<F> {
-    fn drop(&mut self) {
-        let _scope = command_worker_scope(self.permit.clone());
-        drop(self.future.take());
-    }
-}
-
-/// An unattributed command keeps Legacy behavior only before this process participates in homes.
-pub(crate) fn admit_unattributed() -> Result<Option<CommandPermit>, HomeRefusal> {
-    #[cfg(test)]
-    if command_mutant("unattributed_refused_while_off") {
-        return Err(HomeRefusal::NotHeld);
-    }
-    if with_homes(|homes| homes.get().is_some()) {
-        Err(HomeRefusal::NotHeld)
-    } else {
-        Ok(None)
-    }
-}
-
-/// Legacy channels do not allocate a permit; a registered home's refusal never becomes Legacy.
-pub(crate) fn admit_command(
-    channel: &str,
-    provider: &str,
-) -> Result<Option<CommandPermit>, HomeRefusal> {
-    if let Some(permit) = current_command(channel, provider) {
-        return Ok(Some(permit));
-    }
-    #[cfg(test)]
-    if command_mutant("rest_fence_omitted") && provider == "cancel_turn"
-        || command_mutant("text_fence_omitted") && channel == "9200000000000107"
-        || command_mutant("restart_fence_omitted") && channel == "9200000000000108"
-    {
-        return Ok(None);
-    }
-    #[cfg(test)]
-    if command_mutant("off_runs_home_lookup") {
-        COMMAND_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
-    }
-    if !with_homes(|homes| homes.get().is_some()) {
-        return Ok(None);
-    }
-    #[cfg(test)]
-    COMMAND_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
-    let Some(home) = registered(channel) else {
-        return Ok(None);
-    };
-    home.admit_command(provider)
-        .map(Some)
-        .ok_or_else(|| home.refusal().unwrap_or(HomeRefusal::NotHeld))
 }
 
 #[derive(Default)]
@@ -515,31 +392,6 @@ impl HomeGate {
             .flatten()
     }
 
-    pub(crate) fn admit_command(&self, provider: &str) -> Option<CommandPermit> {
-        let mut local = self.locked();
-        self.expire(&mut local, Instant::now());
-        matches!(
-            self.read(&local),
-            HomeOwnership::Owned {
-                intake: HomeIntake::Open,
-                ..
-            }
-        )
-        .then(|| CommandPermit::new(&local.commands, &self.channel_id, provider))
-    }
-
-    pub(crate) fn admit_recovery(&self, provider: &str) -> Option<CommandPermit> {
-        let mut local = self.locked();
-        self.expire(&mut local, Instant::now());
-        let held = local.held.as_ref()?;
-        self.gate
-            .admit(|epoch| {
-                (epoch == held.gate_epoch)
-                    .then(|| CommandPermit::new(&local.commands, &self.channel_id, provider))
-            })
-            .flatten()
-    }
-
     /// The installation's home epoch and permit are checked under the same local gate lock.
     pub(crate) fn admit_at_epoch(
         &self,
@@ -552,7 +404,7 @@ impl HomeGate {
 
     fn admit_at_epoch_checked(
         &self,
-        provider: &str,
+        _provider: &str,
         expected: i64,
         recovery: bool,
         minted: impl FnOnce(i64),
@@ -575,7 +427,7 @@ impl HomeGate {
         self.gate
             .admit(|epoch| {
                 (epoch == held.gate_epoch).then(|| {
-                    let permit = CommandPermit::new(&local.commands, &self.channel_id, provider);
+                    let permit = CommandPermit::new(&local.commands);
                     minted(held.home_epoch);
                     permit
                 })

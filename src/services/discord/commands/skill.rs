@@ -181,11 +181,7 @@ async fn run_skill_slash_command(
                 return Ok(());
             }
             ctx.defer().await?;
-            let permit = crate::services::cluster::channel_home::admit_command(
-                &ctx.channel_id().get().to_string(),
-                ctx.data().provider.as_str(),
-            )?;
-            return crate::services::cluster::channel_home::command_scope(permit, async {
+            return async {
                 let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
                 let begin = super::super::turn_bridge::begin_user_stop;
                 let reason = format!("{invoked_as} stop");
@@ -226,7 +222,7 @@ async fn run_skill_slash_command(
                     }
                 }
                 Ok(())
-            })
+            }
             .await;
         }
         "pwd" => {

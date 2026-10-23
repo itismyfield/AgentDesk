@@ -241,7 +241,7 @@ fn codex_verified_clear_ends_the_incarnation_releases_its_pin_and_keeps_owed_out
         ));
         let http = Arc::new(serenity::Http::new(""));
         let notify = SoftClearNotifyMode::Suppress;
-        let fenced = clear_channel_session_state_fenced(
+        let fenced = clear_channel_session_state_with_session_key(
             &http, &shared, &provider, channel, "/clear", notify, None,
         );
         fenced

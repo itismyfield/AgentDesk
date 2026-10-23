@@ -110,6 +110,7 @@ AUTHORITIES = (
     "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/teardown_probe.rs", "src/services/turn_orchestrator.rs",
+    "src/services/turn_orchestrator/test_support_tests.rs",
     "src/services/discord/router/intake_gate/busy_inject.rs", *ts.SHARED_TEST_HELPERS,
 )
 

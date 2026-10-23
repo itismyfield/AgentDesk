@@ -95,12 +95,13 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
     );
     assert_eq!(persisted_queue_bytes(&fixture), queue_before);
     assert!(snapshot.cancel_token.is_none() && snapshot.pending_user_dispatch.is_none());
-    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        channel,
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            channel,
+        )
+        .unwrap();
     assert_eq!(
         disk.iter().map(QueueIdentity::of).collect::<Vec<_>>(),
         identities
@@ -209,12 +210,13 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
     .unwrap();
     assert_no_retirement_warning(&cleared);
     assert!(queue_identities(&fixture).await.is_empty());
-    let (disk, _) = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        channel,
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            channel,
+        )
+        .unwrap();
     assert!(
         disk.is_empty(),
         "explicit clear still discards the waiting queue"

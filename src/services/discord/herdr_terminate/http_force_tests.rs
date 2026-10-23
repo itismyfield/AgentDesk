@@ -787,7 +787,7 @@ fn force_terminal_failure_matrix_pg() {
         let request = OperatorTerminate { session_key: node.key.clone(), execution_nonce: herdr::EXECUTION.into() };
         let calls = Arc::new(AtomicUsize::new(0));
         let postlude_calls = calls.clone();
-        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, None), None, "test", move |_| {
+        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, None), "test", move |_| {
             postlude_calls.fetch_add(1, Ordering::SeqCst);
             async {}.boxed()
         }).await;
@@ -902,39 +902,6 @@ fn force_duplicate_abort_restart_pg() {
 
 // The home command a forced cancel was admitted under stays open while its detached run lives,
 // past a dropped request, and closes once the run ends.
-#[test]
-fn force_home_permit_survives_http_abort_pg() {
-    let Some((rig, runtime)) = rig_child("force_home_permit_survives_http_abort_pg") else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        use crate::db::o_channel_homes::HomeState;
-        use crate::services::cluster::channel_home;
-        let home = channel_home::register_for_test(CHANNEL, Some(HomeState::Worker));
-        let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
-        node.start(51, "turn-a", Some(DISPATCH)).await;
-        let mut hold = rig.hold_next_write();
-        let request = node.spawn_cancel();
-        tokio::time::timeout(Duration::from_secs(10), &mut hold.reached)
-            .await
-            .expect("the close reached Herdr")
-            .unwrap();
-        request.abort();
-        assert!(request.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            home.commands_in_flight(),
-            1,
-            "the detached run holds the command"
-        );
-        hold.release.send(()).unwrap();
-        wait_for("the run's end", async || home.commands_in_flight() == 0).await;
-        assert_eq!(node.effects(&rig).await.session, disconnected());
-        channel_home::unregister(home.channel_id());
-        drop(hold);
-        node.finish().await;
-    });
-}
 
 // While a forced cancel waits on its end check, another channel of the same runtime takes its
 // queued input and its own transition: the run waits on nothing outside its channel.

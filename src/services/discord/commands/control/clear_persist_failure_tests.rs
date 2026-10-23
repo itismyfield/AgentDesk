@@ -7,7 +7,7 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use super::{
     ClearReport, SoftClearNotifyMode, clear_channel_session_state,
-    clear_channel_session_state_fenced,
+    clear_channel_session_state_with_session_key,
 };
 use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -87,7 +87,7 @@ async fn clear(
     channel_id: ChannelId,
 ) -> anyhow::Result<ClearReport> {
     let http = Arc::new(serenity::Http::new(""));
-    clear_channel_session_state_fenced(
+    clear_channel_session_state_with_session_key(
         &http,
         shared,
         provider,

@@ -90,18 +90,14 @@ async fn s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes() {
     json.as_object_mut().unwrap().remove("finalizer_turn_id");
     fs::write(&legacy, serde_json::to_vec(&json).unwrap()).unwrap();
     let before = [&tmp, &placeholder, &legacy].map(|path| fingerprint(path));
-    let (queued, role) = queues::pending_queue_persistence::load_channel_pending_queue_checked(
-        provider, token, target,
-    )
-    .unwrap();
+    let (queued, role) =
+        queues::test_support::load_channel_pending_queue_checked(provider, token, target).unwrap();
     assert_eq!(queued.len(), 1);
     assert_eq!(role, Some(ChannelId::new(99)));
     assert!(
-        queues::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
-            provider, token, target
-        )
-        .unwrap()
-        .is_some()
+        queues::test_support::load_channel_pending_dispatch_marker_checked(provider, token, target)
+            .unwrap()
+            .is_some()
     );
     assert!(
         queued_placeholders_store::load_channel_queued_placeholders_checked(
@@ -133,15 +129,13 @@ fn s3act_b1_checked_reads_distinguish_absence_from_corruption() {
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let (provider, target, token) = (ProviderKind::Claude, ChannelId::new(5340111), "scope");
     assert!(
-        queues::pending_queue_persistence::load_channel_pending_queue_checked(
-            &provider, token, target
-        )
-        .unwrap()
-        .0
-        .is_empty()
+        queues::test_support::load_channel_pending_queue_checked(&provider, token, target)
+            .unwrap()
+            .0
+            .is_empty()
     );
     assert!(
-        queues::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
+        queues::test_support::load_channel_pending_dispatch_marker_checked(
             &provider, token, target
         )
         .unwrap()
@@ -156,13 +150,10 @@ fn s3act_b1_checked_reads_distinguish_absence_from_corruption() {
         fs::write(dir.join(format!("{}.{}", target.get(), suffix)), "bad").unwrap();
     }
     assert!(
-        queues::pending_queue_persistence::load_channel_pending_queue_checked(
-            &provider, token, target
-        )
-        .is_err()
+        queues::test_support::load_channel_pending_queue_checked(&provider, token, target).is_err()
     );
     assert!(
-        queues::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
+        queues::test_support::load_channel_pending_dispatch_marker_checked(
             &provider, token, target
         )
         .is_err()

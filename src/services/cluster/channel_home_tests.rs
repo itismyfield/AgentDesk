@@ -328,14 +328,9 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
-        "src/services/cluster/channel_home_boot.rs",
         "src/services/cluster/channel_home_drain.rs",
         "src/services/cluster/channel_home_port.rs",
     ];
-    const OPERATOR: (&str, &[&str]) = (
-        "src/cli/channel_home.rs",
-        &["delegate", "begin_reclaim", "force_orphan"],
-    );
     const FORBIDDEN: &[&str] = &[
         "delegate",
         "finish_release",
@@ -381,17 +376,11 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
         if !readers.iter().any(|reader| tokens.contains(reader)) {
             return None;
         }
-        let allowed = match OPERATOR {
-            (operator, allowed) if relative == operator => allowed,
-            _ => &[][..],
-        };
         let mut found = Vec::new();
         if code.contains("HomeGate::new") {
             found.push(format!("{relative}: HomeGate::new"));
         }
-        let named = FORBIDDEN
-            .iter()
-            .filter(|word| tokens.contains(word) && !allowed.contains(word));
+        let named = FORBIDDEN.iter().filter(|word| tokens.contains(word));
         found.extend(named.map(|word| format!("{relative}: {word}")));
         Some(found)
     };
@@ -417,6 +406,9 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
     );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for owner in OWNERS {
+        assert!(root.join(owner).is_file(), "missing home owner: {owner}");
+    }
     let mut stack = vec![root.join("src")];
     let (mut users, mut violations) = (0, Vec::new());
     while let Some(dir) = stack.pop() {
@@ -450,18 +442,12 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 }
                 continue;
             }
-            // Each loop is named once at its definition, the lease once more where the boot starts
-            // it; the boot's watch runs the drain a round at a time, never its loop.
-            for (owner, start, started) in [
-                ("src/services/cluster/channel_home.rs", "run_lease", true),
-                (
-                    "src/services/cluster/channel_home_drain.rs",
-                    "run_drain",
-                    false,
-                ),
+            // Each retained loop is named once at its definition.
+            for (owner, start) in [
+                ("src/services/cluster/channel_home.rs", "run_lease"),
+                ("src/services/cluster/channel_home_drain.rs", "run_drain"),
             ] {
-                let starter = started && relative == "src/services/cluster/channel_home_boot.rs";
-                let expected = usize::from(relative == owner || starter);
+                let expected = usize::from(relative == owner);
                 let named = tokens.iter().filter(|token| **token == start).count();
                 if named != expected {
                     violations.push(format!("{relative}: {start} x{named}"));
@@ -620,48 +606,14 @@ fn standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake() {
     assert_eq!(routing(SELECTED), foreign, "row gone: as before");
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn command_permit_linearizes_close_and_preserves_children() {
-    let home = Arc::new(HomeGate::new(C, "mini"));
-    home.confirm(&written("mini", 1, HomeState::Worker), Instant::now())
-        .unwrap();
-    register(home.clone());
-    let permit = admit_command(C, "claude").unwrap().unwrap();
-    home.close_intake();
-    assert!(home.admit_command("claude").is_none());
-    command_scope(Some(permit.clone()), async {
-        let nested = admit_command(C, "claude").unwrap().unwrap();
-        assert!(admit_command(C, "codex").is_err());
-        assert_eq!(home.commands_in_flight(), 1);
-        drop(nested);
-    })
-    .await;
-    let (entered, entry) = tokio::sync::oneshot::channel();
-    let (finish, finished) = tokio::sync::oneshot::channel();
-    let child = tokio::spawn(command_scope(Some(permit.clone()), async move {
-        entered.send(()).unwrap();
-        finished.await.unwrap();
-    }));
-    entry.await.unwrap();
-    drop(permit);
-    assert_eq!(
-        home.commands_in_flight(),
-        1,
-        "child owns the admitted execution"
-    );
-    home.close();
-    assert!(home.admit_recovery("claude").is_none());
-    finish.send(()).unwrap();
-    child.await.unwrap();
-    assert_eq!(home.commands_in_flight(), 0);
-    unregister(C);
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn command_permit_drop_panic_and_blocking_abort_are_not_unknown() {
     let home = register_for_test(9200000000000102, Some(HomeState::Worker));
     let permit = home.admit_command("claude").unwrap();
-    let dropped = command_scope(Some(permit), std::future::pending::<()>());
+    let dropped = async move {
+        let _held = permit;
+        std::future::pending::<()>().await;
+    };
     drop(dropped);
     assert_eq!(
         home.commands_in_flight(),
@@ -679,7 +631,7 @@ async fn command_permit_drop_panic_and_blocking_abort_are_not_unknown() {
     let (entered, entry) = tokio::sync::oneshot::channel();
     let (finish, finished) = std::sync::mpsc::channel();
     let worker = tokio::task::spawn_blocking(move || {
-        let _held = command_worker_scope(Some(permit));
+        let _held = permit;
         entered.send(()).unwrap();
         finished.recv().unwrap();
     });
@@ -705,10 +657,6 @@ async fn command_registry_unregister_is_immediate_and_reuses_pending_count() {
     assert!(
         registered(old.channel_id()).is_none(),
         "watch removal must not leave a permanent refusal"
-    );
-    assert!(
-        admit_command(old.channel_id(), "claude").unwrap().is_none(),
-        "Legacy executes without restart"
     );
     let new = register_for_test(channel, Some(HomeState::Worker));
     assert_eq!(
@@ -770,21 +718,6 @@ async fn command_admission_expires_at_the_renewal_deadline() {
         assert_eq!(home.admit_command("claude").is_some(), elapsed < HOLD_FOR);
         assert_eq!(home.commands_in_flight(), 0);
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn command_dormant_admission_does_not_lookup_or_start_a_task() {
-    assert!(
-        with_homes(|homes| homes.get().is_none()),
-        "fresh thread has no registry"
-    );
-    COMMAND_LOOKUPS.with(|calls| calls.set(0));
-    for _ in 0..3 {
-        let permit = admit_command(C, "claude").unwrap();
-        assert!(permit.is_none());
-        assert_eq!(command_scope(permit, async { 7 }).await, 7);
-    }
-    COMMAND_LOOKUPS.with(|calls| assert_eq!(calls.get(), 0));
 }
 
 #[tokio::test(flavor = "current_thread")]
