@@ -16,7 +16,7 @@ use super::super::{
 use super::terminate_for_http;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::{ChannelId, SharedData, inflight};
+use crate::services::discord::{ChannelId, SharedData, inflight, runtime_store};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
@@ -77,16 +77,16 @@ struct Node {
 }
 
 impl Node {
-    /// The execution in `state`, its row the channel's active turn on `dispatch`.
+    /// The execution in `state` on `dispatch`, without the context and queue an earlier bind left.
     async fn bind(
         rig: &herdr::P11TerminationRig,
         state: herdr::HostedState,
         dispatch: Option<&str>,
     ) -> Self {
-        // A bind earlier in this child wrote the same launch context; the rig writes it anew.
         let root = crate::config::runtime_root().unwrap();
         let context = format!("runtime/binding_contexts/claude/{}.json", herdr::EXECUTION);
         let _ = std::fs::remove_file(root.join(context));
+        let _ = std::fs::remove_dir_all(runtime_store::discord_pending_queue_root().unwrap());
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) =
@@ -787,7 +787,7 @@ fn force_terminal_failure_matrix_pg() {
         let request = OperatorTerminate { session_key: node.key.clone(), execution_nonce: herdr::EXECUTION.into() };
         let calls = Arc::new(AtomicUsize::new(0));
         let postlude_calls = calls.clone();
-        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, None), None, "test", move |_| {
+        let (result, applied) = terminate_for_http(&node.registry, node.pool.clone(), (request, e08::identity::unbound(&rig, &node)), None, "test", move |_| {
             postlude_calls.fetch_add(1, Ordering::SeqCst);
             async {}.boxed()
         }).await;
@@ -1092,9 +1092,7 @@ fn e07_root_replaced_force_race_pg() {
 // the dispatch, row and input queued after the clear left as the clear left them.
 #[test]
 fn e07_root_replaced_retired_is_not_http_success_pg() {
-    use super::super::super::commands::control::{
-        SoftClearNotifyMode, clear_channel_session_state,
-    };
+    use super::super::super::commands::control::clear_channel_session_state;
     let path = format!(
         "{}::e07_root_replaced_retired_is_not_http_success_pg",
         module_path!()
@@ -1135,8 +1133,8 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
         }
         rig.restore_shell();
         let http = Arc::new(poise::serenity_prelude::Http::new(""));
-        let notify = SoftClearNotifyMode::Suppress;
-        let clear = clear_channel_session_state(&http, &shared, &provider, channel(), "/clear", notify);
+
+        let clear = clear_channel_session_state(&http, &shared, &provider, channel(), "/clear");
         clear.await.expect("a clear always commits");
         assert_eq!(herdr::row(&pool, &key).await, retired(), "the recovery retired it");
         assert!(!herdr::held());
@@ -1168,7 +1166,7 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
 }
 
 // The cancel's own read binds the run: when its turn ended and the successor's dispatch took the
-// channel right after that read, the re-read is refused before any close and the successor lives.
+// channel right after that read, the run is refused before any close and the successor lives.
 #[test]
 fn e07_selection_change_refuses_before_close_pg() {
     let Some((rig, runtime)) = rig_child("e07_selection_change_refuses_before_close_pg") else {
@@ -1183,7 +1181,7 @@ fn e07_selection_change_refuses_before_close_pg() {
         let untouched = node.effects(&rig).await;
         let (status, reply) = node.cancel().await;
         assert!(flag.load(Ordering::SeqCst));
-        let refused = result("refused", "selected dispatch changed");
+        let refused = result("refused", "captured turn runs another dispatch");
         assert_eq!(
             termination(status, &reply),
             (StatusCode::CONFLICT, refused),

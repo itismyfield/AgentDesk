@@ -201,7 +201,7 @@ async fn real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_fl
                 );
                 assert_eq!(posts[0], "answer");
                 assert!(posts[1].starts_with(match outcome {
-                    Outcome::Completed => "-# ✅ ",
+                    Outcome::Completed => "-# ⏱️ ",
                     Outcome::Cancelled => "-# ⏹ 중단 · ",
                     Outcome::Failed => "-# ⚠️ 오류 · ",
                 }));
@@ -309,7 +309,7 @@ async fn real_bridge_and_watcher_producers_share_the_pinned_episode_latch_in_eit
             assert!(watcher_posts.is_empty(), "{watcher_posts:?}");
             assert_eq!(bridge_posts.len(), 2, "{bridge_posts:?}");
             assert_eq!(bridge_posts[0], "answer");
-            assert!(bridge_posts[1].starts_with("-# ✅ "));
+            assert!(bridge_posts[1].starts_with("-# ⏱️ "));
             assert!(bridge_posts[1].ends_with(" · 📦 45%"));
         }
     }
@@ -371,7 +371,7 @@ async fn actual_producers_keep_equal_offset_turns_with_distinct_sources_and_nonc
     assert_eq!(posts.len(), 6, "{posts:?}");
     for pair in posts.chunks_exact(2) {
         assert_eq!(pair[0], "answer");
-        assert!(pair[1].starts_with("-# ✅ "));
+        assert!(pair[1].starts_with("-# ⏱️ "));
     }
     assert!(recorder.contents().is_empty());
 }
@@ -558,5 +558,5 @@ async fn suspended_panel_projection_rechecks_summary_authority_without_consuming
         "the veto must not consume the captured episode's summary latch"
     );
     assert_eq!(posts[0], "answer");
-    assert!(posts[1].starts_with("-# ✅ "));
+    assert!(posts[1].starts_with("-# ⏱️ "));
 }

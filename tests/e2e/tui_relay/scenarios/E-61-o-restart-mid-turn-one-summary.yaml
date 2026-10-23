@@ -40,5 +40,5 @@ assertions:
       marker: "[E2E:E61:AFTER]"
   - turn_summary_after_body:
       body_marker: "[E2E:E61:AFTER]"
-      header: "-# ✅"
+      header: "-# ⏱️"
       output_owner: o

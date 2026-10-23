@@ -266,9 +266,7 @@ async fn admission_case(case: Case) {
         case,
         Case::PureClearReason | Case::Negative(Refusal::LegacyReceiptCustody)
     ) {
-        use crate::services::discord::commands::control::{
-            SoftClearNotifyMode, clear_channel_session_state,
-        };
+        use crate::services::discord::commands::control::clear_channel_session_state;
         let http = Arc::new(serenity::Http::new("Bot initial-fresh-test"));
         let cleared = clear_channel_session_state(
             &http,
@@ -276,7 +274,6 @@ async fn admission_case(case: Case) {
             &ProviderKind::Codex,
             serenity::ChannelId::new(CANARY_CHANNEL),
             "!clear",
-            SoftClearNotifyMode::Suppress,
         )
         .await;
         cleared.expect("the actual clear rail must succeed");

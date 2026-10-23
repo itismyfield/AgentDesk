@@ -4711,11 +4711,7 @@ def _assert_provider_hold_marker_seen(
     )
 
 
-# Completed-panel chrome; the idle-recap card is a separate post, not the turn's panel.
-_PANEL_COMPLETION_PATTERNS = tuple(
-    pattern for pattern in assertions._COMPLETION_CHROME_PATTERNS
-    if pattern is not assertions._IDLE_RECAP_COMPLETION_PATTERN
-)
+_PANEL_COMPLETION_PATTERNS = assertions._COMPLETION_CHROME_PATTERNS
 
 
 def completed_panel_in_place(window: assertions.Window) -> None:

@@ -1,16 +1,12 @@
 use super::*;
 
-/// #4552 decomposition: claim-success request-anchor and idle-recap bootstrap
-/// lifted from `handle_text_message`. This remains after the stale-dispatch
-/// guard and before the placeholder handoff.
+/// Record the claimed request anchor and clear its previously stored idle card.
 pub(super) async fn bootstrap_claimed_turn(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     started: bool,
     channel_id: ChannelId,
     user_msg_id: MessageId,
-    provider: &ProviderKind,
-    adk_session_key: Option<&str>,
 ) {
     // #3811: record the original-request anchor (the real Discord user_msg_id)
     // ONLY once THIS message won the mailbox claim (`started == true`) and the
@@ -35,32 +31,60 @@ pub(super) async fn bootstrap_claimed_turn(
             .await;
     }
 
-    // #3148: this runs right after the claim succeeds and only for the winner,
-    // mirroring the TUI claim → bump → clear path. A queued message that lost
-    // the claim race must not bump or clear. Bump BEFORE clear ensures an
-    // in-flight idle-recap POST whose persist CAS captured the pre-bump
-    // generation cannot overwrite this turn's clear; clear then removes a card
-    // that already persisted before the claim.
+    #[cfg(test)]
+    let started = started
+        ^ crate::services::discord::session_idle_cleanup::recap_cleanup_mutant(
+            "invert_discord_started",
+        );
+    #[cfg(test)]
+    if crate::services::discord::session_idle_cleanup::recap_cleanup_mutant("skip_discord_cleanup")
+    {
+        return;
+    }
     if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) = crate::services::discord::idle_recap::bump_turn_generation(
-            &pool,
-            channel_id.get(),
-            provider,
-            adk_session_key,
-        )
-        .await
-        {
-            tracing::warn!(
-                error = %e,
-                channel_id = channel_id.get(),
-                "idle_recap: failed to bump turn generation on Discord-intake claim"
-            );
-        }
-        crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-            http.clone(),
-            pool,
-            channel_id.get(),
+        crate::services::discord::session_idle_cleanup::spawn_clear_captured_idle_recap_for_channel(
+            http.clone(), pool, channel_id.get(),
+        ).await;
+    }
+}
+
+#[cfg(test)]
+mod recap_cleanup_tests {
+    use super::*;
+    use crate::services::discord::session_idle_cleanup::recap_cleanup_tests::{
+        assert_cleared, discord, pointer, seed_for_channel,
+    };
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn discord_claim_clears_the_idle_card_only_for_the_winning_turn_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "discord_claim_recap",
+            "Discord claim legacy card wiring",
         )
         .await;
+        let pool = db.connect_and_migrate().await;
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared).unwrap().pg_pool = Some(pool.clone());
+        let channel = ChannelId::new(7_274_201);
+        seed_for_channel(&pool, 4242, channel.get()).await;
+        let (http, deletes, server) = discord("📦 응답 완료 · 이어서 질문 가능", true).await;
+        bootstrap_claimed_turn(&http, &shared, false, channel, MessageId::new(7_274_202)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            pointer(&pool).await,
+            Some(4242),
+            "a queued Discord turn must preserve the idle-card pointer"
+        );
+        assert_eq!(
+            deletes.load(Ordering::SeqCst),
+            0,
+            "a queued Discord turn must not delete the idle card"
+        );
+        bootstrap_claimed_turn(&http, &shared, true, channel, MessageId::new(7_274_202)).await;
+        assert_cleared(&pool, &deletes, "the winning Discord claim").await;
+        server.abort();
+        pool.close().await;
+        db.drop().await;
     }
 }

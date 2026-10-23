@@ -164,6 +164,7 @@ src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
+src/services/discord/commands/text_commands/clear_http_overlap_tests.rs
 src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
@@ -177,13 +178,18 @@ src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate/http_force_e08_tests.rs
+src/services/discord/herdr_terminate/http_force_forward_tests.rs
+src/services/discord/herdr_terminate/http_force_hydrate_tests.rs
+src/services/discord/herdr_terminate/http_force_identity_tests.rs
+src/services/discord/herdr_terminate/http_force_purge_tests.rs
+src/services/discord/herdr_terminate/http_force_terminal_tests.rs
 src/services/discord/herdr_terminate/http_force_tests.rs
+src/services/discord/herdr_terminate/http_force_writer_tests.rs
 src/services/discord/herdr_terminate_exit_tests.rs
 src/services/discord/herdr_terminate_route_tests.rs
 src/services/discord/herdr_terminate_tests.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
-src/services/discord/idle_recap_interaction.rs
 src/services/discord/idle_relay_drift.rs
 src/services/discord/inflight/host_recovery_guard_keyed_tests.rs
 src/services/discord/inflight/rebind_reap/tests.rs
@@ -224,6 +230,7 @@ src/services/discord/router/intake_gate/busy_inject/payload_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
+src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs
 src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
 src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs
@@ -265,6 +272,7 @@ src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
+src/services/discord/session_idle_cleanup.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs
@@ -292,6 +300,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_t
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_output_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs
@@ -299,6 +308,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.r
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
+src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
 src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
@@ -588,6 +598,7 @@ services::discord::commands::control::native::tests
 services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::text_commands::clear_refusal_reply_tests
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::self_watchdog::tests::health_response
@@ -602,13 +613,17 @@ services::discord::health::turn_deliver::inject_tests::turn_mode_reading
 services::discord::herdr_terminate::exit_tests
 services::discord::herdr_terminate::http_force::tests
 services::discord::herdr_terminate::http_force::tests::e08
+services::discord::herdr_terminate::http_force::tests::e08::identity
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer
+services::discord::herdr_terminate::http_force::tests::e08::purge
+services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate
+services::discord::herdr_terminate::http_force::tests::e08::terminal
 services::discord::herdr_terminate::route_tests
 services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
-services::discord::idle_recap_interaction::host_guard_tests
-services::discord::idle_recap_interaction::tests
 services::discord::idle_relay_drift::tests
 services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::rebind_reap::tests
@@ -649,6 +664,7 @@ services::discord::router::intake_gate::busy_inject::payload_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
+services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
 services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests
@@ -694,6 +710,7 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::orphan_recovery::tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
+services::discord::session_idle_cleanup::recap_cleanup_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::retired_metadata::tests::pg
@@ -728,12 +745,14 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_http_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::output
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
@@ -1908,6 +1927,8 @@ services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_a
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_first_overlap_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_overlap_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::self_watchdog::tests::health_response::db_slow_http_response_resets_watchdog_streak
@@ -1979,6 +2000,16 @@ services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_t
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_retires_then_applies_effects_once_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_terminated_handler_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e07_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e08_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_e08_terminates_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_heartbeat_lookup_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_records_exact_receipt_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_refuses_late_durable_input_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate::e07_force_absorbs_unhydrated_own_queue_pg
+services::discord::herdr_terminate::http_force::tests::e08::terminal::e08_terminal_dispatch_is_preserved_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg
@@ -2005,10 +2036,6 @@ services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_ro
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
-services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
-services::discord::idle_recap_interaction::host_guard_tests::recap_clear_resets_the_session_whatever_its_stored_host_pg
-services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
-services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
 services::discord::inflight::host_recovery_guard::keyed_tests::keyed_guard_warning_rearms_after_successful_clear_pg
 services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
@@ -2036,6 +2063,8 @@ services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is
 services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_shares_its_row_pg
 services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_row_whatever_copies_its_root_holds_pg
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::custody_lock_contention_preserves_pending_recovery_pg
+services::discord::inflight::removal::custody_notice_tests::custody_retention_requires_old_delivery_and_keeps_unknown_episodes_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
@@ -2205,6 +2234,7 @@ services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_partial_settlement_failure_preserves_queue_and_retries
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_settlement_preserves_queue_then_admits_once
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
+services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests::discord_claim_clears_the_idle_card_only_for_the_winning_turn_pg
 services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests::restart_native_clear_first_intake_submits_fresh_anchor_prompt_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::exact_retry_starts_only_through_its_continuation_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::held_dispatch_is_not_inherited_by_an_active_start_pg
@@ -2422,6 +2452,8 @@ services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_cl
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
+services::discord::session_idle_cleanup::recap_cleanup_tests::cleanup_preserves_normal_messages_and_a_successor_pointer_pg
+services::discord::session_idle_cleanup::recap_cleanup_tests::next_claim_deletes_recorded_idle_card_and_clears_pointer_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_session_reactivated_during_probe_pg
@@ -2560,6 +2592,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_rea
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::act_o_first_activation_applies_the_launched_source_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::output::force_actual_o_and_legacy_output_during_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg
@@ -2578,6 +2611,7 @@ services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_gu
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_route_published_after_the_release_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_leaves_an_unanchored_thread_turn_alone_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg
+services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::admitted_tui_claim_clears_the_recorded_idle_card_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::a_pending_claim_from_n1_refuses_retired_n1_and_bound_n2_but_accepts_n2_pg
@@ -3057,7 +3091,7 @@ services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::repost_turn::scoped::scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg
 services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg
-services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg

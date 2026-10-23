@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 127
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 129
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -42,6 +42,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, `src/services/provider/cancel_token_claude_interrupt.rs` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
+| `ADK_RECAP_CLEANUP_MUTANT` | `src/services/discord/session_idle_cleanup.rs` | Test-only cleanup mutations; production retains the claim and card guards. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
@@ -115,6 +116,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs`, `src/services/discord/turn_presence/activity/unbound/binding_metadata.rs`, `src/services/tui_o/writer/binding.rs` | Test-only switch naming the one rule a mutation run disables. |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
+| `AGENTDESK_OTRANSITION_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/discord/health/o_transition/automatic/termination.rs` |  |
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs`, `src/engine/mod.rs` |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs` |  |

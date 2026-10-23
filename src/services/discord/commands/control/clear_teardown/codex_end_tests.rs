@@ -420,7 +420,6 @@ fn explicit_clear_command_path_records_end_with_only_its_existing_kill() {
             &ProviderKind::Codex,
             channel,
             "!clear",
-            super::super::SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();
@@ -1008,3 +1007,5 @@ fn an_attempt_active_before_clear_prevents_a_ticket_and_later_attempts_change_th
     );
     drop(no_pane);
 }
+
+mod capture_fold_tests;

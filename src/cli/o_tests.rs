@@ -83,6 +83,60 @@ fn o_cli_child() {
     crate::cli::execute(cli.command, false).unwrap();
 }
 
+#[test]
+fn o_parser_rejects_retired_transition_and_keeps_store_commands() {
+    let retired = TestCli::try_parse_from([
+        "agentdesk",
+        "o",
+        "transition",
+        "inspect",
+        "--channel",
+        "7",
+        "--session-key",
+        "key",
+        "--execution-nonce",
+        "nonce",
+        "--cutoff",
+        "2",
+        "--operator",
+        "operator",
+        "--reason",
+        "old",
+    ]);
+    assert_eq!(
+        retired.err().map(|error| error.kind()),
+        Some(clap::error::ErrorKind::InvalidSubcommand),
+        "[removed_transition] operator cleanup must no longer parse"
+    );
+    for command in [
+        vec!["status", "--channel", "7"],
+        vec![
+            "resume",
+            "--channel",
+            "7",
+            "--rejected-serial",
+            "0",
+            "--reason",
+            "retry",
+        ],
+        vec![
+            "boundary",
+            "resolve",
+            "--channel",
+            "7",
+            "--source",
+            "old",
+            "--from",
+            "0",
+        ],
+    ] {
+        assert!(
+            TestCli::try_parse_from(["agentdesk", "o"].into_iter().chain(command)).is_ok(),
+            "remaining store command must keep parsing"
+        );
+    }
+}
+
 /// A store whose channel 7 holds one piece refused with 403 at serial 0.
 fn rejected() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();

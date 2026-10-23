@@ -30,6 +30,7 @@ mod mailbox_observation;
 #[cfg(test)]
 mod mailbox_unreachable_tests;
 pub(crate) use mailbox_observation::MailboxObservationFailure;
+pub(crate) mod checked_purge;
 mod overflow;
 mod pending_queue_persistence;
 pub(crate) mod policy_close;
@@ -1409,6 +1410,12 @@ enum ChannelMailboxMsg {
         clear_cancelled_active_anchor: bool,
         reply: oneshot::Sender<PurgeQueueResult>,
     },
+    /// The forced Herdr cancel's purge, refused unless the queue is still the one it captured.
+    #[cfg(unix)]
+    PurgeQueueIfUnchanged(checked_purge::CheckedPurgeRequest),
+    /// The forced Herdr cancel's capture, after the actor absorbed its own queue file.
+    #[cfg(unix)]
+    CaptureOwnQueue(checked_purge::OwnCaptureRequest),
     /// #3864: blind queue overwrite. Production restore now uses
     /// `MergeRestoredQueueItems` (in-actor, race-immune); `ReplaceQueue` has no
     /// production caller and survives ONLY as a `#[cfg(test)]` queue-seeding
@@ -2446,87 +2453,18 @@ fn input_mailbox_step(
             clear_cancelled_active_anchor,
             reply,
         } => {
-            if let Err(error) =
-                queued_head::refuse_destructive(&mut state, channel_id, &persistence)
-            {
-                tracing::warn!(%channel_id, %error, "queued head refused mailbox purge");
-                let _ = reply.send(PurgeQueueResult {
-                    queued_head_refused: true,
-                    own_files_removed: Some(0),
-                    queue_len_after: state.intervention_queue.len(),
-                    ..Default::default()
-                });
-                return state;
-            }
-            // #2706: queue-only purge. Leaves `cancel_token`,
-            // `active_request_owner`, `active_user_message_id`
-            // untouched so a turn that entered the actor in
-            // between force-kill and purge is not collaterally
-            // cancelled.
-            //
-            // #3029(D): a force purge additionally releases the
-            // active-turn anchor, but ONLY when the anchored token is
-            // already `cancelled`. The force path flips that flag via
-            // `cancel_active_token` before purging, so this clears the
-            // just-killed turn's anchor while still leaving a fresh,
-            // uncancelled turn (which raced in after the force-kill)
-            // fully intact — keeping the #2706 guarantee.
-            let cleared_active_anchor = if clear_cancelled_active_anchor
-                && state
-                    .cancel_token
-                    .as_ref()
-                    .is_some_and(|token| token.cancelled.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                release_active_turn_anchor(&mut state, channel_id, Some(&persistence.provider));
-                true
-            } else {
-                false
-            };
-            state.last_persistence = Some(persistence.clone());
-            let disk_files_removed =
-                remove_channel_pending_queue_files_all_tokens(&persistence.provider, channel_id);
-            let own_files_present = channel_queue_files_present(
-                &persistence.provider,
-                &persistence.token_hash,
+            state = checked_purge::purge_queue(
+                state,
                 channel_id,
+                persistence,
+                clear_cancelled_active_anchor,
+                reply,
             );
-            let previous_queue = state.intervention_queue.clone();
-            let keep = queued_head::protected_len(&mut state, channel_id, &persistence);
-            let drained = state.intervention_queue.drain(keep..).count();
-            let purge_persisted = persist_queue_or_restore(
-                &mut state,
-                channel_id,
-                &persistence,
-                previous_queue,
-                "purge_queue",
-            )
-            .is_ok();
-            let drained = if purge_persisted { drained } else { 0 };
-            if purge_persisted {
-                clear_pending_user_dispatch(&mut state);
-                state.recently_valve_cleared_dispatch = None;
-                delete_pending_dispatch_marker_with_persistence(
-                    &persistence,
-                    channel_id,
-                    "purge_queue",
-                );
-            }
-            if cleared_active_anchor {
-                mark_turn_finished_signal_done(channel_id);
-            }
-            let _ = reply.send(PurgeQueueResult {
-                drained,
-                disk_files_removed,
-                cleared_active_anchor,
-                own_files_removed: if purge_persisted {
-                    own_files_present
-                } else {
-                    Some(0)
-                },
-                queue_len_after: state.intervention_queue.len(),
-                queued_head_refused: false,
-            });
         }
+        #[cfg(unix)]
+        ChannelMailboxMsg::PurgeQueueIfUnchanged(request) => request.run(&mut state, channel_id),
+        #[cfg(unix)]
+        ChannelMailboxMsg::CaptureOwnQueue(request) => request.run(&mut state, channel_id),
         #[cfg(test)]
         ChannelMailboxMsg::ReplaceQueue {
             queue,
