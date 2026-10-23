@@ -3,6 +3,8 @@
 
 pub mod cleanup_witness;
 pub(crate) mod clear_end;
+#[cfg(unix)]
+pub(crate) mod codex_end;
 pub(crate) mod codex_provenance;
 mod durable;
 pub mod ledger;

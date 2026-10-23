@@ -2833,47 +2833,45 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
-    /// Retired `tui_o` keys (the shadow block, Codex history adoption) still load; the rest is kept.
+    /// Retired `tui_o` keys still load, while writer and turn settings are kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retired-shadow-config.yaml");
         let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
              turn: {channels: [41], all_owned: true}\n\
-             repost: {enabled: true, channels: [41]}\n\
              alert_channel_id: 42\n";
-        let settings = format!(
-            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\ncodex_history_adoption: {enabled}\n{live}"
-        );
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
             serde_yaml::from_str(live).unwrap();
-        let indented = settings
-            .lines()
-            .map(|line| format!("  {line}\n"))
-            .collect::<String>();
-        let data_dir = serde_json::to_string(&dir.path().join("data")).unwrap();
-        let yaml = format!(
-            concat!(
-                "server: {{}}\ndata: {{dir: {}}}\n",
-                "agents:\n  - id: retired-shadow\n    name: Retired shadow\n",
-                "    channels:\n",
-                "      claude: {{id: '41', runtime: tui}}\n",
-                "      codex: {{id: '42', runtime: tui}}\n",
-                "tui_o:\n{}"
-            ),
-            data_dir, indented
-        );
-        std::fs::write(&path, &yaml).unwrap();
-
-        let loaded = load_from_path(&path).unwrap();
-        let output = loaded.tui_o.as_ref().unwrap();
-
-        assert_eq!(output, &expected);
-        assert!(output.writer.late_adopt && output.repost.enabled);
-        let rendered = serde_yaml::to_string(output).unwrap();
-        assert_eq!(rendered, serde_yaml::to_string(&expected).unwrap());
-        assert!(!rendered.contains("shadow"), "{rendered}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        for repost in [
+            "{enabled: true, channels: [41]}",
+            "{enabled: false, channels: []}",
+            "{enabled: obsolete, channels: malformed, enabeld: true}",
+        ] {
+            let yaml = format!(
+                concat!(
+                    "server: {{}}\ndata: {{dir: {}}}\n",
+                    "agents:\n  - id: retired-shadow\n    name: Retired shadow\n",
+                    "    channels:\n",
+                    "      claude: {{id: '41', runtime: tui}}\n",
+                    "      codex: {{id: '42', runtime: tui}}\n",
+                    "tui_o:\n  shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n",
+                    "  codex_history_adoption: {enabled}\n  repost: {repost}\n  {}"
+                ),
+                serde_json::to_string(&dir.path().join("data")).unwrap(),
+                live.replace('\n', "\n  "),
+                enabled = enabled,
+                repost = repost,
+            );
+            std::fs::write(&path, &yaml).unwrap();
+            let loaded = load_from_path(&path).unwrap();
+            let output = loaded.tui_o.as_ref().unwrap();
+            assert_eq!(output, &expected);
+            assert!(output.writer.late_adopt);
+            let rendered = serde_yaml::to_string(output).unwrap();
+            assert!(!rendered.contains("repost"), "{rendered}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        }
     }
 
     #[test]

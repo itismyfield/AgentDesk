@@ -1,4 +1,5 @@
 name: CI PR infrastructure retry
+run-name: CI PR retry ${{ github.event.workflow_run.id }} ${{ github.event.workflow_run.head_sha }} attempt ${{ github.event.workflow_run.run_attempt }}
 
 on:
   workflow_run:
@@ -17,8 +18,8 @@ concurrency:
 
 jobs:
   retry:
-    name: Retry infrastructure-only PostgreSQL failure
-    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt < 3
+    name: Retry infrastructure or known flaky failure once
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.run_attempt == 1
     runs-on: ubuntu-latest
     steps:
       # workflow_run has a write-capable token. Always execute the classifier
@@ -28,7 +29,16 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
+      - name: Retry known flaky failures only
+        id: flaky
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 scripts/ci/known-flaky-rerun.py
+
       - name: Classify failure and rerun PostgreSQL job
+        if: steps.flaky.outputs.handled != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}

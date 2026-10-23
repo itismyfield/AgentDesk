@@ -463,6 +463,7 @@ mod tests {
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/router/message_handler/provider_dispatch_live_end_tests.rs",
                 "services/discord/tmux_restart_handoff_mailbox_tests/fresh_start_failure_tests.rs",
+                "services/discord/tmux_watcher/codex_replacement_tests.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests/provider_failure_tests.rs",
@@ -490,6 +491,7 @@ mod tests {
         claim: &'a str,
         process_fixture: &'a str,
         process_bridge: &'a str,
+        codex_replacement: &'a str,
     }
 
     const ENTRY_INPUTS: EntryInputs<'static> = EntryInputs {
@@ -505,6 +507,7 @@ mod tests {
         process_bridge: include_str!(
             "../../router/message_handler/headless_turn/process_mailbox/bridge_tests.rs"
         ),
+        codex_replacement: include_str!("../../tmux_watcher/codex_replacement_tests.rs"),
     };
 
     /// Classification 2, per input, comments and whitespace ignored: entry counts, token/actor/pin
@@ -530,6 +533,7 @@ mod tests {
             claim,
             process_fixture,
             process_bridge,
+            codex_replacement,
         } = inputs;
         want(live, &spawn, Some(2));
         want(
@@ -580,6 +584,26 @@ mod tests {
             "spawn_turn_bridge(fixture.shared.clone(), fixture.token.clone(), rx, context);",
             None,
         );
+        want(codex_replacement, &spawn, Some(1));
+        want(
+            codex_replacement,
+            concat!(
+                "let token = Arc::new(CancelToken::new());",
+                "let mut current = managed_row(&native, 102);",
+                "current.turn_nonce = token.turn_nonce().map(str::to_owned);",
+            ),
+            Some(1),
+        );
+        want(
+            codex_replacement,
+            "discord::mailbox_try_start_turn(&shared, channel, token.clone(), serenity::UserId::new(current.request_owner_user_id), MessageId::new(current.user_msg_id),)",
+            Some(1),
+        );
+        want(
+            codex_replacement,
+            "spawn_turn_bridge(shared.clone(), token.clone(), rx, bridge);",
+            Some(1),
+        );
         want(recovery, "mailbox_recovery_kickoff(", Some(1));
         want(
             recovery,
@@ -601,7 +625,7 @@ mod tests {
         use crate::test_support::CommentForgery;
         type Pick = for<'a> fn(&'a mut EntryInputs<'static>) -> &'a mut &'static str;
         let spawn = ["spawn_turn_", "bridge("].concat();
-        let cases: [(Pick, &str); 15] = [
+        let cases: [(Pick, &str); 18] = [
             (
                 |i| &mut i.live,
                 "spawn_turn_bridge(shared, token, rx, context);",
@@ -632,6 +656,15 @@ mod tests {
                 |i| &mut i.process_bridge,
                 "Fixture::with_user_message(ProviderKind::Codex, USER_MESSAGE)",
             ),
+            (
+                |i| &mut i.codex_replacement,
+                "current.turn_nonce = token.turn_nonce().map(str::to_owned);",
+            ),
+            (
+                |i| &mut i.codex_replacement,
+                "discord::mailbox_try_start_turn(",
+            ),
+            (|i| &mut i.codex_replacement, &spawn),
         ];
         for (pick, needle) in cases {
             for forgery in CommentForgery::ALL {

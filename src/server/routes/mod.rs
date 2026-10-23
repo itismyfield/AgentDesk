@@ -795,3 +795,6 @@ fn response_is_json(response: &Response) -> bool {
 pub(crate) use queue_api::home_stop_tests::{
     app_with as home_stop_test_app, post as home_stop_test_post,
 };
+
+#[cfg(test)]
+pub(crate) use agents_turn_target::codex_replacement_start_conflict_for_test;

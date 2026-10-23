@@ -141,7 +141,7 @@ class SccacheConsumerTests(unittest.TestCase):
         self.assertEqual(seen["RUSTC_WRAPPER"], str(self.brew / "sccache"))
         self.assertEqual(seen["PATH"], f"{self.brew}:{self.env['PATH']}")
         self.assertEqual(seen["SCCACHE_DIR"], str(self.root / ".cache/sccache"))
-        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "40G")
+        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "15G")
         self.assertEqual(seen["SCCACHE_IDLE_TIMEOUT"], "0")
 
     def test_release_consumers_preserve_shell_activation_or_the_empty_opt_out_pair(self):
@@ -176,7 +176,7 @@ raise SystemExit(bt.run(sys.argv[3:], path={str(self.root / 'token')!r}))
                                 ("deploy-release.sh", "release"),
                                 ("deploy-release.sh", "release-fast")):
             source = (REPO / "scripts" / script).read_text()
-            start = 'export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"'
+            start = 'export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"'
             end = ('echo "[2/3] Dashboard' if script == "build-release.sh" else
                    '# Rebuild dashboard so deploy never ships a stale dist.')
             self.assertEqual(source.count(start), 1)
@@ -213,7 +213,7 @@ _resolve_default_release_binary() {{ echo "$REPO/artifact"; }}
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     seen = json.loads(self.output.read_text())
                     self.assertEqual(seen["PATH"], self.env["PATH"])
-                    self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "40G")
+                    self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "15G")
                     if installed:
                         self.assertEqual(seen["RUSTC_WRAPPER"], str(sccache))
                         self.assertEqual(seen["SCCACHE_DIR"], str(self.root / ".cache/sccache"))
