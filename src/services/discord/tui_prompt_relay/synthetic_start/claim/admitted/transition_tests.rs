@@ -704,3 +704,32 @@ async fn synthetic_readoption_replaced_episode_7219() {
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn admitted_tui_claim_clears_the_recorded_idle_card_pg() {
+    use crate::services::discord::session_idle_cleanup::recap_cleanup_tests::{
+        assert_cleared, discord, seed_for_channel,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "tui_claim_recap",
+        "TUI admitted claim legacy card wiring",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let mut fixture = Fixture::new(root.path(), 7_274_203);
+    Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(pool.clone());
+    seed_for_channel(&pool, 4242, fixture.channel.get()).await;
+    let (http, deletes, server) = discord("📦 응답 완료 · 이어서 질문 가능", true).await;
+    let _http = crate::services::discord::shared_state::test_rest::install(http);
+    let claim = claim_tui_direct_synthetic_turn_prepared(fixture.prepared(None)).await;
+    assert!(
+        claim.claimed,
+        "the TUI fixture must reach the admitted production claim"
+    );
+    assert_cleared(&pool, &deletes, "the admitted TUI claim").await;
+    server.abort();
+    pool.close().await;
+    db.drop().await;
+}

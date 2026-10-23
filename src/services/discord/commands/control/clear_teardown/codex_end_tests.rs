@@ -420,7 +420,6 @@ fn explicit_clear_command_path_records_end_with_only_its_existing_kill() {
             &ProviderKind::Codex,
             channel,
             "!clear",
-            super::super::SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();

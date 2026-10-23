@@ -32,8 +32,6 @@ mod host_liveness;
 pub(crate) mod host_teardown_gate;
 pub(crate) mod http;
 mod idle_detector;
-pub(crate) mod idle_recap;
-mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
 #[cfg(test)]

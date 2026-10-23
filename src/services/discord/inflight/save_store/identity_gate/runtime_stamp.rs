@@ -129,7 +129,7 @@ fn admit_codex_terminal_range_in_root(
         || local.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
         || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
         || local.response_sent_offset != 0
-        || result.trim().is_empty()
+        || !captured_terminal_admission::body_admissible(result)
         || end <= start
     {
         return Err(GuardedSaveOutcome::AuthorityPinned);
@@ -146,9 +146,8 @@ fn admit_codex_terminal_range_in_root(
     if !expected.matches_state(&fresh)
         || fresh.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
         || fresh.tmux_session_name.as_deref() != Some(tmux)
-        || nonempty(fresh.turn_nonce.as_deref()) != Some(nonce)
-        || fresh.turn_start_offset != Some(start)
-        || fresh.last_offset != start
+        || !captured_terminal_admission::nonce_matches(&fresh, nonce)
+        || !captured_terminal_admission::range_matches(&fresh, start)
         || fresh.response_sent_offset != 0
         || fresh.restart_mode.is_some()
         || fresh.rebind_origin
@@ -157,31 +156,8 @@ fn admit_codex_terminal_range_in_root(
     {
         return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
     }
-    let (canonical, file_len) =
-        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::AuthorityPinned)?;
-    if file_len < end || !marker_matches(tmux, &canonical, session, start) {
-        return Err(GuardedSaveOutcome::AuthorityPinned);
-    }
-    // A dead prelaunch session deliberately persists no wrapper path. At the
-    // first raw range (`start == 0`), allow that representation only after the
-    // exact row/frame nonce and marker path/session/start checks above; retain
-    // the legacy wrapper-path form for live seeds.
-    let cold = start == 0
-        && fresh
-            .output_path
-            .as_deref()
-            .is_none_or(|path| path == tmux_runtime_paths(tmux).0);
-    let warm = fresh
-        .output_path
-        .as_deref()
-        .and_then(|path| std::fs::canonicalize(path).ok())
-        .as_deref()
-        == Some(canonical.as_path())
-        && binding_matches(tmux, &canonical, session, [start, end]);
-    let generation = tmux_generation_file_mtime_ns(tmux);
-    if (!cold && !warm) || generation == 0 {
-        return Err(GuardedSaveOutcome::AuthorityPinned);
-    }
+    let (canonical, generation) =
+        captured_terminal_admission::legacy_source(&fresh, rollout, tmux, session, (start, end))?;
     persist_terminal_range(
         root,
         &path,
