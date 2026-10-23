@@ -315,3 +315,55 @@ async fn idle_keeps_failed_removals_for_the_next_observation_without_marking_com
         "the next idle must remove the hourglass before adding completion"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_discards_permanently_failed_removals_without_marking_complete_or_retrying() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![
+            TurnViewDelivery::Delivered,
+            TurnViewDelivery::FailedPermanent,
+        ]);
+    let channel = 7_269_007;
+    let message = 1514500851761287343;
+    inject(&shared, channel, message).await;
+    let (fake, supervisor) = supervisor(&shared, &[channel]);
+    fake.set(channel, IDLE);
+    let owners = Arc::strong_count(&shared);
+    supervisor.tick(Instant::now()).await;
+    // The cleanup task owns a shared-data reference until all reaction attempts finish.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while Arc::strong_count(&shared) != owners {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("idle reaction cleanup must finish");
+    assert_eq!(
+        shared
+            .turn_view_reconciler
+            .pending_injected_count(ChannelId::new(channel)),
+        0,
+        "permanent removal failure must be discarded before the next idle"
+    );
+    let ops = shared.turn_view_reconciler.ops();
+    assert_eq!(
+        ops.iter().map(|op| (op.emoji, op.add)).collect::<Vec<_>>(),
+        [('⏳', true), ('⏳', false)],
+        "permanent removal failure must not retry or add a completion checkmark"
+    );
+    supervisor.tick(Instant::now()).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while Arc::strong_count(&shared) != owners {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second idle cleanup must finish");
+    assert_eq!(
+        shared.turn_view_reconciler.ops(),
+        ops,
+        "the next idle must not retry a permanently failed removal"
+    );
+}
