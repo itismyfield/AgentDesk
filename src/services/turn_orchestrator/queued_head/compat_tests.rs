@@ -54,7 +54,11 @@ fn v2_reader_keeps_retained_outside_the_thirty_executable_items() {
     else {
         panic!("V2 must be explicitly read-only")
     };
-    assert_eq!(snapshot.items.len(), 30);
+    assert_eq!(
+        snapshot.items.len(),
+        30,
+        "retained originals must not become executable items"
+    );
     assert_eq!(snapshot.retained_inputs.len(), 1);
     assert_eq!(
         snapshot.retained_inputs[0].input.original.text,

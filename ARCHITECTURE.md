@@ -3532,7 +3532,8 @@ src/
 │   │   │   └── health_barrier_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queued_recovery.rs
-│   │   │   └── queued_recovery_tests.rs
+│   │   │   ├── queued_recovery_tests.rs
+│   │   │   └── snapshot_io.rs
 │   │   ├── queued_head/
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
