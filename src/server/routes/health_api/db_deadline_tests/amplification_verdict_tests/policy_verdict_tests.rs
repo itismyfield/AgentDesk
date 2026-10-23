@@ -165,6 +165,14 @@ pub(super) fn summarize_policy(run: &RunData, plan: Plan, summary: &mut RunSumma
     if summary.acquires.is_empty() {
         summary.invalid.push("acquire_unobserved".to_string());
     }
+    let failed = summary
+        .acquires
+        .iter()
+        .filter(|wait| wait.is_none())
+        .count();
+    if failed > 0 {
+        summary.invalid.push(format!("acquire_failed:{failed}"));
+    }
 }
 
 /// Every run's policy hooks per lane and server pool acquires, pooled per version.
@@ -185,7 +193,7 @@ pub(in super::super) fn pooled_policy(
 /// The candidate owns one reader per Context: never more connections than Contexts.
 pub(super) fn candidate_invalid(candidate: &[RunSummary]) -> Vec<String> {
     let mut invalid = Vec::new();
-    for run in candidate.iter().filter(|run| run.profile == Profile::S2) {
+    for run in candidate.iter().filter(|run| run.profile.has_policy()) {
         let contexts = run
             .conditions
             .get("contexts_with_pg")

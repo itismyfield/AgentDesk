@@ -6,6 +6,10 @@ use sqlx::PgPool;
 use super::{TaskDispatchClaimOutcome, TaskDispatchClaimRequest};
 use crate::config::ClusterConfig;
 
+#[cfg(all(test, unix))]
+#[path = "config_read_tests.rs"]
+mod config_read_tests;
+
 pub async fn claim_task_dispatches(
     pool: &PgPool,
     request: &TaskDispatchClaimRequest,

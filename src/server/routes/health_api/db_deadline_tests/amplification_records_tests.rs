@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::amplification_verdict_tests::{
-    Acquire, Answer, Attempt, Endpoint, Lane, Outcome, Peak, PolicyAttempt, PolicyOutcome, Profile,
-    Resources, RunData, Sample,
+    Acquire, Answer, Attempt, BlockingRead, ClaimAttempt, ClaimOutcome, Endpoint, Lane, Outcome,
+    Peak, PolicyAttempt, PolicyOutcome, Profile, Resources, RunData, Sample,
 };
 
 mod raw_cases_tests;
@@ -71,12 +71,15 @@ pub(super) fn write_run(out: &Path, run: &RunData) {
             rows.push(format!("{point}.{field}\t{}", opt(sample.field(field))));
         }
     }
-    if run.profile() == Some(Profile::S2) {
+    if run.profile().is_some_and(Profile::has_policy) {
         rows.push(format!("peak.proxy_open\t{}", opt(r.peak.proxy_open)));
         rows.push(format!("peak.pool_size\t{}", opt(r.peak.pool_size)));
         rows.push(format!("peak.beyond_pool\t{}", opt(r.peak.beyond_pool)));
         rows.push(format!("policy_statements\t{}", opt(r.policy_statements)));
         write_policy(out, run);
+    }
+    if run.profile() == Some(Profile::S3) {
+        write_claims(out, run);
     }
     std::fs::write(out.join("resources.tsv"), lines(rows)).unwrap();
 }
@@ -108,6 +111,45 @@ fn write_policy(out: &Path, run: &RunData) {
         rows.push(format!("{}\t{}", acquire.measured, opt(acquire.waited)));
     }
     std::fs::write(out.join("acquire.tsv"), lines(rows)).unwrap();
+}
+
+fn write_claims(out: &Path, run: &RunData) {
+    let lines = |rows: Vec<String>| rows.join("\n") + "\n";
+    let mut rows = vec![
+        "seq\tmeasured\tscheduled_us\tsent_us\tlast_byte_us\toutcome\tstatus\tclaimed".to_string(),
+    ];
+    for claim in &run.claims {
+        let (outcome, status, claimed) = match &claim.outcome {
+            ClaimOutcome::Unsent => ("unsent".to_string(), None, None),
+            ClaimOutcome::Timeout => ("timeout".to_string(), None, None),
+            ClaimOutcome::Failed(kind) => (format!("failed:{}", flat(kind)), None, None),
+            ClaimOutcome::Answered { status, claimed } => {
+                ("answered".to_string(), Some(*status), *claimed)
+            }
+        };
+        rows.push(format!(
+            "{}\t{}\t{}\t{}\t{}\t{outcome}\t{}\t{}",
+            claim.seq,
+            claim.measured,
+            claim.scheduled,
+            opt(claim.sent),
+            opt(claim.last_byte),
+            opt(status),
+            opt(claimed),
+        ));
+    }
+    std::fs::write(out.join("claims.tsv"), lines(rows)).unwrap();
+    let mut rows = vec!["watcher\tsubmitted_us\tstarted_us\tfinished_us".to_string()];
+    for read in &run.blocking {
+        rows.push(format!(
+            "{}\t{}\t{}\t{}",
+            read.watcher,
+            read.submitted,
+            opt(read.started),
+            opt(read.finished)
+        ));
+    }
+    std::fs::write(out.join("blocking.tsv"), lines(rows)).unwrap();
 }
 
 fn key_values(path: &Path) -> BTreeMap<String, String> {
@@ -204,6 +246,34 @@ pub(super) fn load_run(dir: &Path, runner: bool) -> RunData {
             }
         }
     }
+    if let Ok(claims) = std::fs::read_to_string(dir.join("claims.tsv")) {
+        for line in claims.lines().skip(1) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match (fields.len() == 8).then(|| claim_from(&fields)).flatten() {
+                Some(claim) => run.claims.push(claim),
+                None => run.invalid.push("claims_unreadable".to_string()),
+            }
+        }
+    }
+    if let Ok(blocking) = std::fs::read_to_string(dir.join("blocking.tsv")) {
+        for line in blocking.lines().skip(1) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let read = (fields.len() == 4)
+                .then(|| {
+                    Some(BlockingRead {
+                        watcher: fields[0].parse().ok()?,
+                        submitted: fields[1].parse().ok()?,
+                        started: parse(fields[2]),
+                        finished: parse(fields[3]),
+                    })
+                })
+                .flatten();
+            match read {
+                Some(read) => run.blocking.push(read),
+                None => run.invalid.push("blocking_unreadable".to_string()),
+            }
+        }
+    }
     if runner {
         run.invalid.extend(runner_evidence(dir));
     }
@@ -257,6 +327,26 @@ fn hook_from(fields: &[&str]) -> Option<PolicyAttempt> {
         scheduled: fields[3].parse().ok()?,
         sent: parse(fields[4]),
         end: parse(fields[5]),
+        outcome,
+    })
+}
+
+fn claim_from(fields: &[&str]) -> Option<ClaimAttempt> {
+    let outcome = match fields[5] {
+        "unsent" => ClaimOutcome::Unsent,
+        "timeout" => ClaimOutcome::Timeout,
+        "answered" => ClaimOutcome::Answered {
+            status: parse(fields[6])?,
+            claimed: parse(fields[7]),
+        },
+        failed => ClaimOutcome::Failed(failed.strip_prefix("failed:")?.to_string()),
+    };
+    Some(ClaimAttempt {
+        seq: fields[0].parse().ok()?,
+        measured: fields[1].parse().ok()?,
+        scheduled: fields[2].parse().ok()?,
+        sent: parse(fields[3]),
+        last_byte: parse(fields[4]),
         outcome,
     })
 }

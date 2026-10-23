@@ -1,5 +1,5 @@
 //! `health_amplification_profile`: public and detail health under open-loop load on an isolated
-//! PostgreSQL with a 1 s tick probe; profile `s2` adds policy read hooks; exact name only.
+//! PostgreSQL with a 1 s tick probe; `s2` adds policy read hooks, `s3` claims too; exact name only.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::amplification_claim_tests as claims;
 use super::amplification_policy_tests as policy;
 use super::amplification_records_tests::{load_run, opt, write_run};
 use super::amplification_verdict_tests::{
-    self as verdict, Answer, Attempt, Comparison, Endpoint, EndpointSummary, Lane,
+    self as verdict, Answer, Attempt, BlockingSummary, Comparison, Endpoint, EndpointSummary, Lane,
     MetricComparison, Outcome, Peak, Plan, Profile, Resources, RunData, RunSummary, SEC, Sample,
     Stat,
 };
@@ -21,7 +22,7 @@ use super::resource_regression_tests::process_threads;
 use super::{Db, reasons, registry_with_mailboxes, serve};
 
 const OUT_ENV: &str = "ADK_HEALTH_AMP_OUT";
-/// `s1` (default) or `s2`.
+/// `s1` (default), `s2` or `s3`.
 const PROFILE_ENV: &str = "ADK_HEALTH_AMP_PROFILE";
 /// `base_dir,...;candidate_dir,...` judges finished runs instead of measuring.
 const COMPARE_ENV: &str = "ADK_HEALTH_AMP_COMPARE";
@@ -39,12 +40,14 @@ const MAILBOXES: [u64; 3] = [7_236_100_001, 7_236_100_002, 7_236_100_003];
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 const MANIFEST: &str = r#"{"generated_at":"2026-10-23T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql","repo_dirty":"false"}"#;
 /// The harness as compiled, so a comparison can tell two binaries ran the same one.
-const HARNESS_SOURCES: [&str; 7] = [
+const HARNESS_SOURCES: [&str; 9] = [
     include_str!("amplification_profile_tests.rs"),
     include_str!("amplification_policy_tests.rs"),
+    include_str!("amplification_claim_tests.rs"),
     include_str!("amplification_records_tests.rs"),
     include_str!("amplification_verdict_tests.rs"),
     include_str!("amplification_verdict_tests/policy_verdict_tests.rs"),
+    include_str!("amplification_verdict_tests/claim_verdict_tests.rs"),
     include_str!("resource_regression_tests.rs"),
     include_str!("../db_deadline_tests.rs"),
 ];
@@ -83,14 +86,26 @@ fn measure(out: &Path) {
     let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     std::fs::write(runtime_dir.join("release-source.json"), MANIFEST).expect("write manifest");
-    if profile == Profile::S2 {
+    if profile.has_policy() {
         policy::write_policy(&root);
     }
+    // The claims read this copy from disk on every request, as `load_graceful` does in operation.
+    let config = (profile == Profile::S3).then(|| {
+        let (path, sha, bytes) = claims::write_config(&root);
+        let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &path,
+        );
+        (env, sha, bytes)
+    });
 
     let infra = runtime("amp-infra", 2);
     let db = infra.block_on(async {
         let db = Db::start(Duration::ZERO, POOL_MAX).await;
         db.seed_blocks().await;
+        if profile == Profile::S3 {
+            claims::seed(&db.seed).await;
+        }
         db
     });
     let pg_version = infra.block_on(async {
@@ -99,7 +114,17 @@ fn measure(out: &Path) {
             .server_version_num()
             .expect("the server reports its version")
     });
-    let server = runtime("amp-server", SERVER_WORKERS);
+    // Blocking threads stay alive between claims and watcher reads, so the count holds still.
+    let server = match profile {
+        Profile::S3 => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(SERVER_WORKERS)
+            .thread_name("amp-server")
+            .thread_keep_alive(Duration::from_secs(3_600))
+            .enable_all()
+            .build()
+            .expect("runtime"),
+        _ => runtime("amp-server", SERVER_WORKERS),
+    };
     let (addr, engines) = server.block_on(async {
         let (engine, engines) = match profile {
             Profile::S1 => {
@@ -110,7 +135,7 @@ fn measure(out: &Path) {
                         .expect("policy engine with PostgreSQL");
                 (engine, None)
             }
-            Profile::S2 => {
+            Profile::S2 | Profile::S3 => {
                 let (main, tick) = policy::engines(&root, &db.pool);
                 (main.clone(), Some((main, tick)))
             }
@@ -139,7 +164,7 @@ fn measure(out: &Path) {
     let generator = match profile {
         Profile::S1 => runtime("amp-load", GENERATOR_WORKERS),
         // Hook threads stay alive between hooks, so their count holds still through the window.
-        Profile::S2 => tokio::runtime::Builder::new_multi_thread()
+        Profile::S2 | Profile::S3 => tokio::runtime::Builder::new_multi_thread()
             .worker_threads(GENERATOR_WORKERS)
             .thread_name("amp-load")
             .thread_keep_alive(Duration::from_secs(3_600))
@@ -155,6 +180,12 @@ fn measure(out: &Path) {
             generator.spawn(policy::acquire_probe(db.pool.clone(), origin, plan)),
         )
     });
+    let claim_load = (profile == Profile::S3).then(|| {
+        (
+            generator.spawn(claims::drive_claims(addr, origin, plan)),
+            server.spawn(claims::drive_blocking(root.clone(), origin, plan)),
+        )
+    });
     sleep_until(origin + Duration::from_micros(plan.warmup_end()));
     let start = sample(&db);
     db.proxy.reset_executions();
@@ -164,7 +195,7 @@ fn measure(out: &Path) {
             sleep_until(window_end);
             Peak::default()
         }
-        Profile::S2 => sample_peaks(&db, window_end),
+        Profile::S2 | Profile::S3 => sample_peaks(&db, window_end),
     };
     let executions = db.proxy.executions();
     let end = sample(&db);
@@ -183,6 +214,12 @@ fn measure(out: &Path) {
             .block_on(probe)
             .expect("the acquire probe finishes");
     }
+    let (claimed, blocking) = claim_load.map_or_else(Default::default, |(sent, read)| {
+        (
+            generator.block_on(sent).expect("the claim driver finishes"),
+            server.block_on(read).expect("the watcher reads finish"),
+        )
+    });
     drop(engines);
     let ticks = wakes.lock().unwrap().clone();
     server.block_on(db.pool.close());
@@ -190,9 +227,15 @@ fn measure(out: &Path) {
     generator.shutdown_timeout(Duration::from_secs(5));
     infra.block_on(db.finish());
 
+    let mut conditions = conditions(plan, pg_version, profile);
+    if let Some((_, sha, bytes)) = &config {
+        for (key, value) in claims::conditions(sha, *bytes) {
+            conditions.insert(key.to_string(), value);
+        }
+    }
     let run = RunData {
         name: String::new(),
-        conditions: conditions(plan, pg_version, profile),
+        conditions,
         attempts,
         ticks,
         resources: Resources {
@@ -201,11 +244,14 @@ fn measure(out: &Path) {
             pool_max: POOL_MAX,
             pg_statements: executions.len(),
             peak,
-            policy_statements: (profile == Profile::S2)
+            policy_statements: profile
+                .has_policy()
                 .then(|| policy::policy_statements(&executions)),
         },
         policy: hooks,
         acquires,
+        claims: claimed,
+        blocking,
         invalid: Vec::new(),
     };
     write_run(out, &run);
@@ -299,7 +345,7 @@ fn conditions(plan: Plan, pg_version: u32, profile: Profile) -> BTreeMap<String,
     .into_iter()
     .map(|(key, value)| (key.to_string(), value))
     .collect();
-    if profile == Profile::S2 {
+    if profile.has_policy() {
         for (key, value) in policy::conditions() {
             conditions.insert(key.to_string(), value);
         }
@@ -433,6 +479,8 @@ fn compare_runs(spec: &str, out: &Path) {
         rendered += &render_endpoints(&endpoints, &ticks);
         let (lanes, acquires) = verdict::pooled_policy(runs);
         rendered += &render_policy(&lanes, &acquires);
+        let (claim, rows, blocking) = verdict::pooled_claims(runs);
+        rendered += &render_claims(claim.as_ref(), rows, blocking.as_ref());
         for run in runs.iter() {
             rendered += &format!("\n{}", render_run(run));
         }
@@ -481,6 +529,28 @@ fn render_policy(lanes: &BTreeMap<Lane, EndpointSummary>, acquires: &[Option<u64
     text
 }
 
+/// The claim lane, the rows it claimed and the watcher reads; empty without a claim load.
+fn render_claims(
+    claim: Option<&EndpointSummary>,
+    rows: usize,
+    blocking: Option<&BlockingSummary>,
+) -> String {
+    let mut text = claim.map_or(String::new(), |summary| {
+        render_series("claim", summary) + &format!("claim rows claimed {rows}\n")
+    });
+    if let Some(reads) = blocking {
+        text += &format!(
+            "blocking reads: submitted {} completed {} | queue wait p50 {} p99 {} max {}\n",
+            reads.submitted,
+            reads.completed,
+            verdict::percentile(&reads.waits, 500),
+            verdict::percentile(&reads.waits, 990),
+            verdict::percentile(&reads.waits, 1000),
+        );
+    }
+    text
+}
+
 fn render_endpoints(
     endpoints: &BTreeMap<Endpoint, EndpointSummary>,
     ticks: &[Option<u64>],
@@ -519,6 +589,7 @@ fn render_run(run: &RunSummary) -> String {
     }
     text += &render_endpoints(&run.endpoints, &run.ticks);
     text += &render_policy(&run.policy, &run.acquires);
+    text += &render_claims(run.claim.as_ref(), run.claim_rows, run.blocking.as_ref());
     let r = &run.resources;
     for (point, sample) in [("start", r.start), ("end", r.end)] {
         text += &format!(
@@ -531,7 +602,7 @@ fn render_run(run: &RunSummary) -> String {
             opt(sample.proxy_open),
         );
     }
-    if run.profile == Profile::S2 {
+    if run.profile.has_policy() {
         text += &format!(
             "window highs: proxy open {} pool {} reader connections (open minus pool) {} | policy statements {}\n",
             opt(r.peak.proxy_open),
@@ -544,9 +615,12 @@ fn render_run(run: &RunSummary) -> String {
 }
 
 fn render_comparison(comparison: &Comparison) -> String {
-    let policy = comparison.policy.as_ref().map_or(String::new(), |policy| {
+    let mut policy = comparison.policy.as_ref().map_or(String::new(), |policy| {
         format!(" policy={}", policy.verdict)
     });
+    if let Some(claim) = &comparison.claim {
+        policy += &format!(" claim={}", claim.verdict);
+    }
     let mut text = format!(
         "VERDICT detail={} public={} tick={}{policy}\ninvalid: {}\n",
         comparison.detail.verdict,
@@ -559,6 +633,7 @@ fn render_comparison(comparison: &Comparison) -> String {
         ("public p99", Some(&comparison.public)),
         ("tick p99", Some(&comparison.tick)),
         ("policy main p99", comparison.policy.as_ref()),
+        ("claim p99", comparison.claim.as_ref()),
     ] {
         if let Some(metric) = metric {
             text += &render_metric(name, metric);

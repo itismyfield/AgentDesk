@@ -14,6 +14,7 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::hang_forensics;
 use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
+mod amplification_claim_tests;
 mod amplification_policy_tests;
 mod amplification_profile_tests;
 mod amplification_records_tests;

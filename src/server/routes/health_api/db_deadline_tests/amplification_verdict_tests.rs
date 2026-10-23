@@ -7,9 +7,16 @@ use std::net::IpAddr;
 use super::resource_regression_tests::THREAD_SLACK;
 
 mod cases_tests;
+mod claim_verdict_tests;
 mod policy_verdict_tests;
 mod s2_cases_tests;
+mod s3_cases_tests;
 
+use claim_verdict_tests::summarize_claims;
+pub(super) use claim_verdict_tests::{
+    BlockingRead, BlockingSummary, CLAIM_RPS_KEY, CONFIG_BYTES_KEY, CONFIG_SHA_KEY, ClaimAttempt,
+    ClaimOutcome, WATCHERS_KEY, pooled_claims,
+};
 pub(super) use policy_verdict_tests::{
     Acquire, Lane, PolicyAttempt, PolicyOutcome, RELOADED, pooled_policy,
 };
@@ -26,12 +33,14 @@ const OPERATOR_PG_PORT: u16 = 15432;
 /// The one age reason whose number grows while the run lasts.
 const AGING_REASON: &str = "dispatch_outbox_oldest_pending_age";
 
-/// `s1` loads health only; `s2` adds the policy read hooks, the tick engine and their probes.
+/// `s1` loads health only; `s2` adds the policy read hooks, the tick engine and their probes;
+/// `s3` adds dispatch claims and optional watcher reads on the server's blocking pool.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Profile {
     #[default]
     S1,
     S2,
+    S3,
 }
 
 impl Profile {
@@ -39,13 +48,19 @@ impl Profile {
         match self {
             Profile::S1 => "s1",
             Profile::S2 => "s2",
+            Profile::S3 => "s3",
         }
     }
 
     pub(super) fn parse(name: &str) -> Option<Self> {
-        [Profile::S1, Profile::S2]
+        [Profile::S1, Profile::S2, Profile::S3]
             .into_iter()
             .find(|profile| profile.name() == name)
+    }
+
+    /// Whether the run carries the policy read load and its probes.
+    pub(super) fn has_policy(self) -> bool {
+        self != Profile::S1
     }
 }
 
@@ -234,6 +249,8 @@ pub(super) struct RunData {
     pub(super) resources: Resources,
     pub(super) policy: Vec<PolicyAttempt>,
     pub(super) acquires: Vec<Acquire>,
+    pub(super) claims: Vec<ClaimAttempt>,
+    pub(super) blocking: Vec<BlockingRead>,
     /// Problems already named while loading the run (runner evidence).
     pub(super) invalid: Vec<String>,
 }
@@ -367,6 +384,10 @@ pub(super) struct RunSummary {
     pub(super) policy: BTreeMap<Lane, EndpointSummary>,
     /// Server pool acquire waits, None for a failed one.
     pub(super) acquires: Vec<Option<u64>>,
+    pub(super) claim: Option<EndpointSummary>,
+    /// Rows the measured claims claimed.
+    pub(super) claim_rows: usize,
+    pub(super) blocking: Option<BlockingSummary>,
     pub(super) invalid: Vec<String>,
 }
 
@@ -506,8 +527,11 @@ pub(super) fn summarize(run: &RunData) -> RunSummary {
     summary
         .invalid
         .extend(resource_invalid(&run.resources, profile));
-    if profile == Profile::S2 {
+    if profile.has_policy() {
         summarize_policy(run, plan, &mut summary);
+    }
+    if profile == Profile::S3 {
+        summarize_claims(run, plan, &mut summary);
     }
     summary.invalid.dedup();
     summary
@@ -551,7 +575,7 @@ fn resource_invalid(resources: &Resources, profile: Profile) -> Vec<String> {
                 invalid.push("connection_growth".to_string());
             }
         }
-        Profile::S2 => {
+        Profile::S2 | Profile::S3 => {
             let peak = &resources.peak;
             for (field, value) in [
                 ("proxy_open", peak.proxy_open),
@@ -636,6 +660,8 @@ pub(super) struct Comparison {
     pub(super) tick: MetricComparison,
     /// Main-engine policy hooks, judged only when every run carries the policy load.
     pub(super) policy: Option<MetricComparison>,
+    /// Dispatch claims, judged only when every run carries the claim load.
+    pub(super) claim: Option<MetricComparison>,
 }
 
 fn values(stats: &[Stat]) -> Option<Vec<u64>> {
@@ -807,7 +833,7 @@ pub(super) fn compare(base: &[RunSummary], candidate: &[RunSummary]) -> Comparis
     let all_s2 = base
         .iter()
         .chain(candidate)
-        .all(|run| run.profile == Profile::S2);
+        .all(|run| run.profile.has_policy());
     // Health-only, public never reads the hostname, so its movement means something else moved.
     if !all_s2
         && detail.verdict == Verdict::Improved
@@ -824,12 +850,26 @@ pub(super) fn compare(base: &[RunSummary], candidate: &[RunSummary]) -> Comparis
         };
         metric(base, candidate, main, valid)
     });
+    let all_s3 = base
+        .iter()
+        .chain(candidate)
+        .all(|run| run.profile == Profile::S3);
+    let claim = (all_s3 && !base.is_empty() && !candidate.is_empty()).then(|| {
+        let claims = |run: &RunSummary| {
+            run.claim
+                .as_ref()
+                .map(|summary| summary.judged.clone())
+                .unwrap_or_default()
+        };
+        metric(base, candidate, claims, valid)
+    });
     Comparison {
         invalid,
         detail,
         public,
         tick,
         policy,
+        claim,
     }
 }
 

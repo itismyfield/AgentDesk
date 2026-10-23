@@ -10,7 +10,7 @@ const CONTEXTS: usize = 4;
 
 /// An `s2` run: health as in `fixture_data`, hooks on both lanes shaped like an endpoint, each
 /// whole hook's SELECTs counted, and a steady acquire probe.
-fn s2_data(name: &str, binary: &str, hooks: Shape) -> RunData {
+pub(super) fn s2_data(name: &str, binary: &str, hooks: Shape) -> RunData {
     let mut run = fixture_data(name, binary, STEADY, STEADY);
     let plan = FIXTURE_PLAN;
     for (key, value) in [

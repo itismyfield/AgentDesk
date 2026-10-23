@@ -205,36 +205,9 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
     assert_eq!(js.eval(GET_LIVE), r#""v1""#);
     assert_eq!(proxy.accepted(), 3);
 
-    // Two engines on two pools read through their own pool's source, never through another's.
+    // A Context whose SELECT is held does not hold up a Context on another pool.
     let side = PgWireProxy::start(&db.database_url, Duration::ZERO).await;
     let side_pool = side.pool(2);
-    let mut config = crate::config::Config::default();
-    config.policies.dir = std::path::PathBuf::from("/nonexistent");
-    config.policies.hot_reload = false;
-    let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
-    let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(side_pool.clone())).unwrap();
-    proxy.reset_executions();
-    side.reset_executions();
-    for _ in 0..3 {
-        assert_eq!(
-            main.eval_js::<String>(READ_ALL).unwrap(),
-            r#"["s1",7,"v1","later",null]"#
-        );
-    }
-    for _ in 0..3 {
-        assert_eq!(
-            tick.eval_js::<String>(READ_ALL).unwrap(),
-            r#"["s1",7,"v1","later",null]"#
-        );
-    }
-    assert_eq!(
-        (policy_selects(&proxy), policy_selects(&side)),
-        (18, 18),
-        "each engine's six SELECTs per read go to its own pool"
-    );
-    drop((main, tick));
-
-    // A Context whose SELECT is held does not hold up another Context.
     proxy.stall("FROM kv_meta");
     let accepted = proxy.accepted();
     let (held_tx, held_rx) = mpsc::channel();
@@ -273,6 +246,69 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
     side_pool.close().await;
     direct.close().await;
     drop((proxy, side));
+    db.drop().await;
+}
+
+/// Main and tick engines on two pools in front of one database, seeded by SQL rather than by a
+/// Context, so no reader exists before theirs: each engine reads only through its own pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_read_bridge_engines_read_through_their_own_source() {
+    let db = TestPostgresDb::create().await;
+    let direct = db.connect_and_migrate().await;
+    sqlx::query("DELETE FROM kv_meta WHERE key = 'maxEntryRetries'")
+        .execute(&direct)
+        .await
+        .unwrap();
+    for (key, value, ttl) in [
+        ("amp_scalar", "s1", None),
+        ("runtime-config", r#"{"maxEntryRetries":7}"#, None),
+        ("live", "v1", None),
+        ("soon", "later", Some(3_600_i64)),
+    ] {
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value, expires_at)
+             VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))
+             ON CONFLICT (key) DO UPDATE
+             SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(ttl)
+        .execute(&direct)
+        .await
+        .unwrap();
+    }
+    let (main_proxy, tick_proxy) = (
+        PgWireProxy::start(&db.database_url, Duration::ZERO).await,
+        PgWireProxy::start(&db.database_url, Duration::ZERO).await,
+    );
+    let (main_pool, tick_pool) = (main_proxy.pool(2), tick_proxy.pool(2));
+    let mut config = crate::config::Config::default();
+    config.policies.dir = std::path::PathBuf::from("/nonexistent");
+    config.policies.hot_reload = false;
+    let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(main_pool.clone())).unwrap();
+    let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(tick_pool.clone())).unwrap();
+    let mut answers = Vec::new();
+    for engine in [&main, &main, &main, &tick, &tick, &tick] {
+        answers.push(engine.eval_js::<String>(READ_ALL).unwrap());
+    }
+    assert_eq!(
+        (policy_selects(&main_proxy), policy_selects(&tick_proxy)),
+        (18, 18),
+        "each engine's six SELECTs per read go to its own pool"
+    );
+    assert!(
+        answers
+            .iter()
+            .all(|answer| answer == r#"["s1",7,"v1","later",null]"#),
+        "{answers:?}"
+    );
+
+    drop((main, tick));
+    main_pool.close().await;
+    tick_pool.close().await;
+    direct.close().await;
+    drop((main_proxy, tick_proxy));
     db.drop().await;
 }
 
