@@ -410,7 +410,7 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(test)]
-mod task_dispatch_claims_pg_tests {
+pub(crate) mod task_dispatch_claims_pg_tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
@@ -1273,7 +1273,7 @@ mod task_dispatch_claims_pg_tests {
         }
     }
 
-    async fn seed_worker_node(
+    pub(crate) async fn seed_worker_node(
         pool: &PgPool,
         instance_id: &str,
         label: &str,
@@ -1322,7 +1322,7 @@ mod task_dispatch_claims_pg_tests {
         .unwrap();
     }
 
-    async fn seed_dispatch_semaphore_holding(
+    pub(crate) async fn seed_dispatch_semaphore_holding(
         pool: &PgPool,
         scope: &str,
         scope_key: &str,
@@ -1350,7 +1350,7 @@ mod task_dispatch_claims_pg_tests {
         .unwrap();
     }
 
-    async fn seed_agent_and_card(pool: &PgPool) {
+    pub(crate) async fn seed_agent_and_card(pool: &PgPool) {
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
             .execute(pool)
             .await
@@ -1361,7 +1361,7 @@ mod task_dispatch_claims_pg_tests {
             .unwrap();
     }
 
-    async fn seed_dispatch_with_required_capabilities(
+    pub(crate) async fn seed_dispatch_with_required_capabilities(
         pool: &PgPool,
         dispatch_id: &str,
         title: &str,

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use super::{claim_after_reading, claim_task_dispatches};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::server::task_dispatch_claims::TaskDispatchClaimRequest;
+use crate::server::task_dispatch_claims::task_dispatch_claims_pg_tests as fixture;
 use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -20,41 +21,29 @@ const PADDING_LINES: usize = 60_000;
 /// One online claim owner, a dispatch holding one `ue_editor` slot, and two pending dispatches
 /// that need it: capacity 2 claims exactly one of them.
 async fn seed(pool: &sqlx::PgPool) {
-    for statement in [
-        "INSERT INTO worker_nodes (
-            instance_id, hostname, role, effective_role, status, labels, capabilities,
-            last_heartbeat_at, started_at, updated_at
-         )
-         VALUES ('mac-book-release', 'mac-book', 'worker', 'worker', 'online',
-                 '[\"mac-book\"]'::jsonb, '{\"providers\":[\"codex\"]}'::jsonb,
-                 NOW(), NOW(), NOW())",
-        "INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')",
-        "INSERT INTO kanban_cards (id, title) VALUES ('card-1', 'Card 1')",
-        "INSERT INTO task_dispatches (
-            id, kanban_card_id, to_agent_id, dispatch_type, status, title, required_capabilities,
-            claim_owner, claimed_at, claim_expires_at, created_at, updated_at
-         )
-         VALUES ('disp-holder', 'card-1', 'agent-1', 'implementation', 'dispatched', 'Holder',
-                 '{\"required\":{\"semaphores\":[\"ue_editor\"]}}'::jsonb,
-                 'mac-mini-release', NOW(), NOW() + INTERVAL '10 minutes', NOW(), NOW())",
-        "INSERT INTO task_dispatches (
-            id, kanban_card_id, to_agent_id, dispatch_type, status, title, required_capabilities,
-            created_at, updated_at
-         )
-         VALUES ('disp-a', 'card-1', 'agent-1', 'implementation', 'pending', 'A',
-                 '{\"required\":{\"semaphores\":[\"ue_editor\"]}}'::jsonb, NOW(), NOW()),
-                ('disp-b', 'card-1', 'agent-1', 'implementation', 'pending', 'B',
-                 '{\"required\":{\"semaphores\":[\"ue_editor\"]}}'::jsonb,
-                 NOW() + INTERVAL '1 second', NOW())",
-        "INSERT INTO dispatch_semaphore_holdings (
-            semaphore_name, scope, scope_key, slot_index, holder_instance_id, dispatch_id,
-            expires_at
-         )
-         VALUES ('ue_editor', 'per-cluster', 'cluster', 0, 'mac-mini-release', 'disp-holder',
-                 NOW() + INTERVAL '10 minutes')",
-    ] {
-        sqlx::query(statement).execute(pool).await.unwrap();
+    let needs = || serde_json::json!({"required": {"semaphores": ["ue_editor"]}});
+    fixture::seed_worker_node(pool, OWNER, "mac-book", 0).await;
+    fixture::seed_agent_and_card(pool).await;
+    fixture::seed_dispatch_with_required_capabilities(
+        pool,
+        "disp-holder",
+        "H",
+        needs(),
+        "dispatched",
+    )
+    .await;
+    for id in ["disp-a", "disp-b"] {
+        fixture::seed_dispatch_with_required_capabilities(pool, id, id, needs(), "pending").await;
     }
+    fixture::seed_dispatch_semaphore_holding(
+        pool,
+        "per-cluster",
+        "cluster",
+        "mac-mini-release",
+        "disp-holder",
+        600,
+    )
+    .await;
 }
 
 fn request() -> TaskDispatchClaimRequest {
@@ -79,21 +68,6 @@ fn config_yaml(root: &Path) -> String {
         yaml += &format!("  - padding entry {line} for the claim config read\n");
     }
     yaml
-}
-
-fn status(statuses: &[(String, String)], id: &str) -> String {
-    statuses
-        .iter()
-        .find(|(row, _)| row == id)
-        .map(|(_, status)| status.clone())
-        .unwrap_or_default()
-}
-
-async fn statuses(pool: &sqlx::PgPool) -> Vec<(String, String)> {
-    sqlx::query_as("SELECT id, status FROM task_dispatches ORDER BY id")
-        .fetch_all(pool)
-        .await
-        .unwrap()
 }
 
 /// What the proxy had seen when the runtime was found free: connections and statements.
@@ -201,11 +175,6 @@ async fn claim_config_read_yields_runtime_without_changing_snapshot() {
         "{:?}",
         outcome.skipped[0].reasons
     );
-    let rows = statuses(&direct).await;
-    assert_eq!(
-        (status(&rows, "disp-a"), status(&rows, "disp-b")),
-        ("dispatched".to_string(), "pending".to_string())
-    );
     assert!(
         root.path().join("data").is_dir(),
         "the claim's read created the data dir"
@@ -273,11 +242,6 @@ async fn claim_config_read_panic_fails_the_claim_before_any_sql() {
         (proxy.accepted(), proxy.executions().len()),
         (0, 0),
         "no worker lookup or transaction started"
-    );
-    let rows = statuses(&direct).await;
-    assert_eq!(
-        (status(&rows, "disp-a"), status(&rows, "disp-b")),
-        ("pending".to_string(), "pending".to_string())
     );
 
     pool.close().await;

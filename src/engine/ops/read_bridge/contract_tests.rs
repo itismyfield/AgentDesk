@@ -249,35 +249,31 @@ async fn policy_read_bridge_deadline_and_context_isolation() {
     db.drop().await;
 }
 
-/// Main and tick engines on two pools in front of one database, seeded by SQL rather than by a
-/// Context, so no reader exists before theirs: each engine reads only through its own pool.
+/// Main and tick engines on two pools in front of one database, seeded through Rust intents rather
+/// than a Context, so no reader exists before theirs: each engine reads only through its own pool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn policy_read_bridge_engines_read_through_their_own_source() {
     let db = TestPostgresDb::create().await;
     let direct = db.connect_and_migrate().await;
-    sqlx::query("DELETE FROM kv_meta WHERE key = 'maxEntryRetries'")
-        .execute(&direct)
-        .await
-        .unwrap();
-    for (key, value, ttl) in [
-        ("amp_scalar", "s1", None),
-        ("runtime-config", r#"{"maxEntryRetries":7}"#, None),
-        ("live", "v1", None),
-        ("soon", "later", Some(3_600_i64)),
-    ] {
-        sqlx::query(
-            "INSERT INTO kv_meta (key, value, expires_at)
-             VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))
-             ON CONFLICT (key) DO UPDATE
-             SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at",
-        )
-        .bind(key)
-        .bind(value)
-        .bind(ttl)
-        .execute(&direct)
-        .await
-        .unwrap();
-    }
+    let kv = |key: &str, value: &str, ttl_seconds| crate::engine::intent::Intent::SetKV {
+        key: key.to_string(),
+        value: value.to_string(),
+        ttl_seconds,
+    };
+    let seeded = crate::engine::intent::execute_intents_with_backends(
+        Some(&direct),
+        None,
+        vec![
+            crate::engine::intent::Intent::DeleteKV {
+                key: "maxEntryRetries".to_string(),
+            },
+            kv("amp_scalar", "s1", 0),
+            kv("runtime-config", r#"{"maxEntryRetries":7}"#, 0),
+            kv("live", "v1", 0),
+            kv("soon", "later", 3_600),
+        ],
+    );
+    assert_eq!(seeded.errors, 0, "the seed writes succeed");
     let (main_proxy, tick_proxy) = (
         PgWireProxy::start(&db.database_url, Duration::ZERO).await,
         PgWireProxy::start(&db.database_url, Duration::ZERO).await,

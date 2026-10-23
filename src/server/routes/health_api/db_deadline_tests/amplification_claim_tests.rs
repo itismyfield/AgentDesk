@@ -60,36 +60,23 @@ pub(super) fn write_config(root: &Path) -> (PathBuf, String, usize) {
 }
 
 /// The claim owner online for the whole run and `CLAIM_ROWS` pending dispatches needing the
-/// semaphore, oldest first.
+/// semaphore, seeded by the claim module's own fixtures.
 pub(super) async fn seed(pool: &sqlx::PgPool) {
-    for statement in [
-        "INSERT INTO worker_nodes (
-            instance_id, hostname, role, effective_role, status, labels, capabilities,
-            last_heartbeat_at, started_at, updated_at
-         )
-         VALUES ('amp-claim-node', 'amp-claim', 'worker', 'worker', 'online', '[]'::jsonb,
-                 '{}'::jsonb, NOW(), NOW(), NOW())",
-        "INSERT INTO agents (id, name) VALUES ('amp-agent', 'Amplification')",
-        "INSERT INTO kanban_cards (id, title) VALUES ('amp-card', 'Amplification')",
-    ] {
-        sqlx::query(statement).execute(pool).await.unwrap();
+    use crate::server::task_dispatch_claims::task_dispatch_claims_pg_tests as fixture;
+    fixture::seed_worker_node(pool, CLAIM_OWNER, "amp-claim", 0).await;
+    fixture::seed_agent_and_card(pool).await;
+    let needs = serde_json::json!({"required": {"semaphores": [SEMAPHORE]}});
+    for row in 0..CLAIM_ROWS {
+        let id = format!("amp-claim-{row}");
+        fixture::seed_dispatch_with_required_capabilities(
+            pool,
+            &id,
+            "amp",
+            needs.clone(),
+            "pending",
+        )
+        .await;
     }
-    sqlx::query(
-        "INSERT INTO task_dispatches (
-            id, kanban_card_id, to_agent_id, dispatch_type, status, title, required_capabilities,
-            created_at, updated_at
-         )
-         SELECT 'amp-claim-' || n, 'amp-card', 'amp-agent', 'implementation', 'pending', 'amp',
-                jsonb_build_object('required', jsonb_build_object('semaphores',
-                    jsonb_build_array($2::TEXT))),
-                NOW() - (n * INTERVAL '1 millisecond'), NOW()
-           FROM generate_series(1, $1::INT) AS n",
-    )
-    .bind(CLAIM_ROWS as i32)
-    .bind(SEMAPHORE)
-    .execute(pool)
-    .await
-    .unwrap();
 }
 
 pub(super) fn conditions(config_sha: &str, config_bytes: usize) -> Vec<(&'static str, String)> {
