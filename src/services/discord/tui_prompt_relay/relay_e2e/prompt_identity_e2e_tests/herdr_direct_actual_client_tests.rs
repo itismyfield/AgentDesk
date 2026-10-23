@@ -133,7 +133,7 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
         None
     );
     crate::services::tui_o::channel_policy::install(&config).unwrap();
-    let writer = OConsumer::start(&h);
+    let writer = start_actual_o_consumer(&h);
     writer.drained().await;
     assert!(
         host::channel_accepts(CHANNEL_ID),
@@ -327,4 +327,37 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
     drop(h);
     pool.close().await;
     database.drop().await;
+}
+
+// Production intake and this real writer must read the same process readiness registry.
+fn start_actual_o_consumer(h: &RelayE2eHarness) -> OConsumer {
+    let io = Arc::new(HttpWriterIo {
+        port: Arc::new(GatewayPort::new(
+            h.ctx.http.clone(),
+            h.ctx.cache.current_user().id.get(),
+        )),
+        alarms: Alarms::default(),
+    });
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let readiness = host::process_readiness();
+    let root = crate::config::runtime_root().unwrap();
+    let owned = crate::services::tui_o::cutover::boot_ownership();
+    let handles = host::start_managed(ShadowProvider::Claude, true, owned, || HostParts {
+        io: io.clone(),
+        runtime_root: Some(root),
+        gate,
+        readiness: readiness.clone(),
+    });
+    assert_eq!(
+        handles.len(),
+        1,
+        "T14 one real managed O writer hosts the channel"
+    );
+    assert!(readiness.is_hosted(CHANNEL_ID));
+    OConsumer {
+        handles,
+        readiness,
+        io,
+    }
 }

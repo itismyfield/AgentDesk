@@ -639,7 +639,7 @@ impl ActualWriter {
         });
         let gate = Arc::new(OwnershipGate::default());
         gate.acquired();
-        let ready = Arc::new(Readiness::default());
+        let ready = host::process_readiness();
         let root = crate::config::runtime_root().unwrap();
         let handles = host::start_managed(
             ShadowProvider::Codex,
