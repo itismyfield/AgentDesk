@@ -183,7 +183,6 @@ src/services/discord/herdr_terminate_route_tests.rs
 src/services/discord/herdr_terminate_tests.rs
 src/services/discord/host_defer_gate_tests.rs
 src/services/discord/host_key_derivation_tests.rs
-src/services/discord/idle_recap_interaction.rs
 src/services/discord/idle_relay_drift.rs
 src/services/discord/inflight/host_recovery_guard_keyed_tests.rs
 src/services/discord/inflight/rebind_reap/tests.rs
@@ -267,6 +266,7 @@ src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
+src/services/discord/session_idle_cleanup.rs
 src/services/discord/session_idle_cleanup_tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs
@@ -609,8 +609,6 @@ services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
-services::discord::idle_recap_interaction::host_guard_tests
-services::discord::idle_recap_interaction::tests
 services::discord::idle_relay_drift::tests
 services::discord::inflight::host_recovery_guard::keyed_tests
 services::discord::inflight::rebind_reap::tests
@@ -698,6 +696,7 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::orphan_recovery::tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
+services::discord::session_idle_cleanup::recap_cleanup_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::retired_metadata::tests::pg
@@ -2011,10 +2010,6 @@ services::discord::host_defer_gate::tests::the_promote_gate_reads_the_channel_ro
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
-services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
-services::discord::idle_recap_interaction::host_guard_tests::recap_clear_resets_the_session_whatever_its_stored_host_pg
-services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once
-services::discord::idle_recap_interaction::tests::recap_compact_claim_pg_rejects_owner_handoff_without_consuming_pointer
 services::discord::idle_relay_drift::tests::drift_repair_counts_loss_only_for_what_the_host_guard_admits_pg
 services::discord::inflight::host_recovery_guard::keyed_tests::keyed_teardown_admits_only_a_found_legacy_row_pg
 services::discord::inflight::rebind_reap::tests::dead_watcher_rebind_reap_unlinks_only_a_row_the_host_guard_admits_pg
@@ -2436,6 +2431,8 @@ services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_cl
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
+services::discord::session_idle_cleanup::recap_cleanup_tests::cleanup_preserves_normal_messages_and_a_successor_pointer_pg
+services::discord::session_idle_cleanup::recap_cleanup_tests::next_claim_deletes_recorded_idle_card_and_clears_pointer_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_session_reactivated_during_probe_pg

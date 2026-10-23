@@ -93,6 +93,15 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
             );
         }
         assert_eq!(
+            app.clone()
+                .oneshot(request("POST", "/sessions/example/idle-recap", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "idle recap production must be unavailable in every runtime profile"
+        );
+        assert_eq!(
             app.oneshot(request("GET", "/dispatched-sessions", true))
                 .await
                 .unwrap()

@@ -1,16 +1,12 @@
 use super::*;
 
-/// #4552 decomposition: claim-success request-anchor and idle-recap bootstrap
-/// lifted from `handle_text_message`. This remains after the stale-dispatch
-/// guard and before the placeholder handoff.
+/// Record the claimed request anchor and clear its previously stored idle card.
 pub(super) async fn bootstrap_claimed_turn(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     started: bool,
     channel_id: ChannelId,
     user_msg_id: MessageId,
-    provider: &ProviderKind,
-    adk_session_key: Option<&str>,
 ) {
     // #3811: record the original-request anchor (the real Discord user_msg_id)
     // ONLY once THIS message won the mailbox claim (`started == true`) and the
@@ -35,32 +31,9 @@ pub(super) async fn bootstrap_claimed_turn(
             .await;
     }
 
-    // #3148: this runs right after the claim succeeds and only for the winner,
-    // mirroring the TUI claim → bump → clear path. A queued message that lost
-    // the claim race must not bump or clear. Bump BEFORE clear ensures an
-    // in-flight idle-recap POST whose persist CAS captured the pre-bump
-    // generation cannot overwrite this turn's clear; clear then removes a card
-    // that already persisted before the claim.
     if started && let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) = crate::services::discord::idle_recap::bump_turn_generation(
-            &pool,
-            channel_id.get(),
-            provider,
-            adk_session_key,
-        )
-        .await
-        {
-            tracing::warn!(
-                error = %e,
-                channel_id = channel_id.get(),
-                "idle_recap: failed to bump turn generation on Discord-intake claim"
-            );
-        }
-        crate::services::discord::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-            http.clone(),
-            pool,
-            channel_id.get(),
-        )
-        .await;
+        crate::services::discord::session_idle_cleanup::spawn_clear_captured_idle_recap_for_channel(
+            http.clone(), pool, channel_id.get(),
+        ).await;
     }
 }

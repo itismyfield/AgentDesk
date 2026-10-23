@@ -1079,7 +1079,6 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
     def test_current_completion_producer_shapes_stay_chrome(self):
         for content in (
             "✅ **응답 완료**\n> **시작**: <t:1700000000:R>",
-            "📦 응답 완료 · resumed\n세션: claude · context unknown · idle 1분",
         ):
             message = _raw_bot_msg(1, content)
             self.assertEqual(assertions.is_relay_response(message), False)

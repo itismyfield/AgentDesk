@@ -809,19 +809,7 @@ fn emit_success_result(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
     });
-    // #3275: the shared result-frame token parsers (watcher
-    // `process_watcher_lines`, bridge/recovery `process_stream_line`) read only
-    // a nested Claude-shaped `usage` object, so emitting tokens solely as the
-    // top-level fields above left watcher-owned codex turns with zero persisted
-    // telemetry and an idle recap of "context unknown". Re-emit the per-call
-    // occupancy via the receipt.rs subset convention (`input - cached` +
-    // `cache_read = cached`, so `context_occupancy_input_tokens()` reconstructs
-    // the original codex input). Sources, in order: the captured
-    // `token_count.info.last_token_usage`, then the terminal event's own
-    // per-turn `usage` (codex exec protocol). The session-cumulative
-    // `info.total_token_usage` is never used here, and with no usable source
-    // the nested object is omitted entirely (fail-safe: recap stays Unknown
-    // rather than fabricated). Top-level fields keep their legacy chain.
+    // Re-emit per-call context usage; omit missing or session-cumulative usage.
     let call_usage = state
         .last_token_usage
         .or_else(|| json.get("usage").and_then(CodexCallTokenUsage::from_value));
@@ -837,11 +825,7 @@ fn emit_success_result(
     Ok(())
 }
 
-/// #3275: record the per-call context occupancy from a `token_count` event.
-/// Only `info.last_token_usage` qualifies; the sibling `info.total_token_usage`
-/// is the session-cumulative count (8.3M in the issue report) and persisting it
-/// would render a wildly inflated context % in the idle recap. Absent payloads
-/// leave prior state untouched.
+/// Record only per-call context occupancy; absent payloads leave prior state untouched.
 fn capture_last_token_usage(payload: &serde_json::Value, state: &mut CodexWrapperTurnState) {
     if let Some(usage) = payload
         .get("info")

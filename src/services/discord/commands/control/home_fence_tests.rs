@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
+use super::super::clear_channel_session_state;
 use super::super::clear_persist_failure_tests::{
     SESSION_ID, boundary_rows, queue_len, seed_backlog, seed_session, session_state,
 };
-use super::super::{SoftClearNotifyMode, clear_channel_session_state};
 use super::*;
 use crate::db::o_channel_homes::HomeState;
 use crate::services::provider::ProviderKind;
@@ -56,7 +56,7 @@ fn a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open
         );
         let clear = || {
             let source = "!clear";
-            let notify = SoftClearNotifyMode::Suppress;
+
             clear_channel_session_state(&http, &shared, &provider, channel_id, source, notify)
         };
         let refused = |result: anyhow::Result<_>| {
@@ -182,7 +182,6 @@ async fn d2b_clear_and_reset_keep_admission_across_effect_await() {
                     &ProviderKind::Gemini,
                     channel,
                     "!clear",
-                    SoftClearNotifyMode::Suppress,
                     None,
                 )
                 .await
@@ -343,7 +342,6 @@ async fn d2b_clear_reply_stays_counted_after_clear_body_finishes() {
             &ProviderKind::Gemini,
             channel,
             "/clear",
-            SoftClearNotifyMode::Suppress,
             None,
         )
         .await

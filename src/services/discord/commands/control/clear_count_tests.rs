@@ -5,7 +5,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::{self as serenity, ChannelId, MessageId, UserId};
 
 use super::super::clear_persist_failure_tests::seed_session;
-use super::super::{ClearReport, SoftClearNotifyMode, clear_channel_session_state};
+use super::super::{ClearReport, clear_channel_session_state};
 use crate::services::discord::{SharedData, make_shared_data_for_tests};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{
@@ -37,8 +37,8 @@ fn input(id: MessageId, sources: &[MessageId]) -> Intervention {
 
 async fn clear(shared: &Arc<SharedData>, channel: ChannelId) -> ClearReport {
     let http = Arc::new(serenity::Http::new(""));
-    let notify = SoftClearNotifyMode::Suppress;
-    let clear = clear_channel_session_state(&http, shared, &PROVIDER, channel, "/clear", notify);
+
+    let clear = clear_channel_session_state(&http, shared, &PROVIDER, channel, "/clear");
     clear.await.expect("a clear always commits")
 }
 

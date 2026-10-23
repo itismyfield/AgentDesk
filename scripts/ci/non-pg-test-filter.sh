@@ -125,8 +125,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
-  --skip services::discord::idle_recap_interaction::host_guard_tests
-  --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::idle_relay_drift::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::rebind_reap::tests
@@ -180,6 +178,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::orphan_recovery::tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
   --skip services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
+  --skip services::discord::session_idle_cleanup::recap_cleanup_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::retired_metadata::tests::pg
@@ -508,19 +507,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
   services::discord::herdr_terminate::tests::m2_natural_a_then_b_late_settlement_preserves_b
   services::discord::herdr_terminate::tests::m2_unreadable_mailbox_is_never_an_idle_channel
-  services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
-  services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
-  services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
-  services::discord::idle_recap_interaction::tests::foreign_or_missing_owner_never_claims_local_host_target
-  services::discord::idle_recap_interaction::tests::foreign_session_identity_preserves_pointer_without_claim_or_injection
-  services::discord::idle_recap_interaction::tests::idle_recap_component_router_accepts_all_recap_actions
-  services::discord::idle_recap_interaction::tests::injection_failure_is_terminal_after_claim
-  services::discord::idle_recap_interaction::tests::owner_handoff_after_claim_is_fenced_immediately_before_injection
-  services::discord::idle_recap_interaction::tests::rebinding_cannot_redirect_compact_to_current_channel_session
-  services::discord::idle_recap_interaction::tests::recap_component_message_id_parser_rejects_zero_and_foreign_prefixes
-  services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
-  services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
-  services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
   services::discord::idle_relay_drift::tests::all_sources_miss_is_no_source
   services::discord::idle_relay_drift::tests::confirmed_dead_orphan_drains_pending_emissions_once
   services::discord::idle_relay_drift::tests::db_channel_disagrees_with_mirror_blocks_misdelivery

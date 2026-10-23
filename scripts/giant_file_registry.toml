@@ -721,11 +721,6 @@ keep_reason = "Retain per-channel health snapshot composition and relay-verdict 
 # state resolution, and durable target store moved to cohesive child modules.
 # The registry entry is removed to avoid a ghost registration.
 
-# RETIRED 2026-07-24 (#4712 D6): idle_recap.rs dropped below the production
-# giant threshold after the card compose/post/delete/persist cluster moved
-# verbatim to `idle_recap/card.rs`. Remove the [[entry]] to avoid a ghost
-# registration; keep future card lifecycle growth in the child module.
-
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
 # [[entry]] here; the #3028 splitter fix dropped its production LoC below the
 # giant threshold (its inline test mod was being miscounted as production), so it

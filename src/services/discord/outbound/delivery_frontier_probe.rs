@@ -56,13 +56,8 @@ pub(in crate::services::discord) fn current_generation_delivered_anchor(
     current_generation_delivered_anchor_at(&path, current_gen, current_transcript_eof)
 }
 
-/// Current-generation durable delivered frontier with diagnostic details.
-///
-/// Idle recap uses this read-only view to report the same trusted frontier the
-/// relay dedup machinery trusts, while preserving the committed range and
-/// terminal anchor ids for a deterministic operator report. Missing/malformed
-/// records, stale prior-generation frontiers, unbounded EOF, and frontier ENDs
-/// beyond the current transcript EOF return `None`.
+/// Read the current-generation durable frontier for relay dedup and recovery.
+/// Missing, malformed, stale, or out-of-bounds records return `None`.
 pub(in crate::services::discord) fn delivered_frontier_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,

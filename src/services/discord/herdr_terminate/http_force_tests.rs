@@ -1092,9 +1092,7 @@ fn e07_root_replaced_force_race_pg() {
 // the dispatch, row and input queued after the clear left as the clear left them.
 #[test]
 fn e07_root_replaced_retired_is_not_http_success_pg() {
-    use super::super::super::commands::control::{
-        SoftClearNotifyMode, clear_channel_session_state,
-    };
+    use super::super::super::commands::control::clear_channel_session_state;
     let path = format!(
         "{}::e07_root_replaced_retired_is_not_http_success_pg",
         module_path!()
@@ -1135,8 +1133,8 @@ fn e07_root_replaced_retired_is_not_http_success_pg() {
         }
         rig.restore_shell();
         let http = Arc::new(poise::serenity_prelude::Http::new(""));
-        let notify = SoftClearNotifyMode::Suppress;
-        let clear = clear_channel_session_state(&http, &shared, &provider, channel(), "/clear", notify);
+
+        let clear = clear_channel_session_state(&http, &shared, &provider, channel(), "/clear");
         clear.await.expect("a clear always commits");
         assert_eq!(herdr::row(&pool, &key).await, retired(), "the recovery retired it");
         assert!(!herdr::held());

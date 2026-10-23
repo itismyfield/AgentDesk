@@ -9,8 +9,8 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
 use super::super::SESSION_CLEARED_RESPONSE;
+use super::clear_channel_session_state;
 use super::clear_persist_failure_tests::{queue_len, seed_backlog, session_state};
-use super::{SoftClearNotifyMode, clear_channel_session_state};
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -26,8 +26,8 @@ fn cleared(discarded: usize) -> String {
 
 async fn clear(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> String {
     let http = Arc::new(serenity::Http::new(""));
-    let notify = SoftClearNotifyMode::Suppress;
-    let clear = clear_channel_session_state(&http, shared, provider, channel, "/clear", notify);
+
+    let clear = clear_channel_session_state(&http, shared, provider, channel, "/clear");
     clear.await.expect("a clear always commits").reply()
 }
 

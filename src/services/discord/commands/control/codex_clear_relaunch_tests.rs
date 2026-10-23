@@ -819,7 +819,6 @@ async fn clear_and_first_input_at_tick(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -1061,7 +1060,6 @@ async fn clear_and_first_input_at_tick(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
