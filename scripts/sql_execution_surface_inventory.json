@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "6f3f00c37b3705e13d7eeca748cd87a8bfde5846",
+  "measured_at_sha": "0de83091f1c26bb06a36b2fb7393b56281432b90",
   "records": [
     {
       "root": "migrations/postgres",
@@ -32401,6 +32401,24 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:5d5708edc0c7e682a9f211090ebdebf380489397537c11b3369d87d6394e17a7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice/retention.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aa0e3b3564c28a0506d227e6c57fe0c9fd2bd4d83f2ad6d84180441d0fb0910b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/inflight/removal/custody_notice_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a90e913a1380a62b713e8a8146630a76135d2715fc528253fc3cfd5842b4cf88"
     },
     {
       "root": "src",

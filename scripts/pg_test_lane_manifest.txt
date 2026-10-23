@@ -2072,6 +2072,8 @@ services::discord::inflight::removal::custody_notice_tests::a_tui_direct_turn_is
 services::discord::inflight::removal::custody_notice_tests::an_earlier_builds_episode_of_a_turn_shares_its_row_pg
 services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_row_whatever_copies_its_root_holds_pg
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
+services::discord::inflight::removal::custody_notice_tests::custody_lock_contention_preserves_pending_recovery_pg
+services::discord::inflight::removal::custody_notice_tests::custody_retention_requires_old_delivery_and_keeps_unknown_episodes_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
