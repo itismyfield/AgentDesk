@@ -237,7 +237,11 @@ async fn an_operator_resolution_is_applied_once_the_writer_restarts_and_only_fro
     );
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     polls(3).await;
-    assert_eq!(harness.port.posts(), ["after"], "retained boundary must replay after restart");
+    assert_eq!(
+        harness.port.posts(),
+        ["after"],
+        "retained boundary must replay after restart"
+    );
     assert_eq!(harness.alarms.taken(), []);
     let applied = harness
         .channel()
