@@ -45,6 +45,13 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
         return;
     };
     let custody = root.join("discord_custody").join(provider.as_str());
+    let _lock = match super::custody_notice::retention::lock(&custody, true) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(provider = provider.as_str(), %error, "boot custody lock failed");
+            return;
+        }
+    };
     BUDGET.set(BOOT_COPY_BUDGET);
     let mut episodes: BTreeMap<String, (Value, Vec<Item>)> = BTreeMap::new();
     let mut add = |(key, item): (Value, Item)| {

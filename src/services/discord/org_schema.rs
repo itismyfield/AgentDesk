@@ -418,7 +418,7 @@ fn spawn_auth_overlay_for_context(
             );
         }
     }
-    Ok(overlay)
+    crate::services::turn_summary_line::quota::record_launch(channel_id, overlay)
 }
 
 pub(crate) fn overlay_from_tmux_session(

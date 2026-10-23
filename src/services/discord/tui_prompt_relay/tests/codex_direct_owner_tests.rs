@@ -455,7 +455,7 @@ async fn assert_settled_answer(requests: &Requests, codex: &CodexChannel, anchor
                     && path.ends_with(&messages)
                     && serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
                         .as_str()
-                        .is_some_and(|content| content.starts_with("-# ✅ "))
+                        .is_some_and(|content| content.starts_with("-# ⏱️ "))
             })
         })
         .await,
@@ -506,7 +506,7 @@ async fn assert_settled_answer(requests: &Requests, codex: &CodexChannel, anchor
     );
     let summaries: Vec<_> = calls
         .iter()
-        .filter(|(_, _, _, content)| content.starts_with("-# ✅ "))
+        .filter(|(_, _, _, content)| content.starts_with("-# ⏱️ "))
         .collect();
     assert_eq!(summaries.len(), 1, "one completion summary: {requests:?}");
     let summary = summaries[0];

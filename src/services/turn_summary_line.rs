@@ -1,5 +1,7 @@
 //! The same bounded terminal summary is shared by O and Legacy delivery.
 
+pub(crate) mod quota;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Completed,
@@ -7,9 +9,15 @@ pub(crate) enum Outcome {
     Failed,
 }
 
-pub(crate) fn render(outcome: Outcome, elapsed_ms: Option<u64>, context_pct: Option<u8>) -> String {
+pub(crate) fn render(
+    outcome: Outcome,
+    elapsed_ms: Option<u64>,
+    context_pct: Option<u8>,
+    quota: Option<quota::Quota>,
+) -> String {
     let mut line = match outcome {
         Outcome::Completed if elapsed_ms.is_none() && context_pct.is_none() => "-# ✅ 완료",
+        Outcome::Completed if elapsed_ms.is_some() => "-# ⏱️",
         Outcome::Completed => "-# ✅",
         Outcome::Cancelled => "-# ⏹ 중단",
         Outcome::Failed => "-# ⚠️ 오류",
@@ -25,6 +33,12 @@ pub(crate) fn render(outcome: Outcome, elapsed_ms: Option<u64>, context_pct: Opt
     }
     if let Some(percent) = context_pct {
         line.push_str(&format!(" · 📦 {}%", percent.min(100)));
+    }
+    if outcome == Outcome::Completed
+        && elapsed_ms.is_some()
+        && let Some(quota) = quota
+    {
+        quota.append(&mut line);
     }
     line
 }

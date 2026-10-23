@@ -529,6 +529,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
+  services::discord::inflight::removal::custody_notice_tests::custody_retention_boundary_and_symlinks_never_follow_external_paths
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
   services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
