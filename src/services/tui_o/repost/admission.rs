@@ -6,7 +6,6 @@ use std::io;
 
 use sqlx::PgPool;
 
-use super::config::RepostSwitch;
 use super::identity::{IDENTITY_VERSION, PieceKey, SPLIT_VERSION, payload_sha256, piece_of};
 use super::o_piece_attempts::AttemptResult;
 use super::o_piece_delivery::{
@@ -234,8 +233,7 @@ pub(crate) fn posted_receipts<'r>(
     posted.filter(|(key, _)| admitted.contains(key)).collect()
 }
 
-/// Admission against PostgreSQL. Only [`Admitter::when_on`] builds one, so with the switch off no
-/// admission step reaches PostgreSQL or the sidecar.
+/// Admission against PostgreSQL with durable provenance for uncertain originals.
 pub(crate) struct Admitter<'a> {
     pool: &'a PgPool,
     node: &'a str,
@@ -243,17 +241,12 @@ pub(crate) struct Admitter<'a> {
 }
 
 impl<'a> Admitter<'a> {
-    pub(crate) fn when_on(
-        switch: &mut RepostSwitch,
-        pool: &'a PgPool,
-        node: &'a str,
-        sender_id: u64,
-    ) -> Option<Self> {
-        switch.when_enabled(|_| Self {
+    pub(crate) fn new(pool: &'a PgPool, node: &'a str, sender_id: u64) -> Self {
+        Self {
             pool,
             node,
             sender_id,
-        })
+        }
     }
 
     fn delivery(&self, key: &PieceKey, payload: &str, anchor: u64, serial: u64) -> NewDelivery {

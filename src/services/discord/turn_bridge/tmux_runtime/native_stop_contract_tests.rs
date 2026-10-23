@@ -39,6 +39,35 @@ async fn until(mut ready: impl FnMut() -> bool) {
     .expect("native stop contract must converge");
 }
 
+async fn mailbox_released(
+    shared: &SharedData,
+    channel: ChannelId,
+    token: &Arc<CancelToken>,
+    reader: &std::thread::JoinHandle<()>,
+    fx: &Fixture,
+    path: &std::path::Path,
+) {
+    // turn_duration completes through the reader's 15s idle fallback and EOF probes.
+    let started = std::time::Instant::now();
+    let released = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while mailbox_holds(shared, channel, token).await {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "mailbox release timed out: channel={} elapsed={:?} reader_finished={} cancelled={} completion_cleanup={} transcript={:?} tmux_calls={:?}",
+        channel.get(),
+        started.elapsed(),
+        reader.is_finished(),
+        token.cancelled.load(Ordering::Acquire),
+        token.is_completion_cleanup(),
+        std::fs::read_to_string(path),
+        fx.calls(),
+    );
+}
+
 fn bridge(
     shared: &Arc<SharedData>,
     channel: ChannelId,
@@ -171,13 +200,7 @@ mod high_risk_recovery {
                         &path,
                         serde_json::json!({"type":"system", "subtype":"turn_duration"}),
                     );
-                    tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                        while mailbox_holds(&shared, channel, &token).await {
-                            tokio::task::yield_now().await;
-                        }
-                    })
-                    .await
-                    .unwrap();
+                    mailbox_released(&shared, channel, &token, &reader, &fx, &path).await;
                     assert!(stop.finish().await.token.is_none());
                     assert!(token.is_completion_cleanup(), "natural completion must win");
                     assert_eq!(tombstone(channel), None);
@@ -190,7 +213,33 @@ mod high_risk_recovery {
                             })
                         })
                         .await;
-                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        // A second EOF liveness probe proves the reader survived the first.
+                        let reader_live =
+                            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                                loop {
+                                    if fx
+                                        .calls()
+                                        .iter()
+                                        .filter(|call| call.starts_with("list-panes"))
+                                        .count()
+                                        >= 2
+                                    {
+                                        break;
+                                    }
+                                    assert!(
+                                        !reader.is_finished(),
+                                        "native reader exited before terminal records: {:?}",
+                                        fx.calls()
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                }
+                            })
+                            .await;
+                        assert!(
+                            reader_live.is_ok(),
+                            "native reader must keep polling its live pane: {:?}",
+                            fx.calls()
+                        );
                         assert!(
                             !token.cancelled.load(Ordering::Acquire),
                             "delivery is not native termination"
@@ -226,13 +275,7 @@ mod high_risk_recovery {
                     };
                     tokio::join!(request, observe);
                 }
-                tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                    while mailbox_holds(&shared, channel, &token).await {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .unwrap();
+                mailbox_released(&shared, channel, &token, &reader, &fx, &path).await;
                 until(|| {
                     !inflight::inflight_state_file_exists(&ProviderKind::Claude, channel.get())
                 })
@@ -362,13 +405,7 @@ fn preserve_stop_failed_command_and_mailbox_notice_once_and_reader_continues() {
                 &path,
                 serde_json::json!({"type":"system", "subtype":"turn_duration"}),
             );
-            tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                while mailbox_holds(&shared, channel, &token).await {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
+            mailbox_released(&shared, channel, &token, &reader, &fx, &path).await;
             assert!(
                 token.is_completion_cleanup(),
                 "an unconfirmed stop leaves normal completion intact"
@@ -614,13 +651,15 @@ fn preserve_stop_rechecks_after_composer_wait_without_retargeting() {
                             &path,
                             serde_json::json!({"type":"system","subtype":"turn_duration"}),
                         );
-                        tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                            while mailbox_holds(&shared, channel, &token).await {
-                                tokio::task::yield_now().await;
-                            }
-                        })
-                        .await
-                        .unwrap();
+                        mailbox_released(
+                            &shared,
+                            channel,
+                            &token,
+                            reader.as_ref().expect("done case has a native reader"),
+                            &fx,
+                            &path,
+                        )
+                        .await;
                     }
                     "successor" => {
                         discord::mailbox_finish_turn(&shared, &ProviderKind::Claude, channel).await;

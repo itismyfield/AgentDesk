@@ -87,6 +87,7 @@ impl Fixture {
              missing) exit 127 ;;\n\
              nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac\n\
              case \"$1\" in\nsend-keys) [ -f \"$d/reject_escape\" ] && exit 1; exit 0 ;;\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
+             list-panes) echo 0; exit 0 ;;\n\
              capture-pane) [ -f \"$d/reject_capture\" ] && exit 1; r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
              [ -n \"$r\" ] && case \"$*\" in *\"-t $r -S\"*) echo 'Ready for input (type message + Enter)'; exit 0 ;; esac\n\
              [ -f \"$d/pane\" ] && {{ cat \"$d/pane\"; exit 0; }}\n\

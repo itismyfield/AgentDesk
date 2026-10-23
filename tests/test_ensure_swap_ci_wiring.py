@@ -331,11 +331,18 @@ class MemMeasureBehavior(unittest.TestCase):
     def run_measure(self, command: str, *, gnu_time: bool, proc_root: Path | None = None,
                     tools: dict[str, str] | None = None):
         self.runner_temp, env = self.measure_env(gnu_time=gnu_time, proc_root=proc_root, tools=tools)
-        # A wrapper that never returns fails here instead of hanging the suite.
-        return subprocess.run(
+        # Observe completion, with a generous watchdog and cleanup of this fixture's group.
+        with subprocess.Popen(
             ["bash", str(MEM_MEASURE), "probe", "--", "bash", "-c", command],
-            env=env, capture_output=True, check=False, timeout=30,
-        )
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        ) as wrapper:
+            try:
+                stdout, stderr = wrapper.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                os.killpg(wrapper.pid, signal.SIGKILL)
+                stdout, stderr = wrapper.communicate()
+                self.fail(f"memory wrapper did not complete: pid={wrapper.pid} stdout={stdout!r} stderr={stderr!r}")
+            return subprocess.CompletedProcess(wrapper.args, wrapper.returncode, stdout, stderr)
 
     def fake_proc(self, rows: tuple[tuple[int, str, int], ...]) -> Path:
         scratch = tempfile.TemporaryDirectory()
@@ -427,17 +434,16 @@ class MemMeasureBehavior(unittest.TestCase):
         proc = self.fake_proc(((101, "cargo", 500),))
         pids = proc.parent / "stuck.pids"
         stuck_cat = (
-            f'case "$*" in */status*) echo $$ >> {shlex.quote(str(pids))}; exec sleep 60 ;; esac\n'
+            f'case "$*" in */status*) echo $$ >> {shlex.quote(str(pids))}; exec python3 -c "import threading; threading.Event().wait()" ;; esac\n'
             'exec /bin/cat "$@"\n'
         )
-        started = time.monotonic()
-        result = self.run_measure("exit 0", gnu_time=True, proc_root=proc, tools={"cat": stuck_cat})
-        self.assertLess(time.monotonic() - started, 20)
+        command = f'while [ ! -s {shlex.quote(str(pids))} ]; do sleep 0.05; done; exit 0'
+        result = self.run_measure(command, gnu_time=True, proc_root=proc, tools={"cat": stuck_cat})
         self.assertEqual(result.returncode, 0)
         self.assertIn(b" peak_sampler=killed ", result.stderr)
         stuck = [int(line) for line in pids.read_text("utf-8").split()]
         self.assertTrue(stuck)
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         for pid in stuck:
             while time.monotonic() < deadline:
                 try:

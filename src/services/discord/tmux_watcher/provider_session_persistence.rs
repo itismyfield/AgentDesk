@@ -88,7 +88,8 @@ pub(super) async fn persist_watcher_provider_session_id(
         ),
         "provider_selector_persisted",
         "tmux_watcher.rs:persist_provider_session_selector",
-    );
+    )
+    .await;
 
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(

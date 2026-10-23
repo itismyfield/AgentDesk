@@ -52,18 +52,6 @@ async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() 
         CANARY_CHANNEL,
         &old
     ));
-    let boot = TuiOConfig {
-        repost: RepostConfig {
-            enabled: true,
-            channels: [CANARY_CHANNEL].into_iter().collect(),
-        },
-        ..TuiOConfig::default()
-    };
-    let mut enabled = RepostSwitch::new(Some(&boot), watch::channel(None).1);
-    assert!(
-        enabled.allowed(CANARY_CHANNEL),
-        "the actual canary runner must be enabled"
-    );
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     assert!(
@@ -73,7 +61,7 @@ async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() 
             .is_empty()
     );
     let io = Io::over(&harness.port);
-    let runner = Runner::new(enabled, pool.clone(), BOT, run_scope());
+    let runner = Runner::new(pool.clone(), BOT, run_scope());
     let sidecar = harness
         ._runtime
         .path()

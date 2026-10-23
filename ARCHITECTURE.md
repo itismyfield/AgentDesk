@@ -11,7 +11,7 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
-Install `sccache` with `brew install sccache` for local build caching. AgentDesk build helpers default to `SCCACHE_CACHE_SIZE=40G` and `SCCACHE_IDLE_TIMEOUT=0` while preserving nonempty overrides; see the [sccache setup guide](docs/ci/sccache-setup.md#22-shell-env-release-deploy-and-installer-source-builds) for activation rules, manual-wrapper behavior, and existing-daemon limits.
+Install `sccache` with `brew install sccache` for local build caching. AgentDesk build helpers default to `SCCACHE_CACHE_SIZE=15G` and `SCCACHE_IDLE_TIMEOUT=0` while preserving nonempty overrides; see the [sccache setup guide](docs/ci/sccache-setup.md#22-shell-env-release-deploy-and-installer-source-builds) for activation rules, manual-wrapper behavior, and existing-daemon limits.
 
 ## Generated `src/` Tree
 
@@ -929,6 +929,13 @@ src/
 │   │   │   ├── inject_tests.rs
 │   │   │   ├── rollout.rs
 │   │   │   └── screen.rs
+│   │   ├── execution_end/
+│   │   │   ├── attempt.rs
+│   │   │   ├── attempt_tests.rs
+│   │   │   ├── capture.rs
+│   │   │   ├── confirm.rs
+│   │   │   ├── identity.rs
+│   │   │   └── mod.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   ├── source_guard_tests.rs
@@ -964,6 +971,8 @@ src/
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
+│   │   ├── warm_followup/
+│   │   │   └── submit.rs
 │   │   ├── busy_inject.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
@@ -1010,12 +1019,16 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── codex_absence/
 │   │   │   ├── observation_tests.rs
+│   │   │   ├── replacement.rs
+│   │   │   ├── replacement_tests.rs
 │   │   │   └── test_setup.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── clear_end_record.rs
-│   │   │   │   │   └── clear_end_record_tests.rs
+│   │   │   │   │   ├── clear_end_record_tests.rs
+│   │   │   │   │   ├── codex_end_record.rs
+│   │   │   │   │   └── codex_end_tests.rs
 │   │   │   │   ├── codex_clear_relaunch_tests/
 │   │   │   │   │   ├── absent_launch_tests/
 │   │   │   │   │   │   ├── auxiliary_tests/
@@ -1258,6 +1271,8 @@ src/
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   ├── reconcile_gate.rs
 │   │   │   │   └── snapshot.rs
+│   │   │   ├── host_recovery_guard/
+│   │   │   │   └── log_state.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1325,6 +1340,7 @@ src/
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
+│   │   │   ├── host_recovery_guard_log_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
@@ -2038,6 +2054,7 @@ src/
 │   │   │   │   └── stream_seed.rs
 │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   ├── cancel_handoff.rs
+│   │   │   ├── codex_replacement_tests.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
 │   │   │   ├── completion_gate.rs
@@ -2309,6 +2326,7 @@ src/
 │   │   │   ├── retry_state/
 │   │   │   │   └── delivery_rewind.rs
 │   │   │   ├── runtime_handoff_loop/
+│   │   │   │   ├── codex_replacement_tests.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── tests.rs
@@ -2518,10 +2536,12 @@ src/
 │   │   │   │   │   ├── cross_runtime_owners.rs
 │   │   │   │   │   ├── cross_runtime_owners_tests.rs
 │   │   │   │   │   ├── dormancy_tests.rs
+│   │   │   │   │   ├── effect_read_defer_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
+│   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
@@ -2542,6 +2562,8 @@ src/
 │   │   │   │   │   ├── superseded_measurement_tests.rs
 │   │   │   │   │   ├── unit_tests.rs
 │   │   │   │   │   └── watcher_runtime_tests.rs
+│   │   │   │   ├── effect_reads.rs
+│   │   │   │   ├── effect_reads_tests.rs
 │   │   │   │   ├── notice_identity.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -3241,9 +3263,7 @@ src/
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── allowlist_host_tests.rs
 │   │   │   ├── allowlist_runner_tests.rs
-│   │   │   ├── allowlist_writer_tests.rs
 │   │   │   ├── backlog_tests.rs
-│   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── identity.rs
@@ -3286,6 +3306,8 @@ src/
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
+│   │   │   ├── codex_end.rs
+│   │   │   ├── codex_end_tests.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── durable.rs
@@ -3359,6 +3381,7 @@ src/
 │   │   │   ├── adoption_past_stall_tests.rs
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
+│   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
