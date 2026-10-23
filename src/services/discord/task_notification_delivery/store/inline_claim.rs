@@ -32,8 +32,7 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
                 bot_key,
             });
         }
-        if event.payload.is_completion_card() && event.scope.terminal_delivery_fingerprint.is_some()
-        {
+        if event.scope.terminal_delivery_fingerprint.is_some() {
             let legacy_hash = content_hash(&event.payload.legacy_render(1));
             if let Some((message_id, bot_key)) =
                 find_terminal_delivery_pg(pool, &event.scope, &legacy_hash).await?
@@ -48,8 +47,7 @@ pub(in crate::services::discord::task_notification_delivery) async fn claim_even
             return Ok(claim);
         }
     } else if cfg!(any(test, debug_assertions)) {
-        if event.payload.is_completion_card() && event.scope.terminal_delivery_fingerprint.is_some()
-        {
+        if event.scope.terminal_delivery_fingerprint.is_some() {
             let legacy_hash = content_hash(&event.payload.legacy_render(1));
             if let Some((message_id, bot_key)) =
                 find_terminal_delivery_memory(&event.scope, &legacy_hash)?

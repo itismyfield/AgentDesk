@@ -174,52 +174,60 @@ async fn modern_completion_title_containing_task_survives_stream_promotion_pg() 
 
 #[tokio::test]
 async fn legacy_body_card_binds_its_first_source_without_reposting_pg() {
-    let (database, pool) = database("legacy body card first source binds existing receipt").await;
-    let task = "legacy-body-source-bind";
-    let summary = "Agent \"Task source binding\" finished";
-    let result = "preserved body first\npreserved body second";
-    let original = event(task, None, Some("completed"), summary, result);
-    let legacy = "✅ Task completed\n**Agent \"Task source binding\" finished**\n\n> preserved body first\n> preserved body second\n\n-# task legacy-b";
-    let hash = content_hash(legacy);
-    let claim = store::claim_card(
-        Some(&pool),
-        &original.scope,
-        "notify",
-        legacy,
-        &hash,
-        StoreIntent::Observation,
-    )
-    .await
-    .expect("the isolated legacy body fixture must claim its old notify authority");
-    let CardClaim::Owned(claim) = claim else {
-        panic!("the isolated legacy body must own its initial row: {claim:?}");
-    };
-    store::mark_posted(Some(&pool), &claim, LEGACY_MESSAGE, legacy, &hash)
+    let (database, mut pool) = database("legacy card first source binds existing receipt").await;
+    for (task, status, summary, result, legacy) in [
+        (
+            "legacy-body-source-bind",
+            "completed",
+            "Agent \"Task source binding\" finished",
+            "preserved body first\npreserved body second",
+            "✅ Task completed\n**Agent \"Task source binding\" finished**\n\n> preserved body first\n> preserved body second\n\n-# task legacy-b",
+        ),
+        (
+            "legacy-short-source-bind",
+            "failed",
+            "Agent \"status worker\" failed",
+            "",
+            "❌ Task failed\n**Agent \"status worker\" failed**\n\n-# task legacy-s",
+        ),
+    ] {
+        let original = event(task, None, Some(status), summary, result);
+        let hash = content_hash(legacy);
+        let claim = store::claim_card(
+            Some(&pool),
+            &original.scope,
+            "notify",
+            legacy,
+            &hash,
+            StoreIntent::Observation,
+        )
         .await
-        .expect("seed the old NULL-source body card and its durable terminal receipt");
-    let before = snapshot(&pool, &original).await;
-    let sourced = event(
-        task,
-        Some("legacy-body-first-source"),
-        Some("completed"),
-        summary,
-        result,
-    );
-    let transport = Transport::default();
-    let aliased = deliver(&pool, &transport, &sourced).await;
-    assert_eq!(aliased.message_id, LEGACY_MESSAGE);
-    assert_eq!(aliased.bot_key, "notify");
-    assert_eq!(
-        transport.counts(),
-        (0, 0),
-        "a formatter migration must not create another completion for the same first-source alias"
-    );
-    assert_eq!(snapshot(&pool, &sourced).await, before);
-    pool.close().await;
-    let pool = database.connect_and_migrate().await;
-    let replay = deliver(&pool, &transport, &sourced).await;
-    assert_eq!(replay.message_id, LEGACY_MESSAGE);
-    assert_eq!(transport.counts(), (0, 0));
-    assert_eq!(snapshot(&pool, &sourced).await, before);
+        .expect("the isolated legacy body fixture must claim its old notify authority");
+        let CardClaim::Owned(claim) = claim else {
+            panic!("the isolated legacy body must own its initial row: {claim:?}");
+        };
+        store::mark_posted(Some(&pool), &claim, LEGACY_MESSAGE, legacy, &hash)
+            .await
+            .expect("seed the old NULL-source body card and its durable terminal receipt");
+        let before = snapshot(&pool, &original).await;
+        let source = format!("first-source-{task}");
+        let sourced = event(task, Some(&source), Some(status), summary, result);
+        let transport = Transport::default();
+        let aliased = deliver(&pool, &transport, &sourced).await;
+        assert_eq!(aliased.message_id, LEGACY_MESSAGE);
+        assert_eq!(aliased.bot_key, "notify");
+        assert_eq!(
+            transport.counts(),
+            (0, 0),
+            "a formatter migration must not create another completion for the same first-source alias"
+        );
+        assert_eq!(snapshot(&pool, &sourced).await, before);
+        pool.close().await;
+        pool = database.connect_and_migrate().await;
+        let replay = deliver(&pool, &transport, &sourced).await;
+        assert_eq!(replay.message_id, LEGACY_MESSAGE);
+        assert_eq!(transport.counts(), (0, 0));
+        assert_eq!(snapshot(&pool, &sourced).await, before);
+    }
     database.drop().await;
 }
