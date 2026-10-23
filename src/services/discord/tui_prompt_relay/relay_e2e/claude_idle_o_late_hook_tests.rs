@@ -367,12 +367,7 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
             .boundary = Boundary::Owed { from: 0 };
         assert!(f.channel().write_rotation(&bypass).is_err());
         f.store
-            .record_boundary_resolved(
-                f.pane.channel.get(),
-                f.pane.b_path().to_str().unwrap(),
-                &crate::services::tui_o::store::rotation::ResolveFrom::Offset(0),
-                "test_operator",
-            )
+            .seed_boundary_resolved(f.pane.channel.get(), &f.b(), 0)
             .unwrap();
         assert!(
             f.channel()
