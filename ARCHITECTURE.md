@@ -107,6 +107,7 @@ src/
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
+│   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
@@ -1591,8 +1592,7 @@ src/
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
 │   │   │   ├── turn_summary_recovery_tests.rs
-│   │   │   ├── two_message_panel.rs
-│   │   │   └── unix_journal.rs
+│   │   │   └── two_message_panel.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -1867,10 +1867,7 @@ src/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
 │   │   │   ├── journal/
-│   │   │   │   ├── controller.rs
-│   │   │   │   ├── pg_store.rs
-│   │   │   │   ├── recovery.rs
-│   │   │   │   └── watcher.rs
+│   │   │   │   └── pg_store.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── idle_replace_tests.rs
 │   │   │   │   └── stream_frame_fixtures.rs
@@ -2329,8 +2326,7 @@ src/
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── source_guard_tests.rs
-│   │   │   │   ├── o_body.rs
-│   │   │   │   └── unix_journal.rs
+│   │   │   │   └── o_body.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── recovery_retry_guard_tests/

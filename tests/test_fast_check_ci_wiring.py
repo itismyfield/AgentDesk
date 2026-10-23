@@ -71,7 +71,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/outbound/delivery_record.rs",
     "src/services/discord/recovery_engine/restore_inflight.rs",
     "src/services/discord/recovery_engine/completion_delivery.rs",
-    "src/services/discord/recovery_engine/unix_journal.rs",
     "src/services/discord/recovery_engine/manual_rebind/mod.rs",
     "src/services/discord/recovery_paths/restart.rs",
     "src/services/discord/router/message_handler.rs",

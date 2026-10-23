@@ -2,7 +2,6 @@ use super::*;
 #[path = "loop_poll_prologue/watcher_resume.rs"]
 pub(in crate::services::discord) mod watcher_resume;
 use self::watcher_resume::watcher_resume_outcome;
-use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use crate::services::discord::tmux::tmux_output_stream::watcher_source_witness;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -552,15 +551,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         });
     if post_terminal_no_inflight_should_suppress {
         let suppressed_range = (data_start_offset, current_offset);
-        // #5071 T1 S3b: this arm is re-entered on every poll pass while the same
-        // bytes stay suppressed, so the one-shot test that already keeps the
-        // warning from repeating now also gates the shadow observation. Without
-        // it a stuck suppression would submit an O+S batch on every pass.
-        let first_observation_of_range = journal_watcher::first_observation_of_suppressed_range(
-            last_post_terminal_suppressed_range,
-            suppressed_range,
-        );
-        if first_observation_of_range {
+        if last_post_terminal_suppressed_range != Some(suppressed_range) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] 🛑 watcher: suppressed post-terminal output without inflight for channel {} (tmux={}, range {}..{})",
@@ -579,26 +570,9 @@ pub(super) async fn poll_watcher_output_or_continue(
                 "watcher: repeated post-terminal suppress for same range"
             );
         }
-        let confirmed_end = suppressed_terminal_confirmed_end(current_offset, all_data);
         let generation_mtime_ns = source_generation_mtime_ns;
         last_relayed_offset = Some(current_offset);
         last_observed_generation_mtime_ns = Some(generation_mtime_ns);
-        // The receipt already proved this local range delivered. This O+S
-        // records duplicate disposal only; it cannot create a new receipt or
-        // advance shared delivery authority.
-        if first_observation_of_range {
-            journal_watcher::settle_without_transport(
-                shared,
-                journal_watcher::WatcherObligationCoordinates {
-                    provider: watcher_provider,
-                    channel_id,
-                    tmux_session_name,
-                    generation_mtime_ns,
-                    range: (data_start_offset, confirmed_end),
-                },
-                journal_watcher::SettlementReason::PostTerminalNoInflightSuppressed,
-            );
-        }
         // #3053: suppressing post-terminal output is NOT idleness — the
         // wrapper is still alive and producing JSONL. The original code
         // `continue`d here before reaching the heartbeat refresh below, so

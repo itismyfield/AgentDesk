@@ -4,12 +4,6 @@ use super::*;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
-    #[serde(default, skip_serializing_if = "is_legacy_delivery_journal_mode")]
-    pub delivery_journal_mode: DeliveryJournalMode,
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub delivery_journal_cohort_percent: u8,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delivery_journal_internal_channel_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
     pub intake_delivery_settlement: IntakeDeliverySettlementStage,
     #[serde(default, skip_serializing_if = "is_legacy_execution_identity_mode")]
@@ -157,10 +151,7 @@ impl RuntimeSettingsConfig {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.delivery_journal_mode == DeliveryJournalMode::Legacy
-            && self.delivery_journal_cohort_percent == 0
-            && self.delivery_journal_internal_channel_ids.is_empty()
-            && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
+        self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
             && self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.publication_permit_mode == PublicationPermitMode::Legacy
             && self.relay_verdict_source == RelayVerdictSource::Structural

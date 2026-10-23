@@ -6,10 +6,8 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
-// #5071 T1 S5: the family's ONE door to the `#[cfg(unix)]` delivery journal.
 // Imported under its own name, never aliased, so every call site below reads the
 // platform bound in the identifier itself.
-use super::unix_journal;
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
 use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
 use crate::services::discord::{
@@ -63,7 +61,7 @@ pub(super) fn captured_terminal_receipt_exists(
 
 struct CapturedRecoveryAnchor {
     expected: inflight::InflightTurnState,
-    delivered: Option<(MessageId, String, unix_journal::Disposition)>,
+    delivered: Option<(MessageId, String)>,
 }
 
 /// A confirmed fallback whose row mutation still needs the captured actor's approval.
@@ -72,7 +70,6 @@ pub(super) struct PendingRecoveryAnchor {
     expected: inflight::InflightTurnState,
     anchor: MessageId,
     text: String,
-    disposition: unix_journal::Disposition,
 }
 
 impl PendingRecoveryAnchor {
@@ -90,7 +87,6 @@ impl PendingRecoveryAnchor {
             shared,
             self.anchor,
             &self.text,
-            self.disposition,
             Some(state),
         )
     }
@@ -178,13 +174,12 @@ impl RecoveryDeliveryContext {
 
     pub(super) fn pending_anchor_after_delivery(&self) -> Option<PendingRecoveryAnchor> {
         let captured = self.captured_anchor.as_ref()?.lock().ok()?;
-        let (anchor, text, disposition) = captured.delivered.clone()?;
+        let (anchor, text) = captured.delivered.clone()?;
         Some(PendingRecoveryAnchor {
             context: self.clone(),
             expected: captured.expected.clone(),
             anchor,
             text,
-            disposition,
         })
     }
 
@@ -334,12 +329,7 @@ impl RecoveryDeliveryContext {
         anchor: MessageId,
         text: &str,
     ) {
-        self.record_successful_fresh_send(
-            shared,
-            anchor,
-            text,
-            unix_journal::Disposition::NoAnchorFreshSend,
-        );
+        self.record_successful_fresh_send(shared, anchor, text);
     }
 
     /// The anchored replace fell back to a POST after its edit failed
@@ -350,59 +340,31 @@ impl RecoveryDeliveryContext {
         anchor: MessageId,
         text: &str,
     ) {
-        self.record_successful_fresh_send(
-            shared,
-            anchor,
-            text,
-            unix_journal::Disposition::AnchoredEditFallback,
-        );
+        self.record_successful_fresh_send(shared, anchor, text);
     }
 
     /// The same edit-failure fallback, driven through the turn-output controller
     /// (`recovery_paths/controller_cutover.rs`).
     ///
-    /// The three entry points exist so the journal's disposition never appears in
-    /// a caller's signature: `controller_cutover.rs` sits in a subtree that is not
-    /// `#[cfg(unix)]`, and naming a journal type there would reopen exactly the
-    /// `E0433` windows break #5071 T1 S4 landed and then had to fix.
     pub(in crate::services::discord) fn record_successful_fresh_send_after_controller_edit_fallback(
         &self,
         shared: &SharedData,
         anchor: MessageId,
         text: &str,
     ) {
-        self.record_successful_fresh_send(
-            shared,
-            anchor,
-            text,
-            unix_journal::Disposition::ControllerEditFallback,
-        );
+        self.record_successful_fresh_send(shared, anchor, text);
     }
 
-    /// The family's single confirmed-delivery funnel. Every caller has already
-    /// seen Discord accept the message; what is still unknown is whether the
-    /// durable frontier advances, which is the whole of what #5071 T1 S5 observes.
-    ///
-    /// The observation opens here and not before the transport: two of the three
-    /// entry points only learn that they advance the frontier at all from the edit
-    /// transport's own answer. `session_relay_sink/journal/recovery.rs` records
-    /// what that costs — this family can never see a delivery lost mid-POST.
-    fn record_successful_fresh_send(
-        &self,
-        shared: &SharedData,
-        anchor: MessageId,
-        text: &str,
-        disposition: unix_journal::Disposition,
-    ) {
+    fn record_successful_fresh_send(&self, shared: &SharedData, anchor: MessageId, text: &str) {
         if let Some(captured) = self.captured_anchor.as_ref() {
             if let Ok(mut captured) = captured.lock() {
                 // The transport await may have replaced only the mailbox actor,
                 // leaving this row byte-for-byte unchanged. Do not bind here.
-                captured.delivered = Some((anchor, text.to_string(), disposition));
+                captured.delivered = Some((anchor, text.to_string()));
             }
             return;
         }
-        self.record_successful_fresh_send_with_snapshot(shared, anchor, text, disposition, None);
+        self.record_successful_fresh_send_with_snapshot(shared, anchor, text, None);
     }
 
     fn record_successful_fresh_send_with_snapshot(
@@ -410,18 +372,9 @@ impl RecoveryDeliveryContext {
         shared: &SharedData,
         anchor: MessageId,
         text: &str,
-        disposition: unix_journal::Disposition,
+
         captured: Option<&mut inflight::InflightTurnState>,
     ) -> inflight::GuardedSaveOutcome {
-        let mut observation = unix_journal::begin_recovery_terminal(
-            shared,
-            &self.provider,
-            disposition,
-            (self.record_channel_id, self.channel_id),
-            self.tmux_session_name.as_deref(),
-            self.expected_current_msg_id,
-            self.durable_range,
-        );
         let bind = if let Some(captured) = captured {
             inflight::bind_recovery_anchor_for_snapshot(
                 &self.provider,
@@ -450,14 +403,8 @@ impl RecoveryDeliveryContext {
             bind,
             inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::RowAbsent
         ) {
-            let settlement = self.record_durable_frontier(shared, anchor, text);
-            unix_journal::settle_recovery_terminal(&mut observation, Some(anchor), settlement);
+            self.record_durable_frontier(shared, anchor, text);
         } else {
-            unix_journal::settle_recovery_terminal(
-                &mut observation,
-                Some(anchor),
-                unix_journal::Settlement::AnchorBindNotPersisted,
-            );
             tracing::warn!(
                 provider = %self.provider.as_str(),
                 channel_id = self.channel_id.get(),
@@ -466,59 +413,11 @@ impl RecoveryDeliveryContext {
                 "recovery no-anchor delivery: inflight anchor bind did not persist; skipping durable anchor write"
             );
         }
-        // Backstop, single-use: both branches above already closed the
-        // obligation, so this appends nothing today. It is here so a future early
-        // return added to this fn leaves a `U` rather than a dangling `O`+`A`.
-        unix_journal::settle_recovery_terminal(
-            &mut observation,
-            Some(anchor),
-            unix_journal::Settlement::DeliveryNotRecorded,
-        );
         bind
     }
 
-    /// Returns the funnel's own verdict about the durable frontier so the caller
-    /// can settle the journal obligation with it.
-    ///
-    /// #5071 T1 S7 JOINED THIS TO THE SHADOW-MIRROR FUNNEL. It used to call
-    /// `delivery_record::write_delivered_frontier` /
-    /// `write_proven_gone_equal_range_frontier` directly and append the
-    /// completed-turn ledger itself, ahead of both. Those three calls are gone,
-    /// replaced by one `delivery_record::record_recovery_terminal_delivery`.
-    /// What changed for these three writes, and nothing is claimed beyond them:
-    ///
-    ///   D2  a relay frontier mutation admission is now taken for the
-    ///       incarnation captured when the recovery decision was made;
-    ///   D3  the exact-receipt decision is now the funnel's
-    ///       `exact_receipt_from_inflight`. That predicate wants the fresh
-    ///       inflight row's `turn_start_offset` to equal `range.0`, while this
-    ///       path builds its range as `(state.last_offset, confirmed_end)`, so
-    ///       the receipt-less arm remains the expected outcome. The DECISION
-    ///       moved; no receipt was created;
-    ///   D4  the delivered-content fingerprint (#4081) is recorded. Before S7
-    ///       this path wrote none at all;
-    ///   D5  the completed-turn ledger append now happens AFTER a successful
-    ///       frontier persist, and on the unknown-generation path instead of it
-    ///       — the funnel's own separation of settlement from persistence,
-    ///       which is what #4564 wanted from the pre-S7 leading append.
-    ///
-    /// D1 (`WatcherFrontierLockAuthority`) is NOT joined and this is deliberate:
-    /// that authority compares the caller's generation to the IN-MEMORY
-    /// `confirmed_end_generation_mtime_ns`, which the recovery path never
-    /// advances, so presenting one would refuse startup-recovery writes outright.
-    /// D6 (advancing the in-memory watermark) is untouched for the same reason —
-    /// both belong to #5071 T1 S7b.
-    ///
-    /// ONE BEHAVIOUR NARROWED, STATED RATHER THAN BURIED. Pre-S7 the ledger
-    /// append ran before the durable write and therefore also ran when that write
-    /// returned `Err`. Under the funnel a failed persist returns before the
-    /// append, exactly as it does for every other funnel caller.
-    fn record_durable_frontier(
-        &self,
-        shared: &SharedData,
-        anchor: MessageId,
-        text: &str,
-    ) -> unix_journal::Settlement {
+    /// Record confirmed delivery under the captured reset incarnation.
+    fn record_durable_frontier(&self, shared: &SharedData, anchor: MessageId, text: &str) {
         // D2. Held across the funnel call below so a watermark reset cannot land
         // between admission and the durable write. `None` means one already
         // landed since this recovery decision snapshotted its range and identity.
@@ -536,7 +435,7 @@ impl RecoveryDeliveryContext {
                 captured_reset_incarnation = self.frontier_reset_incarnation,
                 "recovery no-anchor delivery: relay frontier reset after the recovery decision; refusing the durable frontier"
             );
-            Err(unix_journal::Settlement::FrontierResetDuringDelivery)
+            Err(())
         };
         // EVERY arm reaches the funnel, refusals included, and a refusal reaches
         // it carrying the unknown-generation sentinel `0`. That is what keeps the
@@ -565,8 +464,8 @@ impl RecoveryDeliveryContext {
         );
         drop(admission);
         match recordable {
-            Err(settlement) => settlement,
-            Ok(_) if persisted => unix_journal::Settlement::FrontierPersisted,
+            Err(()) => (),
+            Ok(_) if persisted => (),
             Ok(_) => {
                 tracing::warn!(
                     provider = %self.provider.as_str(),
@@ -575,7 +474,6 @@ impl RecoveryDeliveryContext {
                     range = ?range,
                     "recovery no-anchor delivery: durable anchor write failed"
                 );
-                unix_journal::Settlement::DurableWriteFailed
             }
         }
     }
@@ -584,14 +482,9 @@ impl RecoveryDeliveryContext {
     /// names why it has none. Split out so the refusals stay one readable list
     /// while `record_durable_frontier` holds the admission and the funnel call.
     ///
-    /// The order of the four refusals is the pre-S7 order, unchanged, because the
-    /// journal settlement is which one is reached FIRST.
-    fn resolve_durable_identity(&self) -> Result<((u64, u64), i64), unix_journal::Settlement> {
+    fn resolve_durable_identity(&self) -> Result<((u64, u64), i64), ()> {
         let Some(range) = self.durable_range else {
-            // Unreachable with an open obligation: `begin_recovery_terminal`
-            // refuses the same two range cases this fn does, so nothing was
-            // opened. The variant keeps the exit named all the same.
-            return Err(unix_journal::Settlement::DeliveryNotRecorded);
+            return Err(());
         };
         if range.1 <= range.0 {
             tracing::warn!(
@@ -600,7 +493,7 @@ impl RecoveryDeliveryContext {
                 range = ?range,
                 "recovery no-anchor delivery: refusing to record empty durable range"
             );
-            return Err(unix_journal::Settlement::DeliveryNotRecorded);
+            return Err(());
         }
         let Some(tmux_session_name) = self.tmux_session_name.as_deref() else {
             tracing::warn!(
@@ -608,7 +501,7 @@ impl RecoveryDeliveryContext {
                 channel_id = self.channel_id.get(),
                 "recovery no-anchor delivery: no tmux session name; durable anchor unavailable"
             );
-            return Err(unix_journal::Settlement::NoTmuxSessionName);
+            return Err(());
         };
         let generation_mtime_ns = delivery_record::current_generation_mtime_ns(tmux_session_name);
         if generation_mtime_ns == 0 {
@@ -618,7 +511,7 @@ impl RecoveryDeliveryContext {
                 tmux_session_name,
                 "recovery no-anchor delivery: no current generation marker; durable anchor unavailable"
             );
-            return Err(unix_journal::Settlement::NoGenerationMarker);
+            return Err(());
         }
         if !self.reuse_recorded_anchor && self.expected_gone_anchor.is_none() {
             // Pre-S7 this was the writer-selection `else` arm, producing
@@ -633,7 +526,7 @@ impl RecoveryDeliveryContext {
                 record_channel = self.record_channel_id.get(),
                 "recovery gone-anchor delivery lacks expected durable anchor identity"
             );
-            return Err(unix_journal::Settlement::DurableWriteFailed);
+            return Err(());
         }
         Ok((range, generation_mtime_ns))
     }
@@ -870,18 +763,9 @@ mod tests {
         std::fs::write(path, "1").expect("generation marker");
     }
 
-    /// #5071 T1 S5: the confirmed-delivery funnel now takes the `SharedData` the
-    /// journal's shadow-admission gate reads, plus the entry point that confirmed
-    /// the delivery. A test process has no PG pool, so `begin_recovery_terminal`
-    /// returns `None` and every assertion below observes exactly the durable
-    /// writes it observed before the slice.
+    /// Record a confirmed fallback using isolated shared state.
     fn record_fresh_send_for_test(ctx: &RecoveryDeliveryContext, anchor: MessageId, text: &str) {
-        ctx.record_successful_fresh_send(
-            &make_shared_data_for_tests(),
-            anchor,
-            text,
-            unix_journal::Disposition::NoAnchorFreshSend,
-        );
+        ctx.record_successful_fresh_send(&make_shared_data_for_tests(), anchor, text);
     }
 
     fn inflight_state_path_for_test(
@@ -1474,12 +1358,7 @@ mod tests {
         anchor: MessageId,
         text: &str,
     ) {
-        ctx.record_successful_fresh_send(
-            shared,
-            anchor,
-            text,
-            unix_journal::Disposition::NoAnchorFreshSend,
-        );
+        ctx.record_successful_fresh_send(shared, anchor, text);
     }
 
     /// D4. The funnel records the #4081 delivered-content fingerprint after a

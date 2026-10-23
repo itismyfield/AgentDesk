@@ -1372,57 +1372,6 @@ fn default_prompt_max_bytes_user_derived() -> u64 {
     16 * 1024
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryJournalMode {
-    /// Keep the legacy delivery writer and do not emit delivery-journal rows.
-    #[default]
-    Legacy,
-    /// Emit delivery-journal observations while the legacy writer remains authoritative.
-    Shadow,
-    /// Keep emitting observations, and let explicitly wired readers treat the journal as
-    /// authoritative. Existing delivery writers remain in place until the hot-file handoff.
-    /// This mode is selected by the YAML `runtime.delivery_journal_mode` field only:
-    /// `kv_meta['runtime-config']` and `SettingsService::put_runtime_config` do not read this
-    /// key. A value placed there through the runtime-config API is stored and echoed by that API,
-    /// but the journal consumers ignore it.
-    ///
-    /// Activation is not safe by itself. The fence risk belongs to any transition that exits
-    /// `Legacy`, not to `Authority` alone: a direct `Legacy` to `Authority` transition, or a
-    /// `Legacy` to `Shadow` transition before its admission scope is warmed, can leave an
-    /// in-flight delivery permanently absent. Legacy admits with no observation, then a later
-    /// Authority settle sees `None` and is a no-op. `JournalObserver::submit` also uses bounded
-    /// `try_send`, so a full mailbox drops an observation. Cutover therefore requires Shadow
-    /// warm-up and an in-flight drain/fence; this dormant slice does not provide either one.
-    ///
-    /// `Shadow` to `Authority` prevents that same half-recorded delivery only for deliveries
-    /// actually admitted under `Shadow`. Admission is additionally gated by the cohort and
-    /// internal-channel settings (`cohort_bucket(id) < delivery_journal_cohort_percent.min(100)` unless
-    /// the channel is internal). The shipped defaults are cohort `0` and an empty internal
-    /// channel list, so the admitted scope is empty: no observation is captured, and this
-    /// transition is equivalent to `Legacy` to `Authority` (the reconciler reaches
-    /// `settle_dispatched_unknown`). Cutover requires **the entire target scope to be admitted;
-    /// cohort warm-up complete**, in addition to the drain/fence above.
-    Authority,
-}
-
-impl DeliveryJournalMode {
-    /// Both rollout modes need observations in the journal. `Authority` does not revoke an
-    /// existing writer; that handoff belongs to a later slice.
-    pub const fn records_shadow_observations(self) -> bool {
-        matches!(self, Self::Shadow | Self::Authority)
-    }
-
-    /// Only the explicit authority mode changes a reader's source of truth.
-    pub const fn reads_as_authority(self) -> bool {
-        matches!(self, Self::Authority)
-    }
-}
-
-fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
-    *mode == DeliveryJournalMode::Legacy
-}
-
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum IntakeDeliverySettlementStage {
@@ -1603,10 +1552,6 @@ pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
 /// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
 pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
 
-fn is_zero_u8(value: &u8) -> bool {
-    *value == 0
-}
-
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
     use super::*;
@@ -1629,37 +1574,11 @@ mod runtime_hook_registry_config_tests {
         // direction catches it — the negative assertions below never can.
         // This assertion preserves coverage of the serde-deserialization path.
         let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(absent.delivery_journal_mode, DeliveryJournalMode::Legacy);
-        assert_eq!(absent.delivery_journal_cohort_percent, 0);
         assert_eq!(
             absent.intake_delivery_settlement,
             IntakeDeliverySettlementStage::Off
         );
-        assert!(!absent.delivery_journal_mode.records_shadow_observations());
-        assert!(!absent.delivery_journal_mode.reads_as_authority());
         assert!(absent.is_empty());
-
-        let authority: RuntimeSettingsConfig =
-            serde_yaml::from_str("delivery_journal_mode: authority\n").unwrap();
-        assert_eq!(
-            authority.delivery_journal_mode,
-            DeliveryJournalMode::Authority
-        );
-        assert_eq!(authority.delivery_journal_cohort_percent, 0);
-        assert!(
-            authority
-                .delivery_journal_mode
-                .records_shadow_observations()
-        );
-        assert!(authority.delivery_journal_mode.reads_as_authority());
-        assert!(!authority.is_empty());
-        assert_eq!(
-            serde_yaml::from_str::<RuntimeSettingsConfig>(
-                &serde_yaml::to_string(&authority).unwrap()
-            )
-            .unwrap(),
-            authority
-        );
 
         let ttl_only = RuntimeSettingsConfig {
             tui_hook_buffer_ttl_secs: Some(45),
@@ -3372,3 +3291,7 @@ mod shared_test_env_lock_tests {
 
 #[cfg(test)]
 mod writer_channels_tests;
+
+#[cfg(test)]
+#[path = "config/retired_relay_tests.rs"]
+mod retired_relay_tests;
