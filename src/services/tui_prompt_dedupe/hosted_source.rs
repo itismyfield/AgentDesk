@@ -312,6 +312,32 @@ pub(crate) fn capture_hook(
 #[path = "hosted_source/source_tests.rs"]
 pub(crate) mod tests;
 
+pub(crate) async fn adoption_channel(
+    shared: &Arc<SharedData>,
+    prompt: &super::ObservedTuiPrompt,
+    candidate: Option<ChannelId>,
+) -> Option<ChannelId> {
+    let Some(channel_id) = candidate else {
+        tracing::debug!(
+            provider = %prompt.provider,
+            tmux_session_name = %prompt.tmux_session_name,
+            "skipping SSH-direct TUI prompt notify; no Discord channel mapping"
+        );
+        return None;
+    };
+    if !current_execution_for_adoption(
+        shared,
+        &prompt.provider,
+        channel_id,
+        &prompt.tmux_session_name,
+    )
+    .await
+    {
+        return None;
+    }
+    Some(channel_id)
+}
+
 // New prompt adoption needs a live execution; admitted readers keep their tail.
 pub(crate) async fn current_execution_for_adoption(
     shared: &Arc<SharedData>,
