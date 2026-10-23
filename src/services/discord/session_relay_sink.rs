@@ -64,8 +64,6 @@ pub(in crate::services::discord) mod task_notification_context;
 mod terminal_handoff;
 pub(in crate::services::discord) mod turn_parser;
 use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
-#[cfg(test)]
-use self::idle_jsonl::idle_jsonl_payload_contains_init_event;
 use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
