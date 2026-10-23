@@ -160,8 +160,8 @@ fn in_memory(message: u64) -> Option<InjectionOutcome> {
     disposition::terminal(Some(&ProviderKind::Claude), MessageId::new(message), now)
 }
 
-/// A turn mid-run takes the text under the name Discord shows (nickname, else global name, else
-/// username) and the id: pasted once, marked ⏳, nothing queued or started, recorded for a restart.
+/// A busy pane takes the shown Discord name and text once; the message's hourglass completes
+/// when the channel reads idle, with no extra queued input or provider start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     for (nick, global_name) in [
@@ -415,7 +415,7 @@ async fn parked_at_capture(busy: &Busy, message: u64) -> tokio::task::JoinHandle
 }
 
 /// A vetoed paste hands the message back ahead of input queued meanwhile, also past a failed
-/// first write: marked queued, never ⏳, the checkpoint past it as a queue commit moves it.
+/// first write: its queue marker and checkpoint reflect the durable queue commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg() {
     let busy = busy().await;

@@ -14,7 +14,9 @@ use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use serenity::{ChannelId, MessageId};
 
-use super::{SharedData, queue_reactions, reaction_lifecycle, runtime_store, settings};
+#[cfg(not(test))]
+use super::settings;
+use super::{SharedData, queue_reactions, reaction_lifecycle, runtime_store};
 
 // #4278: descendant module owns orphan-`⏳` defense while retaining access to
 // the reconciler's private target store and persistence helpers.
