@@ -41,6 +41,7 @@ struct LateOs {
     os: Mutex<Option<Arc<dyn ProcessOs>>>,
     exists: Mutex<HashMap<u32, bool>>,
     exists_reads: AtomicUsize,
+    started_at: Mutex<Option<std::time::SystemTime>>,
 }
 
 impl LateOs {
@@ -49,6 +50,7 @@ impl LateOs {
         os.ok_or(RestoreUnverified::ProcessUnreadable)
     }
     fn set(&self, os: FakeOs) {
+        *self.started_at.lock().unwrap() = Some(std::time::SystemTime::now());
         *self.os.lock().unwrap() = Some(Arc::new(os));
     }
 }
@@ -601,4 +603,62 @@ pub(crate) fn native_server_child() -> bool {
         let _ = writeln!(writer, "{response}");
     }
     true
+}
+
+/// Shared scripted OS observations for the gate and the production socket launch adapter.
+struct SharedRigOs(Arc<LateOs>);
+impl ProcessOs for SharedRigOs {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        self.0.exists(pid)
+    }
+    fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
+        self.0.parent(pid)
+    }
+    fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        let mut start = self.0.start(pid)?;
+        start.wall_clock = self
+            .0
+            .started_at
+            .lock()
+            .unwrap()
+            .ok_or(RestoreUnverified::ProcessUnreadable)?;
+        Ok(start)
+    }
+    fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+        self.0.environ(pid)
+    }
+    fn exec_path(&self, pid: u32) -> Option<String> {
+        self.0.exec_path(pid)
+    }
+}
+impl HerdrRig {
+    /// As thread_installer, retaining the production launch/create/evidence adapter over this socket.
+    pub(crate) fn thread_installer_with_launch(
+        &self,
+        node: &str,
+        key: &str,
+        session: &str,
+    ) -> impl Fn() + Send + Sync + 'static {
+        let build = self.registry_builder(node, key, &self.path, session);
+        let (node, key, session, socket, os) = (
+            node.to_owned(),
+            key.to_owned(),
+            session.to_owned(),
+            self.path.clone(),
+            self.os.clone(),
+        );
+        move || {
+            let endpoint = HerdrEndpoint::new(&node, &key, &socket, &session)
+                .unwrap()
+                .with_herdr_home(Path::new("/adk/herdr"))
+                .unwrap();
+            let host = super::SocketHerdrLaunchHost::socket_rig_for_test(
+                endpoint,
+                Box::new(SharedRigOs(os.clone())),
+            );
+            std::mem::forget(herdr_registry::force_for_test(
+                build().with_launch_host(host),
+            ));
+        }
+    }
 }

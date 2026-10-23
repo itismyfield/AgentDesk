@@ -1775,6 +1775,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2154,6 +2155,8 @@ src/
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal.rs
+│   │   │   │   ├── prompt_identity_e2e_tests/
+│   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs

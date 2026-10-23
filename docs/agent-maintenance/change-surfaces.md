@@ -2734,7 +2734,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/standby_relay.rs`
 - `src/services/discord/tmux_watcher.rs`
 - `src/services/discord_config_audit.rs`
-- `src/services/dispatched_sessions.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`

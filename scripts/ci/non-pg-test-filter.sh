@@ -209,6 +209,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
@@ -796,7 +797,24 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
-  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_resent_after_a_relay_without_a_post_is_announced_once
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_primary_send_to_another_waiter_does_not_claim_observer_receipt
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_prompt_without_an_owner_channel_is_announced_once_the_owner_returns
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_refused_announcement_leaves_the_prompt_to_the_idle_scanner
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_created_announcement_is_not_announced_again
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_refused_announcement_is_announced
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_queued_behind_a_timed_out_announcement_is_not_announced_again
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_row_read_during_a_refused_announcement_is_announced_afterwards
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_timed_out_announcement_keeps_the_scanner_row_suppressed
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_aliased_hook_broadcast_twice_is_announced_once
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_keeps_its_distinct_pane_channel
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_http_alias_survives_an_explicit_primary_discard
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::an_unresolved_alias_is_not_a_same_pane_clone
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_without_live_authority_is_unverified_and_posts_nothing
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::input_queued_into_a_running_prompt_does_not_reannounce_its_opening
+  services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::tmux_hook_prompt_registry_miss_still_warns_and_drops
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_injected_new_turn_hook_first_delivers_its_answer

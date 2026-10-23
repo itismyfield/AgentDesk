@@ -240,6 +240,7 @@ src/services/discord/router/message_handler/provider_dispatch_codex_herdr_follow
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_live_end_tests.rs
+src/services/discord/router/message_handler/provider_dispatch_codex_t14_composed_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_start_offset_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
@@ -303,6 +304,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
@@ -674,6 +676,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::http_cancel
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::t14_composed
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::live_end
@@ -746,6 +749,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activatio
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_direct_roundtrip_tests
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
@@ -2303,6 +2307,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::t14_composed::codex_direct_idle_relay_and_followup_keep_the_same_bound_execution_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::a_codex_terminal_left_without_its_newline_is_settled_once_by_its_own_reader_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::a_live_codex_turn_ends_once_only_after_its_provider_is_gone_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
@@ -2605,6 +2610,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_restored_shell_retire_then_next_input_launches_a_new_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
+services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_direct_roundtrip_tests::discord_direct_prompt_and_followup_keep_one_live_execution_source_pg
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e::reconcile_stale_turn_held_release_arms_backstop_and_runs_preserved_q_pg
 services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e::a_registered_new_channel_starts_its_first_catch_up_input_once_pg

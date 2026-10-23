@@ -731,11 +731,11 @@ pub(in crate::services::discord::router) fn final_local(
             .map(|callback| callback(submission))
     })
 }
-async fn seed_ready_row(pool: &sqlx::PgPool, shared: &SharedData) {
+async fn seed_ready_row(pool: &sqlx::PgPool, shared: &SharedData, channel: u64) {
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedExecution, HostedOwner, SourceRef,
     };
-    let channel = discord_mock::CHANNEL_ID.to_string();
+    let channel = channel.to_string();
     let owner = HostedOwner {
         provider: "claude".into(),
         discord_token_hash: shared.token_hash.clone(),
@@ -789,7 +789,7 @@ async fn actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_follo
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    seed_ready_row(&pool, &f.shared).await;
+    seed_ready_row(&pool, &f.shared, discord_mock::CHANNEL_ID).await;
     for id in [8_916_070, 8_916_071] {
         let mut input = submission(id, IntakeOrigin::SlashSkill);
         input
@@ -964,7 +964,7 @@ async fn actual_live_checkpoint_waits_for_second_check_failed_custody_pg() {
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    seed_ready_row(&pool, &f.shared).await;
+    seed_ready_row(&pool, &f.shared, discord_mock::CHANNEL_ID).await;
     let input = submission(8_916_080, IntakeOrigin::LiveMessage);
     assert!(
         matches!(
@@ -1043,7 +1043,9 @@ async fn actual_live_checkpoint_waits_for_second_check_failed_custody_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg() {
     use crate::services::cluster::intake_worker::{self as worker, test_executor};
+    const CHANNEL: u64 = discord_mock::CHANNEL_ID + 302;
     let mut f = Fixture::new("disabled").await;
+    f.state.allow_channel(CHANNEL);
     let _rest = crate::services::discord::shared_state::test_rest::install(f.http.clone());
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -1057,12 +1059,12 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
         .set("isolated-worker-token".into())
         .unwrap();
     registry.register("claude".into(), f.shared.clone()).await;
-    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
         .with_mode(EndpointMode::UserDefault);
-    seed_ready_row(&pool, &f.shared).await;
+    seed_ready_row(&pool, &f.shared, CHANNEL).await;
     let row = crate::db::intake_outbox::owner_fence_pg_tests::seed(
         &pool,
-        &discord_mock::CHANNEL_ID.to_string(),
+        &CHANNEL.to_string(),
         "pending",
         true,
     )
@@ -1095,22 +1097,20 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
                     cache: None,
                     ctx_for_chained_dispatch: None,
                 };
+                let mut ready_request = request(CHANNEL);
+                ready_request.channel_id = ChannelId::new(CHANNEL);
                 assert!(
-                    check(
-                        &deps,
-                        &ProviderKind::Claude,
-                        &request(discord_mock::CHANNEL_ID)
-                    )
-                    .await
-                    .is_none(),
+                    check(&deps, &ProviderKind::Claude, &ready_request)
+                        .await
+                        .is_none(),
                     "worker_policy_flip_preaccept_ready_observation_contract"
                 );
                 hold.record(vec![IntentRef {
                     store: "intake_outbox".into(),
                     id: row.to_string(),
                     provider: "claude".into(),
-                    channel: discord_mock::CHANNEL_ID,
-                    source_message: discord_mock::CHANNEL_ID,
+                    channel: CHANNEL,
+                    source_message: CHANNEL,
                     fifo: 1,
                 }])
                 .await
@@ -1171,7 +1171,7 @@ async fn actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_ro
         );
     }
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox WHERE channel_id=$1")
-        .bind(discord_mock::CHANNEL_ID.to_string())
+        .bind(CHANNEL.to_string())
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1467,7 +1467,7 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
     registry.register("claude".into(), f.shared.clone()).await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    seed_ready_row(&pool, &f.shared).await;
+    seed_ready_row(&pool, &f.shared, discord_mock::CHANNEL_ID).await;
     let row = crate::db::intake_outbox::owner_fence_pg_tests::seed(
         &pool,
         &discord_mock::CHANNEL_ID.to_string(),

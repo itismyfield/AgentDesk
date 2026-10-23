@@ -17,6 +17,24 @@ use crate::services::claude_tui::hook_server::{
 };
 use crate::services::tui_prompt_dedupe as dedupe;
 
+// These views expose fixture evidence without changing the mock transport's production census.
+impl super::discord_mock::DiscordMockState {
+    /// Every minted message, with its final edited body.
+    pub(in crate::services::discord) fn message_snapshot(&self) -> Vec<(u64, String)> {
+        self.messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .map(|(id, (_, text))| (*id, text.clone()))
+            .collect()
+    }
+
+    /// POST bodies include the announcement later edited into an answer.
+    pub(in crate::services::discord) fn post_snapshot(&self) -> Vec<(u64, String)> {
+        self.channel_posts.lock().expect("channel posts").clone()
+    }
+}
+
 const PROMPT: &str = "턴 도중에 입력한 질문";
 const PROMPT_ID: &str = "7d4a7a0e-d052-488b-9a89-d0f3aac426bb";
 const ROW_UUID: &str = "5845e2e0-0000-0000-0000-00000000a001";
@@ -1137,3 +1155,7 @@ async fn bound_live_hook_without_watcher(
     pool.close().await;
     database.drop().await;
 }
+
+#[cfg(unix)]
+#[path = "prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs"]
+mod herdr_direct_roundtrip_tests;
