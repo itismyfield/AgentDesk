@@ -56,7 +56,7 @@ impl Quota {
 
 fn fresh(fetched: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     let age = now.signed_duration_since(fetched);
-    age >= chrono::Duration::zero() && age <= chrono::Duration::seconds(MAX_AGE_SECONDS)
+    (chrono::Duration::zero()..=chrono::Duration::seconds(MAX_AGE_SECONDS)).contains(&age)
 }
 
 fn claude(response: &ClaudeAccountsResponse, now: DateTime<Utc>) -> Option<Quota> {
@@ -131,7 +131,12 @@ fn codex(data: &str, now: DateTime<Utc>) -> Option<Quota> {
 #[derive(Default)]
 struct Cache {
     quotas: BTreeMap<String, (DateTime<Utc>, Quota)>,
-    profiles: BTreeMap<(String, u64), (DateTime<Utc>, String)>,
+    profiles: BTreeMap<(String, u64), Selection>,
+}
+
+struct Selection {
+    at: DateTime<Utc>,
+    profile: String,
 }
 
 static CACHE: LazyLock<RwLock<Cache>> = LazyLock::new(RwLock::default);
@@ -145,7 +150,10 @@ pub(crate) fn record_launch(
     {
         cache.profiles.insert(
             (overlay.provider.as_str().to_string(), channel),
-            (Utc::now(), overlay.profile_id.clone()),
+            Selection {
+                at: Utc::now(),
+                profile: overlay.profile_id.clone(),
+            },
         );
     }
     Ok(overlay)
@@ -174,11 +182,11 @@ fn cached_codex(
     now: DateTime<Utc>,
 ) -> Option<Quota> {
     let cache = cache.try_read().ok()?;
-    let (selected_at, profile) = cache.profiles.get(&("codex".to_string(), channel))?;
-    if *selected_at > started {
+    let selected = cache.profiles.get(&("codex".to_string(), channel))?;
+    if selected.at > started {
         return None;
     }
-    let (fetched, quota) = cache.quotas.get(profile)?;
+    let (fetched, quota) = cache.quotas.get(&selected.profile)?;
     fresh(*fetched, now).then_some(*quota)?.current(now)
 }
 
@@ -194,7 +202,7 @@ pub(crate) fn snapshot(
             if cache
                 .profiles
                 .get(&(provider.to_string(), channel))
-                .is_some_and(|(_, profile)| profile != "default")
+                .is_some_and(|selected| selected.profile != "default")
             {
                 return None;
             }

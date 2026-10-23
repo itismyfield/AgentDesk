@@ -157,7 +157,13 @@ fn cache() -> RwLock<Cache> {
             ("default".into(), (now(), codex(&data(90), now()).unwrap())),
             ("named".into(), (now(), codex(&data(15), now()).unwrap())),
         ]),
-        profiles: BTreeMap::from([(("codex".into(), 42), (now(), "named".into()))]),
+        profiles: BTreeMap::from([(
+            ("codex".into(), 42),
+            Selection {
+                at: now(),
+                profile: "named".into(),
+            },
+        )]),
     })
 }
 
