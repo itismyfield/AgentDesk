@@ -1,5 +1,4 @@
-//! The re-post turn. Off, nothing past the switch runs: no PostgreSQL, probe or sidecar step.
-//! On, a tick advances admitted probes and a turn grants a slot only on fresh absence or approval.
+//! A tick advances admitted probes; a turn grants a slot only on fresh absence or approval.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -15,7 +14,6 @@ use tokio::time::Instant;
 use super::admission::{
     Admitter, AdoptError, ApprovedRejected, Candidate, OriginalGate, PriorBudget, classify,
 };
-use super::config::RepostSwitch;
 use super::dispatch::{self, Admission, DispatchPermit, GuardReason, RepostWriter};
 use super::io::probe::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
 use super::io::probe::matcher::AttributionSnapshot;
@@ -73,7 +71,6 @@ pub(crate) fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
         Admission::AlreadyResolved | Admission::CapReached | Admission::CapUnknown => {
             TurnStep::Done
         }
-        Admission::Parked => TurnStep::Stopped,
         Admission::GuardRejected(GuardReason::LeaseBusy | GuardReason::NoGateway) => TurnStep::Wait,
         Admission::GuardRejected(GuardReason::Writer(_) | GuardReason::Approval(_)) => {
             TurnStep::Stopped
@@ -98,7 +95,6 @@ pub(crate) enum Tick {
 }
 
 pub(crate) struct Runner {
-    switch: RepostSwitch,
     pool: PgPool,
     sender_id: u64,
     run: RunScope,
@@ -106,9 +102,8 @@ pub(crate) struct Runner {
 }
 
 impl Runner {
-    pub(crate) fn new(switch: RepostSwitch, pool: PgPool, sender_id: u64, run: RunScope) -> Self {
+    pub(crate) fn new(pool: PgPool, sender_id: u64, run: RunScope) -> Self {
         Self {
-            switch,
             pool,
             sender_id,
             run,
@@ -116,14 +111,8 @@ impl Runner {
         }
     }
 
-    /// Whether the channel is enabled now; denied channels read nothing else.
-    pub(crate) fn allowed(&mut self, channel: u64) -> bool {
-        self.switch.allowed(channel)
-    }
-
-    fn admitter(&mut self) -> Option<Admitter<'_>> {
-        let (pool, holder) = (&self.pool, self.run.holder.as_str());
-        Admitter::when_on(&mut self.switch, pool, holder, self.sender_id)
+    fn admitter(&self) -> Admitter<'_> {
+        Admitter::new(&self.pool, &self.run.holder, self.sender_id)
     }
 
     /// The channel's recorded receipts by message id; `None` when any cannot be read.
@@ -157,7 +146,7 @@ impl Runner {
     }
 
     /// One pass over the channel's admitted pieces: expired slots settled, probes advanced, found
-    /// messages recorded as receipts. Off returns before PostgreSQL.
+    /// messages recorded as receipts.
     pub(crate) async fn tick(
         &mut self,
         channel: u64,
@@ -165,9 +154,6 @@ impl Runner {
         proof_ids: &[u64],
         settled_at: Instant,
     ) -> Result<Tick, LedgerError> {
-        if !self.allowed(channel) {
-            return Ok(Tick::Off);
-        }
         if !scope_allowed(channel) {
             return Ok(Tick::Off);
         }
@@ -241,22 +227,9 @@ impl Runner {
     pub(crate) async fn try_next_dispatch<W: RepostWriter>(
         &mut self,
         writer: &mut W,
-        membership: OriginalGate,
         intent: DispatchIntent<'_>,
     ) -> Result<Admission<W::Lease>, LedgerError> {
         let asked = Instant::now();
-        let channel = match &intent {
-            DispatchIntent::Auto(evidence) => evidence.scope().key.unit().channel_id,
-            DispatchIntent::OperatorResume { approved, .. } => approved.key.unit().channel_id,
-        };
-        if !self.allowed(channel) {
-            // Off: the recovered admission index decides; an unknown one holds the piece.
-            return Ok(match membership {
-                OriginalGate::Admitted => Admission::Parked,
-                OriginalGate::SendLocal | OriginalGate::SendPgManaged => Admission::LegacyOff,
-                OriginalGate::Unknown => Admission::ObserveOnly,
-            });
-        }
         if !writer.settle_open().await {
             return Ok(Admission::WaitForOpen);
         }
@@ -292,15 +265,7 @@ impl Runner {
                 if let Err(reason) = check.current(&approval_id, &approved) {
                     return Ok(Admission::GuardRejected(GuardReason::Approval(reason)));
                 }
-                if !self.allowed(channel) {
-                    return Ok(Admission::Parked);
-                }
-                let (pool, holder) = (&self.pool, self.run.holder.as_str());
-                let Some(admitter) =
-                    Admitter::when_on(&mut self.switch, pool, holder, self.sender_id)
-                else {
-                    return Ok(Admission::Parked);
-                };
+                let admitter = self.admitter();
                 let row = match admitter.adopt_operator(&approved, prior).await? {
                     AdmitOutcome::Admitted(row) | AdmitOutcome::Existing(row) => row,
                     AdmitOutcome::IdentityConflict(_) => {
@@ -313,9 +278,6 @@ impl Runner {
             }
         };
         // Row and attempt reads yield; current source policy must still permit consuming a slot.
-        if !self.allowed(channel) {
-            return Ok(Admission::Parked);
-        }
         if let Err(reason) = writer.guard() {
             return Ok(Admission::GuardRejected(GuardReason::Writer(reason)));
         }
@@ -354,7 +316,6 @@ pub(crate) trait TurnWriter: RepostWriter + Send {
     fn ledger(&mut self) -> &LedgerState;
     /// Whether a re-post request may still leave; read by every dispatch's wire guard.
     fn set_live(&self, live: bool);
-    fn bind_switch(&self, _effective: Arc<dyn Fn() -> bool + Send + Sync>) {}
 }
 
 pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -362,17 +323,15 @@ pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// The re-post side of one channel's writer, run only from that writer's actor turn, so it never
 /// sends beside the writer's own posts.
 pub(crate) trait RepostHook<W>: Send {
-    /// One turn; off, it returns before PostgreSQL, the sidecar, the transport or Discord.
+    /// One turn, serialized with the channel's original posts.
     fn turn<'a>(&'a mut self, writer: &'a mut W) -> Turned<'a, ()>;
-    /// Whether a fresh original at `serial` may go: off, always, reading nothing; on, never for an
-    /// admitted key, not while admission is unknown, and only once its intent is written.
+    /// A fresh original may go only for an unadmitted key with a durable intent.
     fn original(&mut self, serial: u64, record: PieceRecord) -> Turned<'_, OriginalGate>;
-    /// The channel's shared receipts, read once before its writer starts; off, `Disabled` before
-    /// PostgreSQL. Every wrapper forwards it, so a wrapped turn never reads as off.
+    /// The channel's shared receipts, read once before its writer starts.
     fn receipts(&mut self) -> Turned<'_, ReceiptOverlay>;
 }
 
-/// Builds a channel's re-post transport; asked only once re-post is on.
+/// Builds a channel's re-post transport on its first eligible turn.
 pub(crate) type OpenTransport<T> = Box<dyn FnMut() -> Option<Arc<T>> + Send>;
 
 /// One channel's re-post turn: admits uncertain on originals, probes them and sends at most one
@@ -384,7 +343,7 @@ pub(crate) struct ChannelTurn<T> {
     channel: u64,
     sidecar: PathBuf,
     log: Option<ProvenanceLog>,
-    /// Whether the open sidecar recorded the current on period's activation.
+    /// Whether this runner recorded its activation in the open sidecar.
     activated: bool,
 }
 
@@ -406,7 +365,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         }
     }
 
-    /// The sidecar, opened and activated once per on period. A failed write drops it, so the next
+    /// The sidecar, opened and activated once per runner. A failed write drops it, so the next
     /// open cuts any torn tail before another entry lands.
     fn log(&mut self, frontier: u64) -> Option<&mut ProvenanceLog> {
         if self.log.is_none() {
@@ -427,14 +386,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     }
 
     async fn run<W: TurnWriter>(&mut self, writer: &mut W) {
-        let on = self.runner.allowed(self.channel);
-        writer.set_live(on);
-        if !on {
-            // The next on period is a new activation.
-            self.activated = false;
-            return;
-        }
-        writer.bind_switch(self.runner.switch.live_for(self.channel));
+        writer.set_live(true);
         if !scope_allowed(self.channel) || writer.guard().is_err() || !self.admit(writer).await {
             writer.set_live(false);
             return;
@@ -462,9 +414,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
                 continue;
             }
             let intent = DispatchIntent::Auto(Box::new(evidence));
-            let admitted = self
-                .runner
-                .try_next_dispatch(writer, OriginalGate::Admitted, intent);
+            let admitted = self.runner.try_next_dispatch(writer, intent);
             let Ok(admission) = admitted.await else {
                 return;
             };
@@ -484,11 +434,8 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     }
 
     /// Finishes admissions a crash or an outage left pending, then admits each piece whose latest
-    /// attempt is an uncertain original sent while on.
+    /// attempt is an uncertain original with a durable intent.
     async fn admit<W: TurnWriter>(&mut self, writer: &mut W) -> bool {
-        if !self.runner.allowed(self.channel) {
-            return false;
-        }
         let ledger = writer.ledger();
         let frontier = ledger.next_serial();
         let latest: BTreeMap<u64, PieceRecord> = (0..frontier)
@@ -508,9 +455,10 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         if self.log(frontier).is_none() {
             return false;
         }
-        let (Some(log), Some(admitter)) = (self.log.as_mut(), self.runner.admitter()) else {
+        let Some(log) = self.log.as_mut() else {
             return false;
         };
+        let admitter = self.runner.admitter();
         let backlog = match super::admission::report_backlog(
             log,
             latest.iter().map(|(&serial, record)| (serial, record)),
@@ -562,29 +510,17 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     }
 
     async fn receipt_overlay(&mut self) -> ReceiptOverlay {
-        if !self.runner.allowed(self.channel) {
-            return ReceiptOverlay::Disabled;
-        }
-        let live = self.runner.switch.live_for(self.channel);
         let (pool, sender) = (&self.runner.pool, self.runner.sender_id);
-        ReceiptOverlay::load(pool, self.channel, sender, live).await
+        ReceiptOverlay::load(pool, self.channel, sender).await
     }
 
     async fn original_gate(&mut self, serial: u64, record: PieceRecord) -> OriginalGate {
         let channel = self.channel;
-        if !self.runner.allowed(channel) {
-            return OriginalGate::SendLocal;
-        }
-        let Some(admitter) = self.runner.admitter() else {
-            return OriginalGate::SendLocal;
-        };
+        let admitter = self.runner.admitter();
         let keys = admitter.admitted_keys(channel).await;
         let gate = keys.original(&record.unit_key, record.piece_index);
         if gate != OriginalGate::SendLocal {
             return gate;
-        }
-        if !self.runner.allowed(channel) {
-            return OriginalGate::Unknown;
         }
         if !scope_allowed(channel) || ProvenanceEntry::intent(serial, &record, 0).is_none() {
             return gate;

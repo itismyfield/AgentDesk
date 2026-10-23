@@ -4,13 +4,11 @@ use std::time::Duration;
 
 use chrono::Utc;
 use sqlx::PgPool;
-use tokio::sync::watch;
 
 use super::admission::{
     AdmittedKeys, Admitter, ApprovedRejected, BacklogReason, Candidate, OriginalGate, PriorBudget,
     classify, posted_receipts, report_backlog,
 };
-use super::config::{RepostConfig, RepostSwitch};
 use super::identity::{PieceKey, marker, piece_of};
 use super::io::probe::evidence::EvidenceScope;
 use super::io::probe::matcher::{
@@ -26,7 +24,6 @@ use super::o_piece_delivery::{
 use super::provenance::{ProvenanceEntry, ProvenanceLog};
 use super::send::RepostIds;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::store::ledger::{
     LedgerEntry, PieceDisposition, PieceOutcome, PieceRecord,
@@ -57,21 +54,6 @@ fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> Pie
         prepared_at: Utc::now(),
         outcome,
     }
-}
-
-pub(super) fn switch(enabled: bool) -> RepostSwitch {
-    switch_for(enabled, CHANNEL)
-}
-
-pub(super) fn switch_for(enabled: bool, channel: u64) -> RepostSwitch {
-    let boot = TuiOConfig {
-        repost: RepostConfig {
-            enabled,
-            channels: [channel].into_iter().collect(),
-        },
-        ..TuiOConfig::default()
-    };
-    RepostSwitch::new(Some(&boot), watch::channel(None).1)
 }
 
 pub(super) fn sidecar(dir: &tempfile::TempDir) -> ProvenanceLog {
@@ -304,15 +286,6 @@ fn a_torn_sidecar_tail_is_cut_and_any_other_damage_refuses_the_sidecar() {
 }
 
 #[tokio::test]
-async fn with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar() {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
-        .unwrap();
-    assert!(Admitter::when_on(&mut switch(false), &pool, "node-a", BOT).is_none());
-    assert!(Admitter::when_on(&mut switch(true), &pool, "node-a", BOT).is_some());
-}
-
-#[tokio::test]
 async fn an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_slot_zero_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -323,8 +296,7 @@ async fn an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_sl
         (4, record("committed", "y", None)),
     ];
     sent_while_on(&mut log, 3, &[(3, &ledger[0].1), (4, &ledger[1].1)]);
-    let mut on = switch(true);
-    let admitter = Admitter::when_on(&mut on, &pool, "node-a", BOT).unwrap();
+    let admitter = Admitter::new(&pool, "node-a", BOT);
     // The crash cut serial 3 after its pending entry and serial 4 after its PostgreSQL commit.
     let other = tempfile::tempdir().unwrap();
     let mut elsewhere = sidecar(&other);
@@ -347,7 +319,7 @@ async fn an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_sl
         .connect_lazy(&db.database_url)
         .unwrap();
     down.close().await;
-    let outage = Admitter::when_on(&mut on, &down, "node-a", BOT).unwrap();
+    let outage = Admitter::new(&down, "node-a", BOT);
     let failed = outage.resume_pending(&mut log, record).await;
     assert!(
         failed.iter().all(|(_, result)| result.is_err()),
@@ -392,8 +364,7 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
     let mut log = sidecar(&dir);
     let sent = record("t10", "the piece", Some(PieceOutcome::NotFound));
     sent_while_on(&mut log, 3, &[(3, &sent)]);
-    let mut on = switch(true);
-    let holder_a = Admitter::when_on(&mut on, &pool, "node-a", BOT).unwrap();
+    let holder_a = Admitter::new(&pool, "node-a", BOT);
     let Candidate::Eligible(original) = classify(3, &sent, log.state()) else {
         panic!("an on original");
     };
@@ -402,7 +373,7 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
     assert_eq!(send_uncertain(&pool, &key, Intent::AutoReconfirm).await, 1);
 
     // Holder B re-derives the piece under its own serial, as after a fork or a renumbered ledger.
-    let holder_b = Admitter::when_on(&mut on, &pool, "node-b", BOT).unwrap();
+    let holder_b = Admitter::new(&pool, "node-b", BOT);
     let index = holder_b.admitted_keys(CHANNEL).await;
     assert_eq!(index.original(&sent.unit_key, 0), OriginalGate::Admitted);
     assert_eq!(index.original(&sent.unit_key, 1), OriginalGate::SendLocal);
@@ -441,7 +412,7 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
         .connect_lazy(&db.database_url)
         .unwrap();
     down.close().await;
-    let unread = Admitter::when_on(&mut on, &down, "node-b", BOT).unwrap();
+    let unread = Admitter::new(&down, "node-b", BOT);
     let index = unread.admitted_keys(CHANNEL).await;
     assert!(matches!(index, AdmittedKeys::Unreadable(_)));
     assert_eq!(index.original(&sent.unit_key, 0), OriginalGate::Unknown);
@@ -457,8 +428,7 @@ async fn a_local_posted_of_an_admitted_piece_becomes_its_receipt_before_any_furt
     let mut log = sidecar(&dir);
     let sent = record("t08", "piece", Some(PieceOutcome::NotFound));
     sent_while_on(&mut log, 3, &[(3, &sent)]);
-    let mut on = switch(true);
-    let admitter = Admitter::when_on(&mut on, &pool, "node-a", BOT).unwrap();
+    let admitter = Admitter::new(&pool, "node-a", BOT);
     let Candidate::Eligible(original) = classify(3, &sent, log.state()) else {
         panic!("an on original");
     };
@@ -481,7 +451,7 @@ async fn a_local_posted_of_an_admitted_piece_becomes_its_receipt_before_any_furt
         .connect_lazy(&db.database_url)
         .unwrap();
     down.close().await;
-    let outage = Admitter::when_on(&mut on, &down, "node-a", BOT).unwrap();
+    let outage = Admitter::new(&down, "node-a", BOT);
     assert!(outage.promote_posted(&key, 61).await.is_err());
 
     let reposted = record("t08", "piece", Some(PieceOutcome::Posted(61)));
@@ -502,8 +472,7 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
     let pool = db.connect_and_migrate().await;
     let dir = tempfile::tempdir().unwrap();
     let mut log = sidecar(&dir);
-    let mut on = switch(true);
-    let admitter = Admitter::when_on(&mut on, &pool, "node-a", BOT).unwrap();
+    let admitter = Admitter::new(&pool, "node-a", BOT);
     let approved = |native_key: &str| ApprovedRejected {
         rejected_serial: 2,
         key: PieceKey::new(unit(native_key, UnitKind::Body), 0).unwrap(),
@@ -590,8 +559,7 @@ pub(super) async fn admit_on(
         .map(|(serial, record)| (*serial, record))
         .collect();
     sent_while_on(log, 3, &sent);
-    let mut on = switch(true);
-    let admitter = Admitter::when_on(&mut on, pool, "node-a", BOT).unwrap();
+    let admitter = Admitter::new(pool, "node-a", BOT);
     let mut keys = Vec::new();
     for (serial, record) in &records {
         let Candidate::Eligible(original) = classify(*serial, record, log.state()) else {

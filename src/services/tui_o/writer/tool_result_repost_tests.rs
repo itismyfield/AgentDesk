@@ -15,15 +15,13 @@ async fn shared_tool_result_without_local_history_is_excluded_before_repost_pg()
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut log = ProvenanceLog::open(&dir.path().join("s.jsonl")).unwrap();
-    let mut on = switch(true);
     let original = OriginalAttempt {
         serial: 3,
         key: key.clone(),
         payload: "private tool traceback".into(),
         anchor: 40,
     };
-    Admitter::when_on(&mut on, &pool, "node-a", BOT)
-        .unwrap()
+    Admitter::new(&pool, "node-a", BOT)
         .adopt_uncertain(&mut log, &original)
         .await
         .unwrap();
@@ -32,13 +30,10 @@ async fn shared_tool_result_without_local_history_is_excluded_before_repost_pg()
     harness.gate.acquired();
     let mut writer = harness.writer();
     writer.set_live(true);
-    writer.bind_switch(on.live_for(CHANNEL));
-    let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
+    let mut runner = Runner::new(pool.clone(), BOT, run_scope());
     let intent = evidence(&pool, &key).await;
-    let Admission::Granted { permit, lease } = runner
-        .try_next_dispatch(&mut writer, OriginalGate::Admitted, intent)
-        .await
-        .unwrap()
+    let Admission::Granted { permit, lease } =
+        runner.try_next_dispatch(&mut writer, intent).await.unwrap()
     else {
         panic!("old shared receipt reaches the final writer gate");
     };
