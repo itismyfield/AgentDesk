@@ -84,6 +84,7 @@ impl Drop for LiveSupervisor {
     }
 }
 
+#[cfg(unix)]
 pub(in crate::services::discord) async fn injected_idle_tick(
     shared: Arc<SharedData>,
     channel: u64,
