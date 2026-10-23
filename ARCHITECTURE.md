@@ -3142,6 +3142,8 @@ src/
 │   │   │   └── pane.rs
 │   │   ├── human_frame/
 │   │   │   ├── history/
+│   │   │   │   ├── compat.rs
+│   │   │   │   ├── compat_tests.rs
 │   │   │   │   ├── screen.rs
 │   │   │   │   └── screen_tests.rs
 │   │   │   └── history.rs
@@ -3524,16 +3526,21 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── hydrate_corrupt_queue_tests.rs
 │   │   │   │   └── restored_merge_tests.rs
-│   │   │   └── held_settle.rs
+│   │   │   ├── held_settle.rs
+│   │   │   └── restore_snapshot.rs
 │   │   ├── mailbox_unreachable_tests/
 │   │   │   └── health_barrier_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
+│   │   │   ├── compat.rs
+│   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs
 │   │   │   ├── mend_tests.rs
-│   │   │   └── prefix.rs
+│   │   │   ├── prefix.rs
+│   │   │   ├── snapshot.rs
+│   │   │   └── v2_types.rs
 │   │   ├── registry_purge/
 │   │   │   ├── closed_gate_tests.rs
 │   │   │   └── current_entry_tests.rs
