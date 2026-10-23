@@ -290,7 +290,16 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
         5,
         "T14 exactly two ADK paste/Enter pairs plus one launch command"
     );
-    server.assert_input_bytes(DIRECT);
+    let message = crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::user_message(
+        first, FIRST,
+    );
+    let expected = [FIRST, FOLLOWUP].map(|prompt| {
+        format!(
+            "[User: {} (ID: {})] {prompt}",
+            message.author.name, message.author.id
+        )
+    });
+    server.assert_input_bytes([&expected[0], DIRECT, &expected[1]]);
     assert_eq!(
         h.mock
             .post_snapshot()

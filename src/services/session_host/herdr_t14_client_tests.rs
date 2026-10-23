@@ -899,7 +899,7 @@ impl RealServer {
         requests
     }
 
-    pub(crate) fn assert_input_bytes(&self, direct: &str) {
+    pub(crate) fn assert_input_bytes(&self, expected: [&str; 3]) {
         let inputs = self.inputs();
         assert_eq!(inputs.len(), 3, "T14 three actual provider inputs");
         assert!(
@@ -915,11 +915,12 @@ impl RealServer {
                 .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
                 .collect();
             assert_eq!(raw.last(), Some(&b'\r'), "T14 actual input ends in Enter");
-            if index == 1 {
+            if index == 1 || self.provider == "codex" {
+                // Codex's single-line submit uses Literal; Claude explicitly uses PasteBuffer.
                 assert_eq!(
                     raw,
-                    format!("{direct}\r").as_bytes(),
-                    "T14 native PTY input is the direct prompt and Enter only"
+                    format!("{}\r", expected[index]).as_bytes(),
+                    "T14 literal input is the exact prompt and Enter only"
                 );
             } else {
                 for marker in [b"\x1b[200~".as_slice(), b"\x1b[201~".as_slice()] {
@@ -931,7 +932,10 @@ impl RealServer {
                         "T14 each Discord input is one bracketed paste then Enter"
                     );
                 }
-                assert!(raw.starts_with(b"\x1b[200~") && raw.ends_with(b"\x1b[201~\r"));
+                assert_eq!(
+                    raw,
+                    format!("\x1b[200~{}\x1b[201~\r", expected[index]).as_bytes()
+                );
             }
         }
         self.ledger

@@ -370,7 +370,12 @@ async fn scenario(server: &mut RealServer, home: &Path) {
         5,
         "T14 exactly two ADK paste/Enter pairs plus one launch command"
     );
-    server.assert_input_bytes(DIRECT_ACTUAL);
+    let expected = [
+        expected_input(1, FIRST_ACTUAL),
+        DIRECT_ACTUAL.to_owned(),
+        expected_input(3, FOLLOWUP_ACTUAL),
+    ];
+    server.assert_input_bytes(expected.each_ref().map(String::as_str));
     let inputs = server.inputs();
     assert_eq!(
         inputs.len(),
