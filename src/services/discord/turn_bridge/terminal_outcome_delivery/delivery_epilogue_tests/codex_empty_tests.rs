@@ -16,7 +16,7 @@ use std::{io::Write, sync::mpsc, time::Duration};
 const START: u64 = 160_325;
 const END: u64 = 169_583;
 const PROMPT: &str = "managed empty probe";
-const FIXTURE: &str = include_str!("fixtures/codex_empty_turn.jsonl");
+const FIXTURE: &str = include_str!("../../../../../../tests/fixtures/codex_empty_turn.jsonl");
 
 fn records() -> Vec<Value> {
     let mut records: Vec<Value> = FIXTURE
