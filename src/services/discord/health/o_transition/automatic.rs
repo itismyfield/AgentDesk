@@ -12,8 +12,6 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind, resolve_session_row_pg,
 };
 use crate::services::discord::SharedData;
-use crate::services::session_host::{HostKind, HostLiveness, HostSessionRef, host_for};
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 use crate::services::tui_o::store::spool::ExecutionEnd;
 use crate::services::tui_o::writer::host::{Readiness, process_readiness};
 use crate::services::tui_o::writer::transition_port::{
@@ -150,13 +148,7 @@ async fn channel_sweep(registry: &HealthRegistry, ready: &Readiness, channel: u6
 
 async fn ended(pane: String) -> bool {
     tokio::task::spawn_blocking(move || {
-        // Unknown historical hosts are retained; a Herdr logical name is never a tmux pane.
-        let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
-            read_host_kind_marker(&pane)
-        else {
-            return false;
-        };
-        host_for(kind).liveness(HostSessionRef { kind, name: &pane }) == HostLiveness::DeadOrAbsent
+        crate::services::discord::host_liveness::historical_execution_ended(&pane)
     })
     .await
     .unwrap_or(false)
