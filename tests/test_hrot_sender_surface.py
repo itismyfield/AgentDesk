@@ -11,6 +11,7 @@ spec.loader.exec_module(guard)
 
 OTHER = "src/services/discord/other.rs"
 ACTOR = "src/services/tui_o/writer/actor/transition.rs"
+AUTOMATIC = "src/services/discord/health/o_transition/automatic.rs"
 
 
 class SenderSurfaceTests(unittest.TestCase):
@@ -44,18 +45,35 @@ class SenderSurfaceTests(unittest.TestCase):
             with self.subTest(text=text[-60:]):
                 self.assertTrue(self.with_source(path, text))
 
-    def test_route_second_send_is_red(self):
+    def test_retired_route_sender_is_red(self):
         text = "\nasync fn f(p: P) { p.request(o, c).await; }\n"
-        self.assertTrue(self.with_source(guard.ROUTE, text))
+        self.assertTrue(self.with_source("src/server/routes/o_transition.rs", text))
 
-    def test_apply_is_built_only_in_the_route(self):
+    def test_apply_is_built_only_in_automatic(self):
         built = "\nfn f(r: R, d: D) -> Operation { Operation::Apply(make(r), d) }\n"
-        self.assertEqual(self.with_source(guard.ROUTE, built), [])
-        for path in (ACTOR, OTHER):
+        self.assertEqual(self.with_source(AUTOMATIC, built), [])
+        for path in (ACTOR, OTHER, "src/server/routes/o_transition.rs"):
             with self.subTest(path=path):
                 self.assertTrue(self.with_source(path, built))
         arm = "\nfn f(o: Operation) { match o { Operation::Apply(r, (d)) => (), _ => () } }\n"
         self.assertEqual(self.with_source(ACTOR, arm), [])
+
+    def test_automatic_apply_is_built_only_in_automatic(self):
+        built = "\nfn f(r: R, d: D, i: I) -> Operation { Operation::AutomaticApply(r, d, i) }\n"
+        self.assertEqual(self.with_source(AUTOMATIC, built), [])
+        self.assertTrue(self.with_source(ACTOR, built))
+        self.assertTrue(self.with_source(OTHER, built))
+
+    def test_automatic_sweep_may_send_and_consume_its_own_reply(self):
+        sent = ("\nuse crate::services::tui_o::writer::transition_port::Operation;\n"
+                "async fn f(p: P, r: R) { let q = p.request(o, c).await; "
+                "r.with_transition_reply(1, &p, q, |_| ()); }\n")
+        self.assertEqual(self.with_source(AUTOMATIC, sent), [])
+
+    def test_missing_automatic_sweep_is_red(self):
+        sources = dict(self.sources)
+        sources.pop(AUTOMATIC, None)
+        self.assertTrue(guard.errors(sources))
 
     def test_test_gated_and_comment_mentions_pass(self):
         gated = ("\n#[cfg(test)]\nfn f(p: P) { p.request(Operation::Inspect(r), c); }\n"

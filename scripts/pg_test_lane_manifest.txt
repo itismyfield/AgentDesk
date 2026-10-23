@@ -3084,7 +3084,7 @@ services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::repost_turn::scoped::scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg
 services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg
-services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
