@@ -28,11 +28,11 @@ pub(crate) trait RepostWriter {
     type Lease: Send + 'static;
     /// Settles an open Prepared of the channel; `false` while one is still open.
     fn settle_open(&mut self) -> impl Future<Output = bool> + Send;
-    /// Writer stop, violation, exclusion, delivery_allowed, s3act availability, switch, drain.
+    /// Writer stop, violation, exclusion, delivery_allowed, s3act availability and drain.
     fn guard(&self) -> Result<(), String>;
     fn try_lease(&self) -> Option<Self::Lease>;
     fn gate(&self) -> Arc<OwnershipGate>;
-    /// Whether switch, holder and run still let a request leave; read without the gate lock.
+    /// Whether holder and run still let a request leave; read without the gate lock.
     fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync>;
     /// The shared POST count belongs to the request, including its retry waits and timeout.
     fn start_request(&self) -> Box<dyn Send> {
@@ -67,8 +67,6 @@ pub(crate) enum Admission<L> {
     AlreadyResolved,
     CapReached,
     CapUnknown,
-    /// Admitted while the switch is off: no send, budget kept.
-    Parked,
     GuardRejected(GuardReason),
 }
 
@@ -263,6 +261,26 @@ impl Started {
                 method: ReceiptMethod::PostResponse,
             };
             o_piece_delivery::record_receipt(pool, &receipt).await?;
+        }
+        if let DispatchEnd::Sent(report) = &end {
+            let (outcome, message_id) = match &report.outcome {
+                WireOutcome::Created(created) => ("created", Some(created.id)),
+                WireOutcome::Refused(_) => ("refused", None),
+                WireOutcome::Throttled => ("throttled", None),
+                WireOutcome::Uncertain(_) => ("uncertain", None),
+                WireOutcome::Unsent(_) => ("unsent", None),
+                WireOutcome::TimedOut => ("timed_out", None),
+            };
+            tracing::info!(
+                channel = self.grant.key().unit().channel_id,
+                key = ?self.grant.key(),
+                slot = self.grant.slot(),
+                wire = report.wire,
+                counted = report.counted,
+                outcome,
+                message_id,
+                "[tui_o] re-post dispatch settled"
+            );
         }
         Ok(end)
     }

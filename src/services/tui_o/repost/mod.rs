@@ -1,8 +1,7 @@
 //! Re-posting a piece whose first post went unconfirmed and is later found absent, within a fixed
-//! per-piece budget. Dormant: nothing here runs unless `tui_o.repost.enabled` is set and wired.
+//! per-piece budget.
 
 pub(crate) mod admission;
-pub(crate) mod config;
 pub(crate) mod dispatch;
 pub(crate) mod identity;
 pub(crate) mod projection;
@@ -12,11 +11,11 @@ pub(crate) mod runner;
 mod runner_tests;
 pub(crate) mod send;
 
-// Discord side of `send`, declared here so it stays dormant until the writer wires it in.
+// Discord side of `send`, sharing the writer's transport.
 #[path = "../../discord/outbound/o_writer_repost_io.rs"]
 pub(crate) mod io;
 
-// The shared PostgreSQL budget, declared here for the same reason.
+// The shared PostgreSQL budget.
 #[cfg(test)]
 mod admission_tests;
 #[path = "../../../db/o_piece_attempts.rs"]
