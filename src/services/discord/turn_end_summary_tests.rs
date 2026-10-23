@@ -136,6 +136,62 @@ fn summary(channel: u64, user: u64, nonce: &str) -> LiveSummary {
     )
 }
 
+#[tokio::test]
+async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query() {
+    use futures::FutureExt;
+    let _isolation = Isolation::new();
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let channel = 7_271_002;
+    let mut state = row(channel, 1, "quota-boundary");
+    state.started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let overlay =
+        super::super::org_schema::spawn_auth_overlay(ProviderKind::Codex, Some(channel)).unwrap();
+    let now = chrono::Utc::now();
+    let data = serde_json::json!({"buckets":[
+        {"name":"5h","used":15,"limit":100,"reset":now.timestamp()+18000},
+        {"name":"7d","used":38,"limit":100,"reset":now.timestamp()+604800}
+    ]})
+    .to_string();
+    quota::publish("codex", &overlay.profile_id, &data, now.timestamp());
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            quota::publish("codex", &self.0, "{}", chrono::Utc::now().timestamp());
+        }
+    }
+    let _cleanup = Cleanup(overlay.profile_id);
+    let summary = LiveSummary::bridge(
+        ChannelId::new(channel),
+        &state,
+        0,
+        Outcome::Completed,
+        Some(1000),
+    );
+    let gateway = Gateway::default();
+    post_live(&gateway, &ProviderKind::Codex, summary).await;
+    let posts = gateway.posts();
+    assert_eq!(posts.len(), 1);
+    assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 15% ("), "{posts:?}");
+    assert!(posts[0].contains(" · 7d 38% ("), "{posts:?}");
+    let mut contended_state = row(channel, 2, "quota-contended");
+    contended_state.started_at = state.started_at.clone();
+    let summary = LiveSummary::bridge(
+        ChannelId::new(channel),
+        &contended_state,
+        0,
+        Outcome::Completed,
+        Some(1000),
+    );
+    let delivered = quota::tests::with_locked_quota_cache(|| {
+        post_live(&gateway, &ProviderKind::Codex, summary).now_or_never()
+    });
+    assert!(
+        delivered.is_some(),
+        "Legacy summary waited for the quota writer"
+    );
+    assert_eq!(gateway.posts()[1], "-# ⏱️ 1초");
+}
+
 #[test]
 fn latch_retains_pending_attempts_and_bounds_finished_entries_by_ttl_and_capacity() {
     let mut latch = Latch::default();
