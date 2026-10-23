@@ -38,6 +38,14 @@ fn discord_direct_prompt_and_followup_keep_one_live_execution_source_pg() {
     if !composed_child(exact, CHANNEL_ID) {
         return;
     }
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish(),
+    )
+    .unwrap();
     let rig = Arc::new(HerdrRig::start());
     let mut config: crate::config::Config = serde_json::from_value(json!({
         "server":{}, "cluster":{"instance_id":NODE},
@@ -511,7 +519,28 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     let first = recent_message_id();
     h.seed_channel_history(&[(first, FIRST, false)]);
     h.run_catch_up().await;
-    assert!(kick_off(&h).await, "T14 the first Discord input starts");
+    let before_kickoff = h.mailbox().await;
+    eprintln!(
+        "T14_KICKOFF_BEFORE {}",
+        json!({
+            "queue_len":before_kickoff.intervention_queue.len(),
+            "active":format!("{:?}", before_kickoff.active_user_message_id),
+            "checkpoint":h.checkpoint(), "history_queries":format!("{:?}", h.history_queries()),
+            "requests":rig.requests(), "unhandled":h.unhandled_requests(),
+        })
+    );
+    let started = kick_off(&h).await;
+    let after_kickoff = h.mailbox().await;
+    assert!(
+        started,
+        "T14 the first Discord input starts: queue_before={} queue_after={} active={:?} checkpoint={:?} requests={:?} unhandled={:?}",
+        before_kickoff.intervention_queue.len(),
+        after_kickoff.intervention_queue.len(),
+        after_kickoff.active_user_message_id,
+        h.checkpoint(),
+        rig.requests(),
+        h.unhandled_requests()
+    );
     assert!(
         wait_until(TIMEOUT, || {
             let (pool, token) = (pool.clone(), h.shared.token_hash.clone());

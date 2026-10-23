@@ -71,7 +71,51 @@ fn codex_direct_idle_relay_and_followup_keep_the_same_bound_execution_pg() {
     if !isolated() {
         return;
     }
-    let fx = Fixture::admitted("t14-composed");
+    let mut fx = Fixture::admitted("t14-composed");
+    // The direct observer rebuilds the owner from this process's actual boot state.
+    fx.owner.runtime_root = crate::config::runtime_root()
+        .expect("the fixture owns a runtime root")
+        .display()
+        .to_string();
+    let config: crate::config::Config = serde_json::from_value(json!({
+        "server": {}, "cluster": {"instance_id": NODE},
+        "runtime": {"herdr_turn_enabled": true},
+        "agents": [{"id": "t14", "name": "T14", "channels": {
+            "codex": {"id": CHANNEL.to_string(), "runtime": "tui"}
+        }}],
+        "session_hosts": {"herdr": {
+            "endpoints": {"mini": {"execution_node": NODE, "socket_path": fx.rig.socket(),
+                "herdr_home": "/adk/herdr", "herdr_session": SESSION}},
+            "channels": {CHANNEL.to_string(): KEY}
+        }}
+    }))
+    .unwrap();
+    crate::config::session_hosts::install(&config).unwrap();
+    let expected = crate::config::session_hosts::BootSessionHosts::from_config(&config).unwrap();
+    assert!(
+        crate::config::session_hosts::with_boot(|boot| boot == Some(&expected)),
+        "T14 direct admission uses this fixture's actual boot mapping"
+    );
+    // A synthetic claim uses the real namespaced key, independent of the fake node name.
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        TOKEN,
+        &ProviderKind::Codex,
+        fx.logical(),
+    );
+    let previous_key = format!("codex/{TOKEN}/{NODE}:{}", fx.logical());
+    let changed = fx.rt.block_on(async {
+        sqlx::query("UPDATE sessions SET session_key = $1 WHERE session_key = $2")
+            .bind(&session_key)
+            .bind(&previous_key)
+            .execute(&fx.pool)
+            .await
+            .unwrap()
+    });
+    assert_eq!(
+        changed.rows_affected(),
+        1,
+        "the existing fixture row owns the real session key"
+    );
     let _database: &crate::db::auto_queue::test_support::TestPostgresDb = fx
         .db
         .as_ref()
