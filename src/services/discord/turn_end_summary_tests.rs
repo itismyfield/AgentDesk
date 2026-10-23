@@ -138,6 +138,7 @@ fn summary(channel: u64, user: u64, nonce: &str) -> LiveSummary {
 
 #[tokio::test]
 async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query() {
+    use futures::FutureExt;
     let _isolation = Isolation::new();
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = 7_271_002;
@@ -173,6 +174,22 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
     assert_eq!(posts.len(), 1);
     assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 15% ("), "{posts:?}");
     assert!(posts[0].contains(" · 7d 38% ("), "{posts:?}");
+    let state = row(channel, 2, "quota-contended");
+    let summary = LiveSummary::bridge(
+        ChannelId::new(channel),
+        &state,
+        0,
+        Outcome::Completed,
+        Some(1000),
+    );
+    let delivered = quota::tests::with_locked_quota_cache(|| {
+        post_live(&gateway, &ProviderKind::Codex, summary).now_or_never()
+    });
+    assert!(
+        delivered.is_some(),
+        "Legacy summary waited for the quota writer"
+    );
+    assert_eq!(gateway.posts()[1], "-# ⏱️ 1초");
 }
 
 #[test]

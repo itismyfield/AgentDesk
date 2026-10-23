@@ -215,4 +215,4 @@ pub(crate) fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 #[path = "quota_tests.rs"]
-mod tests;
+pub(crate) mod tests;

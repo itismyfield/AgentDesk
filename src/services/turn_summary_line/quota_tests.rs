@@ -2,6 +2,11 @@ use super::*;
 use crate::services::turn_summary_line::{Outcome, render};
 use serde_json::json;
 
+pub(crate) fn with_locked_quota_cache<T>(run: impl FnOnce() -> T) -> T {
+    let _guard = CACHE.write().unwrap();
+    run()
+}
+
 fn now() -> DateTime<Utc> {
     "2026-10-23T00:00:00Z".parse().unwrap()
 }
