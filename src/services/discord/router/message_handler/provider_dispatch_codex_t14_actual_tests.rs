@@ -256,6 +256,12 @@ async fn scenario(server: &mut RealServer, home: &Path) {
     assert!(options.is_some());
     let pane = bound.location.as_ref().unwrap().pane_id.clone();
     server.assert_single_execution(&pane, pid);
+    let adk_before_direct = server.input_requests();
+    assert_eq!(
+        adk_before_direct.len(),
+        3,
+        "T14 first Discord input uses one paste/Enter pair after bootstrap"
+    );
     let mut client = server.attach(&pane);
     let mut observed = dedupe::subscribe_observed_prompts();
     assert!(
@@ -330,6 +336,11 @@ async fn scenario(server: &mut RealServer, home: &Path) {
         "the real hook and its replay announce direct input once"
     );
     assert_eq!(current_record(&pool, &owner).await.unwrap(), bound);
+    assert_eq!(
+        server.input_requests(),
+        adk_before_direct,
+        "T14 native direct stage adds zero ADK API inputs"
+    );
     assert!(client.detach(), "the native client detaches normally");
     server.assert_single_execution(&pane, pid);
     let later_id = first_id + 1;
@@ -349,6 +360,12 @@ async fn scenario(server: &mut RealServer, home: &Path) {
         options
     );
     server.assert_single_execution(&pane, pid);
+    assert_eq!(
+        server.input_requests().len(),
+        5,
+        "T14 exactly two ADK paste/Enter pairs plus one launch command"
+    );
+    server.assert_input_bytes(DIRECT_ACTUAL);
     let inputs = server.inputs();
     assert_eq!(
         inputs.len(),

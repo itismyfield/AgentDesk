@@ -210,6 +210,12 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
     assert_eq!(Path::new(&binding.output_path), path);
     let pin =
         dedupe::hosted_source::capture(PROVIDER_KEY, &logical, CHANNEL_ID, &path, None).unwrap();
+    let adk_before_direct = server.input_requests();
+    assert_eq!(
+        adk_before_direct.len(),
+        3,
+        "T14 first Discord input uses one paste/Enter pair after bootstrap"
+    );
     let relayed = observe_hooks(&h, subscribe_hook_events(), None);
     let mut client = server.attach(&pane);
     client.send_prompt(DIRECT);
@@ -229,10 +235,13 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
         "t14_actual_claude_client_relay_once_contract"
     );
     wait_for_relays(&relayed, 1).await;
-    assert!(
+    let direct_claim =
         crate::services::discord::inflight::load_inflight_state_read_only(&provider, CHANNEL_ID)
-            .is_some(),
-        "T14 actual client input creates a synthetic lifecycle before its response"
+            .expect("T14 actual client input creates a synthetic lifecycle before its response");
+    assert_eq!(
+        direct_claim.hosted_execution_nonce.as_deref(),
+        Some(pin.execution_nonce.as_str()),
+        "T14 direct synthetic lifecycle belongs to the same actual execution"
     );
     server.release_answer(2);
     settled(&h, &logical, "actual direct human turn", ANSWERS[1]).await;
@@ -242,6 +251,20 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
     assert_eq!(
         dedupe::hosted_source::capture(PROVIDER_KEY, &logical, CHANNEL_ID, &path, None),
         Some(pin.clone())
+    );
+    assert_eq!(
+        server.input_requests(),
+        adk_before_direct,
+        "T14 native direct stage adds zero ADK API inputs"
+    );
+    assert_eq!(
+        h.mock
+            .post_snapshot()
+            .iter()
+            .filter(|(_, body)| body.contains(DIRECT))
+            .count(),
+        1,
+        "T14 actual direct input notice is posted once even after its replay"
     );
     h.deliver_user_message(first + 1, FOLLOWUP).await.unwrap();
     input(server, 3, FOLLOWUP).await;
@@ -262,6 +285,21 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
         "T14 native detach exits without ending the provider"
     );
     server.assert_single_execution(&pane, provider_pid);
+    assert_eq!(
+        server.input_requests().len(),
+        5,
+        "T14 exactly two ADK paste/Enter pairs plus one launch command"
+    );
+    server.assert_input_bytes(DIRECT);
+    assert_eq!(
+        h.mock
+            .post_snapshot()
+            .iter()
+            .filter(|(_, body)| body.contains(DIRECT))
+            .count(),
+        1,
+        "T14 direct notice remains exactly one after the Discord followup"
+    );
     assert_eq!(
         server.inputs().len(),
         3,

@@ -819,6 +819,107 @@ impl RealServer {
         result["snapshot"].clone()
     }
 
+    /// Counts real API mutations; native terminal bytes never use these API methods.
+    pub(crate) fn input_requests(&self) -> Vec<String> {
+        let server_log = self.home.join("xdg/herdr/herdr-server.log");
+        let log = std::fs::read_to_string(&server_log).unwrap();
+        let fields = regex::Regex::new(
+            r#"event="api\.request\.(start|complete)".* outcome="([^"]+)" request_id="([^"]+)" method="([^"]+)""#,
+        ).unwrap();
+        let mut starts = Vec::new();
+        let mut completes = Vec::new();
+        let mut requests = Vec::new();
+        for line in log.lines() {
+            let input = ["pane.send_input", "pane.send_text", "pane.send_keys"]
+                .iter()
+                .any(|method| line.contains(&format!(" method=\"{method}\"")));
+            if !input
+                || !(line.contains("event=\"api.request.start\"")
+                    || line.contains("event=\"api.request.complete\""))
+            {
+                continue;
+            }
+            let found = fields
+                .captures(line)
+                .expect("T14 actual API input log format");
+            let (phase, outcome, id, method) = (&found[1], &found[2], &found[3], &found[4]);
+            assert!(
+                id.starts_with("adk-"),
+                "T14 API input belongs to AgentDesk: {line}"
+            );
+            let entry = (id.to_owned(), method.to_owned());
+            match phase {
+                "start" => {
+                    assert_eq!(outcome, "started", "T14 input API starts normally");
+                    starts.push(entry);
+                    requests.push(line.to_owned());
+                }
+                "complete" => {
+                    assert_eq!(outcome, "ok", "T14 input API completes normally: {line}");
+                    completes.push(entry);
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            starts, completes,
+            "T14 every real API input completes once in order"
+        );
+        let methods: Vec<_> = starts.iter().map(|(_, method)| method.as_str()).collect();
+        assert!(
+            methods == ["pane.send_input", "pane.send_text", "pane.send_keys"]
+                || methods
+                    == [
+                        "pane.send_input",
+                        "pane.send_text",
+                        "pane.send_keys",
+                        "pane.send_text",
+                        "pane.send_keys"
+                    ],
+            "T14 bootstrap command then one or two paste/Enter pairs: {methods:?}"
+        );
+        self.ledger.append(
+            json!({"event":"input_check", "methods":methods, "requests":requests,
+            "server_log":server_log, "raw_server_log":log}),
+        );
+        requests
+    }
+
+    pub(crate) fn assert_input_bytes(&self, direct: &str) {
+        let inputs = self.inputs();
+        assert_eq!(inputs.len(), 3, "T14 three actual provider inputs");
+        for (index, input) in inputs.iter().enumerate() {
+            assert_eq!(input["seq"].as_u64(), Some((index + 1) as u64));
+            let raw: Vec<u8> = input["raw_bytes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                .collect();
+            assert_eq!(raw.last(), Some(&b'\r'), "T14 actual input ends in Enter");
+            if index == 1 {
+                assert_eq!(
+                    raw,
+                    format!("{direct}\r").as_bytes(),
+                    "T14 native PTY input is the direct prompt and Enter only"
+                );
+            } else {
+                for marker in [b"\x1b[200~".as_slice(), b"\x1b[201~".as_slice()] {
+                    assert_eq!(
+                        raw.windows(marker.len())
+                            .filter(|part| *part == marker)
+                            .count(),
+                        1,
+                        "T14 each Discord input is one bracketed paste then Enter"
+                    );
+                }
+                assert!(raw.starts_with(b"\x1b[200~") && raw.ends_with(b"\x1b[201~\r"));
+            }
+        }
+        self.ledger
+            .append(json!({"event":"input_bytes_check", "inputs":inputs}));
+    }
+
     pub(crate) fn assert_single_execution(&self, pane: &str, provider_pid: u32) {
         let snapshot = self.snapshot();
         let panes = snapshot["panes"].as_array().unwrap();
