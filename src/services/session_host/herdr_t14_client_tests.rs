@@ -238,8 +238,11 @@ try:
             append(source, {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn, "last_agent_message": answer}})
         ready(answer)
     # Keep the actual provider and pane identity alive through all post-roundtrip assertions.
-    while os.read(0, 1):
-        pass
+    while True:
+        extra = os.read(0, 1)
+        if not extra:
+            break
+        append(CASE / "post-inputs.jsonl", {"raw_bytes": list(extra)})
 finally:
     termios.tcsetattr(0, termios.TCSANOW, original)
 "####;
@@ -899,6 +902,10 @@ impl RealServer {
     pub(crate) fn assert_input_bytes(&self, direct: &str) {
         let inputs = self.inputs();
         assert_eq!(inputs.len(), 3, "T14 three actual provider inputs");
+        assert!(
+            json_lines(&self.dir.join("post-inputs.jsonl")).is_empty(),
+            "T14 no extra provider bytes after its three inputs"
+        );
         for (index, input) in inputs.iter().enumerate() {
             assert_eq!(input["seq"].as_u64(), Some((index + 1) as u64));
             let raw: Vec<u8> = input["raw_bytes"]

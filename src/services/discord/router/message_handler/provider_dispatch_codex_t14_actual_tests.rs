@@ -378,8 +378,8 @@ async fn scenario(server: &mut RealServer, home: &Path) {
     {
         assert_eq!(inputs[index]["seq"].as_u64(), Some((index + 1) as u64));
         assert_eq!(
-            inputs[index]["prompt"].as_str().unwrap().lines().last(),
-            Some(*expected),
+            inputs[index]["prompt"].as_str(),
+            Some(expected_input(index + 1, expected).as_str()),
             "actual input retains its Discord body or native prompt"
         );
     }
@@ -508,6 +508,7 @@ async fn wait_record(pool: &PgPool, owner: &HostedOwner, state: HostedState) -> 
     .expect("production intake commits its actual process evidence")
 }
 async fn wait_input(server: &RealServer, sequence: usize, prompt: &str) {
+    let expected = expected_input(sequence, prompt);
     tokio::time::timeout(ACTUAL_WAIT, async {
         loop {
             let inputs = server.inputs();
@@ -518,12 +519,8 @@ async fn wait_input(server: &RealServer, sequence: usize, prompt: &str) {
             if inputs.len() == sequence {
                 assert_eq!(inputs[sequence - 1]["seq"].as_u64(), Some(sequence as u64));
                 assert_eq!(
-                    inputs[sequence - 1]["prompt"]
-                        .as_str()
-                        .unwrap()
-                        .lines()
-                        .last(),
-                    Some(prompt)
+                    inputs[sequence - 1]["prompt"].as_str(),
+                    Some(expected.as_str())
                 );
                 assert!(
                     !inputs[sequence - 1]["raw_bytes"]
@@ -538,6 +535,16 @@ async fn wait_input(server: &RealServer, sequence: usize, prompt: &str) {
     })
     .await
     .expect("the fake receives actual pane input bytes")
+}
+fn expected_input(sequence: usize, prompt: &str) -> String {
+    if sequence == 2 {
+        return prompt.into();
+    }
+    let message = discord_mock::user_message(1, prompt);
+    format!(
+        "[User: {} (ID: {})] {prompt}",
+        message.author.name, message.author.id
+    )
 }
 fn answer_count(mock: &discord_mock::DiscordMockState, answer: &str) -> usize {
     mock.message_snapshot()
