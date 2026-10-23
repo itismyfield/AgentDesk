@@ -264,37 +264,36 @@ fn authority_cleanup_inventory_follows_aliases_and_function_values() {
     const COMMON: &str = "src/services/tmux_common.rs";
     const OTHER: &str = "src/services/other.rs";
     const REVIEWED: Listed = &[(COMMON, 1, "the reviewed call")];
-    for needle in ["cleanup_session_temp_files_under_source_authority"] {
-        let calls = [(needle, REVIEWED)];
-        let base = format!(
-            "pub(crate) fn {needle}(a: &Authority, n: &str) {{}}\n\
-             fn reviewed(a: &Authority, n: &str) {{ {needle}(a, n); }}\n\
-             pub(crate) use self::{needle} as wipe;\n"
-        );
-        let mut sources = BTreeMap::from([(COMMON.to_string(), base)]);
-        assert!(listed_call_violations(&sources, &calls).is_empty());
-        sources.insert(
-            OTHER.to_string(),
-            "fn extra(a: &Authority, n: &str) { crate::services::tmux_common::wipe(a, n); }"
-                .to_string(),
-        );
-        let found = listed_call_violations(&sources, &calls);
-        assert!(
-            found
-                .iter()
-                .any(|v| v.contains(&format!("unlisted {needle} x1"))),
-            "{needle}: {found:?}"
-        );
-        sources.insert(
-            OTHER.to_string(),
-            "fn extra() { let later = crate::services::tmux_common::wipe; }".to_string(),
-        );
-        let found = listed_call_violations(&sources, &calls);
-        assert!(
-            found.iter().any(|v| v.contains("taken as a value x1")),
-            "{needle}: {found:?}"
-        );
-    }
+    let needle = "cleanup_session_temp_files_under_source_authority";
+    let calls = [(needle, REVIEWED)];
+    let base = format!(
+        "pub(crate) fn {needle}(a: &Authority, n: &str) {{}}\n\
+         fn reviewed(a: &Authority, n: &str) {{ {needle}(a, n); }}\n\
+         pub(crate) use self::{needle} as wipe;\n"
+    );
+    let mut sources = BTreeMap::from([(COMMON.to_string(), base)]);
+    assert!(listed_call_violations(&sources, &calls).is_empty());
+    sources.insert(
+        OTHER.to_string(),
+        "fn extra(a: &Authority, n: &str) { crate::services::tmux_common::wipe(a, n); }"
+            .to_string(),
+    );
+    let found = listed_call_violations(&sources, &calls);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.contains(&format!("unlisted {needle} x1"))),
+        "{needle}: {found:?}"
+    );
+    sources.insert(
+        OTHER.to_string(),
+        "fn extra() { let later = crate::services::tmux_common::wipe; }".to_string(),
+    );
+    let found = listed_call_violations(&sources, &calls);
+    assert!(
+        found.iter().any(|v| v.contains("taken as a value x1")),
+        "{needle}: {found:?}"
+    );
 }
 
 #[test]
