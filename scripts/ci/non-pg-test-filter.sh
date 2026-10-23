@@ -188,6 +188,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
+  --skip services::discord::tmux::watcher_lifecycle::activity::tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
   --skip services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests
