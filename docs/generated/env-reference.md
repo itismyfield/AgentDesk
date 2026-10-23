@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 128
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 130
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -27,6 +27,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
 | `ADK_COLDSTOP_MUTANT` | `src/services/provider/herdr_before_start.rs` |  |
+| `ADK_EMPTY_TERMINAL_MUTANT` | `src/services/codex_tui/rollout_tail/parser/managed_empty.rs`, `src/services/discord/inflight/save_store/identity_gate/runtime_stamp/captured_terminal_admission.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
@@ -42,6 +43,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, `src/services/provider/cancel_token_claude_interrupt.rs` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
+| `ADK_RECAP_CLEANUP_MUTANT` | `src/services/discord/session_idle_cleanup.rs` | Test-only cleanup mutations; production retains the claim and card guards. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |

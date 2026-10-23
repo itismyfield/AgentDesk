@@ -704,12 +704,7 @@ pub fn emit_relay_delete(
     );
 }
 
-/// #3607 ergonomic wrapper over [`emit_relay_delete`] for the common
-/// delete-then-observe call sites: maps a delete `Result` to the
-/// `committed` / `failed` outcome (and the `Err` text into `detail`) so each
-/// site stays a single compact call instead of an inline match. `provider` may
-/// be empty for sites with no provider scope (idle-recap / monitoring); it is
-/// normalized away to none.
+/// Observe a delete result; an empty provider is valid for unscoped monitoring messages.
 pub fn emit_relay_delete_result<E: std::fmt::Display>(
     provider: &str,
     channel_id: u64,

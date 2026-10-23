@@ -8,6 +8,7 @@ use crate::services::provider::ReadOutputResult;
 
 use super::{RelaySuppressionSender, RolloutFinalizePath};
 use std::path::Path;
+pub(super) mod managed_empty;
 
 /// The restart watcher and session relay consume raw rollout records too.
 /// Share the native tail's parser and explicit completion policy without its
@@ -127,6 +128,7 @@ pub(super) struct RolloutParseState {
     pub(super) latest_turn: Option<String>,
     /// A direct input's tail seeded `started_turn` with its native turn before reading.
     pub(super) native_seeded: bool,
+    pub(super) managed_turn: Option<String>,
 }
 
 impl RolloutParseState {
@@ -245,6 +247,7 @@ pub(super) fn observe_rollout_user_prompt(json: &Value, state: &mut RolloutParse
             &prompt,
             &record,
         );
+        managed_empty::bind(state, &record, outcome);
         if outcome != crate::services::tui_prompt_dedupe::BindOutcome::Stale {
             state.discord_origin_prompt = None;
         }
@@ -483,8 +486,22 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             state.lifecycle_activity = true;
             None
         }
-        // A reader seeded with its native turn takes no other turn's completion or its text.
-        "task_complete" if state.native_seeded && !started_turn_named_by(state, payload) => {
+        // Ignore a different named turn; legacy unnamed completion still finishes a body.
+        "task_complete"
+            if (state.native_seeded
+                || state.managed_turn.is_some()
+                || state.discord_origin_prompt.is_some())
+                && (codex_payload_turn_id(payload).is_some()
+                    || (!state.saw_assistant_text
+                        && !managed_empty::mutant("unwitnessed_fallback"))
+                    || managed_empty::mutant("unnamed_complete"))
+                && !(started_turn_named_by(state, payload)
+                    || (!managed_empty::mutant("managed_complete")
+                        && same_codex_turn(
+                            state.managed_turn.as_deref(),
+                            codex_payload_turn_id(payload),
+                        ))) =>
+        {
             state.lifecycle_activity = true;
             None
         }
@@ -516,7 +533,7 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
 
 fn started_turn_named_by(state: &RolloutParseState, payload: &Value) -> bool {
     let started = state.started_turn.as_ref().and_then(Option::as_deref);
-    same_codex_turn(started, codex_payload_turn_id(payload))
+    same_codex_turn(started, codex_payload_turn_id(payload)) || managed_empty::mutant("native_turn")
 }
 
 /// A Herdr turn's reply takes the fallback body only from its own `task_complete`.
@@ -843,7 +860,7 @@ pub(super) fn emit_done(
     if terminal_range_eligible
         && finalize_path != RolloutFinalizePath::Heuristic
         && offset == complete_record_end
-        && state.saw_assistant_text
+        && managed_empty::body_or_verified_empty(state, "typed_guard")
         && complete_record_end > source_start
         && let Some((tmux_session_name, turn_nonce)) = identity
     {

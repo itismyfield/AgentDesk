@@ -494,7 +494,6 @@ src/
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
-│   │   ├── idle_recap.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs
@@ -920,7 +919,8 @@ src/
 │   │   │   ├── parser/
 │   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
-│   │   │   │   └── herdr_terminal_tests.rs
+│   │   │   │   ├── herdr_terminal_tests.rs
+│   │   │   │   └── managed_empty.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
@@ -1239,11 +1239,6 @@ src/
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
-│   │   ├── idle_recap/
-│   │   │   ├── card.rs
-│   │   │   ├── context_display.rs
-│   │   │   ├── relay_integrity.rs
-│   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
@@ -2349,6 +2344,7 @@ src/
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── codex_empty_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
@@ -2611,7 +2607,6 @@ src/
 │   │   ├── abandon_request_store.rs
 │   │   ├── adk_session.rs
 │   │   ├── adk_session_selector.rs
-│   │   ├── adk_session_selector_checked_tests.rs
 │   │   ├── admin_host_guard.rs
 │   │   ├── admin_host_guard_tests.rs
 │   │   ├── admin_host_guard_verified_reset_tests.rs
@@ -2651,8 +2646,6 @@ src/
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
-│   │   ├── idle_recap.rs
-│   │   ├── idle_recap_interaction.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
@@ -3299,6 +3292,7 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
+│   │   │   ├── clear_end_empty_session_tests.rs
 │   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs

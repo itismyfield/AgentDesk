@@ -48,12 +48,6 @@ _SESSION_PANEL_CHROME_PATTERN = re.compile(
     _SESSION_BANNER_PREFIX_PATTERN.pattern + r"$"
 )
 _COMPLETION_PANEL_CHROME_PATTERN = re.compile(r"^-# ✅ 완료(?:\n|$)")
-# The only current non-emoji-led producer is the idle-recap card. Keep this
-# anchored to its complete header shape so prose such as "응답 완료를
-# 설명합니다" remains a relay body. Monitor-handoff completion is covered by
-# the leading `^✅` status family below.
-_IDLE_RECAP_COMPLETION_PATTERN = re.compile(r"^📦 응답 완료 ·")
-
 # A single-message completion/status footer is appended at an exact ``\n\n``
 # boundary (``single_message_panel::compose_completion_footer_text``).  Keep
 # this list tied to producer shapes rather than treating every ``-#`` line as
@@ -119,7 +113,6 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^▶️"),
     re.compile(r"^⚠️"),
     re.compile(r"진행 중"),
-    _IDLE_RECAP_COMPLETION_PATTERN,
     _SESSION_PANEL_CHROME_PATTERN,
     _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
     re.compile(r"세션 초기화"),
@@ -128,7 +121,6 @@ _STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _COMPLETION_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^✅"),
-    _IDLE_RECAP_COMPLETION_PATTERN,
     _COMPLETION_PANEL_CHROME_PATTERN, TURN_SUMMARY_PATTERN,
 )
 

@@ -11,6 +11,9 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, stable_host_identity,
 };
 
+#[path = "clear_end_empty_session_tests.rs"]
+mod empty_session;
+
 /// The runtime root execution contexts are read under, held with the env lock it needs.
 struct Contexts {
     _env: (tempfile::TempDir, [crate::config::TestEnvVarGuard; 2]),

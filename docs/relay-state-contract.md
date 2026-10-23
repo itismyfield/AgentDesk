@@ -1024,7 +1024,7 @@ past. I19 governs the resume point itself.
   confirm lag over an already-persisted batch — precisely what recovery is for),
   and an unset `watcher_owner_channel_id` (the rest of the codebase already reads
   that as "the polled channel": `nudge_existing_watcher_for_backlog`,
-  `RelayHealthSnapshot::channel_binding`, `idle_recap`).
+  `RelayHealthSnapshot::channel_binding`).
 - On refusal the redrive is counted as a no-progress attempt (r3): the same
   backoff as a nudge, then `redrive_no_progress_capped` after
   `REDRIVE_MAX_NO_PROGRESS_ATTEMPTS`, instead of re-running every poll. It never

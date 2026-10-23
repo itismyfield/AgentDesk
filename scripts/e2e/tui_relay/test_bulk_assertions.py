@@ -117,7 +117,7 @@ class CompletionContracts(unittest.TestCase):
 
     def test_one_completion_per_marked_turn(self):
         value = window(message(101, "[E2E:T:ONE]"), message(102, "-# ✅ 완료"),
-                       message(103, "[E2E:T:TWO]"), message(104, "📦 응답 완료 · 1s"))
+                       message(103, "[E2E:T:TWO]"), message(104, "-# ✅ 완료"))
         a.completion_per_turn(value)
         a.completion_per_turn(value, marker="[E2E:T:TWO]")
         a.completion_per_turn(value, marker="TWO")
