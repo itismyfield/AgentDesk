@@ -1,5 +1,34 @@
 use super::*;
 
+// A private process gives lock-state probes their own registry, including unguarded readers.
+pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+    let test_name = test_name
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .expect("crate-qualified test name");
+    const CHILD_TEST: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TEST";
+    if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--format=pretty", "--color=never"])
+        .env(CHILD_TEST, test_name)
+        .output()
+        .expect("start private registry test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout
+                .lines()
+                .any(|line| line == format!("test {test_name} ... ok"))
+            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "private registry test {test_name} failed ({status}):\n{stdout}\n{stderr}",
+        status = output.status,
+    );
+    true
+}
+
 fn reset_state() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
@@ -2919,6 +2948,12 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
+    if run_with_private_registry(concat!(
+        module_path!(),
+        "::reconcile_holds_source_authority_across_read_decision_and_replacement"
+    )) {
+        return;
+    }
     // The authority key follows the runtime root env, so no other test may move it mid-probe.
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK
