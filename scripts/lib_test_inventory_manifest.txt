@@ -11151,6 +11151,7 @@ services::discord::turn_presence::activity::unbound::dormancy_tests::activation_
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
+services::discord::turn_presence::activity::unbound::hold_leaf::log_tests::superseded_logs_power_of_two_info_and_complete_debug_per_reason
 services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::cleared_local_legacy_rows_become_idle_pg
 services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::divergent_row_absence_revalidates_successor_and_canonical_trace_pg
 services::discord::turn_presence::activity::unbound::live::legacy_divergence_tests::divergent_rows_keep_live_inflight_remote_and_active_turns_held_pg

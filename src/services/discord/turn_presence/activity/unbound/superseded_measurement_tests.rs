@@ -180,7 +180,7 @@ async fn a2_s2_existing_superseded_counters_cover_saved_reading_rejections_pg() 
     let sink = LogSink::default();
     let writer = sink.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .without_time()
         .with_writer(move || writer.clone())
@@ -373,7 +373,7 @@ async fn a2_s2_unrelated_owner_churn_measures_read_availability_pg() {
     let sink = LogSink::default();
     let writer = sink.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
         .without_time()
         .with_writer(move || writer.clone())
