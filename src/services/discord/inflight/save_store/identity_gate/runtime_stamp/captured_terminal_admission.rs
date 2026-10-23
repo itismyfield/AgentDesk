@@ -16,13 +16,14 @@ pub(super) async fn admit_uncaptured_terminal(
     ) {
         return Ok((message, None, false));
     }
-    let aborted = matches!(
+    let requires_admission = matches!(
         &message,
         StreamMessage::CodexTuiTerminalDone {
             kind: crate::services::agent_protocol::NativeTerminalKind::Aborted,
             ..
         }
-    );
+    ) || ((can_deliver_directly || mutant("headless_admission"))
+        && matches!(&message, StreamMessage::CodexTuiTerminalDone { result, .. } if result.is_empty()));
     let mut owned_local = local.clone();
     let mut owned_baseline = baseline.clone();
     let expected = expected.clone();
@@ -40,11 +41,65 @@ pub(super) async fn admit_uncaptured_terminal(
     .map_err(|_| GuardedSaveOutcome::IoError)?;
     *local = owned_local;
     *baseline = owned_baseline;
-    // An abort never degrades to a plain Done: without admitted evidence it keeps the obligation.
+    // Direct empty completions and aborts keep their obligation when source proof is rejected.
     match admitted {
-        (_, None, _) if aborted => Err(GuardedSaveOutcome::AuthorityPinned),
+        (_, None, _) if requires_admission => Err(GuardedSaveOutcome::AuthorityPinned),
         admitted => Ok(admitted),
     }
+}
+
+fn mutant(name: &str) -> bool {
+    #[cfg(test)]
+    return std::env::var("ADK_EMPTY_TERMINAL_MUTANT").ok().as_deref() == Some(name);
+    #[cfg(not(test))]
+    {
+        let _ = name;
+        false
+    }
+}
+
+pub(super) fn nonce_matches(row: &InflightTurnState, nonce: &str) -> bool {
+    nonempty(row.turn_nonce.as_deref()) == Some(nonce) || mutant("nonce")
+}
+
+pub(super) fn body_admissible(result: &str) -> bool {
+    result.is_empty() || !result.trim().is_empty()
+}
+
+pub(super) fn range_matches(row: &InflightTurnState, start: u64) -> bool {
+    (row.turn_start_offset == Some(start) && row.last_offset == start) || mutant("range")
+}
+
+pub(super) fn legacy_source(
+    row: &InflightTurnState,
+    rollout: &str,
+    tmux: &str,
+    session: &str,
+    (start, end): (u64, u64),
+) -> Result<(PathBuf, i64), GuardedSaveOutcome> {
+    let (canonical, file_len) =
+        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::AuthorityPinned)?;
+    if file_len < end || (!marker_matches(tmux, &canonical, session, start) && !mutant("source")) {
+        return Err(GuardedSaveOutcome::AuthorityPinned);
+    }
+    // A dead prelaunch source may have no raw path; live sources retain their exact binding.
+    let cold = start == 0
+        && row
+            .output_path
+            .as_deref()
+            .is_none_or(|path| path == tmux_runtime_paths(tmux).0);
+    let warm = row
+        .output_path
+        .as_deref()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .as_deref()
+        == Some(canonical.as_path())
+        && binding_matches(tmux, &canonical, session, [start, end]);
+    let generation = tmux_generation_file_mtime_ns(tmux);
+    if ((!cold && !warm) && !mutant("source")) || generation == 0 {
+        return Err(GuardedSaveOutcome::AuthorityPinned);
+    }
+    Ok((canonical, generation))
 }
 
 pub(super) struct CapturedTerminalAdmission {

@@ -922,7 +922,8 @@ src/
 │   │   │   ├── parser/
 │   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
-│   │   │   │   └── herdr_terminal_tests.rs
+│   │   │   │   ├── herdr_terminal_tests.rs
+│   │   │   │   └── managed_empty.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   ├── child_binding_tests.rs
@@ -2351,6 +2352,7 @@ src/
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── codex_empty_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
