@@ -316,7 +316,7 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
         messages
             .iter()
             .any(|(id, text)| *id == anchor && text == ANSWER)
-            && messages.iter().any(|(_, text)| text.starts_with("-# ✅ "))
+            && messages.iter().any(|(_, text)| text.starts_with("-# ⏱️ "))
     })
     .await;
     let signal = tokio::time::timeout(Duration::from_secs(20), completed.recv())
@@ -353,7 +353,7 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
     assert_eq!(
         settled
             .iter()
-            .filter(|(_, text)| text.starts_with("-# ✅ "))
+            .filter(|(_, text)| text.starts_with("-# ⏱️ "))
             .count(),
         1,
         "one summary"
