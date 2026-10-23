@@ -756,3 +756,6 @@ pub(super) mod identity;
 
 #[path = "http_force_purge_tests.rs"]
 mod purge;
+
+#[path = "http_force_terminal_tests.rs"]
+mod terminal;
