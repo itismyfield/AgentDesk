@@ -1,5 +1,5 @@
 //! Channel ownership uses the immutable boot policy and, for a selected channel, this process's
-//! adoption of it; delegated output ownership survives its home closing intake.
+//! adoption of it.
 //! Uncertain identities withhold the body.
 //! This is an ownership fact, never delivery evidence; evidence readers must not consult it.
 
@@ -97,7 +97,7 @@ pub(crate) fn turn_selected(channel: u64) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
 }
 
-/// Fresh local Codex admission precedes provider effects; delegated hosts keep their own fences.
+/// Fresh local Codex admission precedes provider effects.
 pub(crate) fn mark_codex_turn_admitted(
     channel: u64,
     provider: &crate::services::provider::ProviderKind,

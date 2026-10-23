@@ -1,6 +1,5 @@
 //! One channel's delivery. For each piece: take the delivery lease, then under the ownership gate
-//! (a delegated channel's home gate) fsync `Prepared` and start the POST, record the result, and
-//! settle unclear ones.
+//! fsync `Prepared` and start the POST, record the result, and settle unclear ones.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};

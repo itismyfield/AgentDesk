@@ -1,7 +1,6 @@
 //! Intake for an O-owned channel runs only where that channel's writer can take it: the gateway
 //! hosting a resumed actor while it holds the lease. A new placement is also held off the O home
-//! and ends a pending adoption on it. A delegated channel is held wherever its home gate takes no
-//! intake. Every other channel routes as before.
+//! and ends a pending adoption on it. Every other channel routes as before.
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
