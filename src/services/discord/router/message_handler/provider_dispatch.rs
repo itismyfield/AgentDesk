@@ -82,7 +82,6 @@ pub(super) static INPUT_EFFECT_OBSERVER: std::sync::Mutex<Option<(u64, InputEffe
 #[cfg(test)]
 pub(super) struct SubmittedPrompt {
     pub prompt: String,
-    pub system_prompt: Option<String>,
     pub session_id: Option<String>,
 }
 #[cfg(test)]
@@ -243,7 +242,6 @@ pub(super) fn execute(
             let (_, capture) = probe.take().unwrap();
             let _ = capture.send(SubmittedPrompt {
                 prompt: turn.prompt.to_owned(),
-                system_prompt: turn.system_prompt.map(str::to_owned),
                 session_id: turn.session_id.map(str::to_owned),
             });
         }

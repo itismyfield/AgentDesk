@@ -255,8 +255,7 @@ pub(super) async fn delete_adk_session(session_key: &str, _api_port: u16) {
 #[path = "adk_session_selector.rs"]
 mod selector;
 pub(super) use selector::{
-    clear_provider_session_id, clear_provider_session_id_checked, clear_provider_session_id_pg,
-    save_provider_session_id, save_provider_session_id_checked,
+    clear_provider_session_id, clear_provider_session_id_pg, save_provider_session_id,
 };
 
 pub(crate) fn context_usage_percent(tokens: u64, context_window: u64) -> u64 {

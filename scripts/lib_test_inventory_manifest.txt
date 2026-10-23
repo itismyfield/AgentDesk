@@ -3478,7 +3478,6 @@ services::discord::adk_session::compact_threshold_tests::compact_pct_for_claude_
 services::discord::adk_session::compact_threshold_tests::compact_pct_for_claude_uses_claude_specific_override
 services::discord::adk_session::context_usage_tests::context_usage_percent_is_bounded_to_window
 services::discord::adk_session::parse_dispatch_id_tests::parse_dispatch_id_strips_profile_label
-services::discord::adk_session::selector::selector_checked_tests::checked_selector_http_ack_and_errors_are_not_best_effort
 services::discord::adk_session::session_key_basis_tests::snapshot_override_wins_over_channel_name
 services::discord::adk_session::session_key_basis_tests::snapshot_session_key_never_collides_with_channel_session_key
 services::discord::admin_host_guard::tests::a_clear_goes_ahead_on_any_host_while_a_reset_refuses_a_kept_session_pg
