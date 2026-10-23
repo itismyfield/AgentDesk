@@ -1,6 +1,5 @@
-//! The claim's config read through the real entry point on a real database: the runtime stays
-//! free while the read is held or parsed, the claim uses what `load_graceful` reads, no SQL starts
-//! before the read is done, and a read that panics fails the claim.
+//! The claim's config read on a real database: the runtime stays free while it is held or parsed,
+//! the claim uses what `load_graceful` reads, and no SQL starts before it is done or if it panics.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -100,9 +99,8 @@ async fn statuses(pool: &sqlx::PgPool) -> Vec<(String, String)> {
 /// What the proxy had seen when the runtime was found free: connections and statements.
 type Seen = (usize, usize);
 
-/// Writes `yaml` into the FIFO only after a task on the claim's runtime ran, or after `WAIT`;
-/// returns what the proxy had seen by then. Opening never blocks, so a claim that never reads
-/// the FIFO ends this thread instead of hanging it.
+/// Writes `yaml` into the FIFO once a task on the claim's runtime ran, or after `WAIT`, returning
+/// what the proxy had seen then; the open never blocks, so a claim that never reads cannot hang it.
 fn feed_after_runtime_ran(
     fifo: PathBuf,
     yaml: String,
