@@ -88,6 +88,8 @@ impl SnapshotMeta {
 
 pub(super) mod compat;
 mod snapshot;
+#[cfg(test)]
+mod v2;
 mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 
@@ -138,6 +140,8 @@ pub(crate) struct HeadLease;
 /// The actor's copy of the channel's snapshot metadata, read from disk once per namespace.
 #[derive(Default)]
 pub(super) struct HeadLedger {
+    #[cfg(test)]
+    v2: Option<v2::Owner>,
     adopted: Option<(ProviderKind, String)>,
     pub(super) meta: SnapshotMeta,
     lease: Option<Arc<HeadLease>>,
@@ -242,6 +246,8 @@ pub(super) fn release_for_clear(
         false => Vec::new(),
     };
     state.queued_head = HeadLedger {
+        #[cfg(test)]
+        v2: previous.v2,
         adopted: Some(key),
         meta: SnapshotMeta {
             head_injection: None,
@@ -486,6 +492,8 @@ mod claim {
     }
 
     pub(crate) enum HeadMsg {
+        #[cfg(test)]
+        V2(v2::actor::Message),
         Claim {
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
@@ -504,6 +512,8 @@ mod claim {
     impl HeadMsg {
         pub(in crate::services::turn_orchestrator) fn refuse(self, error: String) {
             match self {
+                #[cfg(test)]
+                Self::V2(msg) => msg.refuse(),
                 Self::Claim { reply, .. } => {
                     let _ = reply.send(QueuedHeadClaim::PersistenceFailed(error));
                 }
@@ -521,6 +531,8 @@ mod claim {
         msg: HeadMsg,
     ) {
         match msg {
+            #[cfg(test)]
+            HeadMsg::V2(msg) => msg.run(&mut state.queued_head.v2),
             HeadMsg::Claim {
                 expected,
                 persistence,

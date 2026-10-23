@@ -266,6 +266,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
+  --skip services::turn_orchestrator::queued_head::v2::tests
   --skip voice::announce_meta::tests
   --skip voice::turn_link::tests
 )
@@ -1028,6 +1029,18 @@ NON_PG_FILTER_REPLAY=(
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
+  services::turn_orchestrator::queued_head::v2::tests::v2_adoption_reapplies_slots_after_crash_between_commit_and_projection
+  services::turn_orchestrator::queued_head::v2::tests::v2_commit_readback_requires_full_candidate_and_sync_before_permit
+  services::turn_orchestrator::queued_head::v2::tests::v2_exact_attempt_checks_every_source_and_target_field
+  services::turn_orchestrator::queued_head::v2::tests::v2_late_success_and_failure_never_settle_the_current_head
+  services::turn_orchestrator::queued_head::v2::tests::v2_legacy_restore_uses_positive_reserved_proof_and_retains_unknown_without_ledger
+  services::turn_orchestrator::queued_head::v2::tests::v2_mailbox_retains_without_releasing_live_writer_and_late_settles_exactly
+  services::turn_orchestrator::queued_head::v2::tests::v2_parked_and_slot_projection_preserve_uncertainty_and_late_identity
+  services::turn_orchestrator::queued_head::v2::tests::v2_restart_adopts_reserved_and_unknown_without_reset_or_resend
+  services::turn_orchestrator::queued_head::v2::tests::v2_retained_snapshot_cost_is_measured_without_compacting_originals
+  services::turn_orchestrator::queued_head::v2::tests::v2_source_fences_ignore_generation_and_terminal_age_begins_at_settlement
+  services::turn_orchestrator::queued_head::v2::tests::v2_unsupported_host_veto_precedes_may_have_sent_and_effect
+  services::turn_orchestrator::queued_head::v2::tests::v2_writer_lease_survives_owner_adoption
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password

@@ -29,7 +29,7 @@ pub(crate) fn require_legacy_write(path: &Path) -> Result<(), String> {
             .map_err(|e| format!("unreadable queue object {}: {e}", path.display()))?;
         if value.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
             return Err(format!(
-                "read-only queue snapshot {}: legacy mutation refused",
+                "read-only queue snapshot {}: legacy mutation refused; preserve the original file and use a V2-capable recovery binary for manual inspection",
                 path.display()
             ));
         }

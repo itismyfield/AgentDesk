@@ -815,7 +815,7 @@ pub(crate) fn load_pending_dispatch_markers(
         })
         .collect()
 }
-
+#[cfg(test)]
 pub(super) fn load_channel_pending_queue(
     provider: &ProviderKind,
     token_hash: &str,

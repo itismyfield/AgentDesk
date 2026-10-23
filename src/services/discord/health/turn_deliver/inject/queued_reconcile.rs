@@ -1,5 +1,53 @@
 //! Consumes an Unknown head only when its provider's bound native transcript proves it was taken.
 //! Claude's legacy proof still requires the exact enqueue, absorbed removal and human command.
+#[cfg(test)]
+pub(super) fn v2_record_matches(
+    attempt: &serde_json::Value,
+    target: &super::Target,
+    provider: super::queued_provider::QueuedProvider,
+    kind: &crate::services::provider::ProviderKind,
+) -> bool {
+    let Ok(meta) = std::fs::metadata(&target.transcript) else {
+        return false;
+    };
+    let Some((dev, ino)) = file_id(&meta) else {
+        return false;
+    };
+    let bound = target
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.4.as_deref());
+    let Some(session) = provider.session(&target.transcript, bound) else {
+        return false;
+    };
+    let source = &attempt["source"];
+    attempt["provider"] == kind.as_str()
+        && attempt["target"]["owner"] == target.session
+        && source["kind"] == "existing"
+        && source["session_id"] == session
+        && source["transcript"] == target.transcript.display().to_string()
+        && source["file"] == serde_json::json!([dev, ino])
+        && source["offset"]
+            .as_u64()
+            .is_some_and(|offset| offset <= meta.len())
+}
+#[cfg(test)]
+impl crate::services::turn_orchestrator::ChannelMailboxHandle {
+    pub(crate) async fn v2_settle_exact(
+        &self,
+        identity: serde_json::Value,
+        delivered: bool,
+        now: u64,
+    ) -> Result<(), String> {
+        self.v2_request(move |slot| {
+            let key = serde_json::from_value(identity).map_err(|e| e.to_string())?;
+            slot.as_mut()
+                .ok_or("V2 not adopted")?
+                .settle(&key, delivered, now)
+        })
+        .await
+    }
+}
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

@@ -1511,6 +1511,7 @@ src/
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── queued_head_mend_tests.rs
+│   │   │   ├── retained_notice.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -3535,12 +3536,20 @@ src/
 │   │   │   ├── queued_recovery_tests.rs
 │   │   │   └── snapshot_io.rs
 │   │   ├── queued_head/
+│   │   │   ├── v2/
+│   │   │   │   ├── actor.rs
+│   │   │   │   ├── attempt.rs
+│   │   │   │   ├── commit.rs
+│   │   │   │   ├── owner_tests.rs
+│   │   │   │   ├── retained.rs
+│   │   │   │   └── sources.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs
 │   │   │   ├── mend_tests.rs
 │   │   │   ├── prefix.rs
 │   │   │   ├── snapshot.rs
+│   │   │   ├── v2.rs
 │   │   │   └── v2_types.rs
 │   │   ├── registry_purge/
 │   │   │   ├── closed_gate_tests.rs

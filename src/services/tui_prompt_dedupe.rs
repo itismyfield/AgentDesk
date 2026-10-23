@@ -367,6 +367,8 @@ pub(crate) use handoff::{
 pub(crate) use handoff::{codex_replay_restored_handoff_inputs, codex_restore_has_custody};
 #[cfg(test)]
 pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
+#[cfg(test)]
+pub(crate) use injected_steer::retain_injected_steer;
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
 pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;

@@ -423,6 +423,7 @@ src/services/tui_o/writer/tool_result_repost_tests.rs
 src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
+src/services/turn_orchestrator/queued_head/v2/owner_tests.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
 [modules]
@@ -867,6 +868,7 @@ services::tui_o::writer::tests::actor::repost_turn::tool_result
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
+services::turn_orchestrator::queued_head::v2::tests
 voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
@@ -1968,6 +1970,7 @@ services::discord::health::turn_deliver::inject_codex_tests::queued_codex_receip
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_same_owner_serializes_two_inputs_across_effect_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_compat_clear_keeps_original_and_marker_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
@@ -3132,6 +3135,7 @@ services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
+services::turn_orchestrator::queued_head::v2::tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
 voice::announce_meta::tests::durable_handoff_persist_does_not_resurrect_consumed_row
 voice::announce_meta::tests::durable_handoff_round_trips_and_consumes_exactly_once

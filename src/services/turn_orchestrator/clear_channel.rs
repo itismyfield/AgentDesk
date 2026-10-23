@@ -83,7 +83,7 @@ pub(super) fn clear_channel_state(
         pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel_id)
         && let Err(error) = queued_head::compat::require_legacy_write(&path)
     {
-        tracing::warn!(%channel_id, %error, "read-only queue refused clear");
+        tracing::warn!(%channel_id, path = %path.display(), %error, "read-only queue refused clear; preserve the original file and inspect with a V2-capable recovery binary");
         return ClearChannelResult {
             persistence: ClearPersistence {
                 failed: vec!["queue_read_only"],
