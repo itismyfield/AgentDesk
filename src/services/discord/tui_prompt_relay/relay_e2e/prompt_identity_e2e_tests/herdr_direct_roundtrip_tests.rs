@@ -465,8 +465,17 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     use std::os::unix::fs::PermissionsExt;
     let claude_binary = h.root.path().join("bin/claude");
     std::fs::create_dir_all(claude_binary.parent().unwrap()).unwrap();
-    std::fs::write(&claude_binary,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '2.1.0 (Claude Code)'; exit 0; fi\nexit 97\n").unwrap();
+    let claude_non_version = h
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("claude-non-version.invoked");
+    assert!(claude_non_version.is_absolute());
+    let invocation_marker =
+        crate::services::process::shell_escape(claude_non_version.to_str().unwrap());
+    std::fs::write(&claude_binary, format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '2.1.0 (Claude Code)'; exit 0; fi\nprintf '%s\\n' \"$*\" >> {invocation_marker}\nexit 97\n")).unwrap();
     std::fs::set_permissions(&claude_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
     let claude_binary = claude_binary.canonicalize().unwrap();
     assert!(
@@ -515,7 +524,38 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
         "revision":2, "truncated":false}}),
     );
 
-    // A real Discord history intake/kickoff owns the row; the test never writes Bound.
+    // The live runtime API normally persists this canonical metadata before provider dispatch.
+    // This harness has no direct runtime API; only production launch/attach may fill hosted_execution.
+    let provider = crate::services::provider::ProviderKind::Claude;
+    let registered = super::super::registered_bootstrap_e2e::FALLBACK;
+    let logical_key = provider.build_tmux_session_name(registered);
+    let session_key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &h.shared.token_hash,
+        &provider,
+        &logical_key,
+    );
+    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3)")
+        .bind(&session_key).bind(&h.shared.token_hash).bind(CHANNEL_ID.to_string())
+        .execute(&pool).await.unwrap();
+    let channel = CHANNEL_ID.to_string();
+    let initial = load_hosted_execution_pg(
+        &pool,
+        HostedLookupKey::Canonical {
+            provider: "claude",
+            identity: CanonicalSessionIdentity {
+                kind: SessionIdentityKind::DiscordChannel,
+                discord_token_hash: &h.shared.token_hash,
+                channel_id: &channel,
+            },
+        },
+    )
+    .await;
+    assert!(
+        matches!(initial, HostedLookup::Found(row) if matches!(row.record, HostedRecord::Legacy)),
+        "T14 starts with canonical metadata only, before any hosted execution exists"
+    );
+
+    // A real Discord history intake/kickoff owns the hosted transition; the test never writes Bound.
     let first = recent_message_id();
     h.seed_channel_history(&[(first, FIRST, false)]);
     h.run_catch_up().await;
@@ -734,7 +774,17 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
         .filter(|r| r["method"] == "workspace.create")
         .count();
     assert_eq!(creates, 1, "T14 the full roundtrip launches exactly once");
-    assert_eq!(h.provider_starts(), 0, "T14 no fallback CLI driver runs");
+    assert_eq!(
+        h.provider_starts(),
+        0,
+        "T14 the original harness provider stub stays unused"
+    );
+    assert!(
+        !claude_non_version
+            .try_exists()
+            .expect("read fake Claude invocation sentinel"),
+        "T14 the isolated fake Claude receives no non-version execution"
+    );
     assert_eq!(announcements(&h), 1);
     for answer in [
         "T14 first answer",

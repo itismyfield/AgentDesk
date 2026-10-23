@@ -204,7 +204,13 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
     let health = Arc::new(discord::health::HealthRegistry::new());
     discord::session_relay_sink::SessionBoundDiscordRelaySink::new(health.clone())
         .enable_delivery_for_test();
-    let mut shared = discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
+    // Connections opened by this phase stay on its runtime; the executor pool stays on fx.rt.
+    let direct_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(fx.pool.connect_options().as_ref().clone())
+        .await
+        .expect("the direct phase connects to the existing fixture database");
+    let mut shared = discord::make_shared_data_for_tests_with_storage(Some(direct_pool.clone()));
     let fresh = Arc::get_mut(&mut shared).unwrap();
     fresh.provider = ProviderKind::Codex;
     fresh.token_hash = TOKEN.to_string();
@@ -385,6 +391,7 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
             .await,
         "task_complete leaves the same provider alive"
     );
+    direct_pool.close().await;
 }
 
 struct AbortServer(tokio::task::AbortHandle);
