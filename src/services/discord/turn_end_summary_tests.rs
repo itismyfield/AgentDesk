@@ -174,10 +174,11 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
     assert_eq!(posts.len(), 1);
     assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 15% ("), "{posts:?}");
     assert!(posts[0].contains(" · 7d 38% ("), "{posts:?}");
-    let state = row(channel, 2, "quota-contended");
+    let mut contended_state = row(channel, 2, "quota-contended");
+    contended_state.started_at = state.started_at.clone();
     let summary = LiveSummary::bridge(
         ChannelId::new(channel),
-        &state,
+        &contended_state,
         0,
         Outcome::Completed,
         Some(1000),
