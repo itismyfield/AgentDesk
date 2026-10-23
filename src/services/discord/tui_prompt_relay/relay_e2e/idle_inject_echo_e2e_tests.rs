@@ -23,7 +23,7 @@ async fn idle() -> Busy {
             &busy.pane.path(InjectPane::TRANSCRIPT),
         ),
     );
-    rt.h.use_mock_notify_bot(WAIT).await;
+    rt.h.use_mock_provider_bot(WAIT).await;
     busy
 }
 
