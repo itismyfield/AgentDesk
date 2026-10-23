@@ -1010,3 +1010,4 @@ fn an_attempt_active_before_clear_prevents_a_ticket_and_later_attempts_change_th
 }
 
 mod capture_fold_tests;
+mod successor_tests;

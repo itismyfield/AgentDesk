@@ -906,7 +906,8 @@ src/
 │   │   │   ├── capture.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── identity.rs
-│   │   │   └── mod.rs
+│   │   │   ├── mod.rs
+│   │   │   └── producer.rs
 │   │   ├── input/
 │   │   │   ├── tests/
 │   │   │   │   ├── source_guard_tests.rs
@@ -943,7 +944,8 @@ src/
 │   │   ├── verified_tail/
 │   │   │   └── diagnostic_tests.rs
 │   │   ├── warm_followup/
-│   │   │   └── submit.rs
+│   │   │   ├── submit.rs
+│   │   │   └── verified_warm_tests.rs
 │   │   ├── busy_inject.rs
 │   │   ├── canary.rs
 │   │   ├── host_input.rs
@@ -997,7 +999,8 @@ src/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
-│   │   │   │   │   │   └── capture_fold_tests.rs
+│   │   │   │   │   │   ├── capture_fold_tests.rs
+│   │   │   │   │   │   └── successor_tests.rs
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
