@@ -438,7 +438,7 @@ async fn unknown_for_a_minute_notices_once_per_cause_spell() {
     wait(10 * 60).await;
     run.abort();
     assert_eq!(fake.notice_secs(), [60, 132]);
-    assert!(fake.notices()[0].1.contains("(사유: facts_halted)"));
+    assert!(fake.notices()[0].1.contains(r"(사유: facts\_halted)"));
     assert!(status(channel).unwrap()["unknown_notice"]["posted_at"].is_string());
 }
 
