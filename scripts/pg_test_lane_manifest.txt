@@ -164,6 +164,7 @@ src/services/discord/commands/control/home_fence_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
+src/services/discord/commands/text_commands/clear_http_overlap_tests.rs
 src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
@@ -177,7 +178,13 @@ src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate/http_force_e08_tests.rs
+src/services/discord/herdr_terminate/http_force_forward_tests.rs
+src/services/discord/herdr_terminate/http_force_hydrate_tests.rs
+src/services/discord/herdr_terminate/http_force_identity_tests.rs
+src/services/discord/herdr_terminate/http_force_purge_tests.rs
+src/services/discord/herdr_terminate/http_force_terminal_tests.rs
 src/services/discord/herdr_terminate/http_force_tests.rs
+src/services/discord/herdr_terminate/http_force_writer_tests.rs
 src/services/discord/herdr_terminate_exit_tests.rs
 src/services/discord/herdr_terminate_route_tests.rs
 src/services/discord/herdr_terminate_tests.rs
@@ -294,6 +301,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_t
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_output_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs
@@ -591,6 +599,7 @@ services::discord::commands::control::native::tests
 services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
 services::discord::commands::text_commands::clear_refusal_reply_tests
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::self_watchdog::tests::health_response
@@ -605,6 +614,12 @@ services::discord::health::turn_deliver::inject_tests::turn_mode_reading
 services::discord::herdr_terminate::exit_tests
 services::discord::herdr_terminate::http_force::tests
 services::discord::herdr_terminate::http_force::tests::e08
+services::discord::herdr_terminate::http_force::tests::e08::identity
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer
+services::discord::herdr_terminate::http_force::tests::e08::purge
+services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate
+services::discord::herdr_terminate::http_force::tests::e08::terminal
 services::discord::herdr_terminate::route_tests
 services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
@@ -733,6 +748,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_http_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::output
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e
 services::discord::tui_prompt_relay::relay_e2e::reconcile_stale_turn_e2e
@@ -1916,6 +1932,8 @@ services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_a
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unconfirmed_tmux_host_runs_and_ends_the_session_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_of_an_unsettled_herdr_channel_runs_and_warns_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_first_overlap_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_overlap_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::self_watchdog::tests::health_response::db_slow_http_response_resets_watchdog_streak
@@ -1987,6 +2005,16 @@ services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_non_t
 services::discord::herdr_terminate::http_force::tests::e08::e08_force_kill_retires_then_applies_effects_once_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_terminated_handler_pg
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e07_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e08_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_e08_terminates_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_heartbeat_lookup_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_records_exact_receipt_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_refuses_late_durable_input_pg
+services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate::e07_force_absorbs_unhydrated_own_queue_pg
+services::discord::herdr_terminate::http_force::tests::e08::terminal::e08_terminal_dispatch_is_preserved_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg
@@ -2577,6 +2605,7 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_rea
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_channel_name_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2q_registered_herdr_channel_without_session_starts_its_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::act_o_first_activation_applies_the_launched_source_pg
+services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::activation::output::force_actual_o_and_legacy_output_during_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6_sealed_tail_delivered_once_after_termination_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t6b_successor_launch_preserves_a_tail_and_cursor_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_codex_execution_unsealed_survives_its_own_termination_pg

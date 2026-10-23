@@ -1048,6 +1048,7 @@ src/
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
@@ -1228,7 +1229,13 @@ src/
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
+│   │   │   ├── http_force_forward_tests.rs
+│   │   │   ├── http_force_hydrate_tests.rs
+│   │   │   ├── http_force_identity_tests.rs
+│   │   │   ├── http_force_purge_tests.rs
+│   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
+│   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -2152,6 +2159,7 @@ src/
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_activation_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_output_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── idle_inject_echo_e2e_tests.rs
@@ -3048,6 +3056,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── tests/
 │   │   │   └── source_guard_tests.rs
+│   │   ├── trusted_target/
+│   │   │   └── loopback_seam_tests.rs
 │   │   ├── cancel_lookup.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
@@ -3503,6 +3513,8 @@ src/
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
+│   │   ├── checked_purge/
+│   │   │   └── stage_tests.rs
 │   │   ├── clear_fence/
 │   │   │   └── clear_fence_tests.rs
 │   │   ├── dispatch_reservation/
@@ -3523,6 +3535,7 @@ src/
 │   │   │   ├── closed_gate_tests.rs
 │   │   │   └── current_entry_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── checked_purge.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── clear_fence.rs
