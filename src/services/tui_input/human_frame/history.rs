@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+mod compat;
+#[cfg(test)]
+mod compat_tests;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
@@ -103,11 +106,7 @@ fn path() -> Result<PathBuf, String> {
 }
 
 fn read(path: &Path) -> Result<Store, String> {
-    match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw).map_err(|error| error.to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
-        Err(error) => Err(error.to_string()),
-    }
+    compat::read_legacy(path)
 }
 
 fn update<T>(apply: impl FnOnce(&mut Store) -> Result<T, String>) -> Result<T, String> {

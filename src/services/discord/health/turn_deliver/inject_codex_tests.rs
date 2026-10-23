@@ -672,6 +672,11 @@ async fn queued_codex_unknown_restart_waits_for_complete_receipt_without_retypin
     disk["head_injection"]["phase"] = serde_json::json!("may_have_sent");
     fs::write(f.disk_path(), disk.to_string()).unwrap();
     f.restart().await;
+    assert_eq!(
+        f.disk()["head_injection"]["phase"],
+        "unknown",
+        "restart must preserve the possibly sent attempt before any retry"
+    );
     let calls = f.pane.tmux_calls();
     assert_eq!(
         f.attempt().await,
@@ -711,6 +716,88 @@ async fn queued_codex_unknown_restart_waits_for_complete_receipt_without_retypin
     );
     assert!(f.disk()["head_injection"].is_null());
     assert_eq!(f.disk()["terminal_identities"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_v2_compat_clear_keeps_original_and_marker_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_201).await;
+    let original = f.disk()[0].clone();
+    let snapshot = serde_json::json!({
+        "version": 2, "items": [], "head_injection": null,
+        "retained_inputs": [{
+            "input": {"identity": {"primary": original["message_id"],
+                "queued_generation": original["queued_generation"],
+                "sources": [{"message_id": original["message_id"],
+                    "queued_generation": original["queued_generation"]}]},
+                "original": original, "phase": "unknown", "attempt": null,
+                "payload": null, "confirmation_deadline_ms": 30_000},
+            "reason": {"kind": "unconfirmed"},
+            "notice": {"kind": "unconfirmed", "enqueued": false}}],
+        "terminal_identities": []});
+    let bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
+    fs::write(f.disk_path(), &bytes).unwrap();
+    let marker = f.disk_path().with_extension("dispatch");
+    fs::write(&marker, b"held dispatch bytes").unwrap();
+    let calls = f.pane.tmux_calls();
+    let _ = f.attempt().await;
+    assert_eq!(
+        f.pane.tmux_calls(),
+        calls,
+        "V2 read-only entry must not type"
+    );
+    assert_eq!(fs::read(f.disk_path()).unwrap(), bytes);
+    let cleared = f
+        .shared
+        .mailbox(ChannelId::new(f.pane.channel))
+        .clear(f.persistence())
+        .await;
+    assert_eq!(
+        fs::read(f.disk_path()).unwrap(),
+        bytes,
+        "A24: compatibility clear must preserve retained original bytes"
+    );
+    assert_eq!(
+        fs::read(marker).unwrap(),
+        b"held dispatch bytes",
+        "A24: read-only refusal precedes dispatch marker removal"
+    );
+    assert!(cleared.persistence.count_unknown);
+    assert!(cleared.discarded_message_ids.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queued_codex_proof_filters_recorded_identity_before_receipt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut f = QueuedCodex::new(7_272_202).await;
+    f.leave_unknown().await;
+    f.append(&f.late_receipt());
+    let original = f.disk();
+    let calls = f.pane.tmux_calls();
+    for field in ["session_id", "transcript", "file"] {
+        let mut changed = original.clone();
+        changed["head_injection"]["attempt"][field] = match field {
+            "file" => serde_json::json!([0, 1]),
+            _ => serde_json::json!("different-recorded-identity"),
+        };
+        fs::write(f.disk_path(), changed.to_string()).unwrap();
+        f.restart().await;
+        let before = fs::read(f.disk_path()).unwrap();
+        assert_eq!(
+            f.attempt().await,
+            InjectAttempt::HandbackFailed("queued_head_unknown"),
+            "Recorded::matches must reject only the changed {field}"
+        );
+        assert_eq!(fs::read(f.disk_path()).unwrap(), before);
+    }
+    fs::write(f.disk_path(), original.to_string()).unwrap();
+    f.restart().await;
+    assert_eq!(
+        f.attempt().await,
+        InjectAttempt::NotSent("queued_head_reconciled"),
+        "the same complete receipt proves the unmodified recorded identity"
+    );
+    assert_eq!(f.pane.tmux_calls(), calls, "proof checks must never retype");
 }
 
 #[tokio::test(flavor = "current_thread")]
