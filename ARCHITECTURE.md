@@ -103,6 +103,7 @@ src/
 │   ├── late_live_reload_tests.rs
 │   ├── peer_filter.rs
 │   ├── readers_live_reload_tests.rs
+│   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
@@ -238,7 +239,6 @@ src/
 │   ├── idempotency.rs
 │   ├── imsg_reply.rs
 │   ├── imsg_reply_tests.rs
-│   ├── intake_delivery_required_migrations.rs
 │   ├── intake_outbox.rs
 │   ├── intake_outbox_delivery_proof.rs
 │   ├── intake_outbox_dispatch_stamp.rs
@@ -1516,9 +1516,6 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
-│   │   ├── queue_park_ledger/
-│   │   │   ├── cancel_park_tests.rs
-│   │   │   └── promote_hold.rs
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
@@ -1605,8 +1602,7 @@ src/
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
 │   │   │   ├── turn_summary_recovery_tests.rs
-│   │   │   ├── two_message_panel.rs
-│   │   │   └── unix_journal.rs
+│   │   │   └── two_message_panel.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs
@@ -1711,8 +1707,6 @@ src/
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
-│   │   │   │   │   ├── dispatch_stamp/
-│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
 │   │   │   │   │   │   ├── mailbox_reaction_tests.rs
@@ -1726,7 +1720,6 @@ src/
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
 │   │   │   │   │   ├── dispatch_runtime.rs
-│   │   │   │   │   ├── dispatch_stamp.rs
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── input_effect_tests.rs
@@ -1802,9 +1795,6 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
-│   │   │   ├── intake_delivery_capability/
-│   │   │   │   ├── cache.rs
-│   │   │   │   └── tests.rs
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
 │   │   │   ├── o_writer_host/
@@ -1815,6 +1805,7 @@ src/
 │   │   │   │       │   │   ├── fresh_process_tests.rs
 │   │   │   │       │   │   └── fresh_scope_restart_tests.rs
 │   │   │   │       │   ├── delegated_tests.rs
+│   │   │   │       │   ├── discord_mock_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs
 │   │   │   │       ├── b1b_joint_owner_tests.rs
@@ -1843,7 +1834,6 @@ src/
 │   │   │   ├── gateway_runtime.rs
 │   │   │   ├── home_lifecycle_tests.rs
 │   │   │   ├── intake.rs
-│   │   │   ├── intake_delivery_capability.rs
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
@@ -1881,10 +1871,7 @@ src/
 │   │   │   ├── fixtures/
 │   │   │   │   └── o_writer.rs
 │   │   │   ├── journal/
-│   │   │   │   ├── controller.rs
-│   │   │   │   ├── pg_store.rs
-│   │   │   │   ├── recovery.rs
-│   │   │   │   └── watcher.rs
+│   │   │   │   └── pg_store.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── idle_replace_tests.rs
 │   │   │   │   └── stream_frame_fixtures.rs
@@ -2305,8 +2292,6 @@ src/
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
-│   │   │   ├── intake_settlement/
-│   │   │   │   └── tests.rs
 │   │   │   ├── retry_state/
 │   │   │   │   └── delivery_rewind.rs
 │   │   │   ├── runtime_handoff_loop/
@@ -2358,8 +2343,7 @@ src/
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── source_guard_tests.rs
-│   │   │   │   ├── o_body.rs
-│   │   │   │   └── unix_journal.rs
+│   │   │   │   └── o_body.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
 │   │   │   │   │   ├── recovery_retry_guard_tests/
@@ -2448,7 +2432,6 @@ src/
 │   │   │   ├── footer_retirement_tests.rs
 │   │   │   ├── guards.rs
 │   │   │   ├── headless_delivery.rs
-│   │   │   ├── intake_settlement.rs
 │   │   │   ├── memory_lifecycle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── output_lifecycle.rs
@@ -2704,7 +2687,6 @@ src/
 │   │   ├── queue_io.rs
 │   │   ├── queue_marker.rs
 │   │   ├── queue_overflow_dlq.rs
-│   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
@@ -3602,12 +3584,6 @@ src/
 │   ├── turn_summary_line/
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
-│   ├── writer_protocol/
-│   │   ├── namespace/
-│   │   │   ├── catalog.rs
-│   │   │   └── lexical.rs
-│   │   ├── authority.rs
-│   │   └── namespace.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -3634,7 +3610,6 @@ src/
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
-│   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
 │   ├── herdr_admission.rs
 │   ├── herdr_admission_tests.rs
@@ -3714,8 +3689,7 @@ src/
 │   ├── turn_orchestrator.rs
 │   ├── turn_summary_line.rs
 │   ├── turn_summary_line_tests.rs
-│   ├── voice_conductor.rs
-│   └── writer_protocol.rs
+│   └── voice_conductor.rs
 ├── supervisor/
 │   └── mod.rs
 ├── test_support/

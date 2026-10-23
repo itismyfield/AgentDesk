@@ -1704,11 +1704,6 @@ mod tests {
             "mailboxes": [{"channel_id": 123, "has_cancel_token": true}],
             "config_audit": {"warnings": ["secret-ish path"]},
             "degraded_reasons": ["provider:codex:pending_queue_depth:2"],
-            "active_session_audit": {
-                "enabled": true,
-                "candidate_count": 1,
-                "candidates": [{"session_key": "host/mini:codex-1", "confidence": 0.8}]
-            }
         }));
 
         assert_eq!(public["status"], "degraded");
@@ -1724,7 +1719,6 @@ mod tests {
             public["degraded_reasons"],
             json!(["provider:codex:pending_queue_depth:2"])
         );
-        assert!(public.get("active_session_audit").is_none());
     }
 
     #[test]

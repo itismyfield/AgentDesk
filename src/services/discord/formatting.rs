@@ -246,16 +246,16 @@ mod status_panel_v2_formatter_tests;
 mod replace_long_message;
 
 pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
-// #5071 T1 S3a: the deferred receipt variant gained a production consumer — the
-// watcher's cutover short-replace arm, which needs the tail-continuation receipt
-// its `_with_outcome_` sibling does not surface.
-pub(in crate::services::discord) use self::replace_long_message::replace_long_message_raw_deferred_returning_receipt;
 pub(in crate::services::discord) use self::replace_long_message::{
     DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome,
     cleanup_replace_continuations_after_failure, replace_long_message_outcome_to_result,
     replace_long_message_raw, replace_long_message_raw_deferred,
-    replace_long_message_raw_with_outcome, replace_long_message_raw_with_outcome_returning_receipt,
-    watcher_completion_footer_anchor,
+    replace_long_message_raw_with_outcome, watcher_completion_footer_anchor,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use self::replace_long_message::{
+    replace_long_message_raw_deferred_returning_receipt,
+    replace_long_message_raw_with_outcome_returning_receipt,
 };
 
 #[cfg(test)]

@@ -1,36 +1,12 @@
-//! Dormant delivery-proof settlement primitives for `intake_outbox`.
+//! Stale intake delivery-debt queries and transactional settlement.
 //!
-//! The dormant reducer keeps judgment and proof locking in one transaction. It
+//! The reducer keeps judgment and proof locking in one transaction. It
 //! attempts at most one terminal CAS only after the locked row remains strictly
 //! stale; a refreshed row needs no CAS. Autocommit ends the lock at its `SELECT`.
 
 use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, PgConnection, PgPool};
-
-/// The terminal-delivery or sweep source authorizing an intake row transition.
-///
-/// This value is an observability label only.  The settlement CAS is the same
-/// for every source so an authority label cannot widen the SQL predicate. The
-/// sweep label is reserved for its S-W3 caller.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IntakeSettlementSource {
-    Committed,
-    RelayOwnerHandoff,
-    NoBodyNoRetry,
-    Sweep,
-}
-
-impl IntakeSettlementSource {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Committed => "committed",
-            Self::RelayOwnerHandoff => "relay_owner_handoff",
-            Self::NoBodyNoRetry => "no_body_no_retry",
-            Self::Sweep => "sweep",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, sqlx::FromRow)]
 pub(crate) struct StaleDispatchedRow {
@@ -163,11 +139,8 @@ pub(crate) async fn list_stale_spawned(
         .await
 }
 
-/// Whether any row is still open in `spawned` or `dispatched`.
-///
-/// "Debt" here means unsettled, not anomalous: `spawned` is the initial status of every locally
-/// admitted row, so this is true on any node currently carrying traffic. Callers using it as a
-/// disjunct get a no-debt short-circuit for an idle table, not a signal that something is wrong.
+/// Whether any spawned or dispatched row remains unsettled.
+/// The sweep uses this to skip an idle table; open debt alone is not anomalous.
 pub(crate) async fn open_stamp_debt_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM public.intake_outbox
@@ -216,29 +189,6 @@ pub(crate) async fn mark_done_from_delivery_proof(
     .bind(outbox_id)
     .bind(IntakeOutboxStatus::Done)
     .bind(IntakeOutboxStatus::Dispatched)
-    .execute(&mut *conn)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
-/// Settles a receipt-backed intake row from either open handoff state.
-///
-/// The bridge does not own the worker claim token, so this deliberately uses
-/// only the monotonic `spawned`/`dispatched` state CAS.  Audit fields such as
-/// `claim_owner`, `spawned_at`, and `dispatched_at` are left untouched.
-pub(crate) async fn settle_intake_done_from_receipt(
-    conn: &mut PgConnection,
-    outbox_id: i64,
-    source: IntakeSettlementSource,
-) -> Result<bool, sqlx::Error> {
-    let _ = source;
-    let result = sqlx::query(
-        "UPDATE public.intake_outbox
-         SET status = 'done', completed_at = NOW()
-         WHERE id = $1
-           AND status IN ('spawned', 'dispatched')",
-    )
-    .bind(outbox_id)
     .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() == 1)

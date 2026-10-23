@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn same_turn_refresh_preserves_transient_intake_settlement_authority() {
+    fn same_turn_refresh_preserves_intake_outbox_identity() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -664,21 +664,11 @@ mod tests {
         let mut original = inflight("terminal body", 0);
         original.channel_id = channel.get();
         original.adopt_intake_outbox(Some(7331));
-        original.bind_intake_delivery_capabilities(
-            crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities {
-                stamp_dispatched: true,
-                settle_and_sweep: true,
-            },
-        );
         super::super::super::inflight::save_inflight_state(&original)
             .expect("persist same-turn state");
 
         assert!(refresh_delivery_rewind_state(&mut original));
         assert_eq!(original.intake_outbox_id(), Some(7331));
-        assert!(
-            original.intake_delivery_capabilities().settle_and_sweep,
-            "serde reload must not downgrade the bridge's immutable settlement snapshot"
-        );
     }
 
     #[test]

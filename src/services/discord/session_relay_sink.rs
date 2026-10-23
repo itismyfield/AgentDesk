@@ -64,6 +64,8 @@ pub(in crate::services::discord) mod task_notification_context;
 mod terminal_handoff;
 pub(in crate::services::discord) mod turn_parser;
 use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
+#[cfg(test)]
+use self::idle_jsonl::idle_jsonl_payload_contains_init_event;
 use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
@@ -119,7 +121,6 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     by_session: Mutex<HashMap<String, SessionRelayParser>>,
     // #5071 T1 S3a: borrowed from the process-wide observer rather than owned, so
     // the sink direct family and the watcher family serialise onto one actor.
-    journal: &'static journal::JournalObserver,
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
     #[cfg(test)]
@@ -139,7 +140,6 @@ impl SessionBoundDiscordRelaySink {
             frames_total: AtomicU64::new(0),
             delivered_total: AtomicU64::new(0),
             by_session: Mutex::new(HashMap::new()),
-            journal: journal::process_observer(),
             #[cfg(test)]
             lease_test_probe: None,
             #[cfg(test)]
@@ -549,8 +549,12 @@ impl SessionBoundDiscordRelaySink {
                     provider.clone(),
                     None,
                 );
+                #[cfg(test)]
+                let controller_gateway = gateway.unwrap_or(&live_gateway);
+                #[cfg(not(test))]
+                let controller_gateway: &dyn super::gateway::TurnGateway = &live_gateway;
                 return short_controller::deliver_short_replace_via_controller(
-                    short_controller::choose_gateway(gateway, &live_gateway),
+                    controller_gateway,
                     short_controller::SinkShortReplaceCtx {
                         shared: &shared,
                         provider: &provider,
@@ -570,12 +574,6 @@ impl SessionBoundDiscordRelaySink {
                 )
                 .await;
             }
-            let mut direct_journal_attempt =
-                if journal::journals_sink_direct(&route, cutover_short_replace) {
-                    self.journal.begin_fresh(&shared, &delivery)
-                } else {
-                    None
-                };
             if session_bound_should_send_new_chunks_for_placeholder(&relay_text) {
                 let send = || {
                     journal::send_long_chunks_with_anchor_receipt(
@@ -587,7 +585,7 @@ impl SessionBoundDiscordRelaySink {
                         &shared,
                     )
                 };
-                let (message_ids, chunk_anchor_receipt) =
+                let (message_ids, _chunk_anchor_receipt) =
                     claimed_body_send(claim_then_send(Some(body_claim), send).await)??;
                 if let Some(gateway) = gateway {
                     let _ = gateway.delete_message(channel, msg_id).await;
@@ -629,29 +627,22 @@ impl SessionBoundDiscordRelaySink {
                     sink_lease_guard.as_ref(),
                     "src/services/discord/session_relay_sink.rs:sink_long_chunks_advance",
                 );
-                journal::settle(
-                    self.journal,
-                    &mut direct_journal_attempt,
-                    chunk_anchor_receipt,
-                    proof,
-                );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
             #[cfg(test)]
             let mut last_chunk_anchor = self.test_replace_anchor.clone();
             #[cfg(not(test))]
             let mut last_chunk_anchor = None;
-            let mut edit_anchor_receipt = None;
             let (http_ref, shared_ref, text) = (&http, &shared, relay_text.as_str());
-            let (anchor, receipt) = (&mut last_chunk_anchor, &mut edit_anchor_receipt);
+            let anchor = &mut last_chunk_anchor;
             let replace = move || async move {
                 if let Some(gateway) = gateway {
                     gateway
                         .replace_message_with_outcome(channel, msg_id, text)
                         .await
                 } else {
-                    formatting::replace_long_message_raw_with_outcome_returning_receipt(
-                        http_ref, channel, msg_id, text, shared_ref, anchor, receipt,
+                    formatting::replace_long_message_raw_with_outcome(
+                        http_ref, channel, msg_id, text, shared_ref, anchor,
                     )
                     .await
                     .map_err(|error| error.to_string())
@@ -702,12 +693,6 @@ impl SessionBoundDiscordRelaySink {
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_edit_advance",
                     );
-                    journal::settle(
-                        self.journal,
-                        &mut direct_journal_attempt,
-                        edit_anchor_receipt.take(),
-                        proof,
-                    );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
                 Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
@@ -754,12 +739,6 @@ impl SessionBoundDiscordRelaySink {
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_fallback_advance",
-                    );
-                    journal::settle(
-                        self.journal,
-                        &mut direct_journal_attempt,
-                        edit_anchor_receipt.take(),
-                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
