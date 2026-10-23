@@ -13,6 +13,11 @@ use sqlx::{Connection, PgPool};
 use super::config_ops::ConfigRead;
 use super::kv_ops::KvRead;
 
+#[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
+mod epoch_tests;
+
 const DEADLINE_PASSED: &str = "bridge deadline passed before async bridge started";
 const DEADLINE_EXCEEDED: &str = "bridge deadline exceeded during async bridge operation";
 
