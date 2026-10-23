@@ -139,6 +139,14 @@ fn reply(request: &Value, version: &str, scripted: Option<Value>, gone: bool) ->
             "pane_id": PANE, "shell_pid": SHELL, "foreground_process_group_id": PROVIDER,
             "foreground_processes": [{"pid": PROVIDER, "name": "claude"}, {"pid": CHILD, "name": "node"}]
         }}),
+        "pane.read" if !gone && request["params"]["pane_id"] == PANE => {
+            json!({"type": "pane_read", "read": {
+                "pane_id": PANE, "source": request["params"]["source"],
+                "text": include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/tui_input/claude-2.1.293-idle.txt")),
+                "revision": 7, "truncated": false
+            }})
+        }
         "session.snapshot" => json!({"type": "session_snapshot", "snapshot": {
             "version": "0.9.3", "protocol": 22, "workspaces": [], "tabs": [], "layouts": [],
             "agents": [], "panes": panes
