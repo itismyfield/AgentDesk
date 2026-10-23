@@ -125,8 +125,7 @@ mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
-// dedicated inherent impls). See `shared_state::QueuedPlaceholderState` and
-// `shared_state::SessionOverrideState`.
+// dedicated inherent impls). See `shared_state::{QueuedPlaceholderState, SessionOverrideState}`.
 mod shared_state;
 mod single_message_panel;
 mod stall_recovery;
@@ -134,7 +133,8 @@ mod startup_reclaim;
 mod status_panel_orphan_store;
 mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
-mod session_notice;
+pub(crate) mod session_notice;
+pub(crate) mod session_notice_delivery;
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod synthetic_headless_message_id;

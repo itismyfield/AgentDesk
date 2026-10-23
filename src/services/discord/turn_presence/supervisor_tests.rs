@@ -585,6 +585,12 @@ async fn a_queue_two_wakes_did_not_move_is_held_and_noticed_with_its_cause() {
         let notices = fake.notices();
         assert_eq!(notices.len(), 1, "{reason}");
         assert!(notices[0].1.contains(words), "{}", notices[0].1);
+        assert!(
+            notices[0].1.starts_with("-# ⚠️ ")
+                && crate::services::discord::session_notice::is_inline(&notices[0].1),
+            "the held notice must reach the provider effect as one subtext line: {}",
+            notices[0].1
+        );
     }
 }
 

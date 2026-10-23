@@ -71,6 +71,7 @@ src/server/issue_specs.rs
 src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/outbox_worker/attachment_pg_tests.rs
+src/server/outbox_worker/session_notice_pg_tests.rs
 src/server/resource_locks.rs
 src/server/routes/agents_host_guard_tests.rs
 src/server/routes/agents_turn_deliver/pg_tests.rs
@@ -500,6 +501,7 @@ server::issue_specs::issue_specs_pg_tests
 server::message_outbox_retry_tests
 server::multinode_regression::multinode_regression_pg_tests
 server::outbox_worker::attachment_pg_tests
+server::outbox_worker::session_notice_pg_tests
 server::resource_locks::resource_locks_pg_tests
 server::routes::agents::host_guard_tests
 server::routes::agents_turn_deliver::pg_tests
@@ -1414,6 +1416,11 @@ server::outbox_worker::attachment_pg_tests::legacy_enqueue_wrappers_keep_null_at
 server::outbox_worker::attachment_pg_tests::outbox_image_constraints_reject_partial_and_oversized_rows_pg
 server::outbox_worker::attachment_pg_tests::partial_outbox_image_never_invokes_text_delivery_pg
 server::outbox_worker::attachment_pg_tests::stale_processing_reclaim_follows_the_same_prefix_rule_pg
+server::outbox_worker::session_notice_pg_tests::designated_unknown_owner_retries_without_notify_fallback_pg
+server::outbox_worker::session_notice_pg_tests::eligible_lifecycle_notice_pins_provider_display_and_deduplicates_after_restart_pg
+server::outbox_worker::session_notice_pg_tests::explicit_autoqueue_notice_does_not_convert_arbitrary_system_content_pg
+server::outbox_worker::session_notice_pg_tests::unmarked_legacy_pending_and_stale_processing_keep_notify_and_original_payload_pg
+server::outbox_worker::session_notice_pg_tests::user_content_ops_and_unlisted_sources_remain_sql_null_display_pg
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::host_guard_tests::command_agent_and_dispatch_refusal_leave_session_and_dispatch_working_pg

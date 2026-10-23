@@ -284,6 +284,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/outbox_worker/attachment_pg_tests.rs'
+              - 'src/server/outbox_worker/session_notice_pg_tests.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver/pg_tests.rs'

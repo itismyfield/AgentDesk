@@ -370,9 +370,12 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── outbox_actionable_delivery/
+│   │   └── session_notice.rs
 │   ├── outbox_worker/
 │   │   ├── attachment_pg_tests.rs
-│   │   └── claim.rs
+│   │   ├── claim.rs
+│   │   └── session_notice_pg_tests.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -2697,6 +2700,7 @@ src/
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
 │   │   ├── monitoring_status.rs
+│   │   ├── monitoring_status_inline_tests.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
 │   │   ├── placeholder_cleanup.rs
@@ -2746,6 +2750,7 @@ src/
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
 │   │   ├── session_notice.rs
+│   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -2906,8 +2911,10 @@ src/
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
 │   │   ├── attachments.rs
+│   │   ├── diagnostics.rs
 │   │   ├── identity.rs
-│   │   └── identity_tests.rs
+│   │   ├── identity_tests.rs
+│   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs

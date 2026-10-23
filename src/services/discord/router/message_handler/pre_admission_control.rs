@@ -157,8 +157,9 @@ async fn send_pre_admission_notice(
     reason_code: &'static str,
     notice: &str,
 ) {
+    let notice = crate::services::discord::session_notice::subtext("ℹ️", notice);
     rate_limit_wait(shared, channel_id).await;
-    if let Err(error) = channel_id.say(http, notice).await {
+    if let Err(error) = channel_id.say(http, &notice).await {
         tracing::warn!(
             channel_id = channel_id.get(),
             reason_code,
@@ -172,7 +173,7 @@ async fn send_pre_admission_notice(
             &target,
             session_key.as_deref(),
             reason_code,
-            notice,
+            &notice,
         );
     }
 }
@@ -412,23 +413,52 @@ pub(super) mod pre_admission_control_tests {
         use crate::services::discord::turn_view_reconciler::{
             TurnViewState, note_intake_turn_started_current_with_attempt,
         };
+        use axum::{
+            body::Bytes,
+            http::{Method, Uri},
+            response::IntoResponse,
+        };
         let root = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
         let (shared, channel) = fixture(Some(session_with(&["U"], true))).await;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(
+            move |method: Method, uri: Uri, body: Bytes| {
+                let captured = captured.clone();
+                async move {
+                    if method != Method::POST || !uri.path().ends_with("/messages") {
+                        return axum::http::StatusCode::NO_CONTENT.into_response();
+                    }
+                    captured.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
+                    axum::Json(serde_json::json!({
+                        "id":"566000000000199", "channel_id":channel.get().to_string(),
+                        "content":"provider response",
+                        "author":{"id":"1","username":"provider","discriminator":"0001","avatar":null},
+                        "timestamp":"2026-10-23T00:00:00+00:00", "edited_timestamp":null,
+                        "tts":false,"mention_everyone":false,"mentions":[],"mention_roles":[],
+                        "attachments":[],"embeds":[],"pinned":false,"type":0
+                    })).into_response()
+                }
+            },
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http = Arc::new(
-            serenity::HttpBuilder::new("test-token")
+            serenity::HttpBuilder::new("offline-provider-control")
                 .proxy(format!("http://{}", listener.local_addr().unwrap()))
-                .client(
-                    reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_millis(100))
-                        .build()
-                        .unwrap(),
-                )
                 .ratelimiter_disabled(true)
                 .build(),
         );
-        for (index, text) in ["/model", "/frobnicate"].into_iter().enumerate() {
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (index, text) in [
+            "/model gpt**test",
+            "/frobnicate",
+            "/goal pause",
+            "/goal resume",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let message = MessageId::new(566_000_000_000_101 + index as u64);
             note_intake_turn_started_current_with_attempt(&shared, &http, channel, message, "test")
                 .await;
@@ -463,6 +493,39 @@ pub(super) mod pre_admission_control_tests {
             assert_eq!(data.sessions[&channel].pending_uploads, ["U"]);
             assert!(data.sessions[&channel].cleared);
         }
+        for active in [false, true] {
+            send_codex_goal_lifecycle_notice(
+                &http,
+                &shared,
+                channel,
+                GoalLifecycleCommand::Clear,
+                active,
+            )
+            .await;
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            6,
+            "every local control and goal notice posts once through the supplied provider HTTP"
+        );
+        for body in requests.iter() {
+            let content = body["content"].as_str().unwrap();
+            assert!(
+                content.starts_with("-# ℹ️ ")
+                    && crate::services::discord::session_notice::is_inline(content),
+                "the real control/goal entrypoints must emit one provider subtext line: {content:?}"
+            );
+        }
+        assert!(requests[0]["content"].as_str().unwrap().contains("(+1줄)"));
+        assert!(requests[1]["content"].as_str().unwrap().contains("(+2줄)"));
+        assert!(
+            requests[4]["content"]
+                .as_str()
+                .unwrap()
+                .contains(r"\`/goal clear\`")
+        );
+        server.abort();
     }
 
     use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};

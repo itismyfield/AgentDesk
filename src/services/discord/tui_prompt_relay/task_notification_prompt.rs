@@ -214,28 +214,18 @@ async fn legacy_notify_gate(
         );
         return None;
     };
-    let notify_http = match super::super::health::resolve_utility_bot_http(
-        registry.as_ref(),
-        super::super::bot_role::UtilityBotRole::Notify,
-    )
-    .await
-    {
-        Ok(http) => http,
-        Err((status, body)) => {
-            tracing::warn!(
-                provider = %prompt.provider,
-                channel_id = channel_id.get(),
-                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                relay_owner = lease.relay_owner.as_str(),
-                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                status = %status,
-                body = %body,
-                "skipping SSH-direct TUI prompt notify; notify bot unavailable"
-            );
-            return None;
-        }
-    };
+    let provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
+    let notify_http =
+        match super::super::session_notice::provider_http(registry.as_ref(), &provider, channel_id)
+            .await
+        {
+            Ok(http) => http,
+            Err(error) => {
+                tracing::warn!(provider = %prompt.provider, channel_id = channel_id.get(), %error,
+                "skipping input status notice; channel provider unavailable");
+                return None;
+            }
+        };
     Some(TaskPromptGate {
         notify_http,
         card_anchor: None,

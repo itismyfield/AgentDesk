@@ -35,16 +35,16 @@ pub(super) fn preview(text: &str) -> String {
     escaped
 }
 
-pub(super) fn subtext(icon: &str, text: &str) -> String {
+pub(crate) fn subtext(icon: &str, text: &str) -> String {
     finish(format!("-# {icon} {}", preview(text)))
 }
 
-pub(super) fn finish(text: String) -> String {
+pub(crate) fn finish(text: String) -> String {
     // Bound the preview before applying the shared Discord UTF-16 clamp.
     tui_task_card::clamp_discord_message_content(&tui_task_card::truncate_chars_ascii(&text, 900))
 }
 
-pub(super) fn is_inline(text: &str) -> bool {
+pub(crate) fn is_inline(text: &str) -> bool {
     text.starts_with("-# ")
         && !text
             .chars()

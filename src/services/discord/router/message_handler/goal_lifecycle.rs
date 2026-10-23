@@ -132,9 +132,12 @@ pub(super) async fn send_codex_goal_lifecycle_notice(
     command: GoalLifecycleCommand,
     active_turn: bool,
 ) {
-    let notice = codex_goal_lifecycle_notice(command, active_turn);
+    let notice = crate::services::discord::session_notice::subtext(
+        "ℹ️",
+        codex_goal_lifecycle_notice(command, active_turn),
+    );
     rate_limit_wait(shared, channel_id).await;
-    if let Err(error) = channel_id.say(http, notice).await {
+    if let Err(error) = channel_id.say(http, &notice).await {
         tracing::warn!(
             channel_id = channel_id.get(),
             command = command.as_str(),
@@ -148,7 +151,7 @@ pub(super) async fn send_codex_goal_lifecycle_notice(
             &target,
             session_key.as_deref(),
             codex_goal_lifecycle_reason_code(command, active_turn),
-            notice,
+            &notice,
         );
     }
 }
