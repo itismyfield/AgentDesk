@@ -792,8 +792,8 @@ fn response_is_json(response: &Response) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) use queue_api::home_stop_tests::{
-    app_with as home_stop_test_app, post as home_stop_test_post,
+pub(crate) use queue_api::forwarding_tests::{
+    app_with as cancel_route_test_app, post as cancel_route_test_post,
 };
 
 #[cfg(test)]

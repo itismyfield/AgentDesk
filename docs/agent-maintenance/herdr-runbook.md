@@ -35,14 +35,13 @@
 | `runtime.herdr_codex_turn_enabled` | false | Codex Herdr 턴 실행 허용. 꺼져 있으면 unsupported provider로 거절 |
 | `runtime.herdr_cancel_enabled` | false | 요청 스위치. 현재 생산 빌드에서는 true여도 Escape 전달 불가 |
 | `runtime.herdr_terminate_enabled` | false | 명시적 운영자 pane 종료 허용. live 설정을 읽음 |
-| `runtime.channel_home_delegation_enabled` | false | channel-home 변경 CLI와 부팅 시 위임 경로 시작을 제어 |
 | O writer 채널 선택 | 자동 준비를 보장하지 않음 | `tui_o.writer.channels` 또는 `all_tui`로 선택하는 부팅 설정. 실행 노드별 확인 필요 |
 | 대상 채널의 O 소유권·accepting writer·기존 binding checkpoint | 하나라도 없으면 `o_writer_not_ready` | 일반 Herdr 턴의 필수 준비 조건. 채널 선택만으로 충족되지 않음 |
 | Codex cold-launch hook·daemon isolation 조건 | `HooksUnavailable` 또는 `DaemonIsolationUnavailable` 등으로 거절 | hook 활성화·endpoint·바이너리 hook capability와 `--no-daemon` 지원을 별도로 확인 |
 | `ADK_HERDR_ADMISSION` | 미설정이면 허용 | 최초 사용 시 읽음. 설정된 값 중 `on`만 허용하며 나머지는 거절 |
 | `<runtime_root>/herdr/admission-off` | 파일이 없으면 허용 | 발견하면 해당 프로세스 종료까지 정지 상태를 유지 |
 
-근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:199`, `:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/cli/channel_home.rs:70`; `src/services/cluster/channel_home_boot.rs:95`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
+근거: `src/config/session_hosts.rs:33`, `:252`; `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:199`, `:287`, `:288`; `src/services/herdr_launch.rs:62`, `:72`; `src/services/tui_o/channel_policy.rs:1`, `:62`; `src/services/codex/tui_session_launch.rs:416`, `:427`, `:433`, `:436`; `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`; `src/services/discord/herdr_terminate.rs:69`; `src/services/herdr_admission.rs:38`, `:48`, `:70`, `:78`.
 
 admission 정지는 새 Herdr 작업을 막으며 pane을 종료하지 않는다. 일반 턴 선택과 입력 gate가 모두 admission을 검사하므로 기존 실행의 후속 입력과 시험 입력도 영향을 받는다. 이를 범용 intake pause나 대기 입력의 안전한 동결·이관 기능으로 취급하지 않는다.
 
@@ -121,13 +120,7 @@ Herdr integration installer를 중복 적용하지 않는 것을 운영 정책�
 
 ### 2.3 다중 노드 운용
 
-Herdr 실행 endpoint와 채널 소유권 위임을 구분한다. `channel-home`은 현재 부팅·lease·drain과 연결되어 있다. Gateway, standby, REST worker의 시작 경로가 존재하고 releasing drain의 gateway Legacy reset도 연결되어 있다. 로컬 Herdr endpoint가 있는 쪽은 reset에서 pane과 row를 유지한다.
-
-근거: `src/services/discord/runtime_bootstrap.rs:345`, `:411`, `:440`, `:589`, `:634`; `src/services/cluster/channel_home_boot.rs:198`.
-
-위임을 사용할 때는 `<ADK> channel-home status`로 holder·target·epoch와 `open_intake.current_epoch`, `other_epoch`, `unrouted`를 확인한다. 위임 스위치가 켜졌다는 사실이나 home row 생성만으로 준비 완료를 선언하지 않는다. 준비 실패는 채널을 거절하는 경로가 있다.
-
-근거: `src/cli/channel_home.rs:112`, `:118`; `src/services/cluster/home_availability.rs:1`, `:8`; `src/services/turn_host.rs:118`.
+채널 홈 위임의 부팅 경로와 `channel-home` CLI는 제거됐다. Herdr 실행 endpoint와 일반 노드 배치는 각각의 기존 설정과 소유권 경계를 따른다.
 
 [O-U-3] Mac 두 대의 실제 전달·후속 대화·단절 중 완료 후 회수는 별도로 검증한다. 한 Herdr 클라이언트에서 양쪽 화면을 보았다는 사실만으로 이를 통과 처리하지 않는다.
 
@@ -182,15 +175,9 @@ Herdr 실행 endpoint와 채널 소유권 위임을 구분한다. `channel-home`
 
    근거: `src/cli/herdr.rs:163`, `:199`, `:259`, `:285`; `src/db/dispatched_sessions/hosted_execution.rs:434`.
 
-5. **위임 소유권 반환이 필요하면 별도 작업으로 마친다.** 위임 스위치와 양쪽 dcserver를 유지하고 gateway에서 `<ADK> channel-home reclaim <channel>`을 실행한다. Worker 상태에서 Reclaiming 전이를 요청한 뒤 holder의 drain과 gateway의 반환 완료를 기다린다. status에서 해당 home row가 사라진 것을 확인한다.
+5. **중단 상태와 남은 책임을 기록한다.** 전용 runtime에서 모든 대상 실행을 배출·종료한 경우 필요한 Herdr 실행·관리 스위치를 끌 수 있다. runtime 전역 스위치의 다른 채널 영향을 확인한다. 스위치를 끈 매핑 채널은 거절되며 tmux로 자동 전환되지 않는다. 매핑 제거·dcserver 재시작을 같은 채널 복귀의 다음 단계로 안내하지 않는다.
 
-   reclaim은 provider 프로세스 이전, hosted row 은퇴, `.host_kind` 전환을 수행하는 명령이 아니다. `home_draining` blocker나 `other_epoch` 입력이 남으면 원인을 해결한다. `force`로 배출 판정을 우회하지 않는다. 소유권 반환 완료도 같은 채널의 legacy 실행 가능성을 증명하지 않는다.
-
-   근거: `src/cli/channel_home.rs:173`; `src/services/cluster/channel_home_boot.rs:198`; `src/services/cluster/channel_home_drain.rs:145`, `:233`; `src/db/intake_outbox.rs:677`.
-
-6. **중단 상태와 남은 책임을 기록한다.** 전용 runtime에서 모든 대상 실행을 배출·종료한 경우 필요한 Herdr 실행·관리 스위치를 끌 수 있다. runtime 전역 스위치의 다른 채널 영향과 위임 반환 완료를 확인한다. 스위치를 끈 매핑 채널은 거절되며 tmux로 자동 전환되지 않는다. 매핑 제거·dcserver 재시작을 같은 채널 복귀의 다음 단계로 안내하지 않는다.
-
-   근거: `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:178`, `:199`, `:261`; `src/cli/channel_home.rs:70`.
+   근거: `src/config/runtime_settings.rs:121`; `src/services/turn_host.rs:178`, `:199`, `:261`.
 
 현재 유지할 수 있는 legacy 운영은 **이미 legacy 조건을 충족하는 다른 채널·노드의 실행**이다. Herdr 매핑이 없고 해당 실행에 Herdr record·표식 등 충돌 증거가 없어야 한다. 새 작업을 다른 채널에서 시작하는 결정은 원래 요청의 실행·배달 결과를 먼저 확인한 별도 결정으로 기록한다. 이것을 원래 채널의 복귀나 대화 이전으로 기록하지 않는다.
 
@@ -379,7 +366,6 @@ dcserver 재접속은 provider 응답을 자동으로 재실행하는 경로가 
 | 대기 intervention·relay | `GET /api/channels/<channel>/watcher-state` | `has_pending_queue`와 이용 가능한 mailbox/inflight·relay 필드. `unread_bytes=null`은 0이 아님. O drain 전체 증명 불가 | `src/server/routes/domains/runtime.rs:109`; `src/server/routes/queue_api.rs:267`; `src/services/discord/health/snapshot.rs:78`, `:117` |
 | dispatch 참고 조회 | `GET /api/channels/<channel>/queue` | `dispatches` 목록. mailbox 입력 목록이나 확실한 배출 판정으로 사용하지 않음 | `src/server/routes/queue_api.rs:20` |
 | 종료 session key 후보 | `GET /api/sessions` | `sessions[].session_key`, provider·instance·agent. 조회 상태 필터가 있고 channel/nonce 결합은 없음. [O-U-6] 필요 | `src/server/routes/agents_crud.rs:943`, `:977` |
-| 위임·반환 | `<ADK> channel-home status` | home state·holder·target·epoch, 열린 입력의 epoch별 수. 반환 완료 후 대상 home row 부재 확인 | `src/cli/channel_home.rs:112`; `src/services/cluster/channel_home_boot.rs:198` |
 
 Socket API는 코드의 line-delimited JSON 방식으로 요청마다 별도 연결을 사용한다. framing 소스에는 미검증 가정이라는 주석이 남아 있다. [O-U-8] 채택 바이너리에서 실제 framing·필수 응답 필드·오류 응답을 격리 환경으로 확인한다.
 
@@ -411,7 +397,6 @@ health 요청은 현재 hold 파일을 새로 읽지 않는다. CLI의 현재 �
 |---|---|---|---|
 | 실행 은퇴 | `<ADK> herdr retire <channel>` | `retired`와 `no input hold is left`. row와 hold 결과 모두 확인. legacy 전환 증거로 사용하지 않음 | `src/cli/herdr.rs:139`, `:199`, `:285` |
 | 명시적 강제 종료 | `<ADK> herdr terminate --session-key <key> --execution-nonce <nonce> --reason <reason>` | HTTP 200, `result="retired"`만 성공. 다른 결과나 연결 오류에서 임의 재실행 금지 | `src/cli/herdr.rs:26`, `:61`; `src/server/routes/herdr_terminate.rs:102` |
-| 위임 소유권 반환 요청 | gateway의 `<ADK> channel-home reclaim <channel>` | 출력 row가 Reclaiming. CLI 성공은 반환 완료가 아님. 이후 status와 drain 확인. legacy 실행 전환과 별개 | `src/cli/channel_home.rs:173`; `src/services/cluster/channel_home_boot.rs:198` |
 | 부팅 설정·admission latch 재평가 | 대상 runtime의 `<ADK> restart-dcserver` | CLI 결과 후 detail에서 설정·readiness 확인. Herdr 서버 식별과 실행 연속성 별도 확인. 같은 채널 복귀 수단이 아님 | `src/cli/args.rs:32`; `src/cli/dcserver.rs:430`; `src/server/routes/health_api/runtime_profile.rs:35` |
 | 종료 확인 후 남은 턴의 명시적 해제 | `<ADK> turn-lease release --expected '<exact-inspect-identity-json>' --reason <reason>` | 정확한 identity의 결과 확인. 거절 시 우회하지 않음 | `src/cli/turn_lease.rs:21`; `src/services/discord/turn_lease.rs:149`, `:201` |
 | 승인된 관리 서버 정지·기동 | 관리 서버 환경의 `<HERDR_BIN> server stop`, `<HERDR_BIN> server` | 저장소에는 격리 서버 사용만 확인됨. 운영 manager와 권한은 [O-U-1], 프로세스 소멸은 [O-U-5] 확인 | `src/services/session_host/herdr/launch_host_real_tests.rs:48`, `:68`, `:92` |
@@ -504,9 +489,7 @@ python3 scripts/e2e/run_tui_relay.py <common-args> \
 
 근거: `src/services/provider/cancel_token_claude_interrupt.rs:581`, `:598`.
 
-반면 `channel-home`의 부팅·lease·drain·gateway reset은 현재 연결되어 있다. stop settlement의 휴면 상태를 channel-home에도 적용하지 않는다.
-
-근거: `src/services/discord/runtime_bootstrap.rs:345`, `:411`, `:440`, `:589`, `:634`.
+채널 홈 위임의 부팅 경로와 CLI는 제거됐다. 위임 명령으로 stop settlement를 대신하지 않는다.
 
 [O-U-9] 향후 stop settlement 활성화 시 별도 운영 문서와 검증이 필요하다. 중단 안내 송신 뒤 durable ACK 전 장애, fallback 안내 중복, receipt가 남은 상태의 재시작·롤백을 측정한다. 검증 전 정확히 한 번 안내나 안전한 자동 정산을 약속하지 않는다.
 
@@ -655,7 +638,7 @@ H3 probe 이전은 이번 축소 실적으로 계산하지 않는다. 해당 변
 | `src/services/claude/herdr_turn.rs:123`, `:439`, `:594`; `src/services/codex/herdr_turn.rs:113`, `:139`, `:403` | provider별 cold start·후속 입력·source 대기·결과 처리 | provider 대화·턴 의미는 AgentDesk adapter 책임 |
 | `src/services/discord/tui_prompt_relay/herdr_source.rs:154`, `:210`, `:274`; `src/services/discord/recovery_engine/herdr_reader.rs:26` | native source 결합과 재시작 재조회·재등록 | 기존 source authority·binding 기록 재사용. 새 화면 기반 답변 저장소를 만들지 않음 (`herdr_source.rs:175`, `:186`, `:300`) |
 | `src/services/session_host/herdr_clear_adapter.rs:200`; `src/services/discord/herdr_terminate.rs:299`; `src/server/routes/herdr_terminate.rs:37`; `src/cli/herdr.rs` | native clear, 운영자 종료, 상태·은퇴 | AgentDesk가 정책·종료 확인·정산·은퇴를 소유하고 Herdr는 허가된 pane I/O 수행 |
-| `src/services/cluster/channel_home_boot.rs:97`; `src/services/discord/runtime_bootstrap.rs:589`; `src/services/cluster/intake_router_hook.rs:165`; `src/services/cluster/intake_worker.rs:550`; `src/services/session_forwarding/home_stop.rs:176` | holder·home epoch·lease/drain·기존 intake/제어 전달 | 멀티노드 배치·전달은 AgentDesk 책임. 대상 노드의 Herdr 제어는 local socket 경계 |
+| `src/services/cluster/intake_router_hook.rs:165`; `src/services/cluster/intake_worker.rs:550` | 기존 intake 배치·전달 | 멀티노드 배치·전달은 AgentDesk 책임. 대상 노드의 Herdr 제어는 local socket 경계 |
 | `src/services/turn_host.rs:130`, `:261`; `src/services/herdr_admission.rs`; `src/config/session_hosts.rs`; `src/services/tui_o/channel_policy.rs:62` | 실행 host, admission, endpoint·writer 부팅 설정 | AgentDesk 진입 정책. 실제 설정·활성화는 [R-U-01] |
 | `src/services/codex/tui_session_launch.rs:416`, `:427`, `:436` | Codex hook capability와 daemon isolation 준비 | AgentDesk cold-launch 사전조건. 실제 노드 준비 결과는 [R-U-03] |
 
@@ -674,9 +657,7 @@ transport의 재접속과 prompt 재전송을 구분한다. 읽기만 retry하�
 
 근거: `src/services/session_host/herdr/model.rs:206`; `src/services/session_host/herdr/transport.rs:143`, `:156`.
 
-과거의 “lease/drain 운영 경로가 없다”, “gateway Legacy reset이 연결되지 않았다”는 설명을 S의 상태 설명으로 재사용하지 않는다. S에는 RestWorker·Standby·Gateway의 호출, 스위치 조건부 boot, `legacy_reset` 연결이 있다. 실제 활성화와 수용 결과는 [R-U-01], [R-U-05], [R-U-06]이다.
-
-근거: `src/services/discord/runtime_bootstrap.rs:345`, `:411`, `:440`, `:589`, `:634`.
+채널 홈 위임의 과거 boot·reset 연결 설명은 현재 운영 절차로 사용하지 않는다. 해당 부팅 경로와 CLI는 제거됐다. 남은 일반 intake 전달의 실제 설정과 수용 결과는 [R-U-01], [R-U-05], [R-U-06]이다.
 
 종료·retire·매핑 제거 후 같은 Claude 채널이 legacy로 복귀한다는 설명도 사용하지 않는다. 표식과 Retired row 증거를 전환하는 기능은 현재 미확보다. [R-U-16]이 해소되기 전 다른 채널의 성공으로 복귀를 완료 처리하지 않는다.
 

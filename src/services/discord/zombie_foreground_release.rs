@@ -40,8 +40,8 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tmux_turn_liveness::IndependentTmuxReadiness;
 
 use super::SharedData;
-/// A holder's forwarded user stop and a live Herdr turn's non-forced cancel, run as its `/stop`.
-pub(crate) use super::commands::stop::{run_herdr_cancel, run_holder_stop};
+/// A live Herdr turn's non-forced cancel, run as its `/stop`.
+pub(crate) use super::commands::stop::run_herdr_cancel;
 
 /// Terminal evidence gathered at one cancel boundary. Deliberately plain data:
 /// the decision itself is a pure function so both directions (release the

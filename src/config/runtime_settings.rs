@@ -132,10 +132,6 @@ pub struct RuntimeSettingsConfig {
     /// Live operator pane-close switch; unset or false sends no close.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_terminate_enabled: Option<bool>,
-    /// Switch for the `channel-home` delegate, reclaim and force commands and the boot start of
-    /// delegated homes; unset or false refuses or skips them before any database access.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_home_delegation_enabled: Option<bool>,
     /// Boot switch for the gateway's ingress ownership shadow, which only logs; it also needs a
     /// non-empty `channel_ingress_shadow_channels`. Unset or false starts nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,7 +197,6 @@ impl RuntimeSettingsConfig {
             && self.herdr_codex_turn_enabled.is_none()
             && self.herdr_cancel_enabled.is_none()
             && self.herdr_terminate_enabled.is_none()
-            && self.channel_home_delegation_enabled.is_none()
             && self.channel_ingress_shadow_enabled.is_none()
             && self.channel_ingress_shadow_channels.is_none()
             && !self.reset_overrides_on_restart

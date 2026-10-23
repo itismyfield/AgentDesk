@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "354a3d63f1ebd9232aa38a3c3cbfefd88c44cf49",
+  "measured_at_sha": "2d41b333d7013e109953f7d4a9d7ef04ce04ef2f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2449,42 +2449,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:230de70d04fdc42bb8f5bb3901823f818f03007f14c5b42d584a1a64e01aee14"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/cli/channel_home_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:23bc9e3f5abbf72e6c65da0aa31a8cd52dab23f3f169b6044b584658b80db873"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/cli/channel_home_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:7677c58efa7cb09e8409da788cb3731a48e2297979633a6cc41fbea27fbdbbe7"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/cli/channel_home_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:a84f5536efe0b604036ab70ffc6c231495ef4afb8a974d2aa3344363173a332c"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/cli/channel_home_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:ad247218e3cc05f7370d25a9f44e955aa3224dbde3aee7bade7c48df034e1fc1"
     },
     {
       "root": "src",
@@ -12672,15 +12636,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:14720845d7d2da0098e954804f65ed1cfbc8d3d4ff7628827faa7ae38ba63f87"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_channel_homes.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
       "fingerprint": "sha256:263f179346a08aabe33f459b0359dc050054f11e44685bdaaccff8d0615c6387"
     },
     {
@@ -12709,15 +12664,6 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:9086e66b6ae337b5771a02c474ffef615985567cd3358ff9563e69d71cb524ad"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_channel_homes.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:a8aa2dc1a1faa801e5440a9016e8b1ee9c453ff4bbb09682c0ad0e6709571fda"
     },
     {
       "root": "src",
@@ -12771,24 +12717,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:247b222031b59cdb482823df7c530c1523d7d7575c2fd91f8b5013380d8d575b"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_channel_homes_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:523a0bcde84f81bf15ae02ed51857e3961c0e2684e55e29814d249cc09b2ae47"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_channel_homes_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:652d9e216a33b11ca54bdb4b22e9aaf02411cc9f2bd485daa2c058db5bb39962"
     },
     {
@@ -12817,15 +12745,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:a77f97bb376783945310b083b2c3ed4f29093498e0011920b5574856773b98b1"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/o_channel_homes_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:b400961265a081d71d55a7919f9c1beb159f81b9615a0d6c41eb14534a7d9b36"
     },
     {
       "root": "src",
@@ -42805,15 +42724,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:2e867d637c6374bf8a8c8ddf9c7f2e5cbefde48febcb7b8989e4e4ce6e56c262"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/session_forwarding/home_stop_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:14da387de0234e6be4e740131187fe4eeb3c0f70b24d728ce1de921ea28fce32"
     },
     {
       "root": "src",

@@ -110,7 +110,7 @@ impl Node {
             let bearer = format!("Bearer {AUTH}");
             let headers = [("authorization", bearer.as_str()), JSON];
             let body = json!({"retry": retry, "reason": "e08 test"}).to_string();
-            crate::server::routes::home_stop_test_post(&app, &uri, &headers, &body).await
+            crate::server::routes::cancel_route_test_post(&app, &uri, &headers, &body).await
         })
     }
 
@@ -148,7 +148,7 @@ impl Node {
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH.into());
         let (pool, registry) = (Some(self.pool.clone()), Some(self.registry.clone()));
-        crate::server::routes::home_stop_test_app(config, pool, registry, holder)
+        crate::server::routes::cancel_route_test_app(config, pool, registry, holder)
     }
 
     /// The state a direct CLI force-kill on node `holder` runs with.
@@ -617,9 +617,13 @@ fn e08_force_kill_non_owner_forwards_pg() {
         let body = json!({"retry": true, "reason": "e08 test"}).to_string();
         let origin = node.app_on("origin-node");
         let headers = [("authorization", bearer.as_str()), JSON];
-        let (status, reply) =
-            crate::server::routes::home_stop_test_post(&origin, &path(&node.key), &headers, &body)
-                .await;
+        let (status, reply) = crate::server::routes::cancel_route_test_post(
+            &origin,
+            &path(&node.key),
+            &headers,
+            &body,
+        )
+        .await;
         assert!(!status.is_success(), "{status}: {reply}");
         assert!(reply.get("termination").is_none(), "{reply}");
         assert_eq!(
@@ -636,9 +640,13 @@ fn e08_force_kill_non_owner_forwards_pg() {
             ("x-agentdesk-session-owner", herdr::NODE),
         ];
         let owner = node.app_on(herdr::NODE);
-        let (status, reply) =
-            crate::server::routes::home_stop_test_post(&owner, &path(&node.key), &forwarded, &body)
-                .await;
+        let (status, reply) = crate::server::routes::cancel_route_test_post(
+            &owner,
+            &path(&node.key),
+            &forwarded,
+            &body,
+        )
+        .await;
         assert_eq!(
             (status, reply["termination"].clone()),
             (StatusCode::OK, result("retired", "retired")),

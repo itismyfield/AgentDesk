@@ -147,31 +147,6 @@ pub(in crate::services::discord) async fn run_slash_stop(
     .await
 }
 
-/// A forwarded stop runs here as this holder's own `/stop`, inside the permit its receiver
-/// admitted; `None` when no runtime of `provider` serves the channel.
-pub(crate) async fn run_holder_stop(
-    registry: Option<&crate::services::discord::health::HealthRegistry>,
-    provider: &ProviderKind,
-    channel: u64,
-) -> Option<serde_json::Value> {
-    let channel = ChannelId::new(channel);
-    let shared = registry?
-        .shared_for_provider_on_channel(provider, channel)
-        .await?;
-    Some(run_holder_stop_on(&shared, provider, channel).await)
-}
-
-pub(in crate::services::discord) async fn run_holder_stop_on(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-) -> serde_json::Value {
-    let reply = run_slash_stop(shared, provider, channel).await;
-    let wire = reply.wire();
-    reply.finish(shared, provider, channel).await;
-    wire
-}
-
 /// A non-forced cancel's `/stop` on a live Herdr turn of this runtime, as the holder answers it;
 /// `None` when no runtime serves the channel or its turn is not one, and nothing was done.
 pub(crate) async fn run_herdr_cancel(
@@ -201,27 +176,6 @@ pub(in crate::services::discord) fn remote_cancel_reply(answer: &serde_json::Val
         Some(_) => holder_reply(answer),
         None => super::STOPPING_RESPONSE.to_owned(),
     }
-}
-
-/// What a gateway's `/stop` answers for a channel delegated away; `None` keeps the existing path.
-pub(in crate::services::discord) async fn gateway_stop_reply(
-    context: &crate::services::session_forwarding::ForwardCallerContext,
-    provider: &ProviderKind,
-    channel: ChannelId,
-) -> Option<String> {
-    use crate::services::session_forwarding::home_stop::{self, GatewayStop};
-    Some(
-        match home_stop::gateway_stop(context, channel.get(), provider.as_str()).await {
-            GatewayStop::Legacy => return None,
-            GatewayStop::Refused(reason) => {
-                format!("이 채널의 home 상태로는 여기서 중지하지 않아요 ({reason}).")
-            }
-            GatewayStop::Unconfirmed(reason) => format!(
-                "holder 노드의 중지 결과를 확인하지 못했어요. 다시 보내지 않아요 ({reason})."
-            ),
-            GatewayStop::Confirmed(answer) => holder_reply(&answer),
-        },
-    )
 }
 
 fn holder_reply(answer: &serde_json::Value) -> String {

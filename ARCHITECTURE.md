@@ -62,8 +62,6 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
-│   ├── channel_home.rs
-│   ├── channel_home_tests.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -89,6 +87,7 @@ src/
 │   ├── o_transition.rs
 │   ├── o_transition_tests.rs
 │   ├── query.rs
+│   ├── removed_channel_home_tests.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
 │   ├── turn_lease.rs
@@ -522,7 +521,7 @@ src/
 │   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
-│   │   ├── queue_api_home_stop_tests.rs
+│   │   ├── queue_api_forwarding_tests.rs
 │   │   ├── receipt.rs
 │   │   ├── resume.rs
 │   │   ├── reviews.rs
@@ -3023,8 +3022,6 @@ src/
 │   │   ├── tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── cancel_lookup.rs
-│   │   ├── home_stop.rs
-│   │   ├── home_stop_tests.rs
 │   │   ├── probe.rs
 │   │   └── trusted_target.rs
 │   ├── session_host/

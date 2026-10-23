@@ -989,7 +989,7 @@ pub(super) fn mutate_candidates(candidates: &mut Vec<(String, SourceBinding)>) {
 }
 
 #[test]
-fn preserve_stop_forwarded_session_skip_reports_unconfirmed_without_mailbox() {
+fn preserve_slash_stop_session_skip_reports_unconfirmed_without_mailbox() {
     let fx = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let _binding_root = TestBindingRoot::enter(Some(root.path()));
@@ -1002,18 +1002,14 @@ fn preserve_stop_forwarded_session_skip_reports_unconfirmed_without_mailbox() {
         let path = root.path().join("session.jsonl");
         open(&path, "first");
         bind_live(&shared, &ProviderKind::Claude, channel, session, &path);
-        let reply = crate::services::discord::commands::stop::run_holder_stop_on(
+        let reply = crate::services::discord::commands::stop::run_slash_stop(
             &shared,
             &ProviderKind::Claude,
             channel,
         )
         .await;
-        assert_eq!(reply["outcome"], "unconfirmed");
-        assert_eq!(reply["effect_started"], false);
-        assert!(
-            crate::services::discord::commands::stop::remote_cancel_reply(&reply)
-                .contains("중단 미확인")
-        );
+        assert!(reply.text().contains("중단 미확인"));
+        reply.finish(&shared, &ProviderKind::Claude, channel).await;
         assert!(shared.mailbox_peek(channel).is_none());
         assert!(
             !fx.take_calls()

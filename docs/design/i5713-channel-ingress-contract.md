@@ -137,7 +137,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/db/intake_outbox.rs` | 라우팅 | claim SQL :674–683. epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch row에서만 |
 | `src/db/intake_outbox/worker_status.rs` | 라우팅 | worker status 쓰기 펜스 `HOME_CLAIM_FENCE` :87. claim SQL과 같은 조건: epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch worker row에서만 |
 | `src/db/mod.rs` | 배선 | 모듈 선언 :32 |
-| `src/cli/channel_home.rs` | 변경·진단 | 운영자 `delegate` :168, `begin_reclaim` :182, `force_orphan` :197, 진단 `list_homes` :120, `read_home` :138 |
 | `src/cli/args.rs` | 배선 | CLI 인자 :571 |
 | `src/cli/run.rs` | 배선 | CLI 실행 :712 |
 | `src/lib.rs` | readiness | `home_availability::{Availability, Unavailable, state}` 재노출 :291 |
@@ -185,7 +184,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :106·:110, `admit_command` :353 |
 | `src/services/queue/http_force.rs` | command context | `current_command` :52: 강제 취소가 받은 `cancel_turn` permit을 clone해 Herdr 종료 어댑터에 넘긴다. 새 admission 없음 |
 | `src/services/dispatched_sessions/herdr_kill.rs` | admission | `admit_command` :46: HTTP 세션 강제 종료의 Herdr 팔만 permit을 받아 Herdr 종료 어댑터에 넘긴다. Legacy 팔·CLI direct는 admission 없음 |
-| `src/services/session_forwarding/home_stop.rs` | 라우팅·admission | sender `read_home` :176, receiver `read_home` :335 → `registered` :368 |
 | `src/services/turn_host.rs` | admission·readiness | `home_refusal` :118, `for_turn` :130, `refusal_before_turn` :155 |
 | `src/services/tui_o/cutover.rs` | admission | `delegated` → `registered` :121 |
 | `src/services/tui_o/cutover/intake_route.rs` | readiness·라우팅 | `home_availability::refusal` :39, `held_channels`·`intake_held_channels` :58–59, `any_registered` :88 |
@@ -196,7 +194,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/tui_o/writer/transition_port.rs` | admission 보관 | `Context::permit` :40. 요청자가 취득한 `CommandPermit`를 작업 종료까지 보관하며 새 permit을 발급하지 않는다 |
 | `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
 | `src/server/routes/agents_stop.rs` | admission | `admit_command`·`admit_unattributed` :66–70 |
-| `src/server/routes/queue_api.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `command_mutant` :206·:240 |
 | `src/server/routes/health_api/runtime_profile.rs` | 진단 | `channel_home::health` :10(메모리 읽기만) |
 | `src/server/routes/docs/inventory/endpoints/part_04.rs` | 진단 | home stop 전달 endpoint 설명 :538 |
 

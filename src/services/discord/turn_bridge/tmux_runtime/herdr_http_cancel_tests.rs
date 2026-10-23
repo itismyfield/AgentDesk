@@ -19,7 +19,7 @@ async fn cancel_on(case: &Case, channel: u64, force: bool, forwarded: bool) -> (
     let mut config = crate::config::Config::default();
     config.server.auth_token = Some(AUTH.into());
     let pool = case.shared.pg_pool.clone();
-    let app = crate::server::routes::home_stop_test_app(config, pool, Some(registry), NODE_ID);
+    let app = crate::server::routes::cancel_route_test_app(config, pool, Some(registry), NODE_ID);
     let bearer = format!("Bearer {AUTH}");
     let mut headers = vec![("authorization", bearer.as_str())];
     if forwarded {
@@ -29,7 +29,7 @@ async fn cancel_on(case: &Case, channel: u64, force: bool, forwarded: bool) -> (
         ]);
     }
     let (uri, body) = (format!("/turns/{channel}/cancel"), json!({"force": force}));
-    crate::server::routes::home_stop_test_post(&app, &uri, &headers, &body.to_string()).await
+    crate::server::routes::cancel_route_test_post(&app, &uri, &headers, &body.to_string()).await
 }
 
 async fn cancel(case: &Case, force: bool, forwarded: bool) -> (StatusCode, Value) {
