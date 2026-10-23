@@ -133,8 +133,6 @@ pub fn posts_in_flight(channel: u64) -> Option<usize> {
 /// Counts one POST from before its request exists until the request is dropped, ended or aborted.
 struct Running(Arc<AtomicUsize>);
 
-type RepostCheck = Arc<dyn Fn() -> bool + Send + Sync>;
-
 pub(super) fn source_delivery_allowed(
     channel: u64,
     sources: impl IntoIterator<Item = SourceId>,
@@ -227,7 +225,6 @@ pub struct ChannelWriter<P, L, A> {
     /// The channel's re-post turn, run from the same actor turn as its posts.
     repost: Option<Box<dyn RepostHook<Self>>>,
     repost_live: RepostLive,
-    repost_switch: Mutex<Option<RepostCheck>>,
     repost_stops: Vec<watch::Receiver<bool>>,
     /// Shared receipts read at start; a receipted rejection or approval reads as settled.
     receipts: ReceiptOverlay,
@@ -285,7 +282,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             posts,
             repost: None,
             repost_live: RepostLive::default(),
-            repost_switch: Mutex::new(None),
             repost_stops: Vec::new(),
             receipts,
         };
@@ -300,7 +296,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 channel,
                 serial,
                 status,
-                "[tui_o] latest rejected piece needs operator approval"
+                "[tui_o] output blocked; fix the refusal and use /clear for a fresh session"
             );
             writer.stop(WriterAlarm::Blocked { status });
         }
@@ -517,7 +513,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let (piece, approved) = match disposition {
             PieceDisposition::Blocked { serial, status } => {
                 tracing::warn!(channel = self.channel, serial, status, unit_key = ?piece.unit_key,
-                    "[tui_o] latest rejected piece needs operator approval");
+                    "[tui_o] output blocked; fix the refusal and use /clear for a fresh session");
                 return self.stop(WriterAlarm::Blocked { status });
             }
             PieceDisposition::Settled => return Step::Done,
@@ -733,7 +729,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }) {
                     "local retry budget exhausted"
                 } else {
-                    "this serial needs a new operator approval"
+                    "blocked serial; fix the refusal and use /clear for a fresh session"
                 };
                 tracing::warn!(
                     channel = self.channel,
@@ -852,11 +848,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
 
     fn live(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let live = Arc::clone(&self.repost_live.0);
-        let effective = self
-            .repost_switch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
         let stops = self.repost_stops.clone();
         let channel = self.channel;
         let sources: Arc<[SourceId]> = self
@@ -876,7 +867,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)
-                && effective.as_ref().is_some_and(|allowed| allowed())
                 && stops.iter().all(|stop| !*stop.borrow())
                 && channel_home::registered_channel(channel).is_none()
                 && crate::services::cluster::home_availability::refusal(channel).is_none()
@@ -956,12 +946,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> TurnWriter for ChannelWriter<P, L, A> {
-    fn bind_switch(&self, effective: RepostCheck) {
-        *self
-            .repost_switch
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(effective);
-    }
     fn channel(&self) -> u64 {
         self.channel
     }

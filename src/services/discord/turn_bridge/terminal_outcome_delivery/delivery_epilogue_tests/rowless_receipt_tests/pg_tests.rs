@@ -499,3 +499,52 @@ async fn held_request_custody_never_settles_its_dispatch_pg() {
         db.drop().await;
     }
 }
+
+#[tokio::test]
+async fn fresh_terminal_delivery_leaves_intake_receipt_spawned_pg() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO intake_outbox (
+            target_instance_id, forwarded_by_instance_id, channel_id, user_msg_id,
+            request_owner_id, user_text, turn_kind, agent_id, status, spawned_at
+         ) VALUES ('worker', 'leader', $1, 'fresh-message', 'owner', 'hello',
+                   'standard', 'agent', 'spawned', NOW()) RETURNING id",
+    )
+    .bind(DRIVER_CHANNEL_ID.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    driver.inflight.adopt_intake_outbox(Some(id));
+    inflight::save_inflight_state(&driver.inflight).unwrap();
+
+    let (ctx, state) = driver.parts();
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("fresh terminal delivery finishes");
+    assert!(output.terminal_delivery_committed);
+    assert_eq!(driver.completed_publications(), 1);
+    let receipt: (
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT status::text, dispatched_at, completed_at FROM intake_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        receipt,
+        ("spawned".to_string(), None, None),
+        "fresh terminal delivery must leave the worker's receipt lifecycle unchanged"
+    );
+    drop(output);
+    drop(driver);
+    pool.close().await;
+    db.drop().await;
+}

@@ -11,9 +11,7 @@ use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 use tokio::time::{Instant, timeout_at};
 
-use super::super::mailbox::{
-    MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations,
-};
+use super::super::mailbox::MailboxHealthSnapshot;
 use super::super::redaction;
 use super::super::session_enrichment::{
     self, ExecutorWitness, SessionEnrichment, TmuxObservationBudget,
@@ -96,19 +94,13 @@ impl HealthRegistry {
 /// actor may use all of it, and the later reads then end unanswered rather than past it.
 pub(super) async fn first_reads(
     providers: &[ProviderEntry],
-    include_details: bool,
     deadline: Instant,
 ) -> Vec<Observations> {
     join_all(providers.iter().map(|entry| {
         let shared = entry.shared.as_ref();
-        // Park-tracked channels with no actor come back Missing for the park projection.
-        let tracked = ProviderKind::from_str(&entry.name)
-            .filter(|_| include_details)
-            .map(|_| shared.queue_park_ledger.tracked_channels())
-            .unwrap_or_default();
         shared
             .mailboxes
-            .try_snapshot_all_for_health(tracked, deadline)
+            .try_snapshot_all_for_health(Vec::new(), deadline)
     }))
     .await
 }
@@ -146,7 +138,6 @@ pub(super) struct ChannelPass<'a> {
     pub(super) registry: &'a HealthRegistry,
     pub(super) entry: &'a ProviderEntry,
     pub(super) provider_kind: &'a Option<ProviderKind>,
-    pub(super) park: &'a ParkObservations<'a>,
     pub(super) include_mailbox_details: bool,
     #[cfg(unix)]
     pub(super) composite_governs_polarity: bool,
@@ -177,7 +168,6 @@ pub(super) async fn channel_entries<'s>(
         registry,
         entry,
         provider_kind,
-        park,
         include_mailbox_details,
         #[cfg(unix)]
         composite_governs_polarity,
@@ -331,7 +321,6 @@ pub(super) async fn channel_entries<'s>(
                 channel_id: channel.get(),
                 has_cancel_token: mailbox_has_cancel_token,
                 queue_depth,
-                queue_park: park.project(channel),
                 recovery_started: snapshot.recovery_started_at.is_some(),
                 active_request_owner: snapshot.active_request_owner.map(|id| id.get()),
                 active_user_message_id: mailbox_active_user_msg_id,

@@ -7,7 +7,7 @@ use poise::serenity_prelude as serenity;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::{sync::watch, time::Duration};
+use tokio::time::Duration;
 
 use super::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
 use super::matcher::{
@@ -15,7 +15,6 @@ use super::matcher::{
 };
 use super::*;
 use crate::services::discord::outbound::o_writer_io::GatewayPort;
-use crate::services::tui_o::repost::config::{RepostConfig, RepostSwitch};
 use crate::services::tui_o::repost::identity::{marker, payload_sha256};
 use crate::services::tui_o::repost::io::RepostHttp;
 use crate::services::tui_o::repost::o_piece_attempts::{AttemptKind, AttemptResult, AttemptRow};
@@ -23,7 +22,6 @@ use crate::services::tui_o::repost::o_piece_delivery::{
     AdmittedBy, DeliveryRow, PieceKey, ReceiptMethod,
 };
 use crate::services::tui_o::repost::send::{RepostEnvelope, RepostIds};
-use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 use crate::services::tui_o::writer::{DiscordPort, PostOutcome, SeenMessage, confirm};
 
@@ -775,39 +773,6 @@ async fn f4_partial_audit_preserves_known_ids_and_unknown_coverage() {
     );
 }
 
-fn switch(enabled: bool) -> RepostSwitch {
-    let boot = TuiOConfig {
-        repost: RepostConfig {
-            enabled,
-            channels: [CHANNEL].into_iter().collect(),
-        },
-        ..TuiOConfig::default()
-    };
-    RepostSwitch::new(Some(&boot), watch::channel(None).1)
-}
-
-#[tokio::test(start_paused = true)]
-async fn f4_default_off_does_not_construct_a_probe() {
-    assert!(!RepostConfig::default().enabled);
-    let reader = Fake::with([message(900, BOT, "earlier")]);
-    let built = AtomicUsize::new(0);
-    let build = |_| {
-        built.fetch_add(1, Ordering::SeqCst);
-        ProbeSession::new(scope(&[0]), vec![900], Instant::now())
-    };
-    let default_off = RepostSwitch::new(None, watch::channel(None).1);
-    for mut off in [default_off, switch(false)] {
-        assert!(off.when_enabled(build).is_none());
-    }
-    assert_eq!((built.load(Ordering::SeqCst), reader.reads()), (0, 0));
-
-    let mut session = switch(true).when_enabled(build).expect("on builds one");
-    tokio::time::advance(Duration::from_secs(10)).await;
-    session.advance(&reader, &run("run-1"), &known()).await;
-    assert_eq!(built.load(Ordering::SeqCst), 1);
-    assert!(reader.reads() > 0, "the on control really reads");
-}
-
 /// Answers like the legacy writer's gateway: empty history, a read by id through the adapter.
 struct Legacy(GatewayPort);
 
@@ -963,18 +928,14 @@ fn consumer_escapes(path: &str, line: &str) -> bool {
 }
 
 /// The writer seam: the only production lines outside the re-post tree that may name it.
-const WIRING: [(&str, &str); 8] = [
+const WIRING: [(&str, &str); 7] = [
     (
         "src/services/discord/outbound/o_writer_io.rs",
         "use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};",
     ),
     (
         "src/services/discord/runtime_bootstrap/o_writer_host.rs",
-        "use crate::services::tui_o::repost::{",
-    ),
-    (
-        "src/services/discord/runtime_bootstrap/o_writer_host.rs",
-        "config::RepostSwitch, io::probe::evidence::RunScope, runner,",
+        "use crate::services::tui_o::repost::{io::probe::evidence::RunScope, runner};",
     ),
     (
         "src/services/tui_o/writer/deliver.rs",

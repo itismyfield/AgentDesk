@@ -4,8 +4,8 @@
 use axum::Json;
 use serde_json::{Value, json};
 
+use super::route_tests::{self as route, send as routed_send};
 use super::*;
-use crate::server::routes::o_transition::{send as routed_send, test_hooks as route};
 use crate::services::tui_o::writer::host::Readiness;
 use crate::services::tui_o::writer::transition_cleanup::scope::ScopeApproval;
 

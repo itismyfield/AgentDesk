@@ -47,6 +47,7 @@ pub(super) struct Probe {
     pub token: Token,
     pub earlier: Option<Observation>,
     pub later: Option<Observation>,
+    pub last_dialogue: Option<std::time::SystemTime>,
 }
 
 impl Common {

@@ -13,8 +13,7 @@ use std::str::FromStr;
 /// - The compiler requires every added variant to be handled by those four
 ///   exhaustive matches. Renaming a variant also invalidates direct references
 ///   in [`Self::ALL`] and [`Self::from_str`].
-/// - The `[Self; 9]` type of [`Self::ALL`] makes the initializer's cardinality a
-///   compile-time check.
+/// - In test builds, the `[Self; 9]` type of [`Self::ALL`] checks its cardinality.
 /// - Unit tests check [`Self::ALL`] membership against the enum declaration,
 ///   [`Self::from_str`] against [`Self::as_str`], and [`Self::is_open`] against
 ///   [`INTAKE_OUTBOX_OPEN_STATUSES_SQL`][open-statuses]. They also check
@@ -69,6 +68,7 @@ pub(crate) enum OperatorRetryClass {
 }
 
 impl IntakeOutboxStatus {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 9] = [
         Self::Pending,
         Self::Claimed,

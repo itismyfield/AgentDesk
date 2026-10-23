@@ -2,8 +2,8 @@
 //! Configuration and orchestration administration is composed separately.
 use super::super::{
     ApiRouter, AppState, agents, agents_crud, agents_turn_deliver, cluster, dispatched_sessions,
-    dispatches, dm_reply, health_api, hooks, idle_recap, monitoring, protected_api_domain,
-    provider_cli_api, queue_api, termination_events, turn_lease, voice_audio, voice_conductor,
+    dispatches, dm_reply, health_api, hooks, monitoring, protected_api_domain, provider_cli_api,
+    queue_api, termination_events, turn_lease, voice_audio, voice_conductor,
 };
 use axum::{
     Router,
@@ -91,10 +91,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(dispatched_sessions::resume_previous_session),
             )
             .route(
-                "/sessions/{session_key}/idle-recap",
-                post(idle_recap::post_idle_recap),
-            )
-            .route(
                 "/sessions/{id}/tmux-output",
                 get(dispatched_sessions::tmux_output),
             )
@@ -156,10 +152,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 delete(hooks::disconnect_session),
             )
             .route("/internal/node-probe", get(cluster::node_probe))
-            .route(
-                "/o/transition",
-                post(super::super::o_transition::transition),
-            )
             .merge(herdr_routes()),
         state,
     )

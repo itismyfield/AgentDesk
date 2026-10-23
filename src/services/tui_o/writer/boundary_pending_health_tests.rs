@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::tui_o::alarm::{AlarmHealth, AlarmRouter};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, SourceLink};
+use crate::services::tui_o::store::rotation::{Boundary, SourceLink};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
@@ -137,12 +137,7 @@ fn active(health: &AlarmHealth, kind: &str, channel: u64) -> bool {
 fn resolve(harness: &Harness, source: &SourceId) {
     harness
         .store
-        .record_boundary_resolved(
-            CHANNEL,
-            &source_key(source),
-            &ResolveFrom::Offset(0),
-            "boundary-health-test",
-        )
+        .seed_boundary_resolved(CHANNEL, source, 0)
         .unwrap();
 }
 

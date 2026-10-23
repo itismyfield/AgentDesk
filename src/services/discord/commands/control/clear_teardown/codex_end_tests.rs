@@ -18,6 +18,10 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 use crate::services::tui_prompt_dedupe::{self as dedupe, TuiRuntimeBinding};
 
+fn canonical_tmp() -> PathBuf {
+    std::fs::canonicalize("/tmp").unwrap()
+}
+
 struct Fixture {
     logs: tempfile::TempDir,
     _state: std::sync::MutexGuard<'static, ()>,
@@ -189,7 +193,7 @@ impl Pane {
         .unwrap();
         let source = dir.join(format!("rollout-2026-10-23-{id}.jsonl"));
         let header = serde_json::json!({"type":"session_meta","payload":{
-            "id":id.to_string(),"source":"cli","cwd":"/private/tmp",
+            "id":id.to_string(),"source":"cli","cwd":canonical_tmp(),
             "timestamp":(context.created_at + chrono::Duration::seconds(1)).to_rfc3339()
         }});
         std::fs::write(&source, format!("{header}\n")).unwrap();
@@ -420,7 +424,6 @@ fn explicit_clear_command_path_records_end_with_only_its_existing_kill() {
             &ProviderKind::Codex,
             channel,
             "!clear",
-            super::super::SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();
@@ -756,14 +759,14 @@ fn remote_dispatch(channel: Option<u64>, pane: Option<&str>) -> Result<(), Strin
             path: "/dev/null".into(),
             passphrase: None,
         },
-        default_path: "/private/tmp".into(),
+        default_path: canonical_tmp().to_str().unwrap().into(),
         claude_path: None,
     };
     let (sender, _receiver) = std::sync::mpsc::channel();
     crate::services::codex::execute_command_streaming(
         "not sent",
         None,
-        "/private/tmp",
+        canonical_tmp().to_str().unwrap(),
         sender,
         None,
         None,
@@ -1008,3 +1011,6 @@ fn an_attempt_active_before_clear_prevents_a_ticket_and_later_attempts_change_th
     );
     drop(no_pane);
 }
+
+mod capture_fold_tests;
+mod successor_tests;

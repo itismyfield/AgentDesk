@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89"
+    "44938e2d1499cd236b769702e92e19ed972dff761bf0d6a02443a7a0476419dd"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
@@ -71,7 +71,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/outbound/delivery_record.rs",
     "src/services/discord/recovery_engine/restore_inflight.rs",
     "src/services/discord/recovery_engine/completion_delivery.rs",
-    "src/services/discord/recovery_engine/unix_journal.rs",
     "src/services/discord/recovery_engine/manual_rebind/mod.rs",
     "src/services/discord/recovery_paths/restart.rs",
     "src/services/discord/router/message_handler.rs",
@@ -950,7 +949,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for selector in ("rust_compile", "cross_os_rust"):
             for proof_path in proof_paths:
                 self.assertEqual(filters[selector].count(proof_path), 1)
-        self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
         self.assertNotIn(proof_paths[1], job_block(workflow, "check_fast_cross_os_targets"))
         for proof_path in proof_paths:
             filter_line = f"              - '{proof_path}'"

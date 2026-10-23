@@ -707,7 +707,12 @@ fn synthetic_bridge_handoff_fixture(
                 assert_eq!(terminal_body, &body, "terminal must retain the exact saved Unicode body: {sites:?} {bodies:?}");
                 assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again: {sites:?} {bodies:?}");
                 let summary = &resumed_bodies[terminal_index + 1];
-                let summary_shape = regex::Regex::new(r"\A-# ✅ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)\z").unwrap();
+                let summary_shape = regex::Regex::new(concat!(
+            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
+            r"(?: · 📦 (?:100|[1-9]?[0-9])%)?",
+            r"(?: · 5h (?:100|[1-9]?[0-9])% \((?:[01][0-9]|2[0-3]):[0-5][0-9]\))?",
+            r"(?: · 7d (?:100|[1-9]?[0-9])% \((?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) (?:[01][0-9]|2[0-3]):[0-5][0-9]\))?\z"
+        )).unwrap();
                 assert!(summary_shape.is_match(summary), "one completed summary after the terminal body: {sites:?} {bodies:?}");
                 assert!(bodies.iter().all(|sent| !sent.contains("DEFERRED_READER_FAILURE")), "reader error is never published: {sites:?} {bodies:?}");
             } else {

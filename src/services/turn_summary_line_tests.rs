@@ -1,10 +1,22 @@
 use super::*;
 
+fn render(outcome: Outcome, elapsed: Option<u64>, context: Option<u8>) -> String {
+    super::render(outcome, elapsed, context, None)
+}
+
+#[test]
+fn elapsed_completion_uses_clock_and_keeps_context_order() {
+    assert_eq!(
+        render(Outcome::Completed, Some(150_000), Some(45)),
+        "-# ⏱️ 2분 30초 · 📦 45%"
+    );
+}
+
 fn canonical_pattern() -> regex::Regex {
     let duration = r"(?:\d+시간 \d+분|\d+분(?: \d+초)?|\d+초)";
     let percent = r"(?:100|[1-9]?\d)";
     regex::Regex::new(&format!(
-        r"^-# (?:✅(?: 완료| {duration}(?: · 📦 {percent}%)?| · 📦 {percent}%)|(?:⏹ 중단|⚠️ 오류)(?: · {duration})?(?: · 📦 {percent}%)?)$"
+        r"^-# (?:⏱️ {duration}(?: · 📦 {percent}%)?|✅(?: 완료| · 📦 {percent}%)|(?:⏹ 중단|⚠️ 오류)(?: · {duration})?(?: · 📦 {percent}%)?)$"
     )).unwrap()
 }
 
@@ -15,7 +27,7 @@ fn canonical_completed_cancelled_and_failed_examples_match_exactly() {
             Outcome::Completed,
             Some(434_000),
             Some(45),
-            "-# ✅ 7분 14초 · 📦 45%",
+            "-# ⏱️ 7분 14초 · 📦 45%",
         ),
         (
             Outcome::Cancelled,
@@ -58,7 +70,7 @@ fn elapsed_milliseconds_floor_at_every_second_minute_and_hour_boundary() {
     ] {
         for outcome in [Outcome::Completed, Outcome::Cancelled, Outcome::Failed] {
             let prefix = match outcome {
-                Outcome::Completed => "-# ✅ ",
+                Outcome::Completed => "-# ⏱️ ",
                 Outcome::Cancelled => "-# ⏹ 중단 · ",
                 Outcome::Failed => "-# ⚠️ 오류 · ",
             };
@@ -106,7 +118,7 @@ fn all_percent_values_and_elapsed_extremes_are_bounded_single_lines_in_the_canon
 fn canonical_grammar_requires_the_completed_space_and_rejects_extra_status_text() {
     let pattern = canonical_pattern();
     for accepted in [
-        "-# ✅ 7분 14초 · 📦 45%",
+        "-# ⏱️ 7분 14초 · 📦 45%",
         "-# ⏹ 중단 · 2분 3초 · 📦 41%",
         "-# ⚠️ 오류 · 12초",
     ] {
@@ -117,8 +129,8 @@ fn canonical_grammar_requires_the_completed_space_and_rejects_extra_status_text(
         "-# ✅",
         "-# ✅ 완료 · 📦 45%",
         "-# ⏹ 중단 2분 3초",
-        "-# ✅ 1초 · 📦 101%",
-        "-# ✅ 1초 · 도구 실행 중",
+        "-# ⏱️ 1초 · 📦 101%",
+        "-# ⏱️ 1초 · 도구 실행 중",
         "answer\n-# ✅ 완료",
     ] {
         assert!(!pattern.is_match(rejected), "{rejected:?}");

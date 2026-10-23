@@ -132,9 +132,6 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// intentionally restores the persisted value for state-file compatibility.
     #[serde(default)]
     intake_outbox_id: Option<i64>,
-    /// Transient bridge-turn authority; never persisted or restored from disk.
-    #[serde(skip)]
-    intake_delivery_capabilities: crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities,
     /// Submission-boundary evidence; absent means LegacyUnknown, not "unsubmitted".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_submission: Option<super::managed_submission::ManagedSubmissionRecord>,
@@ -1046,7 +1043,6 @@ impl InflightTurnState {
             user_msg_id,
             source_message_ids: Vec::new(),
             intake_outbox_id: None,
-            intake_delivery_capabilities: Default::default(),
             managed_submission: None,
             managed_submission_capability: None,
             busy_followup_retry_user_msg_id: user_msg_id,
@@ -1151,13 +1147,6 @@ impl InflightTurnState {
         self.intake_outbox_id
     }
 
-    pub(in crate::services::discord) fn bind_intake_delivery_capabilities(
-        &mut self,
-        capabilities: crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities,
-    ) {
-        self.intake_delivery_capabilities = capabilities;
-    }
-
     pub(in crate::services::discord) fn bind_managed_submission(
         &mut self,
         submission: super::managed_submission::ManagedSubmission,
@@ -1171,19 +1160,8 @@ impl InflightTurnState {
         self.managed_submission_capability.as_ref()
     }
 
-    pub(in crate::services::discord) fn intake_delivery_capabilities(
-        &self,
-    ) -> crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities
-    {
-        self.intake_delivery_capabilities
-    }
-
-    /// Carry bridge-local settlement authority across a same-turn durable
-    /// state refresh. `intake_delivery_capabilities` is intentionally skipped
-    /// by serde, so replacing a live bridge state with a disk reload would
-    /// otherwise silently downgrade an Enforce turn after it had already
-    /// stamped its outbox row as dispatched.
-    pub(in crate::services::discord) fn preserve_intake_settlement_authority_from(
+    /// Keep the immutable intake row association across a same-turn durable refresh.
+    pub(in crate::services::discord) fn preserve_intake_outbox_identity_from(
         &mut self,
         prior: &Self,
     ) {
@@ -1201,7 +1179,6 @@ impl InflightTurnState {
             }
             self.intake_outbox_id = Some(prior_id);
         }
-        self.intake_delivery_capabilities = prior.intake_delivery_capabilities;
     }
 
     pub fn provider_kind(&self) -> Option<ProviderKind> {

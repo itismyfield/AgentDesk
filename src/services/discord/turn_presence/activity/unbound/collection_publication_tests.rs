@@ -23,7 +23,8 @@ impl Rig {
         let root = tempfile::tempdir().unwrap();
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let root_env = set("AGENTDESK_ROOT_DIR", root.path());
-        let namespace = set("TMUX_TMPDIR", root.path());
+        // tmux reports canonical socket paths, including macOS's /var -> /private/var alias.
+        let namespace = set("TMUX_TMPDIR", &root.path().canonicalize().unwrap());
         let target = [(id, "test-node")];
         let hosts = crate::config::session_hosts::force_for_test(
             Some("test-node"),

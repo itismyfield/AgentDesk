@@ -64,7 +64,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
                 .extend("successor".into(), [floor.checkpoint().0.clone()]);
         }
         // An unresolved ordinary actor leaves the mailbox queued; a scoped one must refuse now.
-        actor.poll_transition(false, &watch::channel(None).0);
+        actor.poll_transition(false, &watch::channel(None).0).await;
         match (freeze, futures::poll!(&mut request)) {
             (true, Poll::Ready(Ok(reply))) => {
                 assert_eq!(reply.refused, Some(Refused::CodexDeferred));
@@ -159,6 +159,7 @@ where
             termination: None,
         },
         apply: false,
+        automatic: None,
         scope: None,
         stopping: stopped,
         context,
@@ -187,7 +188,7 @@ where
         held();
     }
     let mut job = actor.transitions.job.take().unwrap();
-    assert!(actor.step(&mut job, &watch::channel(None).0));
+    assert!(actor.step(&mut job, &watch::channel(None).0).await);
     actor.finish(job);
     assert!(completed.await.unwrap().refused.is_none());
     assert!(!actor.transitions.has_job());

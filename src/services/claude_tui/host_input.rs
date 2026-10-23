@@ -4,20 +4,6 @@
 
 use std::process::Output;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NativeClearSubmission {
-    NotSent,
-    Confirmed,
-    Indeterminate,
-}
-
-pub(crate) fn native_clear_composer_empty(capture: &str) -> bool {
-    use crate::services::tmux_common as tc;
-    tc::tmux_capture_indicates_claude_tui_exact_empty_composer(capture)
-        && !tc::tmux_capture_indicates_claude_tui_busy(capture)
-        && !tc::tmux_capture_indicates_claude_tui_interactive_modal(capture)
-}
-
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,

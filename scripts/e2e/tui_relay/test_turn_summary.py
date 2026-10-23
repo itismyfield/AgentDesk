@@ -27,6 +27,9 @@ def window(*rows):
 class TurnSummaryTests(unittest.TestCase):
     MARKER = "[E2E:SUMMARY:ONE]"
     SUMMARIES = (
+        "-# ⏱️ 7분 14초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 16:00)",
+        "-# ⏱️ 7분 14초 · 📦 45%",
+        "-# ⏱️ 5124095576030시간 25분 · 📦 100% · 5h 100% (23:59) · 7d 100% (12/31 23:59)",
         "-# ✅ 7분 14초 · 📦 45%",
         "-# ⏹ 중단 · 2분 3초 · 📦 41%",
         "-# ⚠️ 오류 · 12초",
@@ -61,6 +64,9 @@ class TurnSummaryTests(unittest.TestCase):
             "-# ✅ 1주", "-# ✅ 1초 · 도구 실행 중", "-# ✅ 완료\n",
             "\n-# ✅ 완료", "answer\n-# ✅ 1초", "-# ✅ 1초\nanswer",
             "```\n-# ✅ 1초\n```", "-# ✅ 1초\t", oversized,
+            "-# ⏱️ 1초 · 5h 101% (11:30)", "-# ⏱️ 1초 · 5h 15% (24:00)",
+            "-# ⏱️ 1초 · 7d 38% (10/27 16:00) · 5h 15% (11:30)",
+            "-# ⏱️ 1초 · 5h 15% (11:30)\n", "-# ✅ 완료 · 5h 15% (11:30)",
         )
         for content in rejected:
             with self.subTest(content=content):

@@ -2,7 +2,7 @@
 #![cfg(unix)]
 
 use super::codex_clear_relaunch_tests::CanaryFixture;
-use super::{ClearReport, SoftClearNotifyMode, clear_channel_session_state};
+use super::{ClearReport, clear_channel_session_state};
 use crate::services::claude_tui::hook_server::adoption_retry::DurableKind;
 use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, observe_binding_hook,
@@ -56,7 +56,6 @@ async fn clear(fixture: &CanaryFixture, provider: &ProviderKind, channel: u64) -
         provider,
         ChannelId::new(channel),
         "/clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap()
@@ -525,13 +524,6 @@ async fn parked_until_clear(mode: crate::services::codex::CodexSourceMode) {
     assert_eq!(after.intervention_queue.len(), 1);
     assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
     assert!(after.pending_user_dispatch.is_none() && after.cancel_token.is_none());
-    let parked = fixture.shared.queue_park_ledger.project(
-        &fixture.shared,
-        &ProviderKind::Codex,
-        channel,
-        &after,
-    );
-    assert_eq!(parked.owner, Some("codex_verified"), "{parked:?}");
     assert!(
         !fixture
             .fake
@@ -547,7 +539,6 @@ async fn parked_until_clear(mode: crate::services::codex::CodexSourceMode) {
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -591,7 +582,6 @@ async fn clear_of_a_live_sessionless_canary_warns_without_retiring_pg() {
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();

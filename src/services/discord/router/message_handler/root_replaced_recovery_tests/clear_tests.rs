@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::discord::commands::control::{
-    ClearReport, SoftClearNotifyMode, clear_channel_session_state_with_session_key,
+    ClearReport, clear_channel_session_state_with_session_key,
 };
 use crate::services::turn_orchestrator::{
     ClaimObservation, QueuePersistenceContext, load_channel_pending_dispatch_marker_checked,
@@ -35,7 +35,6 @@ fn clear(case: &Case) -> ClearReport {
             &ProviderKind::Claude,
             ChannelId::new(CHANNEL),
             "!clear",
-            SoftClearNotifyMode::Suppress,
             Some(&key),
         ))
         .expect("the public clear completes")

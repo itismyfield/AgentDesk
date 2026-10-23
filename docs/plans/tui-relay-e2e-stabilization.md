@@ -31,7 +31,6 @@
 | Turn state | `src/services/tui_turn_state.rs:64-120` | envelope classifier + partial parser(Claude only) |
 | Hook (Claude) | `src/services/claude_tui/hook_server.rs:1-80`, `hook_relay.rs:23-80` | Stop/SubagentStop → PROMPT_READY_NOTIFY |
 | Dedupe | `src/services/tui_prompt_dedupe.rs:9-12` | TTL 10s/24h/30m, channel anchor |
-| Idle recap (#2702) | `tui_prompt_relay.rs:spawn_*_idle_*_relay` | once-per-idle period |
 | Explicit turn-finished (#2625) | `TurnFinishedSignal`, `mark_turn_finished_signal_done`, `ChannelMailboxRegistry::turn_finished` @ `turn_orchestrator.rs:1413,1473,1548`; 이벤트명 `turn_finished` @ `observability/emit.rs:91` | inflight cleanup |
 | Stale resume / draft (#2635) | `src/services/discord/turn_bridge/stale_resume.rs:21-62` | unknown transcript recovery |
 | tmux watcher | `src/services/discord/tmux_watcher.rs:11-42` | dead marker, ready sentinel |
@@ -94,7 +93,7 @@
 | E-3 utf8-multiline | 2.1/2.2 합침(관통) | cc, cdx | 멀티라인+이모지 | 최종 응답에 입력 echo, 깨짐 0 |
 | E-4 direct-input-relay | #2697/#2683/#2669 positive | cc, cdx | SSH 경로 또는 direct send-keys | 프롬프트 알림 1 + 응답 1 |
 | E-5 turn-separation | 4.2 + #2625 | cc, cdx | 응답 후 즉시 새 프롬프트 | 새 헤더 emit, inflight cleanup 신호 관측 |
-| E-6 compact-recap-once | #2702 + 3.3 | cc | `/compact` → 새 프롬프트 | idle-recap 1회만, 본문 사용자메시지 오인 0 |
+| E-6 compact-recap-once | #2702 + 3.3 | cc | `/compact` → 새 프롬프트 | 본문 사용자메시지 오인 0 |
 | E-7 codex-compact-readiness | #2695 | cdx | `/compact` 후 입력 | 입력 먹힘 0, 다음 응답 정상 |
 | E-8 restart-between-turns | 5.1 reframed | cc, cdx | 응답 완료→ dcserver dev restart → 새 프롬프트 | 새 프롬프트만 emit, grace 안 replay만 허용 |
 | E-9 restart-mid-stream | 5.3 sentinel | cc, cdx | 응답 sentinel(특정 marker token) 관측 후 restart | 청크 이어 emit, 중복 0 |

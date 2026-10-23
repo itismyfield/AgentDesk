@@ -1,5 +1,4 @@
 use crate::services::discord::codex_absence::replacement::Replacement;
-
 #[cfg(unix)]
 mod submit;
 #[cfg(unix)]
@@ -1254,6 +1253,7 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     ) {
         return Err(format!("verified prompt submission: {submitted:?}"));
     }
+    super::execution_end::producer::warm_bound(Some(request.channel), request.tmux);
     let sender = request.sender.clone();
     let token = std::sync::Arc::clone(&request.token);
     let tail = super::rollout_tail::tail_warm_followup_rollout_for_tmux(

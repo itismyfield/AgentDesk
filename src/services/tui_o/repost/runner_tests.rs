@@ -8,10 +8,8 @@ use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use super::admission::{ApprovedRejected, OriginalGate, PriorBudget};
-use super::admission_tests::{
-    BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar, switch, switch_for,
-};
+use super::admission::{ApprovedRejected, PriorBudget};
+use super::admission_tests::{BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar};
 use super::dispatch::{Admission, DispatchEnd, DispatchPermit, GuardReason, RepostWriter, start};
 use super::identity::{PieceKey, marker};
 use super::io::probe::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
@@ -231,8 +229,8 @@ fn holder(name: &str) -> RunScope {
     }
 }
 
-fn runner(pool: &PgPool, on: bool, run: &RunScope) -> Runner {
-    Runner::new(switch(on), pool.clone(), BOT, run.clone())
+fn runner(pool: &PgPool, run: &RunScope) -> Runner {
+    Runner::new(pool.clone(), BOT, run.clone())
 }
 
 /// Fresh absence evidence of `key` as `run` would gather it now.
@@ -293,14 +291,13 @@ impl ApprovalCheck for Approves {
 
 #[test]
 fn f5_admission_mapping_is_exhaustive() {
-    let cases: [(Admission<()>, TurnStep); 11] = [
+    let cases: [(Admission<()>, TurnStep); 10] = [
         (Admission::LegacyOff, TurnStep::Legacy),
         (Admission::WaitForOpen, TurnStep::Wait),
         (Admission::ObserveOnly, TurnStep::Wait),
         (Admission::AlreadyResolved, TurnStep::Done),
         (Admission::CapReached, TurnStep::Done),
         (Admission::CapUnknown, TurnStep::Done),
-        (Admission::Parked, TurnStep::Stopped),
         (
             Admission::GuardRejected(GuardReason::LeaseBusy),
             TurnStep::Wait,
@@ -323,43 +320,6 @@ fn f5_admission_mapping_is_exhaustive() {
     }
 }
 
-/// Off answers from the recovered index alone: a pool that cannot connect is never reached.
-#[tokio::test]
-async fn f5_default_off_tick_executes_zero_pg_statements() {
-    let unreachable = sqlx::postgres::PgPoolOptions::new()
-        .acquire_timeout(Duration::from_millis(200))
-        .connect_lazy("postgres://agentdesk@127.0.0.1:1/none")
-        .unwrap();
-    let reader = Fake::with([message(900, BOT, "earlier")]);
-    let run = holder("a");
-    let mut off = Runner::new(switch(false), unreachable.clone(), BOT, run.clone());
-    let ticked = off.tick(CHANNEL, &reader, &[900], Instant::now()).await;
-    assert!(matches!(ticked, Ok(Tick::Off)), "{ticked:?}");
-    let mut writer = TestWriter::new();
-    let expected = [
-        (OriginalGate::Admitted, TurnStep::Stopped),
-        (OriginalGate::SendLocal, TurnStep::Legacy),
-        (OriginalGate::Unknown, TurnStep::Wait),
-    ];
-    for (membership, step) in expected {
-        let intent = DispatchIntent::Auto(Box::new(absent_evidence(
-            super::io::probe::tests::scope(&[0]),
-            super::io::probe::tests::run("run-1"),
-        )));
-        let admission = off.try_next_dispatch(&mut writer, membership, intent).await;
-        assert_eq!(turn_step(&admission.unwrap()), step);
-    }
-    assert_eq!((reader.reads(), writer.prepared().len()), (0, 0));
-
-    // The on control does reach PostgreSQL.
-    let mut on = Runner::new(switch(true), unreachable, BOT, run);
-    assert!(
-        on.tick(CHANNEL, &reader, &[900], Instant::now())
-            .await
-            .is_err()
-    );
-}
-
 #[tokio::test]
 async fn f5_t01_two_holders_get_one_dispatch_permit_pg() {
     let db = TestPostgresDb::create().await;
@@ -373,12 +333,9 @@ async fn f5_t01_two_holders_get_one_dispatch_permit_pg() {
             let run = holder(name);
             let evidence = evidence(&pool, &key, &run).await;
             let mut writer = TestWriter::new();
-            let mut runner = runner(&pool, true, &run);
+            let mut runner = runner(&pool, &run);
             let intent = DispatchIntent::Auto(evidence);
-            let admission = runner
-                .try_next_dispatch(&mut writer, OriginalGate::Admitted, intent)
-                .await
-                .unwrap();
+            let admission = runner.try_next_dispatch(&mut writer, intent).await.unwrap();
             (admission, writer)
         })
     });
@@ -420,16 +377,16 @@ async fn f5_t01_lost_commit_reply_never_recreates_a_permit_pg() {
     let dir = tempfile::tempdir().unwrap();
     let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "t01-lost")], "piece").await[0].clone();
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let mut writer = TestWriter::new();
     let kept = evidence(&pool, &key, &run).await;
     let evidence = evidence(&pool, &key, &run).await;
     let intent = DispatchIntent::Auto(evidence);
-    let first = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let first = runner.try_next_dispatch(&mut writer, intent);
     // The committed grant's answer is lost with its permit.
     assert!(matches!(first.await.unwrap(), Admission::Granted { .. }));
     let again = DispatchIntent::Auto(kept);
-    let second = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, again);
+    let second = runner.try_next_dispatch(&mut writer, again);
     // The evidence is refused as stale, before any grant could find the slot open.
     let second = second.await.unwrap();
     assert!(matches!(second, Admission::ObserveOnly), "{second:?}");
@@ -446,10 +403,10 @@ async fn f5_t02_t25_gate_lost_after_grant_keeps_the_spent_slot_pg() {
     let dir = tempfile::tempdir().unwrap();
     let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "t25")], "piece").await[0].clone();
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let mut writer = TestWriter::new();
     let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("granted");
     };
@@ -471,7 +428,7 @@ async fn f5_t02_t25_gate_lost_after_grant_keeps_the_spent_slot_pg() {
     // Only new evidence opens slot 2, and that is the last.
     writer.gate.acquired();
     let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("slot 2");
     };
@@ -481,7 +438,7 @@ async fn f5_t02_t25_gate_lost_after_grant_keeps_the_spent_slot_pg() {
     started.finish(&mut writer, &pool).await.unwrap();
     assert_eq!(wire.posts(), 1);
     let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-    let last = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let last = runner.try_next_dispatch(&mut writer, intent);
     assert_eq!(turn_step(&last.await.unwrap()), TurnStep::Done);
     assert_eq!(slots(&pool, &key).await.len(), 3);
     pool.close().await;
@@ -502,9 +459,9 @@ async fn f5_t06_gate_closes_during_pg_wait_pg() {
     let waiting = {
         let pool = pool.clone();
         tokio::spawn(async move {
-            let mut runner = runner(&pool, true, &run);
+            let mut runner = runner(&pool, &run);
             let intent = DispatchIntent::Auto(evidence);
-            let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+            let admission = runner.try_next_dispatch(&mut writer, intent);
             let admission = admission.await.unwrap();
             (admission, writer)
         })
@@ -550,13 +507,13 @@ async fn f5_t06_first_transport_poll_and_wire_guard_pg() {
     )
     .await;
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let mut writer = TestWriter::new();
     let epoch = writer.gate.acquired();
 
     // The first poll already sees this send's Prepared at the admitted epoch.
     let intent = DispatchIntent::Auto(evidence(&pool, &keys[0], &run).await);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("granted");
     };
@@ -585,7 +542,7 @@ async fn f5_t06_first_transport_poll_and_wire_guard_pg() {
     // A changed run before the gate: no Prepared and no request.
     let intent = DispatchIntent::Auto(evidence(&pool, &keys[1], &run).await);
     writer.live.store(true, Ordering::SeqCst);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("granted");
     };
@@ -606,10 +563,10 @@ async fn f5_cancelled_waiter_cannot_release_a_live_request_pg() {
     let dir = tempfile::tempdir().unwrap();
     let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "cancel")], "piece").await[0].clone();
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let mut writer = TestWriter::new();
     let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("granted");
     };
@@ -640,7 +597,7 @@ async fn f5_t09_t23_t24_a_turn_waits_for_the_channel_and_allocates_nothing_pg() 
     let dir = tempfile::tempdir().unwrap();
     let key = admit_on(&pool, &mut sidecar(&dir), &[(3, "t09")], "piece").await[0].clone();
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let busy = |writer: &mut TestWriter, case: usize| match case {
         // T09: another send's Prepared is open.
         0 => writer.prepared.lock().unwrap().push((1, 0)),
@@ -655,7 +612,7 @@ async fn f5_t09_t23_t24_a_turn_waits_for_the_channel_and_allocates_nothing_pg() 
         let mut writer = TestWriter::new();
         busy(&mut writer, case);
         let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-        let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+        let admission = runner.try_next_dispatch(&mut writer, intent);
         let admission = admission.await.unwrap();
         assert!(!matches!(admission, Admission::Granted { .. }), "{case}");
         assert_eq!(writer.held.load(Ordering::SeqCst), 0, "{case}");
@@ -665,7 +622,7 @@ async fn f5_t09_t23_t24_a_turn_waits_for_the_channel_and_allocates_nothing_pg() 
     // The positive control: a free channel grants.
     let mut writer = TestWriter::new();
     let intent = DispatchIntent::Auto(evidence(&pool, &key, &run).await);
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     assert!(matches!(
         admission.await.unwrap(),
         Admission::Granted { .. }
@@ -699,26 +656,14 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
     let run = holder("a");
     let mut writer = TestWriter::new();
 
-    // T19: an approval no longer current, or the switch off, allocates nothing.
-    let mut on = runner(&pool, true, &run);
-    let stale = on.try_next_dispatch(
-        &mut writer,
-        OriginalGate::SendLocal,
-        resume(&Approves(false)),
-    );
+    // T19: an approval no longer current allocates nothing.
+    let mut on = runner(&pool, &run);
+    let stale = on.try_next_dispatch(&mut writer, resume(&Approves(false)));
     assert_eq!(turn_step(&stale.await.unwrap()), TurnStep::Stopped);
-    let mut off = runner(&pool, false, &run);
-    let parked =
-        off.try_next_dispatch(&mut writer, OriginalGate::Admitted, resume(&Approves(true)));
-    assert!(matches!(parked.await.unwrap(), Admission::Parked));
     assert!(load(&pool, &approved.key).await.unwrap().is_none());
 
     // T18: the 403 original, the approved retry goes uncertain, Auto takes the last slot.
-    let admission = on.try_next_dispatch(
-        &mut writer,
-        OriginalGate::SendLocal,
-        resume(&Approves(true)),
-    );
+    let admission = on.try_next_dispatch(&mut writer, resume(&Approves(true)));
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("the approved retry");
     };
@@ -730,11 +675,7 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         .await
         .unwrap();
     // A duplicate of the same approval finds the budget, not a new one.
-    let again = on.try_next_dispatch(
-        &mut writer,
-        OriginalGate::SendLocal,
-        resume(&Approves(true)),
-    );
+    let again = on.try_next_dispatch(&mut writer, resume(&Approves(true)));
     let Admission::Granted { permit, lease } = again.await.unwrap() else {
         panic!("slot 2");
     };
@@ -745,7 +686,7 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         .await
         .unwrap();
     let intent = DispatchIntent::Auto(evidence(&pool, &approved.key, &run).await);
-    let last = on.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let last = on.try_next_dispatch(&mut writer, intent);
     assert_eq!(turn_step(&last.await.unwrap()), TurnStep::Done);
     let spent = slots(&pool, &approved.key).await;
     assert_eq!(spent.len(), 3);
@@ -768,7 +709,7 @@ async fn f5_present_is_not_automatically_a_receipt_pg() {
     )
     .await;
     let run = holder("a");
-    let mut runner = runner(&pool, true, &run);
+    let mut runner = runner(&pool, &run);
     let footer = |key: &PieceKey| {
         let ids = RepostIds::for_piece(&marker(key)).unwrap();
         let envelope = RepostEnvelope::additional(CHANNEL, "p".into(), ids);
@@ -887,15 +828,10 @@ async fn auto_missing_row_is_observe_only_pg() {
     let mut writer = TestWriter::new();
     let gone = absent_evidence(super::io::probe::tests::scope(&[0]), run.clone());
     let key = gone.scope().key.clone();
-    let mut runner = Runner::new(
-        switch_for(true, key.unit().channel_id),
-        pool.clone(),
-        BOT,
-        run.clone(),
-    );
+    let mut runner = Runner::new(pool.clone(), BOT, run.clone());
     assert!(load(&pool, &key).await.unwrap().is_none());
     let intent = DispatchIntent::Auto(Box::new(gone));
-    let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+    let admission = runner.try_next_dispatch(&mut writer, intent);
     let admission = admission.await.unwrap();
     assert!(matches!(admission, Admission::ObserveOnly), "{admission:?}");
     assert_eq!(turn_step(&admission), TurnStep::Wait);
@@ -929,9 +865,9 @@ async fn auto_row_gone_before_the_grant_lock_is_observe_only_pg() {
         let pool = pool.clone();
         tokio::spawn(async move {
             let mut writer = TestWriter::new();
-            let mut runner = runner(&pool, true, &run);
+            let mut runner = runner(&pool, &run);
             let intent = DispatchIntent::Auto(evidence);
-            let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);
+            let admission = runner.try_next_dispatch(&mut writer, intent);
             (admission.await.unwrap(), writer)
         })
     };

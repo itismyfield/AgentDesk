@@ -845,23 +845,23 @@ async fn a_flat_paste_drawn_with_its_indent_is_injected_pg() {
     assert_eq!(observed, [injected; 2]);
 }
 
-/// At 80x24 a long line wraps as measured on Claude Code 2.1.293: predicted rows prove the paste
-/// ours, and a line whose rows are not predictable is handed back unpasted.
+/// At 80x24 measured rows or the complete captured body prove a wrapped paste, even when its
+/// glyph widths are unknown.
 #[tokio::test(flavor = "current_thread")]
 async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
-    let (wrapped, unpredictable) = (6_687_011, 6_687_012);
+    let (wrapped, body_confirmed) = (6_687_011, 6_687_012);
     let registry = HealthRegistry::new();
-    let shared = register_inject_runtime(&registry, &[wrapped, unpredictable], Some(pool)).await;
+    let shared = register_inject_runtime(&registry, &[wrapped, body_confirmed], Some(pool)).await;
     let words = |n: usize| ["가나다"; 25][..n].join(" ");
     let measured = [format!("  {}", words(11)), format!("  {} 끝", words(8))];
     let emoji = [format!("  {}", "😀a".repeat(25)), "  😀a".to_string()];
     let mut observed = Vec::new();
     for (ch, text, rows) in [
         (wrapped, format!("{} 끝", words(25)), measured.as_slice()),
-        (unpredictable, "😀a".repeat(26), emoji.as_slice()),
+        (body_confirmed, "😀a".repeat(26), emoji.as_slice()),
     ] {
         let pane = InjectPane::new(ch, "all");
         pane.draw_paste(Some(rows));
@@ -870,6 +870,8 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
                 "draw.first",
                 &format!("❯\u{00a0}[User: imessage:200 (ID: 200)] {}\n", words(6)),
             );
+        } else {
+            pane.set("draw.first", "❯\u{00a0}[User: imessage:200 (ID: 200)]\n");
         }
         let outcome = deliver_text(&registry, ch, &text).await;
         let queue = queue_texts(&shared, ch).await.len();
@@ -880,7 +882,7 @@ async fn a_wrapped_paste_is_injected_only_when_its_rows_are_predicted_pg() {
         observed,
         [
             "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true queued=0",
-            "queued handed_back veto=unpredictable_render keys= seen=false queued=1",
+            "Ok(Injected { turn_id: None }) keys=paste-buffer+send-keys seen=true queued=0",
         ]
     );
 }

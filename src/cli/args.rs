@@ -561,7 +561,6 @@ pub(crate) enum Commands {
         #[arg(long = "no-agentdesk")]
         no_agentdesk: bool,
     },
-    O(crate::cli::o::OArgs),
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
     /// Delegated channel homes: status, and the switched delegate, reclaim and force
@@ -1140,7 +1139,6 @@ mod tests {
             "health",
             "machine-compare",
             "activity",
-            "o",
             "herdr",
             "channel-home",
             "help",

@@ -1256,3 +1256,6 @@ mod route_tests;
 
 #[path = "transition_apply_tests.rs"]
 mod apply_tests;
+
+#[path = "transition_automatic_tests.rs"]
+mod automatic_tests;

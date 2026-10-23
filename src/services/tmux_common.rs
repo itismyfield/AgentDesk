@@ -1243,18 +1243,6 @@ pub(crate) fn cleanup_cleared_session_temp_files(
     cleanup_session_temp_files(session.name());
 }
 
-// The caller already holds the source fence; never acquire it a second time.
-pub(crate) fn cleanup_native_clear_fallback_under_source_authority(
-    authority: &TmuxSourceAuthority<'_>,
-    session: &crate::services::session_host::ClearedHostSession,
-) -> bool {
-    if authority.session() != session.name() {
-        return false;
-    }
-    cleanup_session_temp_files_under_source_authority(authority, authority.session());
-    true
-}
-
 pub(crate) fn cleanup_session_temp_files_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     session_name: &str,

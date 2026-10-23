@@ -236,7 +236,7 @@ async fn health_handler_acquire_budget_public_and_detail_body() {
             None,
             Default::default(),
             "/health/detail",
-            5,
+            4,
         ),
         (
             "registry public",
@@ -250,7 +250,7 @@ async fn health_handler_acquire_budget_public_and_detail_body() {
             Some(mailboxes),
             Default::default(),
             "/health/detail",
-            6,
+            5,
         ),
         ("standby public", empty(), standby_config(), "/health", 5),
         (
@@ -258,7 +258,7 @@ async fn health_handler_acquire_budget_public_and_detail_body() {
             empty(),
             standby_config(),
             "/health/detail",
-            6,
+            5,
         ),
     ];
     let mut seen = Vec::new();
@@ -281,8 +281,8 @@ async fn health_handler_acquire_budget_public_and_detail_body() {
     }
     for (label, probes, executed, expected) in &seen {
         assert!(
-            *probes <= 6 && *executed <= 6,
-            "{label}: over the N=6 budget: {seen:?}"
+            *probes <= 5 && *executed <= 5,
+            "{label}: over the N=5 budget: {seen:?}"
         );
         assert_eq!(
             (probes, executed),
@@ -423,7 +423,7 @@ async fn health_handler_parallel_db_preserves_complete_results() {
             assert_eq!(body["config_audit"]["checked"], 3, "{body}");
             assert_eq!(body["pipeline_overrides"]["checked"], 2, "{body}");
             assert_eq!(body["rate_limit_dispatch_gate"]["danger_pct"], 77, "{body}");
-            assert!(body["active_session_audit"].is_object(), "{body}");
+            assert!(body.get("active_session_audit").is_none(), "{body}");
             assert_eq!(mailbox_rows(&body).len(), channels.len(), "{body}");
             for row in mailbox_rows(&body) {
                 assert!(row["session_lookup_error"].is_null(), "{row}");
@@ -471,7 +471,7 @@ async fn health_handler_db_deadline_covers_late_queries() {
     assert!(body.get("dispatch_outbox").is_none(), "{body}");
     assert_eq!(body["config_audit"]["checked"], 3, "{body}");
     assert_eq!(body["auto_queue_cleanup"]["pending"], 1, "{body}");
-    assert!(body["active_session_audit"].is_object(), "{body}");
+    assert!(body.get("active_session_audit").is_none(), "{body}");
     for row in mailbox_rows(&body) {
         assert!(row["session_lookup_error"].is_null(), "{row}");
     }
