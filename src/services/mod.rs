@@ -24,9 +24,6 @@ pub mod discord;
 pub mod discord_config_audit;
 #[allow(dead_code)]
 pub(crate) mod tui_input;
-// Read only by its tests until the `adk custody status` wiring lands on top of it.
-#[allow(dead_code)]
-pub(crate) mod discord_custody;
 // #1693: `discord_delivery` moved to `dispatches::discord_delivery`. The
 // flat path is preserved as a re-export so existing import sites and
 // tests keep working without churn.

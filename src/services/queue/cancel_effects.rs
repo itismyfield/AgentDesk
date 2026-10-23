@@ -190,7 +190,7 @@ async fn purge_on(
 pub(super) mod herdr {
     use sqlx::PgPool;
 
-    use super::{PurgeCounts, TurnLifecycleTarget, purge_on};
+    use super::{QueuePersistenceContext, SessionIdentity, TurnLifecycleTarget};
     use crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg;
     use futures::FutureExt;
     use futures::future::BoxFuture;
@@ -201,21 +201,31 @@ pub(super) mod herdr {
     use crate::services::turn_cancel_finalizer::{
         FinalizeTurnCancelRequest, FinalizedTurnCancel, TurnCancelCorrelation, finalize_turn_cancel,
     };
-    use crate::services::turn_cancel_queue_guard::{
-        CancelQueueLoss, CancelRemovalWitness, capture_queue_before_cancel_on,
-        record_queue_loss_after_cancel_on,
-    };
+    use crate::services::turn_cancel_queue_guard::{CancelQueueLoss, record_purge_receipt_on};
     use crate::services::turn_lifecycle::cleanup_policy_observability_surface;
+    use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
 
     pub(in crate::services::queue) const HERDR_TERMINATE: &str = "herdr-terminate";
 
     /// What a forced Herdr cancel applied under the terminate's exclusion. `failed` names the first
-    /// step that did not apply; nothing after it ran. `loss` is `None` when the channel had no actor.
+    /// step that did not apply; nothing after it ran but the record of what the purge removed.
+    /// `loss` is `None` when the channel had no actor.
     pub(in crate::services::queue) struct HerdrForceEffects {
         pub(in crate::services::queue) failed: Option<String>,
-        pub(in crate::services::queue) purge: Option<PurgeCounts>,
+        /// The dispatch cancel and the session disconnect both applied.
+        pub(in crate::services::queue) disconnected: bool,
+        pub(in crate::services::queue) purge: Option<QueuePurge>,
         pub(in crate::services::queue) loss: Option<CancelQueueLoss>,
         pub(in crate::services::queue) cancelled: FinalizedTurnCancel,
+    }
+
+    /// The actor's answer to the checked purge.
+    #[derive(Clone, Copy)]
+    pub(in crate::services::queue) struct QueuePurge {
+        pub(in crate::services::queue) removed: usize,
+        /// True only when the actor kept its queue unchanged; `None` when that is unknown.
+        pub(in crate::services::queue) preserved: Option<bool>,
+        pub(in crate::services::queue) queue_len_after: Option<usize>,
     }
 
     /// A forced cancel purged its queue under the exclusion, so nothing is left to release.
@@ -232,7 +242,8 @@ pub(super) mod herdr {
         pool: PgPool,
         session_key: String,
     ) -> HerdrForceEffects {
-        let (failed, purge, loss) = herdr_force_steps(exclusion, &pool, &session_key).await;
+        let (failed, disconnected, purge, loss) =
+            herdr_force_steps(exclusion, &pool, &session_key).await;
         let turn_id = exclusion
             .settled_turn()
             .and_then(|token| token.turn_nonce());
@@ -253,36 +264,44 @@ pub(super) mod herdr {
             tmux_killed: false,
             inflight_cleared: exclusion.settled_turn().is_some(),
             queue_depth: loss.as_ref().and_then(|loss| loss.queue_depth_after),
-            queue_preserved: purge.map(|_| false),
+            queue_preserved: purge.and_then(|purge| purge.preserved),
             termination_recorded: true,
             completed_at: chrono::Utc::now(),
         };
         HerdrForceEffects {
             failed,
+            disconnected,
             purge,
             loss,
             cancelled: finalize_turn_cancel(request),
         }
     }
 
+    type Steps = (
+        Option<String>,
+        bool,
+        Option<QueuePurge>,
+        Option<CancelQueueLoss>,
+    );
+
     async fn herdr_force_steps(
         exclusion: &RetiredExclusion,
         pool: &PgPool,
         session_key: &str,
-    ) -> (Option<String>, Option<PurgeCounts>, Option<CancelQueueLoss>) {
+    ) -> Steps {
         if let Some(dispatch) = exclusion.dispatch()
             && let Err(error) =
                 cancel_dispatch_and_reset_auto_queue_on_pg(pool, dispatch, None).await
         {
-            return (Some(format!("dispatch cancel: {error}")), None, None);
+            return (Some(format!("dispatch cancel: {error}")), false, None, None);
         }
         match exclusion.disconnect_session(pool).await {
             Ok(true) => {}
-            Ok(false) => return (Some("session row moved on".into()), None, None),
-            Err(error) => return (Some(error), None, None),
+            Ok(false) => return (Some("session row moved on".into()), false, None, None),
+            Err(error) => return (Some(error), false, None, None),
         }
         let Some(actor) = exclusion.actor() else {
-            return (None, None, None);
+            return (None, true, None, None);
         };
         let (provider, channel) = (exclusion.provider(), exclusion.channel());
         let target = TurnLifecycleTarget {
@@ -290,17 +309,50 @@ pub(super) mod herdr {
             channel_id: Some(channel),
             tmux_name: String::new(),
         };
-        // Capture, purge and record all address the exclusion's actor, whatever the channel registers.
-        let capture = capture_queue_before_cancel_on(actor).await;
-        let purge = purge_on(actor, provider, channel, Some(session_key), false).await;
-        let purge = purge.map(PurgeCounts::from);
-        let witness = CancelRemovalWitness::Purge(purge);
+        // The capture, the purge it conditions and the record of its receipt all address the
+        // exclusion's actor; a queue the actor no longer holds as captured is refused, not purged.
+        let token = SessionIdentity::parse(session_key).and_then(|identity| identity.token_hash);
+        let persistence =
+            QueuePersistenceContext::new(provider, token.as_deref().unwrap_or_default(), None);
+        // Only the runtime's own namespace is absorbed first; another one is captured as held.
+        let capture = match token.as_deref() == exclusion.owner_token() {
+            true => match actor.try_capture_own_queue(persistence.clone()).await {
+                Ok(captured) => captured.map_err(|why| format!("queue hydrate: {why}")),
+                Err(_) => Err("queue hydrate: the mailbox actor did not answer".to_string()),
+            },
+            false => (actor.try_snapshot().await)
+                .map_err(|_| "queue capture: the mailbox actor did not answer".to_string()),
+        };
+        let checked = match capture {
+            Ok(snapshot) => {
+                #[cfg(test)]
+                super::run_pre_purge_hook_for_test(provider, channel, actor).await;
+                let expected = ExpectedQueue::of(&snapshot);
+                let purge = actor.try_purge_queue_if_unchanged(persistence, expected);
+                purge
+                    .await
+                    .map_err(|_| "queue purge: the mailbox actor did not answer".to_string())
+            }
+            Err(why) => Err(why),
+        };
+        let receipt = checked
+            .as_ref()
+            .map_or(&[][..], |purge| purge.receipt.as_slice());
+        let failed = match &checked {
+            Ok(purge) => {
+                (purge.failed.as_ref()).map(|(stage, why)| format!("queue purge {stage:?}: {why}"))
+            }
+            Err(why) => Some(why.clone()),
+        };
         let reason = "queue_api_cancel_turn_force";
-        let pool = Some(pool);
-        let loss =
-            record_queue_loss_after_cancel_on(actor, &target, &capture, pool, witness, reason);
+        let complete = failed.is_none();
+        let loss = record_purge_receipt_on(actor, &target, receipt, complete, Some(pool), reason);
         let loss = loss.await;
-        let failed = purge.is_none().then(|| "queue purge refused".to_string());
-        (failed, purge, Some(loss))
+        let purge = checked.as_ref().ok().map(|purge| QueuePurge {
+            removed: purge.receipt.len(),
+            preserved: purge.queue_preserved(),
+            queue_len_after: Some(purge.queue_len_after),
+        });
+        (failed, true, purge, Some(loss))
     }
 }

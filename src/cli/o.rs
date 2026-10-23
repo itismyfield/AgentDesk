@@ -10,9 +10,6 @@ use crate::services::tui_o::store::{
     OPERATOR_RESUME_FLOOR, OStore, ResumeRecord, STORE_DIR_NAME, StoreError,
 };
 
-#[path = "o_transition.rs"]
-mod transition;
-
 #[derive(Args)]
 #[command(
     about = "O writer store operations: resolve a pending source boundary, approve a rejected piece"
@@ -46,9 +43,6 @@ pub(crate) enum OCommand {
         #[arg(long, default_value = "operator")]
         operator: String,
     },
-    /// Ask the local server about a transcript transition's cleanup; opens no store here
-    #[command(subcommand)]
-    Transition(transition::TransitionCommand),
 }
 
 #[derive(Subcommand)]
@@ -69,13 +63,9 @@ pub(crate) enum BoundaryCommand {
 }
 
 pub(crate) fn run(args: OArgs) -> Result<(), String> {
-    let command = match args.command {
-        OCommand::Transition(command) => return transition::run(command),
-        command => command,
-    };
     let runtime_root = crate::config::runtime_root().ok_or("runtime root is unresolved")?;
     let store = OStore::existing(&runtime_root).ok_or("no O store under the runtime root")?;
-    match command {
+    match args.command {
         OCommand::Boundary(BoundaryCommand::Resolve {
             channel,
             source,
@@ -93,7 +83,6 @@ pub(crate) fn run(args: OArgs) -> Result<(), String> {
             println!("{path} is owed from byte {from}; the writer applies it at its next start");
             Ok(())
         }
-        OCommand::Transition(_) => unreachable!("answered before the store opens"),
         OCommand::Status { channel } => status(&store, channel),
         OCommand::Resume {
             channel,

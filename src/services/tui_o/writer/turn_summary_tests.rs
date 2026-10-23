@@ -161,7 +161,7 @@ fn claude_first_idle_emits_one_summary_after_the_card_and_final_body() {
             "before",
             "-# ▸ Bash  cargo check  ✗",
             "after",
-            "-# ✅ 7분 14초 · 📦 45%"
+            "-# ⏱️ 7분 14초 · 📦 45%"
         ]
     );
     assert_eq!(summaries(&work).len(), 1);
@@ -189,7 +189,7 @@ fn claude_interrupt_closes_a_nonempty_turn_as_cancelled_once() {
 fn claude_last_assistant_controls_api_failure_and_recovery() {
     for (errors, expected) in [
         (vec![true], "-# ⚠️ 오류 · 5초"),
-        (vec![true, false], "-# ✅ 5초"),
+        (vec![true, false], "-# ⏱️ 5초"),
         (vec![false, true], "-# ⚠️ 오류 · 5초"),
     ] {
         let mut derive = enabled(ShadowProvider::Claude, inputs(None));
@@ -257,7 +257,7 @@ fn autonomous_claude_turn_uses_the_first_assistant_timestamp() {
     assert_eq!(marks(&opening).len(), 1);
     let work = derive.derive(&idle("stop_hook_summary", Some("2026-10-19T00:02:03.000Z")));
     assert_eq!(summaries(&work).len(), 1);
-    assert_eq!(summaries(&work)[0].payload, "-# ✅ 1분 3초");
+    assert_eq!(summaries(&work)[0].payload, "-# ⏱️ 1분 3초");
 }
 
 #[test]
@@ -428,7 +428,7 @@ fn codex_native_turn_emits_card_body_and_one_summary_without_claiming_tool_succe
             .iter()
             .map(|piece| piece.payload.as_str())
             .collect::<Vec<_>>(),
-        vec!["-# ▸ Bash  cargo check  ·", "codex answer", "-# ✅ 1분 2초"]
+        vec!["-# ▸ Bash  cargo check  ·", "codex answer", "-# ⏱️ 1분 2초"]
     );
     assert_eq!(marks(&work).len(), 1);
     assert_eq!(marks(&work)[0].native_key, "native-tool#turn");

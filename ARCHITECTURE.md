@@ -57,8 +57,6 @@ src/
 │   │   ├── apply_config_tests.rs
 │   │   ├── plan.rs
 │   │   └── source.rs
-│   ├── o_transition/
-│   │   └── http.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -86,8 +84,6 @@ src/
 │   ├── monitoring.rs
 │   ├── o.rs
 │   ├── o_tests.rs
-│   ├── o_transition.rs
-│   ├── o_transition_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
@@ -512,8 +508,6 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
-│   │   ├── o_transition.rs
-│   │   ├── o_transition_tests.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_stage_save_tests.rs
@@ -696,6 +690,8 @@ src/
 │   │   │   ├── stash.rs
 │   │   │   ├── stash_tests.rs
 │   │   │   └── submit.rs
+│   │   ├── busy_inject_tests/
+│   │   │   └── common_glyph_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -1002,6 +998,8 @@ src/
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
+│   │   │   │   │   ├── codex_end_tests/
+│   │   │   │   │   │   └── capture_fold_tests.rs
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
@@ -1054,6 +1052,7 @@ src/
 │   │   │   ├── text_commands/
 │   │   │   │   ├── command_dispatch_contract_tests/
 │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   ├── clear_http_overlap_tests.rs
 │   │   │   │   ├── clear_refusal_reply_tests.rs
 │   │   │   │   └── native_stop.rs
 │   │   │   ├── voice/
@@ -1114,6 +1113,12 @@ src/
 │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
+│   │   │   ├── o_transition/
+│   │   │   │   ├── automatic/
+│   │   │   │   │   └── termination.rs
+│   │   │   │   ├── automatic.rs
+│   │   │   │   ├── automatic_idle.rs
+│   │   │   │   └── automatic_idle_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -1228,7 +1233,13 @@ src/
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
+│   │   │   ├── http_force_forward_tests.rs
+│   │   │   ├── http_force_hydrate_tests.rs
+│   │   │   ├── http_force_identity_tests.rs
+│   │   │   ├── http_force_purge_tests.rs
+│   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
+│   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -1260,6 +1271,8 @@ src/
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── custody_notice/
+│   │   │   │   │   └── retention.rs
 │   │   │   │   ├── loader_gate_observation_tests/
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
@@ -2163,6 +2176,7 @@ src/
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_activation_tests.rs
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
+│   │   │   │   ├── herdr_terminate_o_output_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
 │   │   │   │   ├── idle_inject_echo_e2e_tests.rs
@@ -2550,6 +2564,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
+│   │   │   ├── supervisor_injected_tests.rs
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
@@ -2559,6 +2574,7 @@ src/
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
+│   │   │   ├── injected.rs
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── queue_repair.rs
 │   │   │   ├── reaction_set.rs
@@ -2793,8 +2809,6 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
-│   ├── discord_custody/
-│   │   └── tests.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -3063,6 +3077,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── tests/
 │   │   │   └── source_guard_tests.rs
+│   │   ├── trusted_target/
+│   │   │   └── loopback_seam_tests.rs
 │   │   ├── cancel_lookup.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
@@ -3249,6 +3265,9 @@ src/
 │   │   │   └── tool_card_switch_tests.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
+│   │   │   │   ├── automatic.rs
+│   │   │   │   ├── automatic_age.rs
+│   │   │   │   ├── automatic_age_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3401,6 +3420,7 @@ src/
 │   │   │   ├── tool_results.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
+│   │   │   ├── transition_automatic_tests.rs
 │   │   │   ├── transition_cleanup.rs
 │   │   │   ├── transition_cleanup_tests.rs
 │   │   │   ├── transition_execution_tests.rs
@@ -3440,6 +3460,7 @@ src/
 │   │   │   │   ├── commit/
 │   │   │   │   │   └── resume_companions.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs
@@ -3514,6 +3535,8 @@ src/
 │   ├── turn_lifecycle/
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
+│   │   ├── checked_purge/
+│   │   │   └── stage_tests.rs
 │   │   ├── clear_fence/
 │   │   │   └── clear_fence_tests.rs
 │   │   ├── dispatch_reservation/
@@ -3534,6 +3557,7 @@ src/
 │   │   │   ├── closed_gate_tests.rs
 │   │   │   └── current_entry_tests.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── checked_purge.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
 │   │   ├── clear_fence.rs
@@ -3573,6 +3597,9 @@ src/
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs
+│   ├── turn_summary_line/
+│   │   ├── quota.rs
+│   │   └── quota_tests.rs
 │   ├── writer_protocol/
 │   │   ├── namespace/
 │   │   │   ├── catalog.rs
@@ -3595,7 +3622,6 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs
-│   ├── discord_custody.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_gate.rs

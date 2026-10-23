@@ -212,7 +212,7 @@ mod historical_hops;
 mod past_bind;
 mod renumbered;
 mod transition_cleanup;
-/// The operator route `POST /api/o/transition` is its only production sender.
+/// Only the periodic retention sweep sends production cleanup requests.
 pub(crate) mod transition_port;
 
 #[cfg(test)]

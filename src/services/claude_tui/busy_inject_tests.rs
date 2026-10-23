@@ -1,3 +1,5 @@
+mod common_glyph_tests;
+
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
