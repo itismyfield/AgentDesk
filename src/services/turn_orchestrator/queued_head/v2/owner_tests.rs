@@ -616,8 +616,13 @@ fn v2_legacy_restore_uses_positive_reserved_proof_and_retains_unknown_without_le
         let channel = 727280 + n as u64;
         let mut original = item(100);
         original.created_at_wall_time_ms = Some(12345);
-        let mut canonical = original.clone();
-        canonical.created_at_wall_time_ms = Some(0);
+        let intervention =
+            super::super::super::pending_queue_persistence::pending_queue_item_to_intervention(
+                original.clone(),
+                std::time::SystemTime::now(),
+                std::time::Instant::now(),
+            );
+        let canonical = super::super::canonical_item(&intervention, ChannelId::new(7272));
         let meta = super::super::SnapshotMeta {
             head_injection: Some(super::super::PersistedHeadInjection {
                 identity: sources::identity(&original),
