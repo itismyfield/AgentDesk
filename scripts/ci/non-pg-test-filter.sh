@@ -254,6 +254,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::writer::tests::actor::host_start::receipt_projection
   --skip services::tui_o::writer::tests::actor::repost_turn
   --skip services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
+  --skip services::tui_o::writer::tests::deliver_home
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -429,7 +430,6 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
-  services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
@@ -974,7 +974,6 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::runner_tests::f5_aborting_the_owning_task_ends_the_request_without_a_retry
   services::tui_o::repost::runner_tests::f5_admission_mapping_is_exhaustive
   services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
-  services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
@@ -983,8 +982,6 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
   services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
   services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads
-  services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
-  services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only

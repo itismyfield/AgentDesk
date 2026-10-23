@@ -16,7 +16,6 @@ use tokio::sync::{oneshot, watch};
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm};
-use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
 use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
@@ -155,18 +154,6 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// A delegated channel posts only through its registered home gate, which also ends a lapsed hold;
-/// any other channel through the writer's gate. A channel whose delegation is unavailable posts none.
-fn admit<T>(gate: &OwnershipGate, channel: u64, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
-    if crate::services::cluster::home_availability::refusal(channel).is_some() {
-        return None;
-    }
-    match channel_home::registered_channel(channel) {
-        Some(home) => home.admit_post(hand_off),
-        None => gate.admit(hand_off),
     }
 }
 
@@ -606,7 +593,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
         let admitted = poll_fn(|cx| {
-            Poll::Ready(admit(&gate, channel, |epoch| {
+            Poll::Ready(gate.admit(|epoch| {
                 if stops.iter().any(|stop| *stop.borrow())
                     || !super::local_retry::may_prepare(store.ledger(), piece, local_retry.as_ref())
                 {
@@ -878,8 +865,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             live.load(Ordering::SeqCst)
                 && effective.as_ref().is_some_and(|allowed| allowed())
                 && stops.iter().all(|stop| !*stop.borrow())
-                && channel_home::registered_channel(channel).is_none()
-                && crate::services::cluster::home_availability::refusal(channel).is_none()
                 && source_delivery_allowed(channel, sources.iter().cloned())
         })
     }

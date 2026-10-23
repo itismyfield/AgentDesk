@@ -6,12 +6,10 @@ use crate::db::o_channel_homes::{
     ChannelHome, HeldHome, HomeError, HomeState, HomeWrite, adopt, begin_reclaim, delegate,
     finish_release,
 };
-use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::cluster::channel_home::{self as home_gate, HomeGate};
 use crate::services::cluster::channel_home_drain::{
     Blocker, DrainPort, DrainStep, Owed, ResetRefused, drain_round,
 };
-use crate::services::tui_o::channel_policy::Adoption;
 use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
 use test_executor::Checkpoint;
 
@@ -91,7 +89,7 @@ async fn a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_
     let row = insert_pending(&pool, &payload, 1, None).await.unwrap();
     let (_registry, shared) =
         crate::services::discord::health::owner_runtime_for_tests::registered("claude").await;
-    let _standby = test_override::force_standby(&[(C, ClaudeTui)], GW, Adoption::Committed);
+    let _legacy = test_override::force_channels(&[]);
     let _ready = test_probe::answer_with(|_| true);
     let gate = Arc::new(HomeGate::new(&channel, MINI));
     home_gate::register(Arc::clone(&gate));

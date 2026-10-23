@@ -286,7 +286,7 @@ fn mask_literals(text: &str) -> Vec<u8> {
     out
 }
 
-/// Source text with every `#[cfg(test)]` item removed; an item that never closes fails.
+/// Test items are removed; fields stay visible so they cannot hide later production items.
 fn production_text(text: &str) -> String {
     let masked = mask_literals(text);
     let find = |from: usize, needle: &[u8]| {
@@ -298,6 +298,18 @@ fn production_text(text: &str) -> String {
     let (mut out, mut kept) = (String::new(), 0);
     while let Some(at) = find(kept, b"#[cfg(test)]") {
         out.push_str(&text[kept..at]);
+        let after = at + b"#[cfg(test)]".len();
+        let tail = std::str::from_utf8(&masked[after..]).unwrap().trim_start();
+        let name = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let suffix = tail[name..].trim_start();
+        let field = name != 0
+            && (suffix.starts_with(',') || (suffix.starts_with(':') && !suffix.starts_with("::")));
+        if field {
+            kept = after;
+            continue;
+        }
         let end = match (find(at, b";"), find(at, b"{")) {
             (Some(semi), Some(open)) if semi < open => semi + 1,
             (_, Some(open)) => {
@@ -321,10 +333,25 @@ fn production_text(text: &str) -> String {
     out
 }
 
-// Dormant guard: outside the owners, production only reads rows and consults gates; the switched
-// operator CLI may also start a delegate, a reclaim or a force. Nothing builds the drain port.
+// Outside the retained owners, production only reads rows and consults gates.
+// Each retained lease/drain loop is defined by one owner.
 #[test]
 fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
+    for probe in [
+        concat!(
+            "struct Probe {\n#[cfg(test)]\nonly_for_tests: u64,\n}\n",
+            "fn remains() { channel_home::run_lease(); }"
+        ),
+        concat!(
+            "fn remains() { let _ = Probe {\n#[cfg(test)]\nonly_for_tests,\n",
+            "value: { channel_home::run_lease(); 0 }, }; }"
+        ),
+    ] {
+        assert!(
+            production_text(probe).contains("channel_home::run_lease"),
+            "test-only field must not hide following production items"
+        );
+    }
     const OWNERS: &[&str] = &[
         "src/db/o_channel_homes.rs",
         "src/services/cluster/channel_home.rs",
@@ -525,85 +552,6 @@ fn routing(channel: u64) -> impl PartialEq + std::fmt::Debug {
         intake_route::held_channels("claude"),
         ownership,
     )
-}
-
-/// A node off the O home keeps a selected channel's store as standby from boot, so the first
-/// delegation needs no restart; standby alone changes no routing, and only an open gate counts.
-#[test]
-fn standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake() {
-    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-    use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
-    use crate::services::tui_o::cutover::intake_route::{IntakeRoute, test_probe};
-    use crate::services::tui_o::cutover::test_override;
-    const SELECTED: u64 = 4_380_501;
-    let _ready = test_probe::answer_with(|_| true);
-    use crate::services::tui_o::cutover::intake_route;
-    let foreign = {
-        let _plain = test_override::force_foreign(&[(SELECTED, ClaudeTui)], "gw");
-        routing(SELECTED)
-    };
-    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-        "server": {},
-        "cluster": {"enabled": true, "instance_id": "mini", "gateway_preferred_instance_id": "gw"},
-        "tui_o": {"writer": {"channels": [SELECTED]}},
-        "agents": [{"id": "w", "name": "W", "channels": {"claude": {"id": SELECTED.to_string(), "runtime": "tui"}}}],
-    }))
-    .unwrap();
-    let stored = |channels: &std::collections::BTreeSet<u64>, committed: bool| {
-        assert!(!committed, "off the home only local state is read");
-        Ok(channels.iter().map(|&c| (c, Adoption::Committed)).collect())
-    };
-    let boot = BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(true, &config, stored).unwrap();
-    assert!(
-        boot.candidate(SELECTED).is_none(),
-        "nothing adopted off the home"
-    );
-    let standby = boot.standby(SELECTED).cloned().expect("kept as standby");
-    let _booted = test_override::force_boot(boot);
-    assert_eq!(routing(SELECTED), foreign, "no home row: as before");
-
-    // The first delegation in this process: a gate that has not opened holds the channel.
-    let channel = SELECTED.to_string();
-    let gate = std::sync::Arc::new(HomeGate::new(&channel, "mini"));
-    register(std::sync::Arc::clone(&gate));
-    assert!(matches!(
-        intake_route::route("claude", SELECTED),
-        IntakeRoute::Hold(_)
-    ));
-    assert!(matches!(
-        intake_route::route_for_placement("claude", SELECTED),
-        IntakeRoute::Hold(_)
-    ));
-    assert_eq!(intake_route::held_channels("claude"), [channel.clone()]);
-
-    let renewal = HeldHome::for_test(&channel, "mini", 9, HomeState::Worker);
-    gate.confirm(&renewal, Instant::now()).expect("opens");
-    assert_eq!(
-        intake_route::route_for_placement("claude", SELECTED),
-        IntakeRoute::Gateway
-    );
-    assert!(intake_route::held_channels("claude").is_empty());
-    assert_eq!(
-        standby.peek(),
-        Adoption::Committed,
-        "the boot store, no restart"
-    );
-    // Intake closing between the owned read and the gate read names the channel once.
-    let closing = std::sync::Arc::clone(&gate);
-    let closing = test_probe::answer_with(move |_| {
-        closing.close_intake();
-        false
-    });
-    assert_eq!(intake_route::held_channels("claude"), [channel.clone()]);
-    drop(closing);
-    gate.close_intake();
-    assert!(matches!(
-        intake_route::route("claude", SELECTED),
-        IntakeRoute::Hold(_)
-    ));
-    unregister(&channel);
-    assert_eq!(routing(SELECTED), foreign, "row gone: as before");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -3228,7 +3228,6 @@ src/
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── fresh_input.rs
 │   │   │   │   ├── fresh_input_tests.rs
-│   │   │   │   ├── hosting.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
@@ -3290,7 +3289,6 @@ src/
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
-│   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs
 │   │   │   ├── host_managed_tests.rs
 │   │   │   ├── host_renumber_tests.rs

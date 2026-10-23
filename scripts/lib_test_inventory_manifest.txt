@@ -2609,7 +2609,6 @@ services::cluster::channel_home::tests::command_registry_unregister_is_immediate
 services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
-services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -13002,7 +13001,7 @@ services::tui_o::channel_policy::tests::the_body_check_fails_a_bodiless_claim_an
 services::tui_o::cutover::channel_gate::tests::a_claimed_legacy_send_stays_counted_until_its_transport_is_done
 services::tui_o::cutover::channel_gate::tests::an_empty_list_leaves_even_an_unknown_destination_to_legacy_while_no_snapshot_holds
 services::tui_o::cutover::channel_gate::tests::claim_then_send_releases_a_pending_adoption_only_for_the_send_it_runs
-services::tui_o::cutover::test_override::without_a_delegated_home_owned_channels_match_boot_ownership
+services::tui_o::cutover::test_override::owned_channels_match_boot_ownership
 services::tui_o::exact_episode::tests::exact_body_requires_full_child_attempt_receipt_and_whole_frontier
 services::tui_o::exact_episode::tests::exact_conflicting_settlements_never_union_effects
 services::tui_o::exact_episode::tests::exact_empty_and_parent_transport_never_grant_body
@@ -13561,8 +13560,6 @@ services::tui_o::writer::tests::actor::host_start::first_init::resume_companion_
 services::tui_o::writer::tests::actor::host_start::first_init::resume_companion_metadata_only_log_allows_actual_host_first_init
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
-services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate
-services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
 services::tui_o::writer::tests::actor::host_start::late_binding::late_adopt_binding_baseline_at_boundary_zero_is_the_first_bind_ever_logged
 services::tui_o::writer::tests::actor::host_start::late_binding::late_adopt_binding_closed_watch_is_bounded_and_retries_at_five_seconds
 services::tui_o::writer::tests::actor::host_start::late_binding::late_adopt_binding_first_bound_or_resolved_rejects_coalesced_rotation_before_pin
@@ -13816,7 +13813,6 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_lists_every_unpinned_session_a_source_may_be
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_reports_the_history_of_the_judgment_not_a_later_one
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_writes_nothing_and_reports_the_execution_it_judged
-services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_job_keeps_the_home_permit_after_the_requester_left
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_sends_nothing_to_an_actor_that_takes_no_work
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_holds_a_source_whose_inputs_changed_after_its_probes
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_keeps_what_it_retired_before_a_failed_write_and_resumes_the_rest
@@ -13884,8 +13880,7 @@ services::tui_o::writer::tests::codex_launch_cause::incomplete_native_header_and
 services::tui_o::writer::tests::codex_launch_cause::launch_and_discovery_orders_keep_one_startup_and_one_post
 services::tui_o::writer::tests::codex_launch_cause::mismatched_native_rollouts_never_promote_discovery_to_startup
 services::tui_o::writer::tests::codex_launch_cause::unproven_contexts_never_promote_discovery_to_startup
-services::tui_o::writer::tests::deliver_home::a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close
-services::tui_o::writer::tests::deliver_home::the_final_close_waits_for_an_admission_in_progress
+services::tui_o::writer::tests::deliver_home::residual_home_row_does_not_change_writer_or_turn_host_pg
 services::tui_o::writer::tests::derivation_splits_each_unit_once_and_excludes_or_blocks_the_rest
 services::tui_o::writer::tests::local_retry_tests::local_retry_attempt_is_durable_before_the_child_request_is_created
 services::tui_o::writer::tests::local_retry_tests::local_retry_budget_follows_explicit_owner_even_with_a_hook_present
@@ -14502,8 +14497,6 @@ services::turn_cancel_queue_guard::tests::queue_truth_purge_requires_a_complete_
 services::turn_cancel_queue_guard::tests::records_the_queued_message_a_cancel_removed
 services::turn_cancel_queue_guard::tests::the_guard_never_writes_to_the_mailbox
 services::turn_cancel_queue_guard::tests::the_promoted_message_is_not_recorded_as_lost
-services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
-services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
 services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg

@@ -10,8 +10,6 @@ use serde_json::{Value, json};
 use super::*;
 use crate::server::routes::o_transition::{send as routed_send, test_hooks as route};
 use crate::services::claude_tui::source_verify::Left;
-use crate::services::cluster::channel_home::register_for_test;
-use crate::services::discord::health::o_transition::home_admission;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::writer::host::Readiness;
 
@@ -285,45 +283,6 @@ async fn transition_route_sends_nothing_to_an_actor_that_takes_no_work() {
         assert_eq!(reached, (0, 0), "[R5:{case}] sent, read");
         drop((hosted, kept));
     }
-    halt(actor.stop, actor.task).await;
-}
-
-// A job the actor took keeps the home's command permit after the HTTP requester went away, until
-// the job itself ends.
-#[tokio::test(start_paused = true)]
-async fn transition_route_job_keeps_the_home_permit_after_the_requester_left() {
-    let chain = chain(1);
-    let _current = chain.current();
-    let actor = run(&chain);
-    settle(&chain).await;
-    let home = register_for_test(CHANNEL, Some(HomeState::Worker));
-    let (home_epoch, permit) = home_admission(CHANNEL).unwrap();
-    assert_eq!(home.commands_in_flight(), 1, "[R6:admitted]");
-    let context = Context {
-        home_epoch,
-        permit,
-        ..chain.context()
-    };
-    let (ready, watches) = (Arc::new(Readiness::default()), Watches::new(true, false));
-    let _hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-    let base = hooks::started();
-    let asked = route(&ready, context, chain.request(JOB));
-    for _ in 0..5 {
-        polls(1).await;
-        hooks::settle_workers();
-        if hooks::started() > base {
-            break;
-        }
-    }
-    assert_eq!(hooks::started() - base, 1, "[R6:taken]");
-    asked.abort();
-    polls(1).await;
-    assert_eq!(home.commands_in_flight(), 1, "[R6:requester_left]");
-    for _ in 0..40 {
-        polls(1).await;
-        hooks::settle_workers();
-    }
-    assert_eq!(home.commands_in_flight(), 0, "[R6:released_at_end]");
     halt(actor.stop, actor.task).await;
 }
 

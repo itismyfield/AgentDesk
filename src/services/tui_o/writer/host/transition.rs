@@ -95,7 +95,7 @@ impl Readiness {
             || live.resumed.has_changed().is_err()
             || !self.is_ready(channel)
             || !*live.resumed.borrow()
-            || !owned_now(channel, &live.gate)
+            || !owned_now(&live.gate)
         {
             return Err("actor_unavailable");
         }

@@ -1259,9 +1259,6 @@ mod clear_launch;
 #[path = "rotation_unsettled_tests.rs"]
 mod rotation_unsettled;
 
-#[path = "host_home_tests.rs"]
-mod home;
-
 #[path = "host_first_init_tests.rs"]
 mod first_init;
 

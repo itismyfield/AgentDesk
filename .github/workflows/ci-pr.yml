@@ -602,6 +602,7 @@ jobs:
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
               - 'src/services/tui_o/repost/writer_activation_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
+              - 'src/services/tui_o/writer/deliver_home_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/tui_o/writer/scoped_repost_tests.rs'

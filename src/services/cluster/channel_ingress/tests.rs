@@ -522,6 +522,7 @@ async fn observing_leaves_every_existing_home_entry_point_unchanged() {
     );
     assert_eq!(before.open_gate.0, Some(3));
     assert_eq!(before.held_channels.len(), 2);
+    assert_eq!(before.turn_refusals, vec![None; channels.len()]);
 
     let now = Instant::now();
     let samples = [
@@ -555,14 +556,20 @@ async fn observing_leaves_every_existing_home_entry_point_unchanged() {
     assert_eq!(after, before);
 }
 
-/// The design's inventory table must name every non-test source file that reaches the home row,
-/// the home gate, delegation availability or the command fence directly.
+/// The design's direct-consumer table matches the files containing the six home markers.
 #[test]
 fn home_authority_inventory_lists_every_direct_consumer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = std::fs::read_to_string(root.join("docs/design/i5713-channel-ingress-contract.md"))
         .expect("inventory doc");
-    let listed: std::collections::BTreeSet<String> = doc
+    let inventory = doc
+        .split_once("\n### 4.4 home 권위 직접 소비 전수표\n")
+        .expect("home inventory section")
+        .1
+        .split("\n##")
+        .next()
+        .unwrap();
+    let listed: std::collections::BTreeSet<String> = inventory
         .lines()
         .filter_map(|line| line.strip_prefix("| `src/")?.split_once('`'))
         .map(|(path, _)| format!("src/{path}"))
@@ -616,4 +623,9 @@ fn home_authority_inventory_lists_every_direct_consumer() {
         .filter(|path| !root.join(path).is_file())
         .collect();
     assert!(stale.is_empty(), "inventory rows naming no file: {stale:?}");
+    let obsolete: Vec<_> = listed.difference(&consumers).collect();
+    assert!(
+        obsolete.is_empty(),
+        "inventory rows without a home consumer: {obsolete:?}"
+    );
 }

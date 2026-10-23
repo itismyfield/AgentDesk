@@ -1,85 +1,69 @@
-//! A delegated channel's POSTs go through its registered home gate, whatever gate its writer holds.
-
-use std::sync::mpsc;
+//! Residual home state cannot replace ordinary gateway ownership or host selection.
 
 use super::*;
-use crate::db::o_channel_homes::HomeState;
-use crate::services::cluster::channel_home::{HOLD_FOR, register_for_test as register};
+use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::cluster::channel_home;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_host::{self, TurnHost};
 
-fn prepared_epoch(writer: &mut Writer, serial: u64) -> Option<u64> {
-    writer
-        .store()
-        .ledger()
-        .piece(serial)
-        .map(|piece| piece.epoch)
-}
-
-// Only the home gate admits, whatever the gateway gate says: owed pieces still post while draining,
-// nothing after a lapsed hold or the final close.
-#[tokio::test(start_paused = true)]
-async fn a_delegated_channel_posts_under_its_home_through_the_drain_and_none_after_close() {
-    let harness = Harness::new();
-    let mut writer = harness.writer();
-    register(CHANNEL + 1, Some(HomeState::Worker));
-    assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::NoGateway);
-    let epoch = harness.gate.acquired();
-    assert_eq!(writer.deliver(&piece("m0", "a")).await, Step::Done);
-    assert_eq!(prepared_epoch(&mut writer, 0), Some(epoch), "unregistered");
-
-    register(CHANNEL, None);
-    assert_eq!(writer.deliver(&piece("m1", "b")).await, Step::NoGateway);
-    let home = register(CHANNEL, Some(HomeState::Worker));
-    harness.gate.lost();
-    assert_eq!(writer.deliver(&piece("m1", "b")).await, Step::Done);
-    let home_epoch = prepared_epoch(&mut writer, 1);
-    assert_eq!(home_epoch, Some(1), "the home gate's epoch");
-    home.close_intake();
-    assert_eq!(writer.deliver(&piece("m2", "c")).await, Step::Done);
-    // No renewal for H: nothing closed the inner gate, yet the hold has lapsed.
-    tokio::time::advance(HOLD_FOR).await;
-    assert_eq!(writer.deliver(&piece("m3", "d")).await, Step::NoGateway);
-    let home = register(CHANNEL, Some(HomeState::Releasing));
-    assert_eq!(writer.deliver(&piece("m3", "d")).await, Step::Done);
-    home.close();
-    harness.gate.acquired();
-    assert_eq!(writer.deliver(&piece("m4", "e")).await, Step::NoGateway);
-    assert_eq!(harness.port.posts(), ["a", "b", "c", "d"]);
-    let serials = writer.store().ledger().next_serial();
-    assert_eq!(serials, 4, "nothing prepared after close");
-}
-
-// A POST being admitted holds the home gate: the final close waits until it is handed off, and
-// nothing is admitted after the close.
-#[tokio::test(start_paused = true)]
-async fn the_final_close_waits_for_an_admission_in_progress() {
-    let harness = Harness::new();
-    let mut writer = harness.writer();
-    let home = register(CHANNEL, Some(HomeState::Releasing));
-    let (entered, admitting) = mpsc::channel();
-    let closing = std::sync::Arc::clone(&home);
-    let closed = Arc::new(AtomicBool::new(false));
-    let closer = {
-        let closed = Arc::clone(&closed);
-        std::thread::spawn(move || {
-            admitting.recv().unwrap();
-            closing.close();
-            closed.store(true, Ordering::SeqCst);
-        })
+#[tokio::test(flavor = "current_thread")]
+async fn residual_home_row_does_not_change_writer_or_turn_host_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[]);
+    let _channels = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let channel = CHANNEL.to_string();
+    let poison_epoch = i64::MAX - 7;
+    sqlx::query(
+        "INSERT INTO o_channel_homes
+          (channel_id, provider, state, holder, target, epoch, renewed_at, detail)
+         VALUES ($1, 'codex', 'worker', 'stale-remote', NULL, $2,
+                 NOW() - INTERVAL '1 year', 'poison: ignore this home authority')",
+    )
+    .bind(&channel)
+    .bind(poison_epoch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let read = || async {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT row_to_json(h)::jsonb FROM o_channel_homes h WHERE channel_id=$1",
+        )
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
     };
-    let overtaken = Arc::new(AtomicBool::new(true));
-    let seen = Arc::clone(&overtaken);
-    *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
-        entered.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        seen.store(closed.load(Ordering::SeqCst), Ordering::SeqCst);
-    }));
-    assert_eq!(writer.deliver(&piece("m1", "owed")).await, Step::Done);
-    closer.join().unwrap();
-    assert!(
-        !overtaken.load(Ordering::SeqCst),
-        "the close overtook an admission"
+    let before = read().await;
+    assert_eq!(before["epoch"], poison_epoch);
+    assert_eq!(before["holder"], "stale-remote");
+    assert_eq!(before["provider"], "codex");
+    let home = channel_home::register_for_test(CHANNEL, None);
+    assert_eq!(home.refusal(), Some(channel_home::HomeRefusal::NotHeld));
+    let harness = Harness::new();
+    let mut writer = harness.writer();
+    harness.gate.acquired();
+    let posted = writer
+        .deliver(&piece("poison-home", "ignored-home-row"))
+        .await;
+    let refusal =
+        turn_host::refusal_before_turn(Some(&pool), &ProviderKind::Claude, CHANNEL, || async {
+            None
+        })
+        .await;
+    let host = turn_host::for_turn(Some(&pool), &ProviderKind::Claude, CHANNEL, None).await;
+    assert_eq!(
+        (
+            posted == Step::Done,
+            refusal.is_none(),
+            matches!(host, TurnHost::Tmux)
+        ),
+        (true, true, true),
+        "writer and TurnHost ignore residual home authority",
     );
-    *harness.port.on_post.lock().unwrap() = None;
-    assert_eq!(writer.deliver(&piece("m2", "late")).await, Step::NoGateway);
-    assert_eq!(harness.port.posts(), ["owed"]);
+    assert_eq!(harness.port.posts(), ["ignored-home-row"]);
+    assert_eq!(read().await, before, "residual home row is untouched");
+    channel_home::unregister(&channel);
+    pool.close().await;
+    db.drop().await;
 }

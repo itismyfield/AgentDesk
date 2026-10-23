@@ -68,10 +68,13 @@ struct Held {
 #[derive(Default)]
 struct CommandCount {
     count: AtomicUsize,
+    #[cfg(test)]
     ended: tokio::sync::Notify,
 }
 
+#[cfg(test)]
 struct CommandEffect(Arc<CommandCount>);
+#[cfg(test)]
 impl Drop for CommandEffect {
     fn drop(&mut self) {
         #[cfg(test)]
@@ -85,11 +88,13 @@ impl Drop for CommandEffect {
 }
 
 /// Clones keep one admitted command alive; only the last drop ends it.
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct CommandPermit {
     _effect: Arc<CommandEffect>,
 }
 
+#[cfg(test)]
 impl CommandPermit {
     fn new(count: &Arc<CommandCount>) -> Self {
         count.count.fetch_add(1, Ordering::AcqRel);
@@ -143,6 +148,7 @@ impl HomeGate {
     }
 
     /// The admission primitive a writer posts through; it is `Owned` exactly when this home is.
+    #[cfg(test)]
     pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
         Arc::clone(&self.gate)
     }
@@ -347,6 +353,7 @@ impl HomeGate {
     }
 
     /// Whether this process may take new intake for the channel: held, with intake open.
+    #[cfg(test)]
     pub(crate) fn intake_open(&self) -> bool {
         matches!(
             self.ownership(),
@@ -357,31 +364,19 @@ impl HomeGate {
         )
     }
 
-    /// Runs `take` under the gate lock only while this home takes intake, so no close falls between
-    /// that check and `take`.
-    pub(crate) fn while_intake_open<T>(&self, take: impl FnOnce() -> T) -> Option<T> {
-        let mut local = self.locked();
-        self.expire(&mut local, Instant::now());
-        let open = matches!(
-            self.read(&local),
-            HomeOwnership::Owned {
-                intake: HomeIntake::Open,
-                ..
-            }
-        );
-        open.then(take)
-    }
-
     /// Runs `hand_off` under the gate lock with the row epoch, only while this home is held.
+    #[cfg(test)]
     pub(crate) fn admit<T>(&self, hand_off: impl FnOnce(i64) -> T) -> Option<T> {
         self.admit_held(|home_epoch, _| hand_off(home_epoch))
     }
 
     /// [`HomeGate::admit`] for a writer's POST: `hand_off` gets the gate epoch its ledger records.
+    #[cfg(test)]
     pub(crate) fn admit_post<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
         self.admit_held(|_, gate_epoch| hand_off(gate_epoch))
     }
 
+    #[cfg(test)]
     fn admit_held<T>(&self, hand_off: impl FnOnce(i64, u64) -> T) -> Option<T> {
         let mut local = self.locked();
         self.expire(&mut local, Instant::now());
@@ -393,6 +388,7 @@ impl HomeGate {
     }
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
+    #[cfg(test)]
     pub(crate) fn admit_at_epoch(
         &self,
         provider: &str,
@@ -402,6 +398,7 @@ impl HomeGate {
         self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
     }
 
+    #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
         _provider: &str,
@@ -440,6 +437,7 @@ impl HomeGate {
     }
 
     /// Why a turn or command may not run here now; `None` while held with intake open.
+    #[cfg(test)]
     pub(crate) fn refusal(&self) -> Option<HomeRefusal> {
         match self.ownership() {
             HomeOwnership::Owned {
@@ -453,6 +451,7 @@ impl HomeGate {
 }
 
 /// Why a delegated channel's turn or command does not run on this node.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HomeRefusal {
     /// This node does not hold the channel's home.
@@ -460,17 +459,6 @@ pub(crate) enum HomeRefusal {
     /// This node holds it while a drain keeps its intake closed.
     Draining,
 }
-
-impl std::fmt::Display for HomeRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NotHeld => "home_not_held",
-            Self::Draining => "home_draining",
-        })
-    }
-}
-
-impl std::error::Error for HomeRefusal {}
 
 type Homes = BTreeMap<String, Arc<HomeGate>>;
 #[derive(Default)]
@@ -619,11 +607,13 @@ pub(crate) fn registered(channel_id: &str) -> Option<Arc<HomeGate>> {
 }
 
 /// [`registered`] by Discord id; while nothing was ever registered it locks and allocates nothing.
+#[cfg(test)]
 pub(crate) fn registered_channel(channel: u64) -> Option<Arc<HomeGate>> {
     read_homes(|homes| homes.get(&channel.to_string()).cloned()).flatten()
 }
 
 /// [`HomeGate::refusal`] of the channel's registered gate; a channel with none is not refused.
+#[cfg(test)]
 pub(crate) fn refusal(channel: u64) -> Option<HomeRefusal> {
     registered_channel(channel)?.refusal()
 }
@@ -641,6 +631,7 @@ pub(crate) fn register_for_test(channel: u64, state: Option<HomeState>) -> Arc<H
     home
 }
 
+#[cfg(test)]
 pub(crate) fn any_registered() -> bool {
     read_homes(|homes| !homes.is_empty()).unwrap_or(false)
 }
@@ -674,6 +665,7 @@ pub(crate) fn health() -> Option<serde_json::Value> {
 }
 
 /// Registered channels whose gate takes no new intake here.
+#[cfg(test)]
 pub(crate) fn intake_held_channels() -> Vec<String> {
     let held = |homes: &Homes| {
         let closed = homes.iter().filter(|(_, home)| !home.intake_open());

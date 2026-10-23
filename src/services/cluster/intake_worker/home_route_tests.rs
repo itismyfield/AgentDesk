@@ -5,7 +5,6 @@ use crate::db::o_channel_homes::{
     self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite, adopt, begin_reclaim, delegate,
     finish_reclaim, finish_release,
 };
-use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
 use crate::services::cluster::channel_home::{self as home_gate, HomeGate};
 use crate::services::cluster::intake_router_hook::{
     IntakeRouterContext, IntakeRouterDecision, try_route_intake,
@@ -13,7 +12,6 @@ use crate::services::cluster::intake_router_hook::{
 use crate::services::cluster::intake_routing_config::{
     IntakeRoutingMode, OwnerAuthorityChannelOptIn,
 };
-use crate::services::tui_o::channel_policy::Adoption;
 use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
 
 const C: u64 = 4_380_401;
@@ -130,8 +128,8 @@ async fn a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg() {
     let (_registry, shared) = owner.await;
     let not_cancelled = || false;
     let tick = || run_intake_worker_tick(&pool, &shared, MINI, "claude", "o", &not_cancelled);
-    // The holder's boot: C is selected here off the O home and kept as standby.
-    let _standby = test_override::force_standby(&[(C, ClaudeTui)], GW, Adoption::Committed);
+    // Keep O unselected while the home SQL acceptance guard is exercised.
+    let _legacy = test_override::force_channels(&[]);
     let _ready = test_probe::answer_with(|_| true);
 
     // A channel without a home row: the gateway routes it here and it reaches accept as before.

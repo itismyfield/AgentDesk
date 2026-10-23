@@ -46,7 +46,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
 | `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
-| `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Writes the first `init` under the gate's admission: a drain's close or a lease transition waits for its synchronous I/O and the activation serial lock. |
+| `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs` | Writes the first `init` under the gate's admission: a drain's close or a lease transition waits for its synchronous I/O and the activation serial lock. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |

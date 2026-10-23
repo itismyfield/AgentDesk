@@ -335,7 +335,7 @@ fn parts_with_rest(
     prepared
 }
 
-/// Starts the ordinary gateway writer without a delegation registry.
+/// Starts the ordinary gateway writer under its PG gateway lease.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

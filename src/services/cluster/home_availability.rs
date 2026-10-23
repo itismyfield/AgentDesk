@@ -87,15 +87,6 @@ pub fn state(provider: &str) -> Availability {
     })
 }
 
-pub(crate) fn held_channels(provider: &str) -> BTreeSet<u64> {
-    with_providers(|providers| {
-        providers
-            .get(provider)
-            .map(|p| p.channels.clone())
-            .unwrap_or_default()
-    })
-}
-
 /// Why `channel` takes no turn and no POST here; `None` for every channel while nothing was
 /// recorded, as with the switch off.
 pub(crate) fn refusal(channel: u64) -> Option<Unavailable> {

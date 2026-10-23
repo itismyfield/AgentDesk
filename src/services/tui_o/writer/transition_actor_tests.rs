@@ -120,9 +120,7 @@ impl Chain {
         Context {
             tmux: self.pane.clone(),
             nonce: "nonce".into(),
-            home_epoch: None,
             lock: Arc::default(),
-            permit: None,
         }
     }
 
