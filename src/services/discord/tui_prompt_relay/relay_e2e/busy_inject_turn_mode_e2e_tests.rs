@@ -10,6 +10,9 @@ use std::io::Write;
 async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg() {
     let busy = busy().await;
     let rt = &busy.rt;
+    busy.pane.set(InjectPane::TRANSCRIPT, &format!("{}\n{}\n",
+        serde_json::json!({"type":"user","uuid":"first-native","message":{"content":"go"}}),
+        serde_json::json!({"type":"assistant","uuid":"first-answer","apiBlockIndex":0,"message":{"id":"first-answer","content":[{"type":"text","text":"working"}]}})));
     rt.hold_mailbox().await;
     let events = tempfile::tempdir().unwrap();
     let _events = BindingRoot::enter(events.path());
@@ -41,7 +44,7 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
     for row in [
         serde_json::json!({"type":"system","subtype":"turn_duration"}),
         serde_json::json!({"type":"user","uuid":"next-native","message":{"content":frame}}),
-        serde_json::json!({"type":"assistant","uuid":"next-answer","message":{"content":[{"type":"text","text":"working"}]}}),
+        serde_json::json!({"type":"assistant","uuid":"next-answer","apiBlockIndex":0,"message":{"id":"next-answer","content":[{"type":"text","text":"working"}]}}),
         serde_json::json!({"type":"permission-mode","mode":"bypassPermissions"}),
     ] {
         writeln!(transcript, "{row}").unwrap();
@@ -108,7 +111,8 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
             })
         })
         .await,
-        "the real transcript reader must publish Busy before closing the turn"
+        "the real transcript reader must publish Busy before closing the turn: {}",
+        presence.state()
     );
     writeln!(
         transcript,
@@ -132,7 +136,8 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
             })
         })
         .await,
-        "registered turn-mode intake must complete from the real transcript Idle"
+        "registered turn-mode intake must complete from the real transcript Idle: {}",
+        presence.state()
     );
     for message in [first, second] {
         let changes: Vec<_> =
