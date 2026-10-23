@@ -1,4 +1,4 @@
-//! The actor's side of an operator's transition cleanup. It takes one job at a time from its run's
+//! Scoped transition cleanup takes one job at a time from the running actor's
 //! mailbox, probes each candidate twice off the actor, and retires at most one source per poll.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -26,13 +26,13 @@ use crate::services::tui_o::writer::transition_port::{
     Context, Envelope, Hold, Hop, Kind, Operation, Outcome, Receiver, Refused, Reply, Wall,
 };
 
-/// Candidates one job probes; the rest wait for a later job.
+/// Candidates one inspection probes; automatic jobs inspect every pending source.
 const CANDIDATES: usize = 64;
 /// Sources one worker probes before the actor takes its results.
 const BATCH: usize = 4;
-/// Probing past this holds every source not probed twice by then.
+/// Inspections hold every source not probed twice by this deadline.
 const DEADLINE: Duration = Duration::from_secs(60);
-/// Prefix bytes one job may hash: two probes of every candidate at 32 MiB each.
+/// Prefix bytes one inspection may hash: two probes of every candidate at 32 MiB each.
 const HASH_BUDGET: u64 = 2 * CANDIDATES as u64 * (32 << 20);
 
 pub(super) struct Transitions {
@@ -40,7 +40,7 @@ pub(super) struct Transitions {
     job: Option<Job>,
     /// The actor's stop, read again just before each retirement write.
     stop: watch::Receiver<bool>,
-    /// Rotates automatic candidates and the reserved receipt across this run's jobs.
+    /// Rotates the reserved receipt across inspection jobs.
     turn: usize,
 }
 
@@ -279,8 +279,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .map(|c| (source_key(&c.source), c))
             .collect();
         let unprobed = |hop: &&Judged| hop.verdict == Verdict::Unknown(Unclear::NotObserved);
-        // Sources still to retire take the candidates first, receipts already written after them;
-        // a full budget of the former keeps its last candidate for a receipt, in turns.
+        // Pending sources come first; inspections reserve room for an existing receipt.
         let pending = |hop: &&Judged| {
             cursors
                 .get(&hop.key)
@@ -288,15 +287,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         let (mut unprobed, mut receipts): (Vec<&Judged>, Vec<&Judged>) =
             first.iter().filter(unprobed).partition(pending);
-        let rotate = automatic.is_some() && unprobed.len() > CANDIDATES;
+        let limited = automatic.is_none();
         #[cfg(test)]
-        let rotate = rotate && !test_hooks::retention_mutant("budget");
-        if rotate {
-            let offset = self.transitions.turn % unprobed.len();
-            unprobed.rotate_left(offset);
-            self.transitions.turn = self.transitions.turn.wrapping_add(CANDIDATES);
-        }
-        if unprobed.len() >= CANDIDATES && !receipts.is_empty() {
+        let limited = limited
+            || test_hooks::retention_mutant("budget_receipt")
+            || test_hooks::retention_mutant("budget_panes");
+        if !limited {
+            receipts.clear();
+        } else if unprobed.len() >= CANDIDATES && !receipts.is_empty() {
             let turn = self.transitions.turn % receipts.len();
             self.transitions.turn = self.transitions.turn.wrapping_add(1);
             unprobed.insert(CANDIDATES - 1, receipts.remove(turn));
@@ -304,7 +302,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         unprobed.extend(receipts);
         let (mut probes, mut outcomes) = (BTreeMap::new(), BTreeMap::new());
         for (index, hop) in unprobed.into_iter().enumerate() {
-            let Some(cursor) = cursors.get(&hop.key).filter(|_| index < CANDIDATES) else {
+            let Some(cursor) = cursors
+                .get(&hop.key)
+                .filter(|_| !limited || index < CANDIDATES)
+            else {
                 outcomes.insert(hop.key.clone(), Outcome::Held(Hold::Limit));
                 continue;
             };
@@ -396,9 +397,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             };
             job.worker = None;
             let first = matches!(job.stage, Stage::First);
-            // The clock is read once the probes are taken, so probes taken past the deadline stay
-            // unrecorded, however close to it they came back.
-            let late = now() >= job.deadline;
+            // Inspection probes taken past their deadline stay unrecorded.
+            let late = job.automatic.is_none() && now() >= job.deadline;
             for (key, seen, last_dialogue) in seen {
                 if !first && let Some(probe) = job.probes.get_mut(&key).filter(|_| !late) {
                     probe.last_dialogue = last_dialogue;
@@ -413,7 +413,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         }
         let now = now();
-        if now >= job.deadline {
+        if job.automatic.is_none() && now >= job.deadline {
             return true;
         }
         match job.stage {
@@ -444,10 +444,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             && let Some(key) = job.queue.pop_front()
         {
             let cursor = job.probes[&key].token.cursor.clone();
-            if job.hashed + cursor.captured_through > HASH_BUDGET {
-                continue;
+            if job.automatic.is_none() {
+                if job.hashed + cursor.captured_through > HASH_BUDGET {
+                    continue;
+                }
+                job.hashed += cursor.captured_through;
             }
-            job.hashed += cursor.captured_through;
             batch.push((key, cursor));
         }
         if batch.is_empty() {

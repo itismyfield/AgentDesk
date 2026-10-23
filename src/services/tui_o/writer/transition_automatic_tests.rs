@@ -4,21 +4,27 @@ use super::*;
 use crate::services::tui_o::writer::transition_port::Idle;
 
 fn aged_chain(age: i64, known: bool) -> Chain {
+    chain_named(2, true, |n| (format!("h{n}"), aged_row(n, age, known)))
+}
+
+fn aged_row(n: usize, age: i64, known: bool) -> Vec<u8> {
     let at = Utc::now() - TimeDelta::days(age);
-    chain_named(2, true, |n| {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&row(&format!("n{n}"), "old dialogue")).unwrap();
-        if known {
-            value["timestamp"] = serde_json::json!(at.to_rfc3339());
-        }
-        let mut bytes = serde_json::to_vec(&value).unwrap();
-        bytes.push(b'\n');
-        (format!("h{n}"), bytes)
-    })
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&row(&format!("n{n}"), "old dialogue")).unwrap();
+    if known {
+        value["timestamp"] = serde_json::json!(at.to_rfc3339());
+    }
+    let mut bytes = serde_json::to_vec(&value).unwrap();
+    bytes.push(b'\n');
+    bytes
 }
 
 async fn automatic(chain: &Chain, actor: &Run, idle: Idle) -> Reply {
     let request = chain.request("automatic-retention-test");
+    automatic_request(chain, actor, request, idle).await
+}
+
+async fn automatic_request(chain: &Chain, actor: &Run, request: Request, idle: Idle) -> Reply {
     let inspected = ask(actor, Operation::Inspect(request.clone()), chain.context()).await;
     let digest = inspected.scope.unwrap().unwrap().digest;
     ask(
@@ -112,51 +118,74 @@ async fn automatic_retention_retires_old_noncurrent_source() {
 
 #[tokio::test(start_paused = true)]
 async fn automatic_retention_eventually_retires_old_sources_past_unknown_budget() {
-    let chain = chain_named(66, true, |n| {
-        (format!("h{n}"), row(&format!("n{n}"), "unknown age"))
-    });
-    let first = (1..66).min_by_key(|n| chain.key(*n)).unwrap();
-    let target = (1..66).max_by_key(|n| chain.key(*n)).unwrap();
-    for source in [first, target] {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&row(&format!("n{source}"), "old dialogue")).unwrap();
-        value["timestamp"] = serde_json::json!((Utc::now() - TimeDelta::days(8)).to_rfc3339());
-        let mut bytes = serde_json::to_vec(&value).unwrap();
-        bytes.push(b'\n');
-        std::fs::write(&chain.paths[source], bytes).unwrap();
-    }
+    let chain = chain_named(68, true, |n| (format!("h{n}"), aged_row(n, 8, true)));
+    let target = (2..68).max_by_key(|n| chain.key(*n)).unwrap();
     let _current = chain.current();
     let actor = run(&chain);
-    for _ in 0..200 {
-        polls(1).await;
-        if chain.harness.port.posts().len() as u64 >= chain.hops() {
-            break;
-        }
-    }
+    polls(chain.hops() as u32 + 40).await;
     assert_eq!(
         chain.harness.port.posts().len() as u64,
         chain.hops(),
         "fixture must finish its output"
     );
-    automatic(&chain, &actor, idle(true)).await;
+    let mut seed = chain.request("automatic-retention-receipt-seed");
+    seed.cutoff = 3;
+    ask(&actor, chain.apply(seed), chain.context()).await;
     assert!(
-        chain.cursor(first).retired,
+        chain.cursor(1).retired,
         "[auto:budget_seed] first job must create a retired receipt"
     );
     assert!(
-        !chain.cursor(target).retired,
-        "[auto:budget_seed] last candidate must remain beyond the first job's budget"
+        (2..68).all(|source| !chain.cursor(source).retired),
+        "[auto:budget_seed] cutoff must leave all 66 later sources pending"
     );
-    // The remaining 64 pending sources must all get a turn beside the first job's receipt.
-    for _ in 0..3 {
-        automatic(&chain, &actor, idle(true)).await;
-        if chain.cursor(target).retired {
-            break;
+    automatic(&chain, &actor, idle(true)).await;
+    let retired = (2..68)
+        .filter(|source| chain.cursor(*source).retired)
+        .count();
+    assert!(
+        retired == 66 && chain.cursor(target).retired,
+        "[auto:receipt_all] one automatic job must retire all 66 pending sources beside a receipt; retired={retired}"
+    );
+    halt(actor.stop, actor.task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_retention_retires_every_source_from_two_historical_panes() {
+    let chain = chain_named(257, true, |n| (format!("h{n}"), aged_row(n, 8, true)));
+    let panes = [format!("{}-a", chain.pane), format!("{}-b", chain.pane)];
+    for event in chain.bindings.events.lock().unwrap().iter_mut() {
+        if event.seq >= 2 {
+            let old = event.seq - 2;
+            event.tmux_session = panes[usize::from(old > 128)].clone();
         }
     }
+    let _current = chain.current();
+    let actor = run(&chain);
+    polls(chain.hops() as u32 + 40).await;
+    assert_eq!(
+        chain.harness.port.posts().len() as u64,
+        chain.hops(),
+        "fixture must finish its output"
+    );
+    for (pane, job) in panes.iter().zip(["automatic-pane-a", "automatic-pane-b"]) {
+        let mut request = chain.request(job);
+        let Some(Termination::Confirmed(end)) = &mut request.termination else {
+            panic!("fixture must confirm the historical pane");
+        };
+        end.pane = pane.clone();
+        automatic_request(&chain, &actor, request, idle(true)).await;
+    }
+    let retired = (1..257)
+        .filter(|source| chain.cursor(*source).retired)
+        .count();
+    assert_eq!(
+        retired, 256,
+        "[auto:panes_all] each historical pane's single automatic job must retire all 128 sources"
+    );
     assert!(
-        chain.cursor(target).retired,
-        "[auto:budget] unknown ages must not starve an eligible source"
+        !chain.cursor(257).retired,
+        "[auto:panes_all] current source must remain readable"
     );
     halt(actor.stop, actor.task).await;
 }

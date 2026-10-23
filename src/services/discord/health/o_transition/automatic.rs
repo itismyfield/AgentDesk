@@ -34,9 +34,7 @@ pub(crate) fn spawn(registry: Arc<HealthRegistry>, provider: &ProviderKind) {
 async fn sweep(registry: &HealthRegistry) {
     let ready = process_readiness();
     for channel in ready.transition_channels() {
-        let work = channel_sweep(registry, &ready, channel);
-        // An unavailable actor or host never delays the other channels indefinitely.
-        let _ = tokio::time::timeout(Duration::from_secs(240), work).await;
+        let _ = channel_sweep(registry, &ready, channel).await;
     }
 }
 
