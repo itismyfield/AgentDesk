@@ -17,9 +17,6 @@ const TRANSITION: [&str; 2] = [
 ];
 const NATIVE_CLEAR_PROVIDER: &str = "(http, shared, token, &provider)";
 const RECOVERED_FRESH: &str = "&mut t.recovered_fresh";
-// Split so the bridge entry-site census does not count this file as a caller.
-const SPAWN_BRIDGE: &str = concat!("spawn_turn_", "bridge(");
-const STAMP: &str = "dispatch_stamp::stamp_before_bridge_handoff";
 const BUSY_LOG: &str =
     "claude_tui follow-up queued because hosted TUI is busy before prompt submission";
 const FINALIZE: &str = "busy_retry::finalize_enqueue(";
@@ -100,29 +97,6 @@ pub(crate) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<Strin
     gaps.extend(need(
         Lexed::new(runtime).contains(RECOVERED_FRESH),
         "runtime transition must forward recovered_fresh",
-    ));
-    gaps
-}
-
-/// One bridge spawn in the handler, with the dispatch stamp within the 20 lines above it.
-pub(crate) fn bridge_stamp_gaps(intake: &str) -> Vec<String> {
-    let src = match item(intake, HANDLER) {
-        Ok(src) => src,
-        Err(gaps) => return gaps,
-    };
-    let Some(spawn) = src.find(SPAWN_BRIDGE) else {
-        return vec!["intake handler lost its bridge spawn".to_string()];
-    };
-    let mut gaps = need(src.count(SPAWN_BRIDGE) == 1, "one bridge-spawn call site");
-    let spawn_line = src.text()[..spawn].matches('\n').count();
-    let window_start = spawn_line.checked_sub(21).map_or(0, |newline| {
-        let mut newlines = src.text().match_indices('\n');
-        newlines.nth(newline).map_or(0, |(at, _)| at + 1)
-    });
-    let window = src.slice(window_start..spawn);
-    gaps.extend(need(
-        window.contains(STAMP),
-        "the dispatch stamp must stay within the preceding 20 lines",
     ));
     gaps
 }
@@ -356,12 +330,11 @@ fn handler_guards_reject_commented_steps() {
     let abort = |src: &str| abort_branch_gaps(STALE_GUARD, src);
     let param = |src: &str| preserve_param_gaps(src, STALE_GUARD);
     let transition = |src: &str| transition_provider_gaps(src, RUNTIME_TRANSITION);
-    let cases: [(DynJudge<'_>, &[&str]); 9] = [
+    let cases: [(DynJudge<'_>, &[&str]); 8] = [
         (
             &transition,
             &[HANDLER, TRANSITION[0], TRANSITION[1], NATIVE_CLEAR_PROVIDER],
         ),
-        (&(bridge_stamp_gaps as IntakeJudge), &[SPAWN_BRIDGE, STAMP]),
         (&busy, &[FINALIZE]),
         (
             &(bridge_context_gaps as IntakeJudge),

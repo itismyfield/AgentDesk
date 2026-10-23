@@ -4,8 +4,6 @@ use super::*;
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeSettingsConfig {
-    #[serde(default, skip_serializing_if = "is_off_intake_delivery_settlement")]
-    pub intake_delivery_settlement: IntakeDeliverySettlementStage,
     #[serde(default, skip_serializing_if = "is_legacy_execution_identity_mode")]
     pub execution_identity_mode: ExecutionIdentityMode,
     #[serde(default, skip_serializing_if = "is_legacy_publication_permit_mode")]
@@ -151,8 +149,7 @@ impl RuntimeSettingsConfig {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
-            && self.execution_identity_mode == ExecutionIdentityMode::Legacy
+        self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.publication_permit_mode == PublicationPermitMode::Legacy
             && self.relay_verdict_source == RelayVerdictSource::Structural
             && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()

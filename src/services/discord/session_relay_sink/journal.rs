@@ -378,3 +378,125 @@ pub(in crate::services::discord) async fn judge_obligation_window(
     let loaded = pg_store::load_obligation_window(connection, obligation_id).await?;
     Ok(judge_loaded_obligation_window(loaded))
 }
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    fn exact_window(binding: Option<Value>) -> Vec<JournalEvent> {
+        let (obligation, attempt) = (Uuid::from_u128(100), Uuid::from_u128(101));
+        let mut output = json!({});
+        if let Some(value) = binding {
+            output["intake_outbox_id"] = value;
+        }
+        vec![
+            event(obligation, None, "O", 0, output),
+            event(
+                obligation,
+                Some(attempt),
+                "A",
+                1,
+                json!({"frontier_start":10,"frontier_end":20}),
+            ),
+            transport_event(
+                obligation,
+                attempt,
+                DiscordTransportReceipt {
+                    requested_channel_id: "10".into(),
+                    returned_channel_id: "10".into(),
+                    message_id: "30".into(),
+                },
+            ),
+            event(
+                obligation,
+                Some(attempt),
+                "C",
+                3,
+                json!({"frontier_start":10,"frontier_end":20}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn obligation_window_exact_delivery_predicate_is_exhaustive_and_fail_closed() {
+        let base = exact_window(Some(json!(42)));
+        assert_eq!(exact_delivery_predicate(&base), (true, Some(42), false));
+        assert_eq!(
+            exact_delivery_predicate(&exact_window(None)),
+            (true, None, false)
+        );
+        assert_eq!(exact_delivery_predicate(&[]), (false, None, false));
+        let assert_malformed = |name: &str, events: Vec<JournalEvent>| {
+            assert_eq!(
+                exact_delivery_predicate(&events),
+                (false, None, true),
+                "{name}"
+            )
+        };
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(42.5),
+            json!("42"),
+            json!(u64::MAX),
+        ] {
+            assert_malformed("binding", exact_window(Some(value)));
+        }
+        for kind in ["O", "A", "T", "C"] {
+            let mut case = base.clone();
+            case.retain(|event| event.kind != kind);
+            let result = exact_delivery_predicate(&case);
+            assert!(!result.0 && !result.2, "missing {kind}");
+        }
+        let obligation = base[0].obligation_id;
+        let attempt = base[1].attempt_id;
+        assert_eq!(
+            exact_delivery_predicate(&[
+                base[0].clone(),
+                event(obligation, None, "S", 1, json!({}))
+            ]),
+            (false, Some(42), false)
+        );
+        assert_eq!(
+            exact_delivery_predicate(&[
+                base[0].clone(),
+                base[1].clone(),
+                event(obligation, attempt, "U", 2, json!({}))
+            ]),
+            (false, Some(42), false)
+        );
+        let mut case = base.clone();
+        case.push(base[0].clone());
+        assert_malformed("duplicate kind and slot", case);
+        let mut case = base.clone();
+        case[3].obligation_id = Uuid::from_u128(102);
+        assert_malformed("obligation", case);
+        let mut case = base.clone();
+        case[3].seq = 2;
+        assert_malformed("slot", case);
+        let mut case = base.clone();
+        case[0].attempt_id = attempt;
+        assert_malformed("attempt nullability", case);
+        let mut case = base.clone();
+        case[2].attempt_id = Some(Uuid::from_u128(103));
+        assert_malformed("attempt identity", case);
+        let mut case = base.clone();
+        case[3].canonical_payload["frontier_end"] = json!(21);
+        assert_malformed("frontier identity", case);
+        let mut case = base.clone();
+        case[1].canonical_payload = json!({"frontier_start":21,"frontier_end":20});
+        assert_malformed("frontier order", case);
+        let mut case = base.clone();
+        case[2].receipt.as_mut().unwrap().returned_channel_id = "11".into();
+        assert_malformed("receipt channel", case);
+        let mut case = base.clone();
+        case[2].canonical_payload["message_id"] = json!(31);
+        assert_malformed("receipt payload", case);
+        let mut case = base.clone();
+        case[1].canonical_payload["intake_outbox_id"] = json!(42);
+        assert_malformed("binding owner", case);
+        let mut case = base.clone();
+        case[0].kind = "future";
+        assert_malformed("closed kind", case);
+    }
+}

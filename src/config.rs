@@ -1372,28 +1372,6 @@ fn default_prompt_max_bytes_user_derived() -> u64 {
     16 * 1024
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum IntakeDeliverySettlementStage {
-    /// Disable fresh-turn dispatched stamping and bridge-exit settlement, and skip the schema
-    /// probe. The turn path performs no intake-delivery database work.
-    #[default]
-    Off,
-    /// Reserve the observation stage while leaving fresh turns database-neutral: no probe,
-    /// dispatched stamp, or bridge-exit settlement runs on the turn path.
-    Observe,
-    /// Probe the schema and, when ready, enable bridge-exit settlement and stale-debt sweep.
-    /// Dispatched stamping remains disabled.
-    Settle,
-    /// Probe the schema and, when ready, enable dispatched handoff stamping, bridge-exit
-    /// settlement, and stale-debt sweep.
-    Enforce,
-}
-
-fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> bool {
-    *stage == IntakeDeliverySettlementStage::Off
-}
-
 /// Rollout stage for the #5071 T3 execution-identity fence.
 ///
 /// The read model behind this switch
@@ -1574,10 +1552,6 @@ mod runtime_hook_registry_config_tests {
         // direction catches it — the negative assertions below never can.
         // This assertion preserves coverage of the serde-deserialization path.
         let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(
-            absent.intake_delivery_settlement,
-            IntakeDeliverySettlementStage::Off
-        );
         assert!(absent.is_empty());
 
         let ttl_only = RuntimeSettingsConfig {
@@ -1622,45 +1596,6 @@ mod runtime_hook_registry_config_tests {
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
         assert_eq!(empty.tui_hook_registry_enabled, None);
-    }
-
-    #[test]
-    fn intake_delivery_settlement_defaults_off_and_round_trips() {
-        let default = RuntimeSettingsConfig::default();
-        assert_eq!(
-            default.intake_delivery_settlement,
-            IntakeDeliverySettlementStage::Off
-        );
-        assert!(
-            !serde_yaml::to_string(&default)
-                .expect("serialize default runtime")
-                .contains("intake_delivery_settlement")
-        );
-
-        for stage in [
-            IntakeDeliverySettlementStage::Off,
-            IntakeDeliverySettlementStage::Observe,
-            IntakeDeliverySettlementStage::Settle,
-            IntakeDeliverySettlementStage::Enforce,
-        ] {
-            let yaml = format!(
-                "intake_delivery_settlement: {}\n",
-                serde_yaml::to_value(stage)
-                    .expect("serialize stage")
-                    .as_str()
-                    .expect("stage serializes as a string")
-            );
-            let parsed: RuntimeSettingsConfig =
-                serde_yaml::from_str(&yaml).expect("parse settlement stage");
-            assert_eq!(parsed.intake_delivery_settlement, stage);
-            assert_eq!(
-                serde_yaml::from_str::<RuntimeSettingsConfig>(
-                    &serde_yaml::to_string(&parsed).expect("serialize runtime")
-                )
-                .expect("reparse runtime"),
-                parsed
-            );
-        }
     }
 
     // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,

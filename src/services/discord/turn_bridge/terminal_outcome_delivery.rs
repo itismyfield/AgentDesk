@@ -5,7 +5,6 @@
 //! delivery lease commits, terminal-controller cutover, voice completion,
 //! TUI completion gate, dispatch completion/fail, watcher-delivered mark,
 //! `tv_done`, and terminal status readiness.
-use super::intake_settlement;
 use super::output_lifecycle::BridgeOutputOwner;
 use super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningOpenAfterStateSave,
@@ -843,27 +842,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     // spent retries stay with the input.
     if busy_requeue_outcome.is_none() {
         super::busy_followup_retry_store::release_notice(&provider, channel_id, &inflight_state);
-    }
-    // Consume, rather than re-sample, the stamp snapshot under the
-    // `SettlementCapabilities` contract.
-    // A failure of both delivery sinks is not a no-body success settlement.
-    if !matches!(
-        terminal_outcome,
-        TerminalOutcomeDeliveryOutcome::Unresolved { .. }
-    ) {
-        intake_settlement::settle_intake_row_at_bridge_exit(
-            &shared_owned,
-            &inflight_state,
-            intake_settlement::classify(
-                terminal_delivery_committed,
-                status_panel_terminal_committed,
-                preserve_inflight_for_cleanup_retry,
-                bridge_skip_holder_owns_inflight,
-                bridge_output_owner.is_some(),
-            ),
-            inflight_state.intake_delivery_capabilities(),
-        )
-        .await;
     }
     TerminalOutcomeDeliveryOutput {
         outcome: terminal_outcome,
