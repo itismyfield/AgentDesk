@@ -250,3 +250,53 @@ async fn idle_retries_each_failed_reaction_once_then_discards_the_list() {
         "no further retries after two attempts"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_keeps_failed_removals_for_the_next_observation_without_marking_complete() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
+        TurnViewReconciler::with_test_deliveries(vec![
+            TurnViewDelivery::Delivered,
+            TurnViewDelivery::Failed,
+            TurnViewDelivery::Failed,
+            TurnViewDelivery::Delivered,
+            TurnViewDelivery::Delivered,
+        ]);
+    let channel = 7_269_006;
+    let message = 1514500851761287342;
+    inject(&shared, channel, message).await;
+    let (fake, supervisor) = supervisor(&shared, &[channel]);
+    fake.set(channel, IDLE);
+    supervisor.tick(Instant::now()).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while shared
+            .turn_view_reconciler
+            .pending_injected_count(ChannelId::new(channel))
+            != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed hourglass removal must remain pending for the next idle");
+    assert_eq!(
+        shared
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .map(|op| (op.emoji, op.add))
+            .collect::<Vec<_>>(),
+        [('⏳', true), ('⏳', false), ('⏳', false)],
+        "failed removal must not add a completion checkmark"
+    );
+    supervisor.tick(Instant::now()).await;
+    settled(&shared, message).await;
+    assert_eq!(
+        shared
+            .turn_view_reconciler
+            .pending_injected_count(ChannelId::new(channel)),
+        0
+    );
+    assert_eq!(shared.turn_view_reconciler.ops().len(), 5);
+}

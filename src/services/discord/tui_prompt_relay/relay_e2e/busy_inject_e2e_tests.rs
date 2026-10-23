@@ -160,8 +160,7 @@ fn in_memory(message: u64) -> Option<InjectionOutcome> {
     disposition::terminal(Some(&ProviderKind::Claude), MessageId::new(message), now)
 }
 
-/// A busy pane takes the shown Discord name and text once; the message's hourglass completes
-/// when the channel reads idle, with no extra queued input or provider start.
+/// A busy pane outside turn mode gets a final receipt and leaves no pending hourglass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     for (nick, global_name) in [
@@ -208,40 +207,19 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     );
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
-    let taken = (keys, vec!["⏳".to_string()], Some(message), vec![], 0, disk);
+    let taken = (keys, vec!["📥".to_string()], Some(message), vec![], 0, disk);
     rt.finish().await;
-    assert_eq!(observed, taken);
-    let before_idle = rt.h.shared.turn_view_reconciler.ops().len();
-    crate::services::discord::turn_presence::supervisor::tests::injected_idle_tick(
-        rt.h.shared.clone(),
-        CHANNEL_ID,
-    )
-    .await;
-    let shared = rt.h.shared.clone();
-    assert!(
-        wait_until(WAIT, move || {
-            let shared = shared.clone();
-            Box::pin(async move {
-                shared
-                    .turn_view_reconciler
-                    .ops()
-                    .iter()
-                    .any(|op| op.target.message_id.get() == message && op.emoji == '✅' && op.add)
-            })
-        })
-        .await,
-        "idle must complete the message taken by the real intake"
+    assert_eq!(
+        observed, taken,
+        "unobserved injection must finish with a final receipt"
     );
-    let changes: Vec<_> =
+    assert_eq!(
         rt.h.shared
             .turn_view_reconciler
-            .ops()
-            .into_iter()
-            .skip(before_idle)
-            .filter(|op| op.target.message_id.get() == message)
-            .map(|op| (op.emoji, op.add))
-            .collect();
-    assert_eq!(changes, [('⏳', false), ('✅', true)]);
+            .pending_injected_count(ChannelId::new(CHANNEL_ID)),
+        0,
+        "an unobserved channel must not retain pending injection marks"
+    );
 }
 
 /// A message an injection already took ends at the lookup however the channel stands: held
@@ -800,7 +778,7 @@ async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
     rt.finish().await;
-    assert_eq!(observed, (keys, vec!["⏳".to_string()], vec![], 0, disk));
+    assert_eq!(observed, (keys, vec!["📥".to_string()], vec![], 0, disk));
 }
 
 /// A vetoed paste queues as intake would have: the bot's entry is a bot's and drops on cancel,

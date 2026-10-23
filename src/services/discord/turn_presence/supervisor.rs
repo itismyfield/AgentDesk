@@ -30,6 +30,30 @@ static REGISTERED: LazyLock<Mutex<HashMap<String, BTreeSet<u64>>>> =
 /// What each supervised channel last published, for the turn endpoint.
 static PRESENCE: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Presence>>>>> =
     LazyLock::new(Default::default);
+static STARTED: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+struct Started(String);
+
+impl Started {
+    fn new(provider: &ProviderKind) -> Self {
+        let provider = provider.as_str().to_string();
+        *lock(&STARTED).entry(provider.clone()).or_default() += 1;
+        Self(provider)
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let mut started = lock(&STARTED);
+        if let Some(count) = started.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 {
+                started.remove(&self.0);
+            }
+        }
+    }
+}
+
 static PROCESS_STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
 
 #[path = "unknown_notice_store.rs"]
@@ -77,12 +101,21 @@ fn registered(provider: &ProviderKind) -> Vec<u64> {
         .unwrap_or_default()
 }
 
+/// A pending hourglass is safe only while this provider supervises the confirmed channel.
+pub(in crate::services::discord) fn observes(provider: &ProviderKind, channel: u64) -> bool {
+    lock(&STARTED).contains_key(provider.as_str()) && registered(provider).contains(&channel)
+}
+
 /// Spawns the provider's supervisor; call once its bot token is set so no send precedes HTTP.
 pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: ProviderKind) {
     super::activity::initialize_tail();
     LazyLock::force(&PROCESS_STARTED);
+    let started = Started::new(&provider);
     let effects = Arc::new(LiveEffects { shared, provider });
-    tokio::spawn(Supervisor::new(effects).run());
+    tokio::spawn(async move {
+        let _started = started;
+        Supervisor::new(effects).run().await;
+    });
 }
 
 /// The turn endpoint's `turn_presence` block, or `None` outside turn mode.

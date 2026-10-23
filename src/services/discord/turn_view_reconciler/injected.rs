@@ -6,6 +6,16 @@ pub(super) struct Pending {
 }
 
 impl TurnViewReconciler {
+    #[cfg(test)]
+    pub(in crate::services::discord) fn pending_injected_count(&self, channel: ChannelId) -> usize {
+        self.injected
+            .channels
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&channel)
+            .map_or(0, HashMap::len)
+    }
+
     /// Remembers immediate-injection messages separately from turn and queue markers.
     pub(in crate::services::discord) async fn note_busy_injected(
         &self,
@@ -53,6 +63,7 @@ impl TurnViewReconciler {
             for (message, identity) in messages {
                 let target = TurnViewTarget::intake_user_message(channel, message);
                 for (emoji, add) in [('⏳', false), ('✅', true)] {
+                    let mut delivered = false;
                     for _ in 0..2 {
                         if shared
                             .turn_view_reconciler
@@ -67,8 +78,22 @@ impl TurnViewReconciler {
                             .await
                             .delivered()
                         {
+                            delivered = true;
                             break;
                         }
+                    }
+                    if !delivered && !add {
+                        shared
+                            .turn_view_reconciler
+                            .injected
+                            .channels
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .entry(channel)
+                            .or_default()
+                            .entry(message)
+                            .or_insert(identity);
+                        break;
                     }
                 }
             }

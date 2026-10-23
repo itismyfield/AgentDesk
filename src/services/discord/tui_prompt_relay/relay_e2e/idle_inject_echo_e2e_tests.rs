@@ -67,7 +67,7 @@ async fn r1_idle_inject_has_no_direct_terminal_notice_pg() {
         .await
         .unwrap();
     assert_eq!(busy.pane.keys(), ["paste-buffer", "send-keys"]);
-    assert_eq!(rt.marks(message), ["⏳"]);
+    assert_eq!(rt.marks(message), ["📥"]);
     let frame = busy.pane.read("buffer").unwrap();
     let receipts = busy.pane.read(InjectPane::TRANSCRIPT).unwrap();
     assert_eq!(
