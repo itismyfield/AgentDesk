@@ -9032,6 +9032,7 @@ services::discord::tmux::tui_completion_gate_tests::legacy_tmux_wrapper_skips_th
 services::discord::tmux::tui_completion_gate_tests::missing_runtime_kind_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::process_backend_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::rebind_origin_inflight_skips_the_gate
+services::discord::tmux::watcher_lifecycle::activity::tests::current_thread_heartbeat_yields_while_session_row_is_locked_pg
 services::discord::tmux::watcher_lifecycle::claims::host_tests::a_claim_takes_no_source_authority
 services::discord::tmux::watcher_lifecycle::claims::host_tests::a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent
 services::discord::tmux::watcher_lifecycle::claims::host_tests::a_withhold_waits_for_a_claim_that_read_the_admission
