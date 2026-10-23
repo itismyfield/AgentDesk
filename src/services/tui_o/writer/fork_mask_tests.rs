@@ -30,7 +30,7 @@ async fn pending_parent_resolved_past_row_rebuilds_child_debt_once() {
     let child_start = (z.len() + fresh.len()) as u64;
     assert!(parent_start < parent_from && parent_from <= child_start);
     assert_eq!(parent_from, parent_start + r.len() as u64);
-    let (p_path, p) = transcript(&a_path, "p.jsonl", "sp", &parent_body);
+    let (_, p) = transcript(&a_path, "p.jsonl", "sp", &parent_body);
     let (_, b) = transcript(&a_path, "b.jsonl", "sb", &[z, fresh, r].concat());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted = attempts.clone();
@@ -425,7 +425,7 @@ async fn excluded_parent_consumed_prefix_still_decides_a_new_fork() {
     let prefix = prompt("z", "unrelated");
     let r = row("r", "excluded");
     let body = [prefix.clone(), r.clone()].concat();
-    let (p_path, p) = transcript(&a_path, "p.jsonl", "sp", &body);
+    let (_, p) = transcript(&a_path, "p.jsonl", "sp", &body);
     bindings.commit(rotate(2, &a, &p, BindingCause::Fork));
     observe(&harness, bindings.clone());
     assert!(matches!(boundary(&harness, &p), Boundary::Pending { .. }));
