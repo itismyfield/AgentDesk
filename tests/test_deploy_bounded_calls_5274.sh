@@ -17,9 +17,9 @@ ISSUE_CAPTURE_LIMIT=4096
 ISSUE_CAPTURE_READ_LIMIT=$((ISSUE_CAPTURE_LIMIT + 1))
 
 cleanup() {
-    local listener_pid
-    # Each listener has a self-expiring deadline; waiting reaps only fixtures
-    # created by this test and never sends a signal to any process.
+    local listener_pid ready_path
+    # Release listeners before reaping only the fixtures created by this test.
+    for ready_path in "$TMP_ROOT"/*.port; do touch "${ready_path%.port}.release"; done
     for listener_pid in "${LISTENER_PIDS[@]-}"; do
         [ -n "$listener_pid" ] || continue
         wait "$listener_pid" 2>/dev/null || true
@@ -52,44 +52,9 @@ SKIPPED_CASES=0
 
 start_hanging_listener() {
     local ready_path="$1"
-    # The listener accepts TCP, consumes no response, and exits on its own after
-    # 18s. The production 15s cap therefore has a margin for macOS diagnostics;
-    # a removed cap remains alive when the test's 17s assertion deadline fires.
-    python3 - "$ready_path" 2>/dev/null <<'PY' &
-import socket
-import sys
-import time
-from pathlib import Path
-
-ready_path = Path(sys.argv[1])
-deadline = time.monotonic() + 18.0
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", 0))
-    server.listen(4)
-    ready_path.write_text(str(server.getsockname()[1]), encoding="ascii")
-    server.settimeout(0.1)
-    connection = None
-    while connection is None and time.monotonic() < deadline:
-        try:
-            connection, _ = server.accept()
-        except socket.timeout:
-            pass
-    if connection is not None:
-        with connection:
-            connection.settimeout(0.1)
-            while time.monotonic() < deadline:
-                try:
-                    chunk = connection.recv(65536)
-                    if not chunk:
-                        time.sleep(0.05)
-                except socket.timeout:
-                    pass
-                except OSError:
-                    break
-PY
+    python3 "$SCRIPT_DIR/fixtures/deploy_bounded_wait.py" listen "$ready_path" &
     LISTENER_PIDS+=("$!")
-    for _ in {1..200}; do
+    for _ in {1..3000}; do
         [ -s "$ready_path" ] && return 0
         sleep 0.01
     done
@@ -102,45 +67,7 @@ measure_case() {
     local label="$2"
     local output_path="$TMP_ROOT/${label}.measure.log"
     local rc=0
-    # The Python supervisor observes completion without terminating the child;
-    # the fixture listener's own deadline provides eventual cleanup for a mutant.
-    python3 - "$case_path" "$output_path" <<'PY' >"$output_path" 2>&1 || rc=$?
-import subprocess
-import sys
-import time
-
-case_path, output_path = sys.argv[1:]
-assertion_deadline_s = 17.0
-started = time.monotonic()
-process = subprocess.Popen(
-    ["bash", case_path],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-)
-deadline = started + assertion_deadline_s
-while process.poll() is None and time.monotonic() < deadline:
-    time.sleep(0.02)
-timed_out = process.poll() is None
-try:
-    return_code = process.wait(timeout=8)
-except subprocess.TimeoutExpired:
-    # No signal-based cleanup is permitted here. The test fixture is designed
-    # to close the accepted socket before this wait expires.
-    return_code = 125
-elapsed = time.monotonic() - started
-if process.stdout is not None:
-    output = process.stdout.read()
-else:
-    output = ""
-sys.stdout.write(output)
-sys.stdout.write(
-    f"measure label={case_path} elapsed={elapsed:.3f}s rc={return_code} "
-    f"timeout_assertion={'FAILED' if timed_out else 'ok'}\n"
-)
-if timed_out or return_code != 0:
-    raise SystemExit(1)
-PY
+    python3 "$SCRIPT_DIR/fixtures/deploy_bounded_wait.py" measure "$case_path" >"$output_path" 2>&1 || rc=$?
     cat "$output_path"
     return "$rc"
 }
@@ -431,7 +358,7 @@ sys.stdout.buffer.write(payload)
 sys.stdout.buffer.flush()
 ready_path.write_text("ready", encoding="ascii")
 if mode == "race":
-    deadline = time.monotonic() + linger_s
+    deadline = time.monotonic() + 60
     while not trigger_path.exists() and time.monotonic() < deadline:
         time.sleep(0.005)
     if trigger_path.exists():
@@ -441,14 +368,14 @@ if mode == "race":
 elif mode == "finite":
     time.sleep(linger_s)
 else:
-    deadline = time.monotonic() + linger_s
-    while time.monotonic() < deadline:
+    deadline = time.monotonic() + (linger_s or 180)
+    while time.monotonic() < deadline and not ready_path.with_suffix(".release").exists():
         sys.stdout.buffer.write(b"p" * 1024)
         sys.stdout.buffer.flush()
         time.sleep(0.01)
 PY
 ) &
-for _ in {1..200}; do
+for _ in {1..3000}; do
     [ -f "$ready_path" ] && break
     sleep 0.01
 done
@@ -464,7 +391,7 @@ target="\${@: -1}"
 if [[ "\$target" == *agentdesk-issue-stdout* ]]; then
     if [ "$mode" = race ]; then
         : > "$trigger_path"
-        for _ in {1..400}; do
+        for _ in {1..6000}; do
             [ -f "$grown_path" ] && break
             sleep 0.005
         done
@@ -485,7 +412,7 @@ target="\${@: -1}"
 if [[ "\$target" == *agentdesk-issue-stdout* ]]; then
     if [ "$mode" = race ]; then
         : > "$trigger_path"
-        for _ in {1..400}; do
+        for _ in {1..6000}; do
             [ -f "$grown_path" ] && break
             sleep 0.005
         done
@@ -563,7 +490,7 @@ run_issue_variant() {
     wait "${LISTENER_PIDS[${#LISTENER_PIDS[@]}-1]}" 2>/dev/null || true
     if [ "$expected" = "ok" ]; then
         if [ "$rc" -ne 0 ]; then
-            echo "FAIL: restored gh issue-create guard exceeded the 17s assertion deadline" >&2
+            echo "FAIL: restored gh issue-create guard did not complete before the fixture watchdog" >&2
             FAILURES=$((FAILURES + 1))
         else
             echo "gh issue create restored: ok"
@@ -581,7 +508,7 @@ run_issue_leader_exit_variant() {
     local source_path="$2"
     local expected="$3"
     local case_path="$TMP_ROOT/${label}.sh"
-    write_issue_writer_case "$source_path" persistent 18 "$label" "$case_path" \
+    write_issue_writer_case "$source_path" persistent 0 "$label" "$case_path" \
         "$TMP_ROOT/${label}.captured-bytes" 0
     local measure_output="$TMP_ROOT/${label}.measure.out"
     local rc=0
@@ -792,6 +719,7 @@ if ! start_hanging_listener "$TCP_PROBE_READY"; then
         "the same listener mutation cases are exercised when local sockets are permitted"
 fi
 if [ "$TCP_LISTENER_AVAILABLE" -eq 1 ]; then
+    touch "${TCP_PROBE_READY%.port}.release"
     wait "${LISTENER_PIDS[${#LISTENER_PIDS[@]}-1]}" 2>/dev/null || true
     run_notify_variant restored "$DEPLOY_SH" ok
     run_notify_variant removed "$MUTATED_NOTIFY" failed

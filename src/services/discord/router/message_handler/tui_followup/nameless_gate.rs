@@ -188,6 +188,9 @@ async fn local_legacy_start_ready(
     channel_id: serenity::ChannelId,
     name: Option<&str>,
 ) -> bool {
+    // A start acts on this judgment, so the periodic observer must not supersede it meanwhile.
+    let _effect =
+        crate::services::discord::turn_presence::activity::effect_reads::begin(channel_id.get());
     let reading = crate::services::discord::turn_presence::activity::reading_now(
         shared, provider, channel_id,
     )

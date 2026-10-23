@@ -216,6 +216,7 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
             super::super::store::boot_observation::Attempt::Unlink,
         );
         if fs::remove_file(&path).is_ok() {
+            sync_removed(&path);
             *match (&stale, &locked) {
                 (Some(_), _) => &mut report.reaped_stale,
                 (None, Some(_)) => &mut report.reaped_provider_mismatch,

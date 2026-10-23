@@ -973,3 +973,6 @@ pub(super) async fn handle_runtime_handoff_loop_message(
         guarded_save_outcome,
     }
 }
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use tests::codex_replacement::adopt_codex_replacement_for_test;

@@ -614,6 +614,47 @@ impl Snapshot {
         }
         self.files.same(&files) && self.memory_current()
     }
+    fn notice(
+        &self,
+        shared: &SharedData,
+        answer: Observed,
+        hold: Option<&HoldLeaf>,
+    ) -> super::super::notice_identity::NoticeObservation {
+        use super::super::notice_identity::{ExecutionIdentity, NoticeObservation};
+        let label = self
+            .files
+            .candidates
+            .as_ref()
+            .ok()
+            .and_then(|c| c.current.as_deref());
+        let mut notice = NoticeObservation::bound(answer.reason, label);
+        notice.hold_leaf = hold.map(HoldLeaf::leaf);
+        if let HostedLookup::Found(found) = &self.canonical
+            && let HostedRecord::Known(record) = &found.record
+        {
+            let owner = &record.owner;
+            let node = crate::config::session_hosts::local_node();
+            let root = self.runtime_root.as_ref().map(|p| p.display().to_string());
+            if local_owner(
+                owner,
+                &self.provider,
+                self.channel.get(),
+                &shared.token_hash,
+                &owner.logical_key,
+                node.as_deref(),
+            ) && root.as_deref() == Some(owner.runtime_root.as_str())
+                && label.is_none_or(|label| label == owner.logical_key)
+                && (self.exact == self.canonical || self.exact == HostedLookup::Missing)
+            {
+                notice.identity = ExecutionIdentity::Nonce(record.execution_nonce.clone());
+                notice.target_label = Some(owner.logical_key.clone());
+            } else {
+                notice.identity = ExecutionIdentity::Unresolved;
+                notice.target_label = None;
+            }
+        }
+        notice
+    }
     fn scope(&self, shared: &SharedData) -> HostScope {
         let candidates = self.files.candidates.as_ref().ok();
         let name = candidates.and_then(|c| c.current.as_deref());
@@ -719,6 +760,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     snapshot: Option<Snapshot>,
     namespace: Option<Observation>,
     superseded: bool,
+    pub(in crate::services::discord::turn_presence::activity) notice:
+        super::super::notice_identity::NoticeObservation,
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
@@ -777,7 +820,12 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
             None,
         ),
     };
+    let notice = snapshot.as_ref().map_or_else(
+        || super::super::notice_identity::NoticeObservation::bound(answer.reason, None),
+        |snapshot| snapshot.notice(shared, answer, hold.as_ref()),
+    );
     let stamp = Stamp {
+        notice,
         shared: Arc::downgrade(shared),
         channel,
         basis,

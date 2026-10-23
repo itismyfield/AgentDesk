@@ -308,7 +308,7 @@ pub(super) fn reap_abandoned_rebind_origin_locked_in_root(
         "reap_abandoned_rebind_origin_locked",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => RebindReapOutcome::Reaped,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,
         Err(error) => {
@@ -383,7 +383,7 @@ pub(super) fn reap_dead_watcher_rebind_origin_locked_in_root(
         "reap_dead_watcher_rebind_origin_locked",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => RebindReapOutcome::Reaped,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => RebindReapOutcome::Missing,
         Err(error) => {

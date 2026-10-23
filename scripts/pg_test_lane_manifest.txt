@@ -276,6 +276,7 @@ src/services/discord/terminal_ui_obligation.rs
 src/services/discord/terminal_ui_obligation/sweep_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_reaper/retirement_await_tests/host_gate_pg_tests.rs
+src/services/discord/tmux_watcher/codex_replacement_tests.rs
 src/services/discord/tmux_watcher/discrete_trigger_marker.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs
@@ -331,6 +332,7 @@ src/services/discord/turn_presence/activity/unbound/collection_publication_tests
 src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs
 src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
+src/services/discord/turn_presence/activity/unbound/effect_read_defer_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
 src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs
@@ -705,6 +707,7 @@ services::discord::terminal_ui_obligation::sweep_tests
 services::discord::terminal_ui_obligation::tests
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
@@ -778,6 +781,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_
 services::discord::turn_presence::activity::unbound::live::review_tests
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests
+services::discord::turn_presence::activity::unbound::live::review_tests::effect_read_defer_tests
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests
 services::discord::turn_presence::activity::unbound::routine_owner::registered_receipt_tests
 services::discord::turn_presence::activity::unbound::routine_owner::tests
@@ -2486,6 +2490,11 @@ services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::discrete_trigger_marker::pg_tests::background_marker_provider_outbox_survives_restart_replay_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_cancel_during_replacement_does_not_protect_dead_pane_pg
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_replacement_create_failure_releases_watcher_and_clears_row
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_true_crash_after_replacement_clears_row
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_warm_replacement_preserves_paused_watcher_and_start_activity
+services::discord::tmux::tmux_watcher::post_stream_exit::codex_replacement_tests::codex_watcher_exit_preserves_row_until_create_failure_bridge_settles
 services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
@@ -2755,6 +2764,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::unresolv
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::a2_s2_superseded_collection_preserves_live_presence_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_existing_superseded_counters_cover_saved_reading_rejections_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::collection_publication_tests::superseded_measurement_tests::a2_s2_unrelated_owner_churn_measures_read_availability_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::effect_read_defer_tests::observer_tick_defers_to_a_running_effect_read_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
@@ -2770,6 +2780,7 @@ services::discord::turn_presence::activity::unbound::live::review_tests::s1e_suc
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::unbound_notice_keeps_the_canonical_nonce_and_hold_leaf_in_its_publication_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_canonical_missing_namespace_or_tuple_mismatch_keeps_hold_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_either_historical_or_canonical_live_candidate_holds_pg
 services::discord::turn_presence::activity::unbound::live::stale_binding_tests::s1_exact_alias_pointing_to_another_row_keeps_hold_pg

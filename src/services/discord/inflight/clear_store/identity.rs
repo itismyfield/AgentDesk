@@ -116,7 +116,7 @@ fn remove_identity_matched_state_unchecked(
     reason: &'static str,
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
     log_inflight_remove(provider, channel_id, state.user_msg_id, reason, path);
-    match fs::remove_file(path) {
+    match fs::remove_file(path).map(|()| sync_removed(path)) {
         Ok(()) => (GuardedClearOutcome::Cleared, Some(state)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             (GuardedClearOutcome::Missing, None)

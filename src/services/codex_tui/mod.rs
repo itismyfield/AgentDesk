@@ -1,5 +1,6 @@
 pub(crate) mod busy_inject;
 pub(crate) mod canary;
+pub(crate) mod execution_end;
 pub(crate) mod host_input;
 pub mod input;
 pub mod rollout_index;

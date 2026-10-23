@@ -724,3 +724,7 @@ fn provisional_cleanup_preserves_replacement_incarnation() {
 #[cfg(unix)]
 #[path = "herdr_owner_tests.rs"]
 mod herdr_owner;
+
+#[cfg(unix)]
+#[path = "codex_replacement_tests.rs"]
+pub(super) mod codex_replacement;

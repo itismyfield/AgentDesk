@@ -97,6 +97,7 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     file.sync_all()
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
+    super::log_discord_inflight_atomic_replace(path);
     #[cfg(test)]
     super::rename_fault::before(path, &tmp);
     let renamed = fs::rename(&tmp, path);
@@ -159,6 +160,12 @@ pub(super) fn flush_dir(
     synced
 }
 
+/// Flushes `path`'s parent and the directories up to `root` before `path` is published, so
+/// files written in place there are durable before the publication that vouches for them.
+pub(crate) fn flush_chain_before_publish(root: &Path, path: &Path) -> FlushStatus {
+    flush_published(root, path)
+}
+
 /// `fsync_parent_dir`, then the directories up to the runtime root, for writers that classify the
 /// post-rename outcome themselves; outside the runtime root only the parent is synced.
 pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
@@ -181,6 +188,44 @@ pub(crate) fn sync_removed(path: &Path) {
             "recovery-critical file removed; directory sync failed (removal durability unconfirmed)"
         );
     }
+}
+
+/// After a rename of `from` to `to`, flushes the destination chain up to `root`, then the source,
+/// so a crash never keeps the removal without the copy; failures are only logged.
+pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
+    let failed = match flush_published(root, to) {
+        FlushStatus::Flushed => flush_parent(from)
+            .err()
+            .map(|(stage, error)| (stage, error.to_string())),
+        FlushStatus::UnflushedPlatform => None,
+        FlushStatus::SyncFailed { stage, error } => Some((stage, error)),
+    };
+    if let Some((stage, error)) = failed {
+        tracing::warn!(
+            from = %from.display(),
+            to = %to.display(),
+            stage = ?stage,
+            error = %error,
+            moved = true,
+            "recovery-critical file moved; directory sync failed (move durability unconfirmed)"
+        );
+    }
+}
+
+/// Recovery-critical publication of `<trusted root>/<store>/<provider>/<file>`, the trusted root
+/// being the runtime root in production; store and provider names come from the path.
+pub(crate) fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
+    fn name(dir: Option<&Path>) -> Option<&str> {
+        dir.and_then(Path::file_name).and_then(|name| name.to_str())
+    }
+    let mut above = path.ancestors().skip(1);
+    let (provider, store) = (name(above.next()), name(above.next()));
+    let root = above.next().unwrap_or(Path::new(""));
+    let mut context = AtomicWriteContext::new(store.unwrap_or("unknown")).durable_root(root);
+    context.provider = provider;
+    let stem = path.file_stem().and_then(|stem| stem.to_str());
+    context.channel_id = stem.and_then(|stem| stem.parse().ok());
+    critical_publish(path, data, context)
 }
 
 /// Trusted root of a context: the one it names, else the runtime root every store hangs from.
