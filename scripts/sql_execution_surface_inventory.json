@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "a3bca396ee8f4e2f16d13d7e7e810cb883f78167",
+  "measured_at_sha": "5b3383cde524ad0f5861f57cd716cf2e612067fa",
   "records": [
     {
       "root": "migrations/postgres",
@@ -33980,6 +33980,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/router/message_handler/provider_dispatch_codex_t14_actual_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a07a3e5456e2ba2fe7fbf9eefc7a9c0c62267b3d671eca3fb44c9750c8fc9a86"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/router/message_handler/provider_dispatch_codex_t14_composed_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -36514,6 +36523,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:529fc1bffaa23dbdfac96dd6768485a49b61311a4095b4579ec566ef99dce8ec"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_actual_client_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:264abc19db6070857bc9994f0e95495982a8e306736093fa5bbb26949e6e383a"
     },
     {
       "root": "src",
