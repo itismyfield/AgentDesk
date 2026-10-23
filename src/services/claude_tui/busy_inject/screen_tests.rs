@@ -29,7 +29,7 @@ fn rows(text: &str, size: Option<(usize, usize)>) -> Option<Vec<String>> {
             assert_eq!(rows[0], HEADER);
             Some(rows[1..].to_vec())
         }
-        Drawn::Folded => None,
+        Drawn::Folded | Drawn::Body => None,
     }
 }
 
@@ -336,4 +336,29 @@ fn only_status_rows_and_a_whole_footer_may_follow_the_box() {
         assert_eq!(read(at, 0, &[row]), unknown, "{row}");
     }
     assert_eq!(read(foot, 0, &["  › stashed"]), (draft, Stash::Unknown));
+}
+
+#[test]
+fn common_glyph_plans_accept_direct_and_preserve_the_flat_stash_boundary() {
+    let draft = BUSY_DRAFT.replace(TOAST, "");
+    for corpus in [
+        "한글 English 123 'plain' \"quotes\"",
+        "“둥근” ‘따옴표’ … — – (괄호) [대괄호] {중괄호}",
+        "😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷",
+        "漢字 かな カナ （全角）、。！？",
+    ] {
+        for count in [1, 3, 20] {
+            let frame = super::frame("discord", "200", "ann", "abcd1234", &corpus.repeat(count));
+            assert_eq!(
+                plan_for(BUSY, &frame, (46, 37)),
+                Ok(None),
+                "{corpus} x{count}"
+            );
+        }
+        let flat = super::frame("discord", "200", "ann", "abcd1234", corpus);
+        assert_eq!(
+            plan_for(&draft, &flat, (400, 37)),
+            Ok(Some(vec!["js".into()]))
+        );
+    }
 }

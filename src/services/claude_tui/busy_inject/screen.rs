@@ -3,7 +3,9 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::services::tui_input::actor::gate::{claude_border_row, claude_prompt_row};
+use crate::services::tui_input::actor::gate::{
+    claude_border_row, claude_prompt_row, own_wrapped_draft,
+};
 
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
@@ -308,10 +310,59 @@ fn renders_flat(frame: &str, width: usize, height: usize) -> bool {
 /// How Claude shows a paste in an empty composer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Drawn {
+    /// Wrapping is unknown; only the full captured body can prove this paste.
+    Body,
     /// A `[Pasted text #N …]` placeholder.
     Folded,
     /// Every row, the prompt and continuation indent removed.
     Rows(Vec<String>),
+}
+
+/// Wrap predictions are optional: the full captured body can prove any printable paste.
+pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
+    let (width, height) = size?;
+    if width < 6
+        || height <= 10
+        || frame
+            .split('\n')
+            .any(|line| line.chars().any(char::is_control))
+    {
+        return None;
+    }
+    Some(drawn(frame, size).unwrap_or(Drawn::Body))
+}
+
+/// Proves the complete composer body, or a whole placeholder only when the paste should fold.
+pub(super) fn owns_direct(capture: &str, frame: &str, drawn: &Drawn) -> bool {
+    let Composer::Text(rows) = read(capture).composer else {
+        return false;
+    };
+    if matches!(drawn, Drawn::Rows(expected) if own_wrapped_draft(capture, expected))
+        || rows
+            .iter()
+            .flat_map(|row| row.chars())
+            .filter(|c| !c.is_whitespace())
+            .eq(frame.chars().filter(|c| !c.is_whitespace()))
+    {
+        return true;
+    }
+    let [row] = rows.as_slice() else {
+        return false;
+    };
+    if !matches!(drawn, Drawn::Folded) {
+        return false;
+    }
+    let Some(rest) = row.strip_prefix("[Pasted text #") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let lines = frame.matches('\n').count();
+    digits > 0
+        && if lines == 0 {
+            &rest[digits..] == "]"
+        } else {
+            rest[digits..] == format!(" +{lines} lines]")
+        }
 }
 
 /// Measured on Claude Code 2.1.293: a paste folds as in [`renders_flat`]; otherwise each line
