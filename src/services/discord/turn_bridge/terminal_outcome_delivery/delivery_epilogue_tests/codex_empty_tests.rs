@@ -157,11 +157,14 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
         } else {
             complete
         };
-        if case == "unnamed" {
+        if matches!(case, "unnamed" | "unnamed_fallback") {
             terminal["payload"]
                 .as_object_mut()
                 .unwrap()
                 .remove("turn_id");
+            if case == "unnamed_fallback" {
+                terminal["payload"]["last_agent_message"] = json!("unattributed fallback");
+            }
         }
         let mut bytes = encode(&[terminal]);
         let padding = END as usize - START as usize - head.len() - bytes.len();
@@ -177,6 +180,7 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
         "previous"
             | "foreign"
             | "unnamed"
+            | "unnamed_fallback"
             | "open_tool"
             | "hook_only"
             | "stale_origin"
@@ -295,6 +299,7 @@ async fn managed_empty_native_turn_rejects_unrelated_completion_and_open_tools()
         "previous",
         "foreign",
         "unnamed",
+        "unnamed_fallback",
         "hook_only",
         "open_tool",
         "stale_origin",

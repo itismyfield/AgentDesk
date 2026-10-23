@@ -492,6 +492,8 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
                 || state.managed_turn.is_some()
                 || state.discord_origin_prompt.is_some())
                 && (codex_payload_turn_id(payload).is_some()
+                    || (!state.saw_assistant_text
+                        && !managed_empty::mutant("unwitnessed_fallback"))
                     || managed_empty::mutant("unnamed_complete"))
                 && !(started_turn_named_by(state, payload)
                     || (!managed_empty::mutant("managed_complete")
