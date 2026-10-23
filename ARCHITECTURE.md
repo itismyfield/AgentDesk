@@ -1212,10 +1212,13 @@ src/
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force.rs
 │   │   │   ├── http_force_e08_tests.rs
+│   │   │   ├── http_force_forward_tests.rs
 │   │   │   ├── http_force_hydrate_tests.rs
 │   │   │   ├── http_force_identity_tests.rs
 │   │   │   ├── http_force_purge_tests.rs
+│   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
+│   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── retired_exclusion.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
@@ -3018,6 +3021,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── tests/
 │   │   │   └── source_guard_tests.rs
+│   │   ├── trusted_target/
+│   │   │   └── loopback_seam_tests.rs
 │   │   ├── cancel_lookup.rs
 │   │   ├── home_stop.rs
 │   │   ├── home_stop_tests.rs
