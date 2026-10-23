@@ -171,37 +171,24 @@ async fn local_retry_real_hook_off_and_denied_channel_grant_local_budget_without
 }
 
 #[tokio::test]
-async fn local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg() {
+async fn local_retry_real_hook_durable_intent_returns_to_repost_owner_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    for delegated in [false, true] {
-        let harness = Harness::new();
-        harness.gate.acquired();
-        if delegated {
-            crate::services::cluster::channel_home::register_for_test(
-                CHANNEL,
-                Some(crate::db::o_channel_homes::HomeState::Worker),
-            );
-        }
-        let io = Io::over(&harness.port);
-        let hook = turn(&harness, pool.clone(), switch(true), &io);
-        let mut writer = harness.writer().with_repost(Some(Box::new(hook)));
-        assert_eq!(
-            writer.deliver(&piece("scope-owner", "payload")).await,
-            Step::Done
-        );
-        assert_eq!(
-            writer.store().ledger().piece(0).unwrap().local_retry,
-            delegated.then_some(LocalRetryMark::Budget)
-        );
-        if delegated {
-            assert!(!sidecar(&harness).exists());
-        } else {
-            let log = ProvenanceLog::open(&sidecar(&harness)).unwrap();
-            assert!(log.state().intent(0).is_some());
-        }
-        assert_eq!((io.reads.load(Ordering::SeqCst), io.wire()), (0, 0));
-    }
+
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let io = Io::over(&harness.port);
+    let hook = turn(&harness, pool.clone(), switch(true), &io);
+    let mut writer = harness.writer().with_repost(Some(Box::new(hook)));
+    assert_eq!(
+        writer.deliver(&piece("scope-owner", "payload")).await,
+        Step::Done
+    );
+    assert_eq!(writer.store().ledger().piece(0).unwrap().local_retry, None);
+    let log = ProvenanceLog::open(&sidecar(&harness)).unwrap();
+    assert!(log.state().intent(0).is_some());
+    assert_eq!((io.reads.load(Ordering::SeqCst), io.wire()), (0, 0));
+
     pool.close().await;
     db.drop().await;
 }

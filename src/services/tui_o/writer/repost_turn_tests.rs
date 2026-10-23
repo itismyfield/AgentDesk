@@ -719,7 +719,6 @@ mod allowlist;
 // Delivery and turn selection share the ordinary gateway contract despite stale home state.
 #[tokio::test(flavor = "current_thread")]
 async fn residual_home_row_does_not_change_writer_or_turn_host_pg() {
-    use crate::services::cluster::channel_home;
     use crate::services::provider::ProviderKind;
     use crate::services::turn_host::{self, TurnHost};
 
@@ -753,8 +752,6 @@ async fn residual_home_row_does_not_change_writer_or_turn_host_pg() {
     assert_eq!(before["epoch"], poison_epoch);
     assert_eq!(before["holder"], "stale-remote");
     assert_eq!(before["provider"], "codex");
-    let home = channel_home::register_for_test(CHANNEL, None);
-    assert_eq!(home.refusal(), Some(channel_home::HomeRefusal::NotHeld));
     let harness = Harness::new();
     let mut writer = harness.writer();
     harness.gate.acquired();
@@ -778,7 +775,6 @@ async fn residual_home_row_does_not_change_writer_or_turn_host_pg() {
     );
     assert_eq!(harness.port.posts(), ["ignored-home-row"]);
     assert_eq!(read().await, before, "residual home row is untouched");
-    channel_home::unregister(&channel);
     pool.close().await;
     db.drop().await;
 }

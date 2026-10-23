@@ -254,8 +254,6 @@ src/
 │   ├── mod.rs
 │   ├── o_channel_activation.rs
 │   ├── o_channel_activation_fence_tests.rs
-│   ├── o_channel_homes.rs
-│   ├── o_channel_homes_tests.rs
 │   ├── o_piece_attempts.rs
 │   ├── o_piece_delivery.rs
 │   ├── o_piece_ledger_tests.rs
@@ -772,11 +770,7 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
 │   │   ├── channel_home/
-│   │   │   ├── epoch_tests.rs
-│   │   │   ├── ingress_snapshot.rs
-│   │   │   └── intake.rs
 │   │   ├── channel_ingress/
-│   │   │   └── tests.rs
 │   │   ├── execution_capacity/
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
@@ -832,16 +826,8 @@ src/
 │   │   ├── agent_execution_node.rs
 │   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
-│   │   ├── channel_home.rs
-│   │   ├── channel_home_drain.rs
-│   │   ├── channel_home_drain_tests.rs
-│   │   ├── channel_home_port.rs
-│   │   ├── channel_home_port_tests.rs
-│   │   ├── channel_home_tests.rs
-│   │   ├── channel_ingress.rs
 │   │   ├── execution_capacity.rs
 │   │   ├── execution_requirements.rs
-│   │   ├── home_availability.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
@@ -1243,6 +1229,7 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── restore_failure.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── delivery_rewind/
@@ -1311,10 +1298,6 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── ingress_shadow/
-│   │   │   ├── compat_tests.rs
-│   │   │   ├── shadow_tests.rs
-│   │   │   ├── telemetry.rs
-│   │   │   └── worker.rs
 │   │   ├── live_bridge/
 │   │   │   ├── guard_tests/
 │   │   │   │   └── source_guard_tests.rs
@@ -2614,7 +2597,6 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
-│   │   ├── ingress_shadow.rs
 │   │   ├── inject_disposition.rs
 │   │   ├── inject_disposition_test_support.rs
 │   │   ├── inject_disposition_tests.rs

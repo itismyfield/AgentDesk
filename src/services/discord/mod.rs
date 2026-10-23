@@ -41,7 +41,6 @@ pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
 mod inflight_heartbeat_sweeper;
-mod ingress_shadow;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
@@ -2598,7 +2597,6 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
     pub(super) voice_config: crate::voice::VoiceConfig,
     pub(super) voice_receiver: crate::voice::VoiceReceiver,
-    pub(in crate::services::discord) ingress_shadow: Option<ingress_shadow::IngressShadow>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

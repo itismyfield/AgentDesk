@@ -284,11 +284,6 @@ pub mod home_runtime {
     pub use crate::services::tui_o::writer::host::{ManagedWriterHandle, WriterStopped};
 }
 
-/// Read-only delegation boot status, distinct from home authority and restore readiness.
-pub mod delegation_availability {
-    pub use crate::services::cluster::home_availability::{Availability, Unavailable, state};
-}
-
 /// Dormant iMessage reply contracts for admission and claim/ACK integration.
 pub mod imsg_reply {
     pub use crate::db::imsg_reply::{

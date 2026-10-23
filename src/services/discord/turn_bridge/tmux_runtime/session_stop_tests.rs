@@ -223,7 +223,6 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1b-direct-parent";
@@ -467,7 +466,6 @@ fn codex_parent_without_session_meta_refuses_stop_and_replies() {
             provider: ProviderKind::Codex,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "codex-without-parent-header";
@@ -519,7 +517,6 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1c-discord-turn";
@@ -716,7 +713,6 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
                 provider: provider.clone(),
                 voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
                 voice_config,
-                ingress_shadow: None,
             };
             command(&ctx, &data, channel).await;
             assert!(mock.unhandled.lock().unwrap().is_empty());
@@ -742,14 +738,6 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             if let Some(held) = held {
                 held.recv_timeout(std::time::Duration::from_secs(3))
                     .unwrap();
-            }
-            if matches!(case, OwnerCase::Slash) {
-                let home =
-                    crate::services::cluster::channel_home::register_for_test(channel.get(), None);
-                assert_eq!(
-                    home.refusal(),
-                    Some(crate::services::cluster::channel_home::HomeRefusal::NotHeld)
-                );
             }
             let request = run_slash_stop(&shared, &provider, channel);
             let change = async {
@@ -793,12 +781,9 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             assert_eq!(
                 reply.text(),
                 expected,
-                "residual home must not refuse slash stop"
+                "slash stop uses ordinary owner identity"
             );
             reply.finish(&shared, &provider, channel).await;
-            if matches!(case, OwnerCase::Slash) {
-                crate::services::cluster::channel_home::unregister(&channel.get().to_string());
-            }
         }
         let calls = fx.take_calls();
         if matches!(case, OwnerCase::Slash | OwnerCase::CodexText) {

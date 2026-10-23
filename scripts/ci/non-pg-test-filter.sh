@@ -30,7 +30,6 @@ NON_PG_SKIP_ARGS=(
   --skip db::intake_outbox_delivery_proof::tests
   --skip db::intake_outbox_dispatch_stamp::tests
   --skip db::o_channel_activation::fence_tests
-  --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
   --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
@@ -76,8 +75,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::auto_queue::tests
   --skip services::automation_candidate_materializer::iteration_result_tests
   --skip services::cluster::attachment_transfer::storage_tests
-  --skip services::cluster::channel_home::tests
-  --skip services::cluster::channel_home_drain::tests
   --skip services::cluster::execution_capacity::tests
   --skip services::cluster::intake_preflight::tests
   --skip services::cluster::intake_router_hook::agent_execution_node_tests
@@ -125,8 +122,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
-  --skip services::discord::ingress_shadow::compat_tests
-  --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::queue_dispatch::canary_workspace::tests
@@ -412,19 +407,6 @@ NON_PG_FILTER_REPLAY=(
   services::auto_queue::tests::auto_queue_status_surfaces_review_cycle_clock
   services::auto_queue::tests::thread_link_view_only_builds_url_for_discord_snowflakes
   services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
-  services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
-  services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
-  services::cluster::channel_home::tests::a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set
-  services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
-  services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
-  services::cluster::channel_home::tests::a_restore_finishing_after_its_home_was_lost_opens_no_intake
-  services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
-  services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
-  services::cluster::channel_home::tests::command_registration_never_discards_a_preexisting_local_execution
-  services::cluster::channel_home::tests::command_registry_unregister_is_immediate_and_reuses_pending_count
-  services::cluster::channel_home::tests::command_replacement_and_resume_keep_counter_and_intake_closed
-  services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
-  services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
@@ -502,16 +484,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
-  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
-  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
-  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_live_messages_byte_identical
-  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
-  services::discord::ingress_shadow::shadow_tests::a_full_or_closed_queue_drops_and_counts_without_waiting
-  services::discord::ingress_shadow::shadow_tests::an_event_is_described_by_its_own_channel_and_ids
-  services::discord::ingress_shadow::shadow_tests::an_unreadable_gate_holds_and_counts_as_unknown
-  services::discord::ingress_shadow::shadow_tests::freshness_counts_the_whole_lookup_on_the_database_clock
-  services::discord::ingress_shadow::shadow_tests::only_the_switch_with_listed_channels_starts_an_observer
-  services::discord::ingress_shadow::shadow_tests::the_worker_judges_the_real_gate_and_records_every_id
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
   services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete
@@ -835,7 +807,7 @@ NON_PG_FILTER_REPLAY=(
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
   services::dispatches::wait_queue::tests::wake_query_preserves_fifo_ordering
   services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
-  services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
+  services::herdr_launch::tests::a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn
   services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
   services::herdr_launch::tests::retired_durability_tests::retired_hold_absent_still_requires_directory_fsync

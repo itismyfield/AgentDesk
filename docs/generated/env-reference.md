@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 126
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -44,13 +44,11 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
-| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
-| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
-| `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs` | Writes the first `init` under the gate's admission: a drain's close or a lease transition waits for its synchronous I/O and the activation serial lock. |
+| `ADK_S3B_MUTANT` | `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs` | Writes the first `init` under the gate's admission: a drain's close or a lease transition waits for its synchronous I/O and the activation serial lock. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
-| `ADK_TEST_HOME_COMMAND_MUTANT` | `src/server/routes/queue_api.rs`, `src/services/cluster/channel_home.rs` | Cancel the active turn in a channel. |
+| `ADK_TEST_HOME_COMMAND_MUTANT` | `src/server/routes/queue_api.rs` | Cancel the active turn in a channel. |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |

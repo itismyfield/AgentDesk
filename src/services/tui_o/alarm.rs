@@ -768,7 +768,6 @@ mod postgres_tests {
 
         const CHANNEL: u64 = 632_501;
         let _runtime_root = crate::config::TestRuntimeRootGuard::new();
-        assert!(crate::services::cluster::channel_home::registered_channel(CHANNEL).is_none());
         let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
             "agentdesk_o_alarm_writer_retry",
             "O writer autonomous alarm retry",

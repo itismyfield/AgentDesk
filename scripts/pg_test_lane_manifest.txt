@@ -31,7 +31,6 @@ src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
 src/db/o_channel_activation.rs
 src/db/o_channel_activation_fence_tests.rs
-src/db/o_channel_homes_tests.rs
 src/db/o_piece_ledger_tests.rs
 src/db/postgres.rs
 src/db/postgres/advisory_lock_tests.rs
@@ -114,8 +113,6 @@ src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
 src/services/auto_queue/runtime/verified_reset_pg_tests.rs
 src/services/automation_candidate_materializer/iteration_result_tests.rs
 src/services/cluster/attachment_transfer/storage_tests.rs
-src/services/cluster/channel_home_drain_tests.rs
-src/services/cluster/channel_home_tests.rs
 src/services/cluster/execution_capacity/tests.rs
 src/services/cluster/intake_preflight.rs
 src/services/cluster/intake_router_hook.rs
@@ -177,8 +174,6 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/receipt_boundary_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs
-src/services/discord/ingress_shadow/compat_tests.rs
-src/services/discord/ingress_shadow/shadow_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/placeholder_sweeper/retirement_tests.rs
@@ -428,7 +423,6 @@ db::intake_outbox_dispatch_stamp::tests
 db::intake_outbox_dispatched_audit::postgres_tests
 db::o_channel_activation::fence_tests
 db::o_channel_activation::postgres_tests
-db::o_channel_homes::tests
 db::postgres::advisory_lock::tests
 db::postgres::test_db_reclaim::tests
 db::postgres::tests
@@ -517,8 +511,6 @@ services::auto_queue::runtime::verified_reset_pg_tests
 services::auto_queue::tests
 services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
-services::cluster::channel_home::tests
-services::cluster::channel_home_drain::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
 services::cluster::intake_router_hook::agent_execution_node_tests
@@ -582,8 +574,6 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::receipt_boundary_tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
-services::discord::ingress_shadow::compat_tests
-services::discord::ingress_shadow::shadow_tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
 services::discord::queue_dispatch::canary_workspace::tests
@@ -1127,11 +1117,6 @@ db::o_channel_activation::fence_tests::fenced_rows_preserve_all_open_status_and_
 db::o_channel_activation::fence_tests::intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg
 db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_in_fresh_facts_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
-db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
-db::o_channel_homes::tests::a_row_read_carries_pgs_clock_from_the_same_statement_pg
-db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
-db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
-db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
 db::postgres::advisory_lock::tests::expiry_is_in_force_before_the_lock_is_granted_pg
 db::postgres::advisory_lock::tests::idle_expiry_ends_only_the_expiring_lease_session_pg
 db::postgres::advisory_lock::tests::keepalive_holds_an_expiring_lease_and_silence_releases_it_pg
@@ -1577,17 +1562,6 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::prepare_worktree_rejects_future_iterations_before_touching_git_pg
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
-services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
-services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
-services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
-services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
-services::cluster::channel_home_drain::tests::a_replaced_gates_cleanup_never_unregisters_the_gate_that_replaced_it_pg
-services::cluster::channel_home_drain::tests::an_unreadable_projection_or_a_dropped_hold_keeps_the_drain_waiting_pg
-services::cluster::channel_home_drain::tests::an_unreadable_row_or_intake_or_a_failed_leave_keeps_the_row_pg
-services::cluster::channel_home_drain::tests::command_drain_rechecks_recovery_admitted_during_reset_pg
-services::cluster::channel_home_drain::tests::command_drain_waits_before_reset_and_after_final_close_pg
-services::cluster::channel_home_drain::tests::the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg
-services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_once_across_hand_over_and_restarts_pg
 services::cluster::execution_capacity::tests::execution_capacity_atomic_reservations_execution_and_fenced_expiry_pg
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
 services::cluster::intake_router_hook::agent_execution_node_tests::agent_primary_inherits_into_thread_with_bounded_fallback_without_moving_owner_pg
@@ -1923,8 +1897,6 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_settles_admitted_kinds_and_leaves_other_turns_as_before_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
-services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
-services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placeholder_stops_before_mailbox_finish_pg
@@ -2908,13 +2880,13 @@ services::tui_o::writer::tests::actor::repost_turn::activation::d4act_actor_stop
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_channel_turn_binds_switch_before_real_repost_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_host_stop_during_pending_finish_prevents_retry_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_reload_off_during_429_wait_prevents_retry_pg
-services::tui_o::writer::tests::actor::repost_turn::activation::d4act_scope_revoked_after_grant_and_during_429_wait_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_revoked_after_grant_never_wires_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_revoked_after_tick_never_grants_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_source_revoked_during_429_wait_prevents_retry_pg
+services::tui_o::writer::tests::actor::repost_turn::activation::d4act_spent_grant_survives_dispatch_and_429_wait_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_switch_withdrawal_after_first_poll_keeps_started_http_and_slot_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::d4act_unbound_writer_blocks_grant_prepared_and_wire_pg
-services::tui_o::writer::tests::actor::repost_turn::activation::f6_delegated_admission_requires_sendable_home_pg
+services::tui_o::writer::tests::actor::repost_turn::activation::f6_admitted_work_suppresses_original_and_fresh_work_dispatches_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_herdr_repost_counts_as_inflight_until_request_ends_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg
 services::tui_o::writer::tests::actor::repost_turn::activation::f6_unsent_and_429_do_not_raise_uncertain_alarm_pg
@@ -2929,7 +2901,7 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_
 services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
-services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
+services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_returns_to_repost_owner_pg
 services::tui_o::writer::tests::actor::repost_turn::residual_home_row_does_not_change_writer_or_turn_host_pg
 services::tui_o::writer::tests::actor::repost_turn::scoped::scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg
 services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg

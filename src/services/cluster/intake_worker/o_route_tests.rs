@@ -79,20 +79,12 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
     drop((off, selected, unread));
 
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
-    struct ResidualGate;
-    impl Drop for ResidualGate {
-        fn drop(&mut self) {
-            crate::services::cluster::channel_home::unregister(&LEGACY.to_string());
-        }
-    }
-    let _residual = ResidualGate;
-    crate::services::cluster::channel_home::register_for_test(LEGACY, None);
     let (o_row, legacy_row) = (seed(&pool, O, 2).await, seed(&pool, LEGACY, 3).await);
     let not_ready = test_probe::answer_with(|_| false);
     assert_eq!(
         tick().await.unwrap(),
         TickOutcome::Processed,
-        "residual local home must not hold ordinary worker input"
+        "ordinary worker input reaches its normal route"
     );
     assert!(
         ran_past_o(state(&pool, legacy_row).await),
