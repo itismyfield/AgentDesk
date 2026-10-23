@@ -235,6 +235,7 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
             crate::services::turn_summary_line::Outcome::Completed,
             u64::try_from(elapsed).ok(),
             None,
+            None,
         ),
     ];
     append(&path, &[answer("msg_1", "the answer"), end].concat());

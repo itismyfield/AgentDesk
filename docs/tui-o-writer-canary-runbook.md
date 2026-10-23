@@ -285,13 +285,12 @@ the original piece once, then the output that followed. Run these on the O home,
   script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
   `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
 
-Enable re-post for a canary with both `tui_o.repost.enabled: true` and an explicit
-`tui_o.repost.channels: [<CHANNEL_ID>]` allowlist. An empty or missing `channels` list denies
-all re-post work; other hosted channels continue normal fresh original delivery. Validated reloads
-apply to the next grant and wire attempt, including a 429 retry, while an HTTP request whose first
-poll already left may finish.
+Re-post runs automatically for eligible gateway writer channels; it has no configuration switch or
+separate channel allowlist. Old `tui_o.repost` settings are ignored. An uncertain original is only
+re-posted after two complete absence checks, within the existing three-send budget. Stop the
+writer/host to quiesce its requests; a request that already left may finish.
 
-An enabled re-post turn reports retained uncertain backlog with
+A re-post turn reports retained uncertain backlog with
 `[tui_o] re-post backlog retained`: `channel`, `count`, and `pieces` contain the serial, unit key,
 piece index and reason, without the payload. The sidecar marks each serial before the log is
 emitted; repeated turns, sidecar reopening and later activations do not repeat that report.
@@ -303,15 +302,14 @@ be marked reported, or the reporting step may have failed.
 ## 8. Roll back after re-post activation
 
 An older binary that cannot read the `not_sent` ledger tag stops the channel writer with ledger
-damage if it encounters that tag. Turning re-post OFF does not end an existing request or prevent
-its terminal ledger append: a request waiting after HTTP 429 can append `not_sent` after OFF.
+damage if it encounters that tag. Stopping the host must be followed by request completion and
+writer quiescence: a request waiting after HTTP 429 can still append `not_sent` while stopping.
 Follow these steps in order before selecting that older binary:
 
-1. Confirm effective OFF.
-   Establish the complete list of channels that have ever had re-post enabled, including channels
-   no longer selected for activation. Confirm the effective re-post switch is OFF on every target
-   node, using its validated live value rather than a default or a file edit alone. Keep it OFF on
-   all nodes through the rollback decision.
+1. Stop the affected writer hosts.
+   Establish the complete list of channels whose writers have run re-post, including channels no
+   longer selected for writer activation. Stop those hosts on every target node and keep them
+   stopped through the rollback decision. Keep shared grants, receipts, sidecars and ledgers.
 2. Wait for in-flight requests and writer quiescence.
    Wait for existing requests to end and their terminal ledger appends to complete, then confirm
    the affected writer tasks have ended and joined with no ledger writes still possible. An HTTP
@@ -334,7 +332,7 @@ Follow these steps in order before selecting that older binary:
    or the full activation list cannot be established. Only complete, successful reads with zero
    `not_sent` tags across all activated ledgers allow this reader compatibility check to pass.
    The existing O writer rollback restrictions in §6 and operator-resume floor in §7 still apply.
-   OFF does not remove existing tags. Do not delete or automatically convert `not_sent` records,
+   Stopping does not remove existing tags. Do not delete or automatically convert `not_sent` records,
    or infer conversions from old Prepared/NotFound records. Keep a binary that supports the tag
    until a separately verified compatible recovery procedure is available.
 

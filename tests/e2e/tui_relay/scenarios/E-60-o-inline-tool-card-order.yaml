@@ -34,5 +34,5 @@ assertions:
       body_marker: "[E2E:E60:AFTER]"
       before_marker: "[E2E:E60:BEFORE]"
       tool_label: Bash
-      header: "-# ✅"
+      header: "-# ⏱️"
       output_owner: o

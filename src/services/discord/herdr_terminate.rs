@@ -372,13 +372,13 @@ pub(crate) async fn terminate_explicit_herdr(
     }
 }
 
-/// The service up to its settlement. A `dispatch` expectation binds the run to the dispatch the
-/// caller selected: the captured turn's and the row's active one must both be it.
+/// The service up to its settlement. An HTTP `expected` binds the run to what the caller selected:
+/// the row's owner, and the dispatch the captured turn and the row's active one must both be.
 async fn terminate_scoped(
     request: OperatorTerminate,
     shared: Arc<SharedData>,
     pool: &PgPool,
-    dispatch: Option<Option<String>>,
+    expected: Option<http_force::Expected>,
 ) -> Result<RetiredExclusion, TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
@@ -389,6 +389,7 @@ async fn terminate_scoped(
         return Err(Refused("unknown execution".into()));
     };
     if record.execution_nonce != request.execution_nonce
+        || expected.as_ref().is_some_and(|e| e.owner != record.owner)
         || record.state == HostedState::Retired
         || record.owner.discord_token_hash != shared.token_hash
         || Some(record.owner.owner_node.clone()) != crate::config::session_hosts::local_node()
@@ -434,7 +435,10 @@ async fn terminate_scoped(
         return Err(Refused("turn changed under transition".into()));
     }
     let captured = turn.as_ref().and_then(|turn| turn.dispatch_id.as_ref());
-    if dispatch.as_ref().is_some_and(|d| d.as_ref() != captured) {
+    if expected
+        .as_ref()
+        .is_some_and(|e| captured != e.dispatch.as_ref())
+    {
         return Err(Refused("captured turn runs another dispatch".into()));
     }
     let Some(target) = herdr_endpoints().target(record) else {
@@ -448,7 +452,7 @@ async fn terminate_scoped(
     #[cfg(test)]
     run_probe(&AFTER_FENCE).await;
     if load(pool, &request.session_key).await.as_ref() != Ok(&row)
-        || !http_force::dispatch_holds(pool, &row, dispatch.as_ref()).await
+        || !http_force::dispatch_holds(pool, &row, expected.as_ref()).await
     {
         fence.reopen();
         return Err(Refused("row changed under fence".into()));
@@ -509,7 +513,7 @@ async fn terminate_scoped(
     Ok(RetiredExclusion::new(
         parts,
         row,
-        dispatch.flatten(),
+        expected.and_then(|e| e.dispatch),
         provider,
         channel,
     ))

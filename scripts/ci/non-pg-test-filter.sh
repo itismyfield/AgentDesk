@@ -541,6 +541,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
+  services::discord::inflight::removal::custody_notice_tests::custody_retention_boundary_and_symlinks_never_follow_external_paths
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
   services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
@@ -1019,20 +1020,13 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
   services::tui_o::repost::admission_tests::local_retry_mark_excludes_both_root_and_child_before_pg_candidate_classification
   services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
-  services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
   services::tui_o::repost::runner_tests::f5_a_request_dropped_after_its_first_pending_is_gone_and_stays_counted
   services::tui_o::repost::runner_tests::f5_aborting_the_owning_task_ends_the_request_without_a_retry
   services::tui_o::repost::runner_tests::f5_admission_mapping_is_exhaustive
-  services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
   services::tui_o::writer::tests::actor::host_start::home::an_unregistered_channel_still_needs_the_pg_gateway_lease
-  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_unreadable_pool_is_unknown
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
-  services::tui_o::writer::tests::actor::repost_turn::allowlist::d4b_off_approved_piece_still_posts_once_through_actor
-  services::tui_o::writer::tests::actor::repost_turn::d4b_old_config_without_channels_denies_real_channel_turn
-  services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
-  services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
-  services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row

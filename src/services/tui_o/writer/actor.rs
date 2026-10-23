@@ -355,7 +355,7 @@ where
         }
         actor.collect_settled();
         actor.read_sources();
-        actor.poll_transition(sources_resumed, &unsettled);
+        actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         #[cfg(test)]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
@@ -423,6 +423,8 @@ where
 mod fresh_resume;
 #[cfg(test)]
 pub(crate) use fresh_resume::work_for_tests;
+mod automatic;
+mod automatic_age;
 mod transition;
 mod transition_snapshot;
 

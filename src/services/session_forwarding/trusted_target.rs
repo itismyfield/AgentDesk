@@ -250,6 +250,8 @@ fn validate_transport(
     if origin.scheme() == "https" {
         return Ok(());
     }
+    #[cfg(test)]
+    let pinned: &[SocketAddr] = &loopback_seam::unregistered(pinned);
     if !node_config.allow_private_forwarding
         || !node_config.allow_insecure_http_forwarding
         || !pinned
@@ -316,6 +318,11 @@ fn validate_addresses(
     }
     let mut unique = BTreeSet::new();
     for address in addresses {
+        #[cfg(test)]
+        if loopback_seam::admits(address, allow_private) {
+            unique.insert(address);
+            continue;
+        }
         if !address_is_allowed(address.ip(), allow_private) {
             return Err(TrustedTargetError::UnsafeAddress);
         }
@@ -416,6 +423,58 @@ fn ipv6_is_allowed(address: Ipv6Addr, allow_private: bool) -> bool {
         return allow_private;
     }
     true
+}
+
+#[cfg(test)]
+pub(crate) mod loopback_seam {
+    //! One exact loopback socket the registering thread treats as an operator-allowed private
+    //! address, so a test can forward to an owner server on 127.0.0.1; consent checks still apply.
+
+    use std::cell::Cell;
+    use std::net::SocketAddr;
+
+    thread_local! {
+        static ADMITTED: Cell<Option<SocketAddr>> = const { Cell::new(None) };
+    }
+
+    /// The registration; dropping it restores the address policy on its thread.
+    pub(crate) struct LoopbackGuard(());
+
+    /// Admits loopback `address` on this thread only; registering a second one panics.
+    pub(crate) fn allow_loopback_for_test(address: SocketAddr) -> LoopbackGuard {
+        assert!(
+            address.ip().is_loopback(),
+            "{address} is not a loopback socket"
+        );
+        let held = ADMITTED.with(Cell::get);
+        assert!(
+            held.is_none(),
+            "{held:?} is already admitted on this thread"
+        );
+        ADMITTED.with(|cell| cell.set(Some(address)));
+        LoopbackGuard(())
+    }
+
+    impl Drop for LoopbackGuard {
+        fn drop(&mut self) {
+            ADMITTED.with(|cell| cell.set(None));
+        }
+    }
+
+    fn registered(address: SocketAddr) -> bool {
+        ADMITTED.with(Cell::get) == Some(address)
+    }
+
+    /// The registered socket passes only where private addresses are allowed.
+    pub(super) fn admits(address: SocketAddr, allow_private: bool) -> bool {
+        allow_private && registered(address)
+    }
+
+    /// `pinned` without the registered socket, which counts as a configured private address.
+    pub(super) fn unregistered(pinned: &[SocketAddr]) -> Vec<SocketAddr> {
+        let unregistered = |address: &&SocketAddr| !registered(**address);
+        pinned.iter().filter(unregistered).copied().collect()
+    }
 }
 
 #[cfg(test)]
@@ -802,3 +861,6 @@ mod tests {
         assert!(lookups.lock().unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod loopback_seam_tests;
