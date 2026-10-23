@@ -78,9 +78,12 @@ fn measure(out: &Path) {
         db.seed_blocks().await;
         db
     });
-    let pg_version: String = infra
-        .block_on(sqlx::query_scalar("SHOW server_version").fetch_one(&db.seed))
-        .expect("read the server version");
+    let pg_version = infra.block_on(async {
+        let connection = db.seed.acquire().await.expect("a seed connection");
+        connection
+            .server_version_num()
+            .expect("the server reports its version")
+    });
     let server = runtime("amp-server", SERVER_WORKERS);
     let addr = server.block_on(async {
         let mut engine_config = crate::config::Config::default();
@@ -122,7 +125,7 @@ fn measure(out: &Path) {
     generator.shutdown_timeout(Duration::from_secs(5));
     infra.block_on(db.finish());
 
-    let conditions = conditions(plan, &pg_version);
+    let conditions = conditions(plan, pg_version);
     let resources = Resources {
         start,
         end,
@@ -170,7 +173,7 @@ fn sample(db: &Db) -> Sample {
     }
 }
 
-fn conditions(plan: Plan, pg_version: &str) -> BTreeMap<String, String> {
+fn conditions(plan: Plan, pg_version: u32) -> BTreeMap<String, String> {
     let mut harness = Sha256::new();
     for source in HARNESS_SOURCES {
         harness.update(source.as_bytes());

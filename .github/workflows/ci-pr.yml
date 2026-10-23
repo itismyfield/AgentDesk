@@ -294,6 +294,7 @@ jobs:
               - 'src/server/routes/dispatches/crud.rs'
               - 'src/server/routes/escalation.rs'
               - 'src/server/routes/health_api/db_deadline_tests.rs'
+              - 'src/server/routes/health_api/db_deadline_tests/amplification_profile_tests.rs'
               - 'src/server/routes/health_api/host_guard_tests.rs'
               - 'src/server/routes/health_api/kv_gate_tests.rs'
               - 'src/server/routes/herdr_legacy_tests.rs'
