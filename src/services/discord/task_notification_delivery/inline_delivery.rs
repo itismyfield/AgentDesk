@@ -6,10 +6,12 @@ pub(super) fn needs_reconciliation(
     clients: &CardDeliveryClients,
     claimed: &ClaimedCard,
 ) -> bool {
+    if event.payload.is_completion_card() {
+        return false;
+    }
     let desired = clients.for_event(event);
     desired.is_none_or(|bot| bot.key != claimed.bot_key)
-        || (!event.payload.is_completion_card()
-            && !super::super::session_notice::is_inline(&claimed.rendered_content))
+        || !super::super::session_notice::is_inline(&claimed.rendered_content)
 }
 
 pub(super) async fn reconcile_legacy<T: TaskCardTransport>(
