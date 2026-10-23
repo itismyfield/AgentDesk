@@ -389,19 +389,13 @@ impl HomeGate {
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
     #[cfg(test)]
-    pub(crate) fn admit_at_epoch(
-        &self,
-        provider: &str,
-        expected: i64,
-        recovery: bool,
-    ) -> Option<CommandPermit> {
-        self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
+    pub(crate) fn admit_at_epoch(&self, expected: i64, recovery: bool) -> Option<CommandPermit> {
+        self.admit_at_epoch_checked(expected, recovery, |_| {})
     }
 
     #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
-        _provider: &str,
         expected: i64,
         recovery: bool,
         minted: impl FnOnce(i64),

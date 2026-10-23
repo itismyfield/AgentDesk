@@ -710,9 +710,9 @@ async fn a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set() {
     let closed = owned(2, 1, HomeIntake::Closed);
     assert_eq!((home.ownership(), sampled(&home)), (closed, closed));
     assert!(home.admit_command("claude").is_none() && !home.intake_open());
-    assert!(home.admit_at_epoch("claude", 2, false).is_none());
+    assert!(home.admit_at_epoch(2, false).is_none());
     assert_eq!(home.refusal(), Some(HomeRefusal::Draining));
-    let restore = home.admit_at_epoch("claude", 2, true);
+    let restore = home.admit_at_epoch(2, true);
     assert!(restore.is_some(), "the restore is admitted");
     assert_eq!(
         home.admit_post(|epoch| epoch),
@@ -741,7 +741,7 @@ async fn a_restore_finishing_after_its_home_was_lost_opens_no_intake() {
     let home = HomeGate::new(C, "mini").opens_after(Some(Arc::clone(&restored)));
     home.confirm(&written("mini", 2, HomeState::Worker), Instant::now())
         .unwrap();
-    let restore = home.admit_at_epoch("claude", 2, true).expect("held");
+    let restore = home.admit_at_epoch(2, true).expect("held");
     home.renewal_stale(2);
     restored.store(true, Ordering::Release);
     assert_eq!(
@@ -750,10 +750,7 @@ async fn a_restore_finishing_after_its_home_was_lost_opens_no_intake() {
     );
     assert!(!home.intake_open() && home.admit_command("claude").is_none());
     assert_eq!(home.refusal(), Some(HomeRefusal::NotHeld));
-    assert!(
-        home.admit_at_epoch("claude", 2, true).is_none(),
-        "no new permit"
-    );
+    assert!(home.admit_at_epoch(2, true).is_none(), "no new permit");
     assert_eq!(
         home.commands_in_flight(),
         1,

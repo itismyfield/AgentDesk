@@ -900,9 +900,6 @@ fn force_duplicate_abort_restart_pg() {
     });
 }
 
-// The home command a forced cancel was admitted under stays open while its detached run lives,
-// past a dropped request, and closes once the run ends.
-
 // While a forced cancel waits on its end check, another channel of the same runtime takes its
 // queued input and its own transition: the run waits on nothing outside its channel.
 #[test]

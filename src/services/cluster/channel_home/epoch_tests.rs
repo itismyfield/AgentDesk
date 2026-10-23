@@ -13,7 +13,7 @@ async fn s3act_b3a2_epoch_check_and_permit_share_lock() {
     for recovery in [false, true] {
         let mut competed = false;
         let permit = home
-            .admit_at_epoch_checked("claude", 1, recovery, |epoch| {
+            .admit_at_epoch_checked(1, recovery, |epoch| {
                 assert_eq!(epoch, 1, "permit must name the checked epoch");
                 assert_eq!(
                     home.local
@@ -45,13 +45,13 @@ async fn s3act_b3a2_epoch_check_and_permit_share_lock() {
     )
     .unwrap();
     for recovery in [false, true] {
-        assert!(home.admit_at_epoch("claude", 1, recovery).is_none());
+        assert!(home.admit_at_epoch(1, recovery).is_none());
     }
     home.close_intake();
-    assert!(home.admit_at_epoch("claude", 2, false).is_none());
-    assert!(home.admit_at_epoch("claude", 2, true).is_some());
+    assert!(home.admit_at_epoch(2, false).is_none());
+    assert!(home.admit_at_epoch(2, true).is_some());
     home.close();
-    assert!(home.admit_at_epoch("claude", 2, true).is_none());
+    assert!(home.admit_at_epoch(2, true).is_none());
 }
 
 impl HomeGate {

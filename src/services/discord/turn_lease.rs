@@ -342,6 +342,8 @@ impl OperatorRelease {
             ),
         };
         let _ = self.clear_outcome.set(cleared);
+        #[cfg(test)]
+        tests::pause_operator_claim().await;
         tracing::warn!(channel_id = key.channel_id.get(), turn_id = key.user_msg_id,
             turn_nonce = %self.request.expected.turn_nonce, generation = key.generation,
             reason = %self.request.reason, inflight_clear = ?cleared,

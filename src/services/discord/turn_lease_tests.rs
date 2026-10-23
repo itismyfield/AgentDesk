@@ -1031,3 +1031,82 @@ async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_inp
         HERDR_SETTLEMENT_OVERRIDE.set(true);
     }).await;
 }
+
+type ClaimPause = Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+
+thread_local! {
+    static OPERATOR_CLAIM_PAUSE: std::cell::RefCell<Option<ClaimPause>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) async fn pause_operator_claim() {
+    let pause = OPERATOR_CLAIM_PAUSE.with(|slot| slot.borrow().clone());
+    if let Some(pause) = pause {
+        pause.0.notify_one();
+        pause.1.notified().await;
+    }
+}
+
+struct OperatorClaimPause;
+impl Drop for OperatorClaimPause {
+    fn drop(&mut self) {
+        OPERATOR_CLAIM_PAUSE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn operator_release_settles_after_caller_abort_without_home_fence() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575499);
+        let request = seed(&shared, channel).await;
+        let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        OPERATOR_CLAIM_PAUSE.with(|slot| *slot.borrow_mut() = Some(barrier.clone()));
+        let _pause = OperatorClaimPause;
+        let owner = Arc::clone(&shared);
+        let caller =
+            tokio::spawn(async move { release_on(&owner, &PROVIDER, channel, request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
+            .await
+            .expect("operator claim reached its actual actor boundary");
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none(),
+            "exact CAS already ran"
+        );
+        assert!(
+            inflight::load_inflight_state_read_only(&PROVIDER, channel.get()).is_none(),
+            "claim cleared its captured inflight row"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Acquire),
+            1,
+            "actor settlement still pending"
+        );
+        caller.abort();
+        let cancelled = caller.await.is_err_and(|error| error.is_cancelled());
+        barrier.1.notify_one();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while shared.restart.global_active.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(cancelled && settled, "actor settled after caller abort");
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .cancel_token
+                .is_none()
+        );
+        assert!(inflight::load_inflight_state_read_only(&PROVIDER, channel.get()).is_none());
+        assert_eq!(shared.restart.global_active.load(Ordering::Acquire), 0);
+    })
+    .await;
+}

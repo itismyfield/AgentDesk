@@ -658,9 +658,6 @@ fn e08_force_kill_non_owner_forwards_pg() {
     });
 }
 
-// The home command a force-kill was admitted under stays open while its detached run lives,
-// past a dropped request, and closes once the run ends.
-
 // The force-kill's own read binds the run: when its turn ended and the successor's dispatch took
 // the channel right after that read, the run is refused before any close and the successor lives.
 #[test]

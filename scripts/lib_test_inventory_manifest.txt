@@ -10914,6 +10914,7 @@ services::discord::turn_lease::tests::operator_release_commits_without_any_infli
 services::discord::turn_lease::tests::operator_release_follow_up_never_latches_a_successor_recovery
 services::discord::turn_lease::tests::operator_release_preserves_queue_and_provider_and_is_idempotent
 services::discord::turn_lease::tests::operator_release_rejects_changed_identity_or_generation_without_effects
+services::discord::turn_lease::tests::operator_release_settles_after_caller_abort_without_home_fence
 services::discord::turn_lease::tests::operator_release_strict_clear_preserves_nonce_less_successor
 services::discord::turn_lease::tests::rebind_origin_row_still_refuses_operator_inspect_and_release
 services::discord::turn_lease::tests::restart_mode_pinned_token_still_refuses_release_without_any_row
@@ -13825,8 +13826,8 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_cleaned_source_that_grows_reads_again_as_a_provider_retirement_does
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_in_progress_refuses_its_id_asked_with_another_request
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_is_compared_whole_and_never_applied_again_to_a_source_read_again
-services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_keeps_its_permit_until_it_ends_however_the_requester_left
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_probes_at_most_sixty_four_candidates
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_runs_to_completion_after_the_requester_leaves
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_uncounted_posts_unknown
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_what_the_actor_still_owes_from_its_own_state
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_probes_run_on_one_worker_however_slow_it_is
