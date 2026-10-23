@@ -439,10 +439,11 @@ fn v2_retained_snapshot_cost_is_measured_without_compacting_originals() {
     for count in [0, 32, 256, 1024] {
         let mut next = owner.snapshot.clone();
         next.retained_inputs = vec![template.clone(); count];
+        owner.fault = Fault::AfterRename;
         owner.commit(next).unwrap();
         let bytes = std::fs::metadata(&owner.path).unwrap().len();
         println!(
-            "RETAINED_COST R={count} snapshot_bytes={bytes} full_compare_bytes={bytes} readback_bytes={bytes}"
+            "RETAINED_COST R={count} snapshot_bytes={bytes} candidate_full_compare_bytes={bytes} candidate_readback_bytes={bytes}"
         );
         assert_eq!(owner.snapshot.retained_inputs.len(), count);
     }
@@ -465,7 +466,8 @@ fn v2_late_success_and_failure_never_settle_the_current_head() {
     drop(owner.arm(&a, 1000).unwrap());
     owner.tick(31_000).unwrap();
     owner.enqueue(item(200)).unwrap();
-    owner.reserve(attempt(200, "pane-late"), payload()).unwrap();
+    let b = owner.reserve(attempt(200, "pane-late"), payload()).unwrap();
+    drop(owner.arm(&b, 32_000).unwrap());
     let before = owner.json().unwrap();
     owner.settle(&a, false, 32_000).unwrap();
     assert_eq!(

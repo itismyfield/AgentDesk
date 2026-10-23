@@ -479,7 +479,7 @@ async fn queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg() 
         .unwrap();
     let transcript = f.pane.dir.path().join("rollout.jsonl");
     let meta = fs::metadata(&transcript).unwrap();
-    let attempt = serde_json::json!({"nonce":"v2-real-native-receipt", "provider":"codex",
+    let attempt = serde_json::json!({"nonce":"7272301a", "provider":"codex",
         "target":{"host":"tmux","owner":f.pane.session(),"root":"/tmp","execution_nonce":"turn-open"},
         "source":{"kind":"existing","session_id":format!("queued-codex-{}",f.pane.channel),
             "transcript":transcript.display().to_string(),"file":[meta.dev(),meta.ino()],"offset":meta.len()}});
@@ -496,9 +496,12 @@ async fn queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg() 
         })
         .await
         .unwrap();
+    let result = f.attempt().await;
     assert!(
-        matches!(f.attempt().await, InjectAttempt::Injected { .. }),
-        "V2 must traverse the actual queued origin, permit, adapter and rollout receipt"
+        matches!(result, InjectAttempt::Injected { .. }),
+        "V2 must traverse the actual queued origin, permit, adapter and rollout receipt: {result:?}; disk={}; keys={}",
+        f.disk(),
+        f.pane.keys()
     );
     let snapshot = mailbox
         .v2_request(|slot| slot.as_ref().unwrap().json())
