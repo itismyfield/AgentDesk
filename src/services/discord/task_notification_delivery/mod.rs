@@ -14,6 +14,8 @@ mod store;
 mod terminal_identity;
 
 #[cfg(test)]
+mod inline_contract_tests;
+#[cfg(test)]
 mod footer_retirement_tests;
 #[cfg(test)]
 mod tests;
