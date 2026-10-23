@@ -189,7 +189,7 @@ pub(crate) struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Envelope>,
-    /// The writer's gate, which owns a channel without a registered home.
+    /// The writer's channel ownership gate.
     pub(super) gate: Arc<OwnershipGate>,
     pub(super) wall: Wall,
     /// The host's stop, raised before the actor's own stop reaches it.
@@ -244,7 +244,7 @@ impl TransitionPort {
     }
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
-    /// runs to its end with the permit, and only the reply is lost.
+    /// runs to its end, and only the reply is lost.
     pub(crate) async fn request(
         &self,
         operation: Operation,

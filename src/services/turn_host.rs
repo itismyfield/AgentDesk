@@ -121,8 +121,8 @@ pub(crate) async fn for_turn(
     }
 }
 
-/// The turn's first judgement, before it resets, reconciles or clears anything: a delegated channel
-/// not held here or a configured one is refused, any other passes without I/O.
+/// Before resetting, reconciling or clearing a turn, refuse a configured Herdr session.
+/// An unconfigured channel passes without I/O.
 pub(crate) async fn refusal_before_turn<F>(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
