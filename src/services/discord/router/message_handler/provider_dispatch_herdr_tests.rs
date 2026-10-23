@@ -226,13 +226,30 @@ impl Fixture {
             .unwrap();
             (db, pool)
         });
+        let rig = HerdrRig::start();
+        rig.answer(
+            "pane.read",
+            json!({
+                "type": "pane_read",
+                "read": {
+                    "pane_id": PANE,
+                    "source": "recent_unwrapped",
+                    "text": include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
+                    )),
+                    "revision": 1,
+                    "truncated": false,
+                },
+            }),
+        );
         Self {
             ingress,
             rt,
             db: Some(db),
             pool,
             owner,
-            rig: HerdrRig::start(),
+            rig,
             cwd: tempfile::tempdir().unwrap(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
