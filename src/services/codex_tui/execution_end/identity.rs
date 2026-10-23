@@ -11,12 +11,43 @@ use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
 const PROMPT_PREFIX_BYTES: u64 = 4 * 1024 * 1024;
 
+#[cfg(unix)]
+#[derive(Debug)]
+pub(super) enum SourceFailure {
+    Pending(String),
+    Rejected(String),
+}
+
+#[cfg(unix)]
+impl From<&str> for SourceFailure {
+    fn from(reason: &str) -> Self {
+        Self::Rejected(reason.into())
+    }
+}
+
+#[cfg(unix)]
+impl From<String> for SourceFailure {
+    fn from(reason: String) -> Self {
+        Self::Pending(reason)
+    }
+}
+
 /// Verifies the exact old source; a resume may retain a source born before this execution.
 #[cfg(unix)]
 pub(crate) fn verify_source(
     context: &BindingContext,
     source: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
 ) -> Result<std::path::PathBuf, String> {
+    verify_source_detail(context, source).map_err(|failure| match failure {
+        SourceFailure::Pending(reason) | SourceFailure::Rejected(reason) => reason,
+    })
+}
+
+#[cfg(unix)]
+pub(super) fn verify_source_detail(
+    context: &BindingContext,
+    source: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
+) -> Result<std::path::PathBuf, SourceFailure> {
     use crate::services::codex_tui::session::source_observation::{
         CodexHookSourceClaim, CodexRolloutSource, verify_codex_hook_source,
     };
@@ -33,7 +64,11 @@ pub(crate) fn verify_source(
     if super::mutant("source_unchecked") {
         return Ok(canonical_root);
     }
-    if source.path.canonicalize().ok().as_ref() != Some(&source.path) {
+    let canonical_source = source
+        .path
+        .canonicalize()
+        .map_err(|_| SourceFailure::Pending("source is not canonical".into()))?;
+    if canonical_source != source.path {
         return Err("source is not canonical".into());
     }
     let verified = verify_codex_hook_source(
@@ -44,7 +79,14 @@ pub(crate) fn verify_source(
             expected_source: CodexRolloutSource::Cli,
         },
     )
-    .map_err(|reason| format!("native source rejected: {reason:?}"))?;
+    .map_err(|reason| {
+        let message = format!("native source rejected: {reason:?}");
+        if reason.may_resolve_later() {
+            SourceFailure::Pending(message)
+        } else {
+            SourceFailure::Rejected(message)
+        }
+    })?;
     let exact_file = match verified.identity {
         #[cfg(unix)]
         SourceFileIdentity::Unix { dev, ino } => dev == source.dev && ino == source.ino,
@@ -65,12 +107,14 @@ pub(crate) fn verify_source(
         }
         "fresh" => match fresh_source_evidence(context, &verified) {
             Ok(Some(())) => Ok(canonical_root),
-            Ok(None) => Err("fresh source evidence pending".into()),
-            Err(reason) => Err(if super::mutant("reason_merged") {
+            Ok(None) => Err(SourceFailure::Pending(
+                "fresh source evidence pending".into(),
+            )),
+            Err(reason) => Err(SourceFailure::Rejected(if super::mutant("reason_merged") {
                 "fresh source does not match execution context".into()
             } else {
                 reason
-            }),
+            })),
         },
         _ => Err("source is not the execution's fresh or resumed source".into()),
     }

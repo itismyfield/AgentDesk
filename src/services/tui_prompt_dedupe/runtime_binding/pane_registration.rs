@@ -105,10 +105,15 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
         return false;
     }
     let record = Record::Stat;
-    register_rehydrated_under_source_authority(
+    let published = register_rehydrated_under_source_authority(
         authority, provider, channel_id, binding, record, cause,
     )
-    .is_some_and(Persisted::published)
+    .is_some_and(Persisted::published);
+    #[cfg(unix)]
+    if published && provider == "codex" {
+        crate::services::codex_tui::execution_end::producer::binding_published_under(authority);
+    }
+    published
 }
 
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;

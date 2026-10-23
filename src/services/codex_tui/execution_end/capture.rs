@@ -90,6 +90,7 @@ fn capture_under(
         ended_at: Utc::now(),
         basis: EndBasis::ExplicitClear,
         context: ContextSnapshot::from(&context),
+        successor: None,
     };
     Ok(CapturedOldExecution {
         record,
