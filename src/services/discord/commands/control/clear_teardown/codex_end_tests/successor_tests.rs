@@ -56,7 +56,7 @@ fn fresh(pane: &Pane, prompt: Option<&str>) -> (BindingContext, PathBuf, String)
         .unwrap()
         .join(format!("rollout-{session}.jsonl"));
     let header = serde_json::json!({"type":"session_meta","payload":{
-        "id":session,"source":"cli","cwd":"/private/tmp",
+        "id":session,"source":"cli","cwd":canonical_tmp(),
         "timestamp":context.created_at.to_rfc3339()
     }});
     std::fs::write(&path, format!("{header}\n")).unwrap();
@@ -124,7 +124,7 @@ fn cold_pane(dir: &Path) -> Pane {
     .unwrap();
     let source = dir.join(format!("rollout-2026-10-23-{id}.jsonl"));
     let header = serde_json::json!({"type":"session_meta","payload":{
-        "id":id.to_string(),"source":"cli","cwd":"/private/tmp",
+        "id":id.to_string(),"source":"cli","cwd":canonical_tmp(),
         "timestamp":(context.created_at + chrono::Duration::seconds(1)).to_rfc3339()
     }});
     std::fs::write(&source, format!("{header}\n")).unwrap();
@@ -154,7 +154,7 @@ if [ "${1-} ${2-}" = 'resume --help' ]; then echo '--dangerously-bypass-hook-tru
 python3 - "$@" <<'PY'
 import datetime, json, os, pathlib, uuid
 context = json.loads(pathlib.Path(os.environ['AGENTDESK_BINDING_CONTEXT']).read_text())
-working_dir = '/private/tmp' if context.get('expected_native_session_id') else str(pathlib.Path(context['provider_root']).parent)
+working_dir = CANONICAL_TMP if context.get('expected_native_session_id') else str(pathlib.Path(context['provider_root']).parent)
 identity = context.get('expected_native_session_id') or str(uuid.uuid4())
 stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 rows = [
@@ -173,7 +173,7 @@ if context.get('expected_native_session_id'):
 else:
     path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
 PY
-"#).unwrap();
+"#.replace("CANONICAL_TMP", &serde_json::to_string(&canonical_tmp()).unwrap())).unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
     vec![
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -607,7 +607,7 @@ fn first_binding_before_context_blocks_a_later_matching_fresh_source() {
     let (context, path, session) = fresh(&pane, None);
     spawn(&pane, &context, &mut observation);
     let header = serde_json::json!({"type":"session_meta","payload":{
-        "id":session,"source":"cli","cwd":"/private/tmp",
+        "id":session,"source":"cli","cwd":canonical_tmp(),
         "timestamp":(context.created_at - chrono::Duration::milliseconds(1)).to_rfc3339()
     }});
     std::fs::write(&path, format!("{header}\n")).unwrap();
@@ -763,7 +763,7 @@ fn seven_historical_unsealed_ends_stay_unsealed_when_only_the_adjacent_end_seals
     let mut fixture = Fixture::new();
     fixture.logs = tempfile::Builder::new()
         .prefix("a2a7-")
-        .tempdir_in("/private/tmp")
+        .tempdir_in(canonical_tmp())
         .unwrap();
     p5::set_test_root(Some(fixture.logs.path()));
     let pane = Pane::start(fixture.logs.path());
@@ -788,7 +788,7 @@ fn seven_historical_unsealed_ends_stay_unsealed_when_only_the_adjacent_end_seals
         let session = uuid::Uuid::new_v4().to_string();
         let path = provider_root.join(format!("rollout-{session}.jsonl"));
         let header = serde_json::json!({"type":"session_meta","payload":{
-            "id":session,"source":"cli","cwd":"/private/tmp",
+            "id":session,"source":"cli","cwd":canonical_tmp(),
             "timestamp":context.created_at.to_rfc3339()
         }});
         std::fs::write(&path, format!("{header}\n")).unwrap();
@@ -878,8 +878,7 @@ fn actual_warm_kill_fallback_resumes_without_seal_and_preserves_managed_turn() {
         .unwrap()
         .source;
     let native = source.session_id.clone();
-    let options =
-        crate::services::codex::actual_submit_tests::options(&native, Path::new("/private/tmp"));
+    let options = crate::services::codex::actual_submit_tests::options(&native, &canonical_tmp());
     crate::services::codex_tui::warm_followup::write_codex_tui_launch_options_evidence(
         &pane.name, &options,
     )
@@ -993,7 +992,7 @@ fn actual_warm_kill_fallback_resumes_without_seal_and_preserves_managed_turn() {
     let mut result = None;
     let logs = capture_logs(|| {
         result = Some(crate::services::codex::actual_submit_tests::cold_driver(
-            Path::new("/private/tmp"),
+            &canonical_tmp(),
             &native,
             (&pane.name, pane.channel),
             Arc::clone(&token),
