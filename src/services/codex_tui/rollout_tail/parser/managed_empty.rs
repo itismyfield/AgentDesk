@@ -22,8 +22,7 @@ pub(in super::super) fn body_or_verified_empty(state: &RolloutParseState, guard:
             && state.own_turn_complete_seen
             && !state.mixed_turn
             && !state.has_pending_tool_call()
-            && !state.dropped_assistant_content
-            && state.final_text.is_empty())
+            && !state.dropped_assistant_content)
 }
 
 pub(in super::super) fn mutant(name: &str) -> bool {

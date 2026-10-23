@@ -93,6 +93,13 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
                 json!("previous answer must not be adopted");
             rows.insert(2, previous);
         }
+        "commentary_only" => {
+            let mut commentary = rows[7].clone();
+            commentary["payload"]["id"] = json!("commentary-answer");
+            commentary["payload"]["phase"] = json!("commentary");
+            commentary["payload"]["content"][0]["text"] = json!("current commentary");
+            rows.insert(7, commentary);
+        }
         _ => {}
     }
     let mut prefix = encode(&[json!({"type":"response_item","payload":{
@@ -214,8 +221,20 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
         assert!(
             !messages
                 .iter()
-                .any(|m| matches!(m, StreamMessage::Text { .. } | StreamMessage::Done { .. })),
-            "{case}: no previous or synthesized body and no plain Done"
+                .any(|m| matches!(m, StreamMessage::Done { .. })),
+            "{case}: no plain Done"
+        );
+        let expected = if case == "commentary_only" {
+            "current commentary"
+        } else {
+            ""
+        };
+        assert!(messages.iter().any(|m| matches!(m, StreamMessage::CodexTuiTerminalDone { result, .. } if result == expected)), "{case}: only this turn's body is retained");
+        assert!(
+            messages
+                .iter()
+                .all(|m| !matches!(m, StreamMessage::Text { content } if content != expected)),
+            "{case}: no previous or synthesized text"
         );
     }
     if case == "hook_after" {
@@ -304,6 +323,7 @@ async fn drive_bridge(
 async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_notice() {
     for (o, order) in [
         (false, "hook_before"),
+        (false, "commentary_only"),
         (true, "hook_before"),
         (true, "hook_after"),
     ] {
@@ -348,13 +368,21 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
                 .iter()
                 .filter(|body| body.contains("응답 내용 없이 턴을 종료"))
                 .count(),
-            1,
+            usize::from(order != "commentary_only"),
             "one visible empty-response notice on o={o}: {bodies:?}"
         );
         assert!(
             !bodies.iter().any(|body| body.contains("previous answer")),
             "never reuse a previous answer"
         );
+        if order == "commentary_only" {
+            assert!(
+                bodies
+                    .iter()
+                    .any(|body| body.contains("current commentary")),
+                "current commentary remains visible"
+            );
+        }
         if o {
             assert_eq!(footer_posts.len(), 1, "O posts the native completion once");
             assert!(footer_posts[0].starts_with("-# ✅"));
@@ -368,7 +396,7 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
                 .observations()
                 .iter()
                 .any(|call| call.call == DriverCall::Replace),
-            "placeholder ends on the notice"
+            "placeholder ends on terminal delivery"
         );
         assert!(
             discord::mailbox_try_start_turn(
