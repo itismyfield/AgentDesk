@@ -11,7 +11,6 @@ pub(super) fn check_reviewed_calls() {
     const OWNED: &str = "owned by another piece";
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
-    const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
     const CLEAR: &str = "a user clear of a channel with no Herdr endpoint";
     const CALLS: &[(&str, Listed)] = &[
         (
@@ -79,7 +78,7 @@ pub(super) fn check_reviewed_calls() {
         (
             "cleanup_session_temp_files_under_source_authority",
             &[
-                ("src/services/tmux_common.rs", 2, ENTRY),
+                ("src/services/tmux_common.rs", 1, ENTRY),
                 ("src/services/codex/absence_launch.rs", 1, SWEEP),
                 (
                     "src/services/tui_prompt_dedupe/runtime_binding/codex_policy/clear_relaunch.rs",
@@ -87,10 +86,6 @@ pub(super) fn check_reviewed_calls() {
                     CLEAR,
                 ),
             ],
-        ),
-        (
-            "cleanup_native_clear_fallback_under_source_authority",
-            &[("src/services/tui_prompt_dedupe/native_clear.rs", 1, NATIVE)],
         ),
         (
             "end_managed_process_session",
@@ -116,7 +111,6 @@ pub(super) fn check_reviewed_calls() {
                     1,
                     MISSING,
                 ),
-                ("src/services/discord/commands/control/native.rs", 1, NATIVE),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
                 ("src/services/discord/admin_host_guard.rs", 1, MISSING),
@@ -270,40 +264,36 @@ fn authority_cleanup_inventory_follows_aliases_and_function_values() {
     const COMMON: &str = "src/services/tmux_common.rs";
     const OTHER: &str = "src/services/other.rs";
     const REVIEWED: Listed = &[(COMMON, 1, "the reviewed call")];
-    for needle in [
-        "cleanup_session_temp_files_under_source_authority",
-        "cleanup_native_clear_fallback_under_source_authority",
-    ] {
-        let calls = [(needle, REVIEWED)];
-        let base = format!(
-            "pub(crate) fn {needle}(a: &Authority, n: &str) {{}}\n\
-             fn reviewed(a: &Authority, n: &str) {{ {needle}(a, n); }}\n\
-             pub(crate) use self::{needle} as wipe;\n"
-        );
-        let mut sources = BTreeMap::from([(COMMON.to_string(), base)]);
-        assert!(listed_call_violations(&sources, &calls).is_empty());
-        sources.insert(
-            OTHER.to_string(),
-            "fn extra(a: &Authority, n: &str) { crate::services::tmux_common::wipe(a, n); }"
-                .to_string(),
-        );
-        let found = listed_call_violations(&sources, &calls);
-        assert!(
-            found
-                .iter()
-                .any(|v| v.contains(&format!("unlisted {needle} x1"))),
-            "{needle}: {found:?}"
-        );
-        sources.insert(
-            OTHER.to_string(),
-            "fn extra() { let later = crate::services::tmux_common::wipe; }".to_string(),
-        );
-        let found = listed_call_violations(&sources, &calls);
-        assert!(
-            found.iter().any(|v| v.contains("taken as a value x1")),
-            "{needle}: {found:?}"
-        );
-    }
+    let needle = "cleanup_session_temp_files_under_source_authority";
+    let calls = [(needle, REVIEWED)];
+    let base = format!(
+        "pub(crate) fn {needle}(a: &Authority, n: &str) {{}}\n\
+         fn reviewed(a: &Authority, n: &str) {{ {needle}(a, n); }}\n\
+         pub(crate) use self::{needle} as wipe;\n"
+    );
+    let mut sources = BTreeMap::from([(COMMON.to_string(), base)]);
+    assert!(listed_call_violations(&sources, &calls).is_empty());
+    sources.insert(
+        OTHER.to_string(),
+        "fn extra(a: &Authority, n: &str) { crate::services::tmux_common::wipe(a, n); }"
+            .to_string(),
+    );
+    let found = listed_call_violations(&sources, &calls);
+    assert!(
+        found
+            .iter()
+            .any(|v| v.contains(&format!("unlisted {needle} x1"))),
+        "{needle}: {found:?}"
+    );
+    sources.insert(
+        OTHER.to_string(),
+        "fn extra() { let later = crate::services::tmux_common::wipe; }".to_string(),
+    );
+    let found = listed_call_violations(&sources, &calls);
+    assert!(
+        found.iter().any(|v| v.contains("taken as a value x1")),
+        "{needle}: {found:?}"
+    );
 }
 
 #[test]

@@ -1063,3 +1063,12 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_resets_it_without_tm
     assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux call");
     db.drop().await;
 }
+
+/// A bounded runtime for the replay kickoff fixtures.
+pub(in crate::services::discord) fn intake_replay_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+}

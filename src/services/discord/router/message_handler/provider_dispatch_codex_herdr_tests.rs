@@ -1036,8 +1036,7 @@ fn session_key(provider: &ProviderKind) -> String {
     )
 }
 
-// T1-1/T1-1b/T1-2/T1-10: each provider follows only its own switch at intake and dispatch, with no
-// tmux or provider I/O; on, Codex is O-ready by its own kind and its `!clear` is refused.
+// Each provider follows its own switch at intake and dispatch without pane or provider I/O.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_pg() {
     use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
@@ -1122,22 +1121,14 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                 .unwrap(),
                 sender,
             );
-            let clear = crate::services::discord::admin_host_guard::read_herdr_clear(
-                Some(pool),
-                &provider,
-                channel,
-                Some(&key),
-            )
-            .await
-            .err();
-            (intake, dispatched, clear)
+            (intake, dispatched)
         }
     };
     let entered = Err("herdr turn: no database".to_string());
     for claude in [false, true] {
         for codex in [false, true] {
             let case = format!("claude={claude} codex={codex}");
-            let (intake, dispatched, _) = judge(ProviderKind::Claude, claude, codex).await;
+            let (intake, dispatched) = judge(ProviderKind::Claude, claude, codex).await;
             match claude {
                 true => assert_eq!((intake, &dispatched), (None, &entered), "{case}"),
                 false => {
@@ -1146,20 +1137,16 @@ async fn each_provider_follows_only_its_own_herdr_switch_at_intake_and_dispatch_
                     assert_eq!(dispatched, Err(unwired.to_string()), "{case}");
                 }
             }
-            let (intake, dispatched, clear) = judge(ProviderKind::Codex, claude, codex).await;
+            let (intake, dispatched) = judge(ProviderKind::Codex, claude, codex).await;
             match codex {
                 true => {
                     assert_eq!((intake, &dispatched), (None, &entered), "{case}");
-                    let unsupported =
-                        crate::services::discord::admin_host_guard::HERDR_CODEX_CLEAR_UNSUPPORTED;
-                    assert_eq!(clear.as_deref(), Some(unsupported), "{case}");
                 }
                 false => {
                     let provider = "codex".to_string();
                     let refused = HerdrRefusal::ProviderUnsupported { provider };
                     assert_eq!(intake, Some(refused.clone()), "{case}");
                     assert_eq!(dispatched, Err(refused.to_string()), "{case}");
-                    assert_eq!(clear, Some(refused.to_string()), "{case}");
                 }
             }
         }

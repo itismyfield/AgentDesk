@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use super::*;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, Rotation, SourceLink};
+use crate::services::tui_o::store::CURSOR_DIR;
+use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink};
 use crate::services::tui_o::store::spool::source_key;
-use crate::services::tui_o::store::{CURSOR_DIR, StoreError};
 use crate::services::tui_o::writer::binding::BindingLog;
 use crate::services::tui_o::writer::switch::{Excluded, begin_era_checked};
 use crate::services::tui_prompt_dedupe::binding_events as p5;
@@ -219,39 +219,10 @@ async fn an_operator_resolution_is_applied_once_the_writer_restarts_and_only_fro
     assert!(harness.port.posts().is_empty());
     let pending = WriterAlarm::BoundaryPending { source: b.clone() };
     assert_eq!(harness.alarms.taken(), [pending]);
-    let path = b_path.display().to_string();
-    let resolve = |from: ResolveFrom| {
-        harness
-            .store
-            .record_boundary_resolved(CHANNEL, &path, &from, "op")
-    };
-    let refused = |from| matches!(resolve(from), Err(StoreError::Rejected(_)));
-    assert!(
-        refused(ResolveFrom::Offset(body.len() as u64 + 1)),
-        "mid-record offset"
-    );
-    assert!(refused(ResolveFrom::Uuid("u-none".into())));
-    let ledger = a_path
-        .parent()
-        .unwrap()
-        .join("o_store")
-        .join(CHANNEL.to_string())
-        .join("ledger.jsonl");
-    let clean = std::fs::metadata(&ledger).unwrap().len();
-    append(&ledger, b"{\"at\":");
-    assert!(
-        refused(ResolveFrom::Uuid("u-x2".into())),
-        "unfinished ledger tail"
-    );
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&ledger)
-        .unwrap()
-        .set_len(clean)
+    harness
+        .store
+        .seed_boundary_resolved(CHANNEL, &b, body.len() as u64)
         .unwrap();
-    let recorded = resolve(ResolveFrom::Uuid("u-x2".into())).unwrap();
-    assert_eq!(recorded, (b.clone(), body.len() as u64));
-    assert!(refused(ResolveFrom::Offset(0)), "a source is resolved once");
     let on_disk = harness
         .channel()
         .rotation()
@@ -266,7 +237,11 @@ async fn an_operator_resolution_is_applied_once_the_writer_restarts_and_only_fro
     );
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     polls(3).await;
-    assert_eq!(harness.port.posts(), ["after"]);
+    assert_eq!(
+        harness.port.posts(),
+        ["after"],
+        "retained boundary must replay after restart"
+    );
     assert_eq!(harness.alarms.taken(), []);
     let applied = harness
         .channel()

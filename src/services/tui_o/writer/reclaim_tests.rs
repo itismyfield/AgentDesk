@@ -371,7 +371,6 @@ async fn a_first_pin_on_an_incomplete_history_does_not_reclaim_the_pane() {
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn an_adopted_resume_holds_its_rows_until_an_operator_resolves() {
-    use crate::services::tui_o::store::rotation::ResolveFrom;
     let [a, b, c] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
     let (harness, a_path) = launched(&a);
     let path = |session: &str| a_path.with_file_name(format!("{session}.jsonl"));
@@ -405,11 +404,9 @@ async fn an_adopted_resume_holds_its_rows_until_an_operator_resolves() {
     assert!(spooled > 0, "[R5:resume_held] spool");
     halt(stop, task).await;
 
-    let from = ResolveFrom::Offset(past.len() as u64);
-    let b_path = path(&b).display().to_string();
     let resolved = harness
         .store
-        .record_boundary_resolved(CHANNEL, &b_path, &from, "op");
+        .seed_boundary_resolved(CHANNEL, &b_source, past.len() as u64);
     assert!(resolved.is_ok(), "[R5:resume_resolved] {resolved:?}");
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     polls(6).await;
