@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 128
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 129
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -116,6 +116,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs`, `src/services/discord/turn_presence/activity/unbound/binding_metadata.rs`, `src/services/tui_o/writer/binding.rs` | Test-only switch naming the one rule a mutation run disables. |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
+| `AGENTDESK_OTRANSITION_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/discord/health/o_transition/automatic/termination.rs` |  |
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs`, `src/engine/mod.rs` |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs` |  |

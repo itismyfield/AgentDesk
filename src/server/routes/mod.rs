@@ -53,7 +53,6 @@ mod runtime_profile_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod herdr_legacy_tests;
-pub(crate) mod o_transition;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
 mod session_evidence;

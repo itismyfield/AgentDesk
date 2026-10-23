@@ -9,6 +9,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::session_host::{
     HostKind, HostLiveness, HostPresence, HostSessionRef, InteractiveSessionHost, TmuxHost,
+    host_for,
 };
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
@@ -85,4 +86,14 @@ pub(in crate::services::discord) async fn tmux_verdict_gate(
         SessionLiveness::ProbeFailed | SessionLiveness::Unknown => HostLiveness::ProbeError,
     };
     shared_teardown(shared, provider, channel_id, name, Some(observed), caller).await
+}
+
+/// A known historical host must confirm death; missing evidence never stands for absence.
+pub(in crate::services::discord) fn historical_execution_ended(name: &str) -> bool {
+    let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
+        read_host_kind_marker(name)
+    else {
+        return false;
+    };
+    host_for(kind).liveness(HostSessionRef { kind, name }) == HostLiveness::DeadOrAbsent
 }

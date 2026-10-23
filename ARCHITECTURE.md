@@ -57,8 +57,6 @@ src/
 │   │   ├── apply_config_tests.rs
 │   │   ├── plan.rs
 │   │   └── source.rs
-│   ├── o_transition/
-│   │   └── http.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -86,8 +84,6 @@ src/
 │   ├── monitoring.rs
 │   ├── o.rs
 │   ├── o_tests.rs
-│   ├── o_transition.rs
-│   ├── o_transition_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
@@ -511,8 +507,6 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
-│   │   ├── o_transition.rs
-│   │   ├── o_transition_tests.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_stage_save_tests.rs
@@ -1113,6 +1107,12 @@ src/
 │   │   │   ├── intake_placeholder_retirement_tests.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
+│   │   │   ├── o_transition/
+│   │   │   │   ├── automatic/
+│   │   │   │   │   └── termination.rs
+│   │   │   │   ├── automatic.rs
+│   │   │   │   ├── automatic_idle.rs
+│   │   │   │   └── automatic_idle_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -3226,6 +3226,9 @@ src/
 │   │   │   └── tool_card_switch_tests.rs
 │   │   ├── writer/
 │   │   │   ├── actor/
+│   │   │   │   ├── automatic.rs
+│   │   │   │   ├── automatic_age.rs
+│   │   │   │   ├── automatic_age_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3378,6 +3381,7 @@ src/
 │   │   │   ├── tool_results.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
+│   │   │   ├── transition_automatic_tests.rs
 │   │   │   ├── transition_cleanup.rs
 │   │   │   ├── transition_cleanup_tests.rs
 │   │   │   ├── transition_execution_tests.rs

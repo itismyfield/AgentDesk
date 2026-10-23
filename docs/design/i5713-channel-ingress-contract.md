@@ -182,7 +182,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/turn_lease.rs` | admission | `registered_channel` → `admit_recovery` :155 |
 | `src/services/tui_o/writer/actor/transition_snapshot.rs` | 관측 | `home_now` :155: `registered_channel`로 요청 epoch의 home이 열려 있는지만 읽는다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/transition_port.rs` | admission | 전환 요청이 `CommandPermit` :40을 운반한다. 발급은 `admit_command` |
-| `src/services/discord/health/o_transition.rs` | admission | 운영자 전환 요청의 Context 조달 `home_admission` :109: 같은 home lock 아래 `registered_channel`·`ownership`으로 epoch를 확인하고 `admit_at_epoch(…, recovery=false)`로 `CommandPermit`을 받는다. row·gate를 쓰지 않는다 |
+| `src/services/discord/health/o_transition.rs` | admission | 자동 transcript 정리의 Context 조달 `home_admission`: 같은 home lock 아래 `registered_channel`·`ownership`으로 epoch를 확인하고 `admit_at_epoch(…, recovery=false)`로 `CommandPermit`을 받는다. row·gate를 쓰지 않는다 |
 | `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :106·:110, `admit_command` :353 |
 | `src/services/queue/http_force.rs` | command context | `current_command` :52: 강제 취소가 받은 `cancel_turn` permit을 clone해 Herdr 종료 어댑터에 넘긴다. 새 admission 없음 |
 | `src/services/dispatched_sessions/herdr_kill.rs` | admission | `admit_command` :46: HTTP 세션 강제 종료의 Herdr 팔만 permit을 받아 Herdr 종료 어댑터에 넘긴다. Legacy 팔·CLI direct는 admission 없음 |
