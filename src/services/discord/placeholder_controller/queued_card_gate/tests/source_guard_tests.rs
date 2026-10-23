@@ -24,7 +24,6 @@ const RAW_DISCORD_MESSAGE_OPS: &[&str] = &[
     "delete_rollback_channel_message(",
     "edit_message(",
     "edit_channel_message(",
-    "edit_channel_message_with_components(",
     "edit_outbound_message(",
     "edit_outbound_message_classified(",
 ];

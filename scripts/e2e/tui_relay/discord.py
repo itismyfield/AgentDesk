@@ -263,6 +263,8 @@ class DiscordClient:
         target = urllib.parse.quote(self.handoff_to_agent, safe="")
         url = f"{self.base_url}/api/agents/{target}/turn/start"
         deadline = time.monotonic() + self.timeout_s
+        last_error = None
+        error_body = ""
         while True:
             request = urllib.request.Request(
                 url,
@@ -270,18 +272,32 @@ class DiscordClient:
                 headers=request_headers(self.base_url, {"Content-Type": "application/json"}),
                 method="POST",
             )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if last_error is not None:
+                    raise RuntimeError(f"turn/start HTTP {last_error.code}: {error_body}") from last_error
+                raise RuntimeError("turn/start timeout before request")
             try:
-                with urllib.request.urlopen(request, timeout=min(10.0, self.timeout_s)) as response:
+                with urllib.request.urlopen(request, timeout=min(10.0, remaining)) as response:
                     payload = response.read().decode("utf-8")
                 break
             except urllib.error.HTTPError as error:
                 error_body = error.read().decode("utf-8", "replace")
+                try:
+                    refusal = json.loads(error_body)
+                except json.JSONDecodeError:
+                    refusal = None
+                unknown_activity = (
+                    isinstance(refusal, dict) and refusal.get("reason") == "turn_activity_unknown"
+                )
+                remaining = deadline - time.monotonic()
                 if (
                     error.code == 409
-                    and "mailbox is busy" in error_body
-                    and time.monotonic() < deadline
+                    and ("mailbox is busy" in error_body or unknown_activity)
+                    and remaining > 0
                 ):
-                    time.sleep(1.0)
+                    last_error = error
+                    time.sleep(min(1.0, remaining))
                     continue
                 raise RuntimeError(f"turn/start HTTP {error.code}: {error_body}") from error
         if not payload:

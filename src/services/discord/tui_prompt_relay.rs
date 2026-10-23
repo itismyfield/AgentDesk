@@ -427,7 +427,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
     let live_events = &shared.ui.placeholder_live_events;
     live_events.set_turn_request_anchor(channel_id, None, None);
-    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
     // recorded — every failure early-return below would otherwise leave the lease set
@@ -454,34 +453,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     };
     let notify_http = task_gate.notify_http;
     let task_card_anchor = task_gate.card_anchor;
-    // A TUI-direct prompt has now been observed for this channel. Bump idle
-    // recap generation before the pre-claim clear so an in-flight recap POST job
-    // cannot persist a stale card after a deferred/local-only/aborted synthetic
-    // start path (#3296, #3878).
-    if let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) = super::idle_recap::bump_turn_generation(
-            &pool,
-            channel_id.get(),
-            &recap_provider,
-            lease.session_key.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                error = %e,
-                channel_id = channel_id.get(),
-                provider = %recap_provider.as_str(),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                "idle_recap: failed to bump turn generation on TUI-direct observation"
-            );
-        }
-        super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-            notify_http.clone(),
-            pool,
-            channel_id.get(),
-        )
-        .await;
-    }
     // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
     // later removes it (the shared reaction remove path only removes `@me`; a
     // different bot leaves the hourglass forever). The note BODY may be any bot

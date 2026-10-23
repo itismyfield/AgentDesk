@@ -24,7 +24,7 @@ def window(*rows):
 
 class FooterRetirementTests(unittest.TestCase):
     def test_raw_panels_and_embedded_footer_are_rejected(self):
-        for content in ("...", "…", "Processing...", "🟢 진행 중", "✅ 응답 완료", "📦 응답 완료 · 1분",
+        for content in ("...", "…", "Processing...", "🟢 진행 중", "✅ 응답 완료",
                         "answer\n\n-# ✅ 완료", "-# ⠸ 진행 중", "-# Tasks\n-# └ Bash ✓",
                         "-# 턴 시작 : anonymized", "-# ⏱ 5초"):
             with self.subTest(content=content), self.assertRaisesRegex(assertions.AssertionError, "retired status chrome"):

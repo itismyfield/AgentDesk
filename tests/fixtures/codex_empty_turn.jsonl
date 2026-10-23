@@ -1,0 +1,11 @@
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"native-empty"}}
+{"type":"turn_context","payload":{"turn_id":"native-empty"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"managed empty probe"}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-empty","create_time":1792720274.997874}}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"native-empty"}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"native-empty"}}
+{"type":"response_item","payload":{"type":"reasoning","internal_chat_message_metadata_passthrough":{"turn_id":"native-empty"}}}
+{"type":"event_msg","payload":{"type":"item_completed","turn_id":"native-empty"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","id":"empty-answer","content":[{"type":"output_text","text":""}],"internal_chat_message_metadata_passthrough":{"turn_id":"native-empty"}}}
+{"type":"token_usage_record","payload":{"turn_id":"native-empty"}}
+{"type":"event_msg","payload":{"type":"token_count"}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"native-empty","last_agent_message":null}}

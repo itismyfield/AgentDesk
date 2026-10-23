@@ -468,6 +468,7 @@ mod tests {
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests/provider_failure_tests.rs",
                 "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",
+                "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/codex_empty_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs",
                 "services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/o_after_done_chain_tests.rs",
