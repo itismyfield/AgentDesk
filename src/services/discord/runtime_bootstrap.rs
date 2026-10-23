@@ -47,8 +47,6 @@ use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
 use self::gateway_lease_recovery::spawn_standby_gateway_retry;
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use self::gateway_runtime::run_bot_framework_options;
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
 #[allow(unused_imports)]
