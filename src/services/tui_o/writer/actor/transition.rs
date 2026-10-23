@@ -480,8 +480,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let Ok(_transition) = Arc::clone(&job.context.lock).try_lock_owned() else {
             return Outcome::Held(Hold::TransitionBusy);
         };
-        if !super::automatic::ready(job, key).await {
-            return Outcome::Unchanged;
+        if let Err(reason) = super::automatic::ready(job, key).await {
+            return Outcome::Held(Hold::Policy(reason));
         }
         let tmux = job.context.tmux.clone();
         let admitted =

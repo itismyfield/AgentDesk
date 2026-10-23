@@ -89,6 +89,14 @@ pub(crate) enum Refused {
     Unread(String),
 }
 
+/// The automatic retention policy that kept a source readable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum PolicyHold {
+    Young,
+    AgeUnknown,
+    NotIdle,
+}
+
 /// Why nothing was written for a source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Hold {
@@ -96,6 +104,8 @@ pub(crate) enum Hold {
     Stale,
     TransitionBusy,
     SourceBusy,
+    /// Age or runtime activity prevented automatic cleanup.
+    Policy(PolicyHold),
     /// A cleanup is recorded for it already, by another job or before it grew back.
     PriorCleanup,
     /// Past the candidate, hashing or time limit of one job.
