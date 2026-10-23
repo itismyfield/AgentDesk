@@ -131,8 +131,6 @@ pub(in crate::services::discord) use config::{
     update_channel_model_override, would_channel_model_override_change,
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
-#[cfg(test)]
-pub(in crate::services::discord) use control::clear_channel_session_state_with_session_key;
 pub(in crate::services::discord) use control::{
     clear_channel_session_state, native_clear_admits, reset_channel_provider_state,
     reset_managed_process_session, reset_provider_session_if_pending,
