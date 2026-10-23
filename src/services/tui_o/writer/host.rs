@@ -156,7 +156,6 @@ fn locked<T>(set: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Readiness {
     /// The generation whose claim hosts `channel`, read now. A claim is not a live host: one whose
     /// actor ended abnormally keeps it. No claim does mean no host, as each claims before it spawns.
-    #[cfg(test)]
     pub fn hosted_by(&self, channel: u64) -> Option<u64> {
         locked(&self.hosted).get(&channel).copied()
     }
@@ -405,7 +404,6 @@ impl Drop for StopOnDrop {
 }
 
 /// A writer whose host, actor and admitted POST all ended, its claim released.
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct WriterStopped {
     pub channel: u64,
@@ -413,6 +411,17 @@ pub struct WriterStopped {
 }
 
 impl ManagedWriterHandle {
+    #[cfg(test)]
+    pub fn channel(&self) -> u64 {
+        self.channel
+    }
+
+    /// Whether the host task still runs and was not told to stop.
+    #[cfg(test)]
+    pub fn live(&self) -> bool {
+        !self.host.is_finished() && !*self.stop.signal.borrow()
+    }
+
     /// Leaves the late reservation unsettled when this host ends, for a successor that takes it
     /// over; set before the stop is signalled.
     #[cfg(test)]

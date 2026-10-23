@@ -11,9 +11,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::*;
 use crate::config::session_hosts::ForcedSessionHosts;
-use crate::db::o_channel_homes::{HeldHome, HomeState};
 use crate::services::claude_tui::source_verify::{SourceHistory, Visit};
-use crate::services::cluster::channel_home::HomeGate;
 use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::store::fault::{self, Step};
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
@@ -815,43 +813,23 @@ async fn transition_apply_holds_a_source_whose_inputs_changed_after_its_probes()
     }
 }
 
-/// A home holding channel 70 here with intake open, so its commands are admitted.
-fn admitting_home() -> Arc<HomeGate> {
-    let home = Arc::new(HomeGate::new("70", "mini"));
-    let written = HeldHome::for_test("70", "mini", 1, HomeState::Worker);
-    home.confirm(&written, tokio::time::Instant::now()).unwrap();
-    home
-}
-
-// A request dropped before the mailbox took it changes nothing; a taken one keeps its job and
-// permit to the end whoever left, until the actor itself ends.
+// A request dropped before mailbox admission changes nothing; an admitted job continues
+// after its requester leaves, until the work completes or its actor ends.
 #[tokio::test(start_paused = true)]
-async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_left() {
+async fn transition_job_runs_to_completion_after_the_requester_leaves() {
     let chain = chain(1);
     let _current = chain.current();
     let actor = run(&chain);
     settle(&chain).await;
-    let home = admitting_home();
-    let mut permits = [(); 3].map(|_| home.admit_command("claude"));
-    assert_eq!(home.commands_in_flight(), 3);
-    let with = |permit| Context {
-        permit,
-        ..chain.context()
-    };
     let base = hooks::started();
     drop(
         actor
             .port
-            .request(chain.apply(chain.request(JOB)), with(permits[0].take())),
+            .request(chain.apply(chain.request(JOB)), chain.context()),
     );
     polls(3).await;
     assert_eq!(hooks::started() - base, 0, "[T4:dropped_before]");
-    assert_eq!(home.commands_in_flight(), 2, "[T4:dropped_before]");
-    let asked = send(
-        &actor,
-        chain.apply(chain.request(JOB)),
-        with(permits[1].take()),
-    );
+    let asked = send(&actor, chain.apply(chain.request(JOB)), chain.context());
     for _ in 0..5 {
         polls(1).await;
         hooks::settle_workers();
@@ -861,23 +839,19 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
     }
     assert_eq!(hooks::started() - base, 1, "[T4:taken]");
     asked.abort();
-    assert_eq!(home.commands_in_flight(), 2, "[T4:requester_left]");
     for _ in 0..40 {
         polls(1).await;
         hooks::settle_workers();
     }
     assert_eq!(chain.audit(0).as_deref(), Some(JOB), "[T4:ran_to_its_end]");
-    assert_eq!(home.commands_in_flight(), 1, "[T4:released_at_end]");
     let asked = send(
         &actor,
         Operation::Inspect(chain.request("next")),
-        with(permits[2].take()),
+        chain.context(),
     );
     polls(1).await;
     hooks::settle_workers();
-    assert_eq!(home.commands_in_flight(), 1, "[T4:held_by_the_job]");
     halt(actor.stop, actor.task).await;
-    assert_eq!(home.commands_in_flight(), 0, "[T4:actor_ended]");
     let ended = asked.await.unwrap().err();
     assert_eq!(
         ended.as_deref(),
@@ -887,7 +861,7 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
 }
 
 // A stop, the actor's or only its host's so far, raised while the retiring poll awaits a POST is
-// read again before the write: nothing is written, and the job answers with its permit released.
+// read again before the write: nothing is written and the job answers with Stopping.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held() {
     for host in [false, true] {
@@ -897,11 +871,7 @@ async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_hel
         let release = Release(Arc::clone(&held));
         let actor = run_with(&chain, None, Arc::clone(&held));
         settle(&chain).await;
-        let home = admitting_home();
-        let context = Context {
-            permit: home.admit_command("claude"),
-            ..chain.context()
-        };
+        let context = chain.context();
         let (base, kept) = (hooks::started(), chain.cursor_file(0));
         let asked = send(&actor, chain.apply(chain.request(JOB)), context);
         for _ in 0..5 {
@@ -958,7 +928,6 @@ async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_hel
             Outcome::Held(Hold::Stopping),
             "[stop:{host}:outcome]"
         );
-        assert_eq!(home.commands_in_flight(), 0, "[stop:{host}:permit]");
         let last = port.posts().last().cloned();
         assert_eq!(
             last.as_deref(),
