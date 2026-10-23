@@ -1840,6 +1840,25 @@ async fn residual_home_rows_do_not_route_new_input_and_historical_stamps_stay_he
             (Some(900001), 0),
             "old stamp and lack of children remain intact"
         );
+        sqlx::query("UPDATE intake_outbox SET status='failed_post_accept' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await?;
+        let error = force_fail_and_retry_as_new(&pool, id, "operator retry")
+            .await
+            .expect_err("historical manual retry must not mint an unstamped child");
+        assert!(
+            matches!(error, ForceFailError::HistoricalHomeStamp { id: refused } if refused == id)
+        );
+        let children: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM intake_outbox WHERE parent_outbox_id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            children, 0,
+            "historical manual retry leaves no runnable child"
+        );
     }
     pool.close().await;
     fixture.drop().await;

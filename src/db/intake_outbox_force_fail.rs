@@ -22,6 +22,10 @@ pub(crate) enum ForceFailError {
          intake_outbox.provider explicitly before retrying, or leave it terminal"
     )]
     UnknownProvider { id: i64 },
+    #[error(
+        "intake_outbox row id={id} retains a historical home stamp; leave it held for explicit recovery"
+    )]
+    HistoricalHomeStamp { id: i64 },
     #[error("postgres error: {0}")]
     Db(#[from] sqlx::Error),
 }
@@ -74,6 +78,14 @@ pub(crate) async fn force_fail_and_retry_as_new(
     };
     if !force_fail_provider_ready(&row.provider) {
         return Err(ForceFailError::UnknownProvider { id: stuck_id });
+    }
+
+    if sqlx::query_scalar::<_, bool>("SELECT home_epoch IS NOT NULL FROM intake_outbox WHERE id=$1")
+        .bind(stuck_id)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Err(ForceFailError::HistoricalHomeStamp { id: stuck_id });
     }
 
     if force_terminate {
