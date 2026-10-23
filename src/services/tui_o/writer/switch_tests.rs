@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use super::*;
+use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::store::rotation::{Boundary, Rotation, SourceLink};
 use crate::services::tui_o::store::spool::source_key;
-use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::writer::binding::BindingLog;
 use crate::services::tui_o::writer::switch::{Excluded, begin_era_checked};
 use crate::services::tui_prompt_dedupe::binding_events as p5;
