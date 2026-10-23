@@ -208,7 +208,7 @@ pub(in crate::services::discord) fn teardown_for_lookup(
         result
             .as_ref()
             .err()
-            .map(|&verdict| (verdict, row_missing, target.host.clone())),
+            .map(|verdict| (format!("{verdict:?}"), row_missing, target.host.clone())),
     );
     match result {
         Ok(session) => KeyedTeardown::Cleared(session),

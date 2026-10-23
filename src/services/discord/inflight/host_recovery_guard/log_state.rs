@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use crate::services::session_host::{GuardVerdict, TargetHost};
+use crate::services::session_host::TargetHost;
 
 type TargetKey = (String, u64, String, Option<String>);
 type Key = (TargetKey, String);
-type State = (GuardVerdict, bool, TargetHost);
+type State = (String, bool, TargetHost);
 
 static LOGGED: LazyLock<Mutex<HashMap<Key, State>>> = LazyLock::new(Default::default);
 
