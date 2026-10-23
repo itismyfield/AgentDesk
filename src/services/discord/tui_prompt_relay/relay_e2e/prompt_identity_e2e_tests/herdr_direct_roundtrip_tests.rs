@@ -418,7 +418,7 @@ fn assert_input_pair(pair: &[Value], prompt: &str) {
 
 async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     let mut database = None;
-    let h = Box::pin(RelayE2eHarness::start_inner(
+    let h = Box::pin(RelayE2eHarness::start_inner_with_env_lock(
         ProviderStub::Success,
         true,
         async {
@@ -428,6 +428,7 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
             Some(pool)
         },
         false,
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
     ))
     .await;
     let database = database.unwrap();
@@ -809,6 +810,8 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
         path.display()
     );
     writer.stop().await;
+    drop(_tmux);
+    drop(_claude_home);
     drop(claude_binary_guard);
     drop(h);
     pool.close().await;

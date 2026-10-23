@@ -67,7 +67,7 @@ async fn input(server: &RealServer, seq: u64, text: &str) {
 
 async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
     let mut database = None;
-    let h = Box::pin(RelayE2eHarness::start_inner(
+    let h = Box::pin(RelayE2eHarness::start_inner_with_env_lock(
         ProviderStub::Success,
         true,
         async {
@@ -77,6 +77,7 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
             Some(pool)
         },
         false,
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
     ))
     .await;
     let database = database.unwrap();
@@ -331,6 +332,7 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
     writer.stop().await;
     hooks.abort();
     let _ = hooks.await;
+    drop(_tmux);
     drop(_home);
     drop(_provider);
     drop(h);
