@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
 use crate::services::discord::commands::control::{
-    ClearReport, SoftClearNotifyMode, clear_channel_session_state_with_session_key,
+    ClearReport, clear_channel_session_state_with_session_key,
 };
 
 fn clear(case: &Case) -> ClearReport {
@@ -23,7 +23,6 @@ fn clear(case: &Case) -> ClearReport {
             &ProviderKind::Claude,
             ChannelId::new(CHANNEL),
             "!clear",
-            SoftClearNotifyMode::Suppress,
             Some(&key),
         ))
         .expect("the public clear completes")

@@ -23,5 +23,5 @@ assertions:
       marker: "[E2E:E62:{run_id}:BODY]"
   - turn_summary_after_body:
       body_marker: "[E2E:E62:{run_id}:BODY]"
-      header: "-# ✅"
+      header: "-# ⏱️"
       output_owner: legacy

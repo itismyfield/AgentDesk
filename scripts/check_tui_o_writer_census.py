@@ -161,8 +161,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "formatting/replace_long_message.rs": {"edit_channel_message*": 1, "replace_long_message*": 5, "send_channel_message*": 1, "send_long_message*": 1},
     "gateway.rs": {".edit_message": 1, ".send_message": 2, "TurnGateway::send_message": 2, "send_terminal_notice_http_once": 1, "replace_long_message*": 2, "replace_message_with_outcome": 1, "send_long_message*": 1, "send_outbound_message": 1},
     "health/recovery.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
-    "http.rs": {".edit_message": 2, ".send_message": 5, "send_channel_message*": 2},
-    "idle_recap/card.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
+    "http.rs": {".edit_message": 1, ".send_message": 4, "send_channel_message*": 2},
     "meeting_orchestrator/records.rs": {"send_long_message*": 3},
     "meeting_orchestrator/rounds.rs": {"send_long_message*": 1},
     "meeting_orchestrator/selection_runtime.rs": {".edit_message": 1, ".send_message": 1},
@@ -284,7 +283,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "gateway.rs": ("W19", "KEEP_TRANSPORT"),
     "health/recovery.rs": ("W33", "CUT_D"),
     "http.rs": ("W19", "KEEP_TRANSPORT"),
-    "idle_recap/card.rs": ("W25", "KEEP_NONBODY"),
     "meeting_orchestrator/records.rs": ("MEETING", "KEEP_NONBODY"),
     "meeting_orchestrator/rounds.rs": ("MEETING", "KEEP_NONBODY"),
     "meeting_orchestrator/selection_runtime.rs": ("MEETING", "KEEP_NONBODY"),
@@ -390,9 +388,6 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     "src/services/discord/health/recovery.rs": (
         "maybe_recover_completed_stale_leak:peek",
         "maybe_recover_completed_stale_leak:claim",
-    ),
-    "src/services/discord/idle_recap.rs": (
-        "probe_relay_integrity:peek",
     ),
     "src/services/discord/outbound/turn_output_controller.rs": (
         "deliver_turn_output_with_fallback_revalidation:claim",
@@ -564,7 +559,6 @@ FLIP_READY_TESTS: dict[str, tuple[str, ...]] = {
     "W34": ("o_delegated_restart_handoff_keeps_only_the_marker",),
     "W35": ("o_delegated_anchor_repost_is_skipped",),
     "backstop": ("o_delegated_done_turn_needs_no_legacy_delivery_confirmation",),
-    "idle_recap": ("o_delegated_idle_recap_probe_reports_unknown",),
 }
 
 

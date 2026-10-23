@@ -21,6 +21,8 @@ fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
 }
 
 mod commit;
+#[cfg(unix)]
+pub(crate) mod settled;
 mod terminal;
 #[cfg(test)]
 pub(crate) use commit::commit_claim;

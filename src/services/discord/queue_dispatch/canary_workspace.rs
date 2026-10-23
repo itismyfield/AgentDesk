@@ -3,8 +3,6 @@
 use super::super::*;
 use crate::services::codex_tui::canary::CANARY_CHANNEL;
 
-const OWNER: &str = "canary_workspace";
-
 /// Without a core session intake can only auto-start, and an unusable workspace would consume the
 /// input with an error reply. Not cached, so a config reload is picked up on the next kick.
 pub(super) async fn parked(
@@ -20,13 +18,8 @@ pub(super) async fn parked(
         && crate::services::discord::settings::resolve_workspace(channel, None)
             .is_none_or(|workspace| !std::path::Path::new(&workspace).is_dir())
     {
-        let reason = "workspace_unresolved";
-        shared
-            .queue_park_ledger
-            .note_promote_hold(provider, channel, OWNER, reason);
         return true;
     }
-    shared.queue_park_ledger.clear_promote_hold(channel, OWNER);
     false
 }
 

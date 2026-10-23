@@ -227,32 +227,6 @@ impl ClearReport {
     }
 }
 
-pub(super) async fn notify(
-    shared: &std::sync::Arc<super::SharedData>,
-    channel: poise::serenity_prelude::ChannelId,
-    source: &str,
-    mode: super::SoftClearNotifyMode,
-    session_key: Option<&str>,
-    report: &ClearReport,
-) {
-    if let Some((reason, content)) = super::soft_clear_lifecycle_notify_row(source, mode) {
-        let content = if report.execution.is_some() {
-            report.reply()
-        } else {
-            report
-                .warning()
-                .map_or(content.clone(), |warning| format!("{content}\n{warning}"))
-        };
-        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            shared.pg_pool.as_ref(),
-            &format!("channel:{}", channel.get()),
-            session_key,
-            reason,
-            &content,
-        );
-    }
-}
-
 #[cfg(test)]
 #[path = "clear_count_tests.rs"]
 mod clear_count_tests;

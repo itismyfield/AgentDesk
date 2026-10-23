@@ -24,7 +24,7 @@ def window(*rows):
 
 class FooterRetirementTests(unittest.TestCase):
     def test_raw_panels_and_embedded_footer_are_rejected(self):
-        for content in ("...", "…", "Processing...", "🟢 진행 중", "✅ 응답 완료", "📦 응답 완료 · 1분",
+        for content in ("...", "…", "Processing...", "🟢 진행 중", "✅ 응답 완료",
                         "answer\n\n-# ✅ 완료", "-# ⠸ 진행 중", "-# Tasks\n-# └ Bash ✓",
                         "-# 턴 시작 : anonymized", "-# ⏱ 5초"):
             with self.subTest(content=content), self.assertRaisesRegex(assertions.AssertionError, "retired status chrome"):
@@ -54,7 +54,7 @@ class FooterRetirementTests(unittest.TestCase):
 
     def test_plain_subtext_prose_cards_and_standalone_summaries_are_allowed(self):
         for content in ("⠋ 계속 처리 중", "-# foo", "The work is 진행 중; Processing... is quoted prose.",
-                        "-# ▸ Bash  echo Processing... 진행 중  ✓", "-# ✅ 1분", "-# ✅ 완료",
+                        "-# ▸ Bash  echo Processing... 진행 중  ✓", "-# ⏱️ 1분", "-# ✅ 완료",
                         "-# ⏹ 중단", "-# ⚠️ 오류 · 5초"):
             with self.subTest(content=content):
                 assertions.no_status_chrome(window(message(content)))
@@ -67,7 +67,7 @@ class FooterRetirementTests(unittest.TestCase):
         assertions.no_status_chrome(value)
 
     def test_standalone_summary_with_exact_outcome_header_follows_body(self):
-        for header, content in (("-# ✅", "-# ✅ 1분"), ("-# ⏹ 중단", "-# ⏹ 중단"),
+        for header, content in (("-# ⏱️", "-# ⏱️ 1분"), ("-# ⏹ 중단", "-# ⏹ 중단"),
                                 ("-# ⚠️ 오류", "-# ⚠️ 오류 · 5초")):
             with self.subTest(content=content):
                 assertions.turn_summary_after_body(window(message("[BODY]"), message(content, "11")),
@@ -80,19 +80,19 @@ class FooterRetirementTests(unittest.TestCase):
                                                    body_marker="[BODY]")
 
     def test_summary_before_body_and_duplicate_summary_ids_fail(self):
-        for value in (window(message("-# ✅ 1분", "9"), message("[BODY]")),
-                      window(message("[BODY]"), message("-# ✅ 1분", "11"), message("-# ✅ 1분", "12"))):
+        for value in (window(message("-# ⏱️ 1분", "9"), message("[BODY]")),
+                      window(message("[BODY]"), message("-# ⏱️ 1분", "11"), message("-# ⏱️ 1분", "12"))):
             with self.subTest(value=value), self.assertRaises(assertions.AssertionError):
                 assertions.turn_summary_after_body(value, body_marker="[BODY]")
 
     def test_card_marker_cannot_stand_in_for_the_body(self):
-        value = window(message("-# ▸ Bash  echo [BODY]  ✓"), message("-# ✅ 1분", "11"))
+        value = window(message("-# ▸ Bash  echo [BODY]  ✓"), message("-# ⏱️ 1분", "11"))
         with self.assertRaises(assertions.AssertionError):
             assertions.turn_summary_after_body(value, body_marker="[BODY]")
 
     def test_inline_order_requires_success_between_distinct_before_and_after_bodies(self):
         rows = [message("[BEFORE]", "10"), message("-# ▸ Bash  cargo check  ✓", "11"),
-                message("[AFTER]", "12"), message("-# ✅ 1분", "13")]
+                message("[AFTER]", "12"), message("-# ⏱️ 1분", "13")]
         options = {"before_marker": "[BEFORE]", "body_marker": "[AFTER]", "tool_label": "Bash"}
         assertions.turn_summary_after_body(window(*rows), **options)
         for order in ((1, 0, 2, 3), (0, 2, 1, 3)):
@@ -105,7 +105,7 @@ class FooterRetirementTests(unittest.TestCase):
                                                          *rows[2:]), **options)
 
     def test_output_owner_requires_an_evaluated_receipt_and_exact_mode(self):
-        value = window(message("[BODY]"), message("-# ✅ 1분", "11"))
+        value = window(message("[BODY]"), message("-# ⏱️ 1분", "11"))
         for owner in ("o", "legacy"):
             spec = {"turn_summary_after_body": {"body_marker": "[BODY]", "output_owner": owner}}
             driver.run_assertion(spec, window=value, record={"durable_record_probe": {

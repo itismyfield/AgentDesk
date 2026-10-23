@@ -1,4 +1,4 @@
-//! The context an operator's transition cleanup request runs under: the channel's Bound Claude row
+//! The context a transition cleanup runs under: the channel's Bound Claude row
 //! on this node, checked against its launch, this server's runtime and the channel's home.
 
 use poise::serenity_prelude::ChannelId;
@@ -17,7 +17,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, execution_context, observe_spawn_nonce_marker,
 };
 
-/// The execution the operator names.
+/// The execution whose sources are considered for cleanup.
 pub(crate) struct Target {
     pub channel: u64,
     pub session_key: String,
@@ -31,8 +31,6 @@ pub(crate) async fn resolve_context(
     pool: &PgPool,
     target: &Target,
 ) -> Result<Context, String> {
-    #[cfg(test)]
-    test_hooks::RESOLVES.with(|count| count.set(count.get() + 1));
     let key = HostedLookupKey::SessionKey(&target.session_key);
     let record = match load_hosted_execution_pg(pool, key).await {
         HostedLookup::Found(row) => match row.record {
@@ -118,10 +116,5 @@ pub(crate) fn home_admission(channel: u64) -> Result<(Option<i64>, Option<Comman
     Ok((Some(home_epoch), Some(permit)))
 }
 
-#[cfg(test)]
-pub(crate) mod test_hooks {
-    thread_local! {
-        /// Context resolutions this thread started.
-        pub(crate) static RESOLVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-}
+pub(crate) mod automatic;
+mod automatic_idle;

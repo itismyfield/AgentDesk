@@ -215,7 +215,6 @@ impl Fixture {
             &ProviderKind::Claude,
             self.channel_id,
             "!clear",
-            super::super::SoftClearNotifyMode::Suppress,
         )
         .await
     }

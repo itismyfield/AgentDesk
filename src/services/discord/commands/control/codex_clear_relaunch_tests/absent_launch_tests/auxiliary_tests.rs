@@ -427,7 +427,6 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
             &ProviderKind::Codex,
             serenity::ChannelId::new(CANARY_CHANNEL),
             "!clear",
-            SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();
@@ -612,12 +611,6 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
         let channel = serenity::ChannelId::new(CANARY_CHANNEL);
         let snapshot = fixture.shared.mailbox(channel).snapshot().await;
         let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
-        let parked = fixture.shared.queue_park_ledger.project(
-            &fixture.shared,
-            &ProviderKind::Codex,
-            channel,
-            &snapshot,
-        );
         let readiness = crate::services::discord::router::hosted_tui_promote_readiness_blocked(
             &fixture.shared,
             &ProviderKind::Codex,
@@ -632,7 +625,7 @@ async fn full_fifo_with_owners(recover: Option<bool>, foreign_no_core: Option<bo
                 .or_insert(0_usize) += 1;
         }
         eprintln!(
-            "B1_Q2_NO_PROVIDER activity={observed:?} park={parked:?} readiness_blocked={readiness} binding={binding:?} queue={:?} token={} pending={:?} recovery={:?} effect_counts={effects:?}",
+            "B1_Q2_NO_PROVIDER activity={observed:?} readiness_blocked={readiness} binding={binding:?} queue={:?} token={} pending={:?} recovery={:?} effect_counts={effects:?}",
             snapshot
                 .intervention_queue
                 .iter()
@@ -861,12 +854,6 @@ async fn recovery_diagnostic(
         CANARY_TMUX,
     )
     .await;
-    let park = fixture.shared.queue_park_ledger.project(
-        &fixture.shared,
-        &ProviderKind::Codex,
-        channel,
-        &snapshot,
-    );
     let terminal_custody =
         crate::services::discord::terminal_delivery_custody::retains_channel(CANARY_CHANNEL);
     eprintln!(
@@ -886,7 +873,7 @@ async fn recovery_diagnostic(
             .collect::<Vec<_>>()
     );
     eprintln!(
-        "B1_Q3_GATES boot={boot} stage={stage} readiness={readiness:?} activity={activity:?} unbound={unbound:?} observation={} observed_capture={observed_capture:?} capture={capture:?} nonce={:?} marker={marker:?} fold={fold:?} core={core:?} binding={binding:?} host_deferred={host_deferred} hold_detail={} park={park:?} presence={:?} pane={:?} process_pid={:?} context={context:?}",
+        "B1_Q3_GATES boot={boot} stage={stage} readiness={readiness:?} activity={activity:?} unbound={unbound:?} observation={} observed_capture={observed_capture:?} capture={capture:?} nonce={:?} marker={marker:?} fold={fold:?} core={core:?} binding={binding:?} host_deferred={host_deferred} hold_detail={} presence={:?} pane={:?} process_pid={:?} context={context:?}",
         observation.is_some(),
         dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
         dedupe::codex_verified_hold_detail(CANARY_TMUX),

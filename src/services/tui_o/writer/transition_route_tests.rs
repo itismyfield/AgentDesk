@@ -1,5 +1,4 @@
-//! The operator route's Inspect sent to a real actor over a real store: what reaches the actor,
-//! what it writes, which reply the route consumes and what it reports of the execution.
+//! Requests sent to a real actor over a real store: admission, scope, writes and reply freshness.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +7,6 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::server::routes::o_transition::{send as routed_send, test_hooks as route};
 use crate::services::claude_tui::source_verify::Left;
 use crate::services::cluster::channel_home::register_for_test;
 use crate::services::discord::health::o_transition::home_admission;
@@ -38,13 +36,78 @@ impl Watches {
     }
 }
 
+type Answer = (StatusCode, Json<Value>);
+
+fn refused(status: StatusCode, result: &str, detail: &str) -> Answer {
+    (
+        status,
+        Json(json!({"ok": false, "result": result, "detail": detail})),
+    )
+}
+
+thread_local! {
+    pub(super) static SENDS: Cell<usize> = const { Cell::new(0) };
+    static REPLIED: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+fn on_reply(probe: impl FnOnce() + 'static) {
+    REPLIED.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+}
+
+fn replied() {
+    if let Some(probe) = REPLIED.with(|slot| slot.borrow_mut().take()) {
+        probe();
+    }
+}
+
+/// Sends the operation to the channel's running actor and answers with its reply only while the
+/// run it went to is still the channel's current one.
+pub(super) async fn send(
+    readiness: &Readiness,
+    channel: u64,
+    context: Context,
+    operation: Operation,
+) -> Answer {
+    let done = match operation {
+        Operation::Inspect(_) => "inspected",
+        Operation::Apply(..) | Operation::AutomaticApply(..) => "applied",
+    };
+    let Some(port) = readiness.transition(channel) else {
+        let detail = "the channel's writer takes no request now";
+        return refused(StatusCode::CONFLICT, "actor_unavailable", detail);
+    };
+    SENDS.with(|count| count.set(count.get() + 1));
+    let reply = match port.request(operation, context).await {
+        Ok(reply) => reply,
+        Err(detail) => return refused(StatusCode::BAD_GATEWAY, "reply_lost", &detail),
+    };
+    replied();
+    let consumed = readiness.with_transition_reply(channel, &port, reply, |reply| {
+        let ok = reply.refused.is_none();
+        let result = if ok { done } else { "actor_refused" };
+        let status = if ok {
+            StatusCode::OK
+        } else {
+            StatusCode::CONFLICT
+        };
+        (status, json!({"ok": ok, "result": result, "reply": reply}))
+    });
+    // Sent already, so a run no longer current or ready is a stale reply, never an unsent one.
+    match consumed {
+        Ok((status, answer)) => (status, Json(answer)),
+        Err(_) => refused(
+            StatusCode::CONFLICT,
+            "stale_actor_reply",
+            "the run that replied is no longer current and ready",
+        ),
+    }
+}
+
 type Routed = tokio::task::JoinHandle<(StatusCode, Json<Value>)>;
 
 fn route(ready: &Arc<Readiness>, context: Context, request: Request) -> Routed {
     let ready = Arc::clone(ready);
-    tokio::spawn(
-        async move { routed_send(&ready, CHANNEL, context, Operation::Inspect(request)).await },
-    )
+    tokio::spawn(async move { send(&ready, CHANNEL, context, Operation::Inspect(request)).await })
 }
 
 /// Runs the actor, letting each probe worker finish, until the route answers.
@@ -61,7 +124,7 @@ async fn routed(asked: Routed) -> (StatusCode, Value) {
 }
 
 fn sends() -> usize {
-    route::SENDS.with(std::cell::Cell::get)
+    SENDS.with(std::cell::Cell::get)
 }
 
 fn verdicts(answer: &Value) -> Vec<String> {
@@ -91,7 +154,7 @@ fn moved_from(current: &SourceId, left: &[&SourceId]) -> impl Drop + use<> {
     force_execution_for_tests(Ok((pin, history)))
 }
 
-// Inspect through the route reaches the actor once and writes nothing though both hops judge
+// An Inspect through readiness reaches the actor once and writes nothing though both hops judge
 // eligible; it reports the judged execution, nonce, and each old source's identity and pane.
 #[tokio::test(start_paused = true)]
 async fn transition_route_inspect_writes_nothing_and_reports_the_execution_it_judged() {
@@ -175,7 +238,7 @@ async fn transition_route_inspect_lists_every_unpinned_session_a_source_may_be()
     halt(actor.stop, actor.task).await;
 }
 
-// The route reports the history the judgment read, not the one the pane moved to before the
+// The reply reports the history the judgment read, not the one the pane moved to before the
 // reply was consumed.
 #[tokio::test(start_paused = true)]
 async fn transition_route_inspect_reports_the_history_of_the_judgment_not_a_later_one() {
@@ -187,7 +250,7 @@ async fn transition_route_inspect_reports_the_history_of_the_judgment_not_a_late
     let _hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
     let moved = Rc::new(RefCell::new(None));
     let (later, old) = (Rc::clone(&moved), chain.sources[0].clone());
-    route::on_reply(move || {
+    on_reply(move || {
         *later.borrow_mut() = Some(force_execution_for_tests(Ok(execution(&old, Utc::now()))))
     });
     let (status, answer) = routed(route(&ready, chain.context(), chain.request(JOB))).await;
@@ -226,7 +289,7 @@ async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
     let wall = Arc::new(SystemTime::now);
     let (next, _receiver) =
         TransitionPort::new(1, Arc::clone(&gate), wall, watch::channel(false).1);
-    route::on_reply(move || {
+    on_reply(move || {
         drop(replaced.borrow_mut().take());
         *replaced.borrow_mut() = Some(kept.host(&again, &gate, &next));
     });
@@ -241,7 +304,7 @@ async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
     );
     let _hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
     let stopping = Rc::clone(&watches);
-    route::on_reply(move || stopping.stopping.send_modify(|stop| *stop = true));
+    on_reply(move || stopping.stopping.send_modify(|stop| *stop = true));
     let (status, answer) = routed(route(&ready, chain.context(), chain.request(JOB))).await;
     let stale = (status, &answer["result"]);
     let expected = (StatusCode::CONFLICT, &json!("stale_actor_reply"));
@@ -288,7 +351,7 @@ async fn transition_route_sends_nothing_to_an_actor_that_takes_no_work() {
     halt(actor.stop, actor.task).await;
 }
 
-// A job the actor took keeps the home's command permit after the HTTP requester went away, until
+// A job the actor took keeps the home's command permit after its requester went away, until
 // the job itself ends.
 #[tokio::test(start_paused = true)]
 async fn transition_route_job_keeps_the_home_permit_after_the_requester_left() {
@@ -335,6 +398,7 @@ mod pg {
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLocation, HostedOwner, HostedState,
     };
+    use crate::services::discord::health::o_transition::{Target, resolve_context};
     use crate::services::discord::host_teardown_gate::test_support::runtime;
     use crate::services::session_host::herdr_socket_rig_tests::{
         HerdrRig, KEY, NODE, PANE, SESSION,
@@ -343,61 +407,31 @@ mod pg {
     use crate::services::tui_prompt_dedupe::binding_context::{
         BindingContext, PreparedIncarnation,
     };
-    use tower::ServiceExt;
 
     const KEY_OF_ROW: &str = "claude/hrot-c1/mac-mini:row";
 
-    use crate::config::Config;
-
-    fn app(
-        registry: Arc<crate::services::discord::health::HealthRegistry>,
-        pool: sqlx::PgPool,
-        port: u16,
-    ) -> axum::Router {
-        let mut engine_config = crate::config::Config::default();
-        engine_config.policies.hot_reload = false;
-        let engine = crate::engine::PolicyEngine::new(&engine_config).unwrap();
-        let tx = crate::server::ws::new_broadcast();
-        let buffer = crate::server::ws::spawn_batch_flusher(tx.clone());
-        let mut config = crate::config::Config::default();
-        config.server.port = port;
-        crate::server::routes::api_router_with_pg(
-            engine,
-            config,
-            tx,
-            buffer,
-            Some(registry),
-            Some(pool),
-        )
-    }
-
-    async fn post(app: &axum::Router, body: &Value) -> (StatusCode, Value) {
-        let origin = format!(
-            "http://127.0.0.1:{}",
-            crate::config::Config::default().server.port
-        );
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/o/transition");
-        let request = request
-            .header("content-type", "application/json")
-            .header("origin", origin);
-        let mut request = request
-            .body(axum::body::Body::from(body.to_string()))
-            .unwrap();
-        let peer: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
-        request
-            .extensions_mut()
-            .insert(axum::extract::ConnectInfo(peer));
-        let response = app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
+    async fn inspect(
+        registry: &crate::services::discord::health::HealthRegistry,
+        pool: &sqlx::PgPool,
+        ready: &Readiness,
+        request: Request,
+        nonce: &str,
+    ) -> (StatusCode, Value) {
+        let target = Target {
+            channel: request.channel,
+            session_key: KEY_OF_ROW.into(),
+            nonce: nonce.into(),
+        };
+        let context = match resolve_context(registry, pool, &target).await {
+            Ok(context) => context,
+            Err(detail) => {
+                let (status, Json(answer)) = refused(StatusCode::CONFLICT, "refused", &detail);
+                return (status, answer);
+            }
+        };
+        let (status, Json(answer)) =
+            send(ready, request.channel, context, Operation::Inspect(request)).await;
+        (status, answer)
     }
 
     async fn store(pool: &sqlx::PgPool, owner: &HostedOwner, record: &Value) {
@@ -416,7 +450,7 @@ mod pg {
         .unwrap();
     }
 
-    // Through the router and a real PG row: a row that is not the target's own execution reaches no
+    // Through context resolution and a real PG row: another execution reaches no
     // actor; the row's own execution reaches the hosted actor once, and its Inspect writes nothing.
     #[test]
     fn transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg() {
@@ -478,18 +512,11 @@ mod pg {
             };
             let (ready, watches) = (process_readiness(), Watches::new(true, false));
             let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-            let app = app(registry, pool.clone(), Config::default().server.port);
             let request = chain.request(JOB);
-            let ended = match &request.termination {
-                Some(Termination::Confirmed(end)) => json!({"Confirmed": end}),
-                _ => unreachable!(),
-            };
-            let body = |nonce: &str, channel: u64| {
-                json!({
-                    "operation": "inspect", "channel": channel, "session_key": KEY_OF_ROW,
-                    "execution_nonce": nonce, "cutoff": request.cutoff, "job_id": JOB,
-                    "operator": "operator", "reason": "herdr transition", "termination": ended,
-                })
+            let for_channel = |channel| {
+                let mut request = request.clone();
+                request.channel = channel;
+                request
             };
             let with = |change: fn(&mut HostedOwner)| {
                 let mut changed = owner.clone();
@@ -552,7 +579,8 @@ mod pg {
                     store(&pool, owner, &record).await;
                 }
                 let (sent, read) = (sends(), hooks::snapshots());
-                let (status, answer) = post(&app, &body(asked, channel)).await;
+                let (status, answer) =
+                    inspect(&registry, &pool, &ready, for_channel(channel), asked).await;
                 let refused = (status, answer["result"].clone());
                 assert_eq!(
                     refused,
@@ -567,7 +595,7 @@ mod pg {
                 assert_eq!(files(&chain.dir()), before, "[P1:{case}] writes");
             }
             std::fs::write(&marker, "0123456789abcdef0123456789abcdef").unwrap();
-            let (status, answer) = post(&app, &body(&nonce, CHANNEL)).await;
+            let (status, answer) = inspect(&registry, &pool, &ready, request.clone(), &nonce).await;
             assert_eq!(
                 (status, answer["result"].clone()),
                 (StatusCode::CONFLICT, json!("refused")),
@@ -575,7 +603,7 @@ mod pg {
             );
             std::fs::write(&marker, &nonce).unwrap();
             let sent = sends();
-            let (status, answer) = post(&app, &body(&nonce, CHANNEL)).await;
+            let (status, answer) = inspect(&registry, &pool, &ready, request.clone(), &nonce).await;
             assert_eq!(
                 (status, answer["result"].clone()),
                 (StatusCode::OK, json!("inspected")),
@@ -597,35 +625,11 @@ mod pg {
         });
     }
 
-    /// `agentdesk o …` as the binary parses it.
-    #[derive(clap::Parser)]
-    struct Cli {
-        #[command(flatten)]
-        o: crate::cli::o::OArgs,
-    }
-
-    async fn cli(args: Vec<String>) -> Result<(), String> {
-        let ran = tokio::task::spawn_blocking(move || {
-            let parsed = <Cli as clap::Parser>::try_parse_from(args).unwrap();
-            crate::cli::o::run(parsed.o)
-        });
-        ran.await.unwrap()
-    }
-
-    // The CLI's Inspect manifest, applied over TCP through the router to a real PG row's actor,
-    // retires the one hop its scope holds with its audit; the hop past it and the manifest stay.
+    // Applying through the real row's context retires only its approved scope and keeps the hop
+    // beyond that cutoff untouched.
     #[test]
-    fn transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg() {
+    fn transition_apply_retires_only_the_scope_its_inspect_approved_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        // The runtime root's guard holds the shared env lock this base is set under.
-        let base = std::ffi::OsString::from(format!("http://127.0.0.1:{port}"));
-        let _base = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
-            "AGENTDESK_API_URL",
-            &base,
-        );
         let threaded = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -681,73 +685,38 @@ mod pg {
             store(&pool, &owner, &serde_json::to_value(bound).unwrap()).await;
             let (ready, watches) = (process_readiness(), Watches::new(true, false));
             let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-            // Nested under `/api` as the server's web surface mounts it.
-            let service = axum::Router::new().nest("/api", app(registry, pool.clone(), port));
-            let service = service.into_make_service_with_connect_info::<std::net::SocketAddr>();
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            let served = tokio::spawn(async move { axum::serve(listener, service).await });
-            let dir = tempfile::tempdir().unwrap();
-            let manifest = dir.path().join("manifest.json").display().to_string();
-            let inspect = [
-                "agentdesk",
-                "transition",
-                "inspect",
-                "--channel",
-                &CHANNEL.to_string(),
-                "--session-key",
-                KEY_OF_ROW,
-                "--execution-nonce",
-                &nonce,
-                "--cutoff",
-                "2",
-                "--operator",
-                "operator",
-                "--reason",
-                "herdr transition",
-                "--job-id",
-                JOB,
-                "--ended",
-                "mac-mini",
-                &chain.pane,
-                "2",
-                "2",
-                "the tmux pane is gone",
-                "--manifest",
-                &manifest,
-            ];
-            let inspect = inspect.map(str::to_owned).to_vec();
-            assert_eq!(cli(inspect).await, Ok(()), "[PA:inspect]");
-            let written = std::fs::read(&manifest).unwrap();
-            let shown: Value = serde_json::from_slice(&written).unwrap();
-            let hops = &shown["answer"]["reply"]["scope"]["Ok"]["hops"];
+            let mut request = chain.request(JOB);
+            request.cutoff = 2;
+            if let Some(Termination::Confirmed(end)) = &mut request.termination {
+                end.last_seq = 2;
+            }
+            let (status, shown) = inspect(&registry, &pool, &ready, request.clone(), &nonce).await;
+            assert_eq!(status, StatusCode::OK, "[PA:inspect] {shown}");
+            let hops = &shown["reply"]["scope"]["Ok"]["hops"];
             let listed = (hops.as_array().map(Vec::len), &hops[0]["key"]);
-            assert_eq!(
-                listed,
-                (Some(1), &json!(chain.key(0))),
-                "[PA:manifest_scope]"
-            );
+            assert_eq!(listed, (Some(1), &json!(chain.key(0))), "[PA:scope]");
+            let digest = shown["reply"]["scope"]["Ok"]["digest"].as_str().unwrap();
+            let digest = ScopeDigest::parse(digest).unwrap();
+            let context = resolve_context(
+                &registry,
+                &pool,
+                &Target {
+                    channel: CHANNEL,
+                    session_key: KEY_OF_ROW.into(),
+                    nonce: nonce.clone(),
+                },
+            )
+            .await
+            .unwrap();
             let (outside, before) = (chain.cursor_file(1), chain.cursor_file(0));
-            let apply = [
-                "agentdesk",
-                "transition",
-                "apply",
-                "--manifest",
-                &manifest,
-                "--confirm",
-            ];
-            let apply = apply.map(str::to_owned).to_vec();
-            assert_eq!(cli(apply).await, Ok(()), "[PA:apply]");
+            let (status, Json(answer)) =
+                send(&ready, CHANNEL, context, Operation::Apply(request, digest)).await;
+            assert_eq!(status, StatusCode::OK, "[PA:apply] {answer}");
             assert_ne!(chain.cursor_file(0), before, "[PA:in_scope_written]");
             let retired = (chain.cursor(0).retired, chain.audit(0));
             assert_eq!(retired, (true, Some(JOB.to_string())), "[PA:in_scope]");
             assert_eq!(chain.cursor_file(1), outside, "[PA:out_of_scope]");
             assert_eq!(chain.audit(1), None, "[PA:out_of_scope]");
-            assert_eq!(
-                std::fs::read(&manifest).unwrap(),
-                written,
-                "[PA:manifest_kept]"
-            );
-            served.abort();
             let _ = std::fs::remove_file(&marker);
             drop(hosted);
             halt(actor.stop, actor.task).await;
@@ -756,7 +725,7 @@ mod pg {
         });
     }
 
-    // Through the router and a real PG row, Inspect judges the execution the hook judgment folded,
+    // Through a real PG row's context, Inspect judges the execution the hook judgment folded,
     // and reports that history and every unpinned session an old source may be, not a later one.
     #[test]
     fn transition_route_inspect_reports_the_folded_execution_it_judged_pg() {
@@ -851,25 +820,15 @@ mod pg {
             store(&pool, &owner, &serde_json::to_value(bound).unwrap()).await;
             let (ready, watches) = (process_readiness(), Watches::new(true, false));
             let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-            let app = app(registry, pool.clone(), Config::default().server.port);
             let request = chain.request(JOB);
-            let Some(Termination::Confirmed(end)) = &request.termination else {
-                unreachable!()
-            };
-            let body = json!({
-                "operation": "inspect", "channel": CHANNEL, "session_key": KEY_OF_ROW,
-                "execution_nonce": nonce, "cutoff": request.cutoff, "job_id": JOB,
-                "operator": "operator", "reason": "herdr transition",
-                "termination": {"Confirmed": end},
-            });
             let (later, u4_path) = (Rc::clone(&pane), path(&u4));
             let (launched, prompted) = (a.clone(), u4.clone());
-            route::on_reply(move || {
+            on_reply(move || {
                 std::fs::write(&u4_path, session_row(&prompted)).unwrap();
                 later.http("UserPromptSubmit", None, &launched, &prompted, &u4_path, 41);
             });
             let (before, sent) = (files(&chain.dir()), sends());
-            let (status, answer) = post(&app, &body).await;
+            let (status, answer) = inspect(&registry, &pool, &ready, request, &nonce).await;
             let (_, moved) = claude_history(CHANNEL, pane.tmux, Some(&nonce)).unwrap();
             let moved = moved.current.map(|visit| visit.session);
             assert_eq!(moved, Some(u4.clone()), "[F:moved_before_consumed]");

@@ -3388,8 +3388,7 @@ fn exclusion_built_violations(files: &BTreeMap<String, ScannedFile>) -> Vec<Stri
     )]
 }
 
-/// Effects a forced Herdr cancel or session kill reaches only through the terminate service and
-/// its exclusion: lifecycle and raw kills, token cancels, SQL, queue purges, drains and wakes.
+/// Effects a forced cancel or kill reaches only through the terminate service and its exclusion.
 const E07_FORBIDDEN: &[&str] = &[
     "force_kill_turn",
     "force_kill_turn_for_row",
@@ -3429,7 +3428,8 @@ const E07_FORBIDDEN: &[&str] = &[
     "capture_queue_before_cancel",
     "record_queue_loss_after_cancel",
     "capture_queue_before_cancel_on",
-    "record_queue_loss_after_cancel_on",
+    "try_purge_queue_if_unchanged",
+    "record_purge_receipt_on",
     "disconnect_session_keeping_provider",
     "disconnect_session_and_prepare_retry_pg",
     "prepare_force_kill_retry_pg",

@@ -309,14 +309,6 @@ pub(in crate::services::discord) async fn handle_event(
                 if component_events::handle_component_if_applicable(ctx, component, data).await? {
                     return Ok(());
                 }
-                if super::super::idle_recap_interaction::is_idle_recap_custom_id(
-                    &component.data.custom_id,
-                ) {
-                    return super::super::idle_recap_interaction::handle_idle_recap_interaction(
-                        ctx, component, data,
-                    )
-                    .await;
-                }
                 if super::super::commands::is_node_picker_custom_id(&component.data.custom_id) {
                     let settings_snapshot = { data.shared.settings.read().await.clone() };
                     if !super::super::provider_handles_channel(
@@ -781,18 +773,6 @@ pub(in crate::services::discord) async fn handle_event(
                 .await;
                 return Ok(());
             }
-            // #3148: the idle-recap card clear (and the per-channel
-            // turn-generation bump) was RELOCATED from here to
-            // `intake_turn::handle_text_message`, immediately AFTER the mailbox
-            // claim succeeds (`started == true`), mirroring the TUI path
-            // (`tui_prompt_relay` claim → bump → clear). Clearing at intake
-            // time — BEFORE the later mailbox claim — was not truly
-            // capture-at-claim: a recap POST could recheck-idle while intake had
-            // captured old/none but the claim had not happened, persist a fresh
-            // card, and the old-id-keyed clear could not remove it (Window 2).
-            // Performing the clear after the claim (and after the claim's
-            // generation bump) closes that window with the same capture-at-claim
-            // semantics the TUI path already has.
 
             // #189: Generic DM reply tracking — consume pending entry if present.
             // Keep this after auth so unauthorized DM senders cannot inject

@@ -4,7 +4,8 @@ use crate::services::discord::{
     SESSION_CLEANUP_INTERVAL, SESSION_MAX_IDLE, SharedData, mailbox_clear_channel,
     saturating_decrement_global_active,
 };
-use poise::serenity_prelude::ChannelId;
+use poise::serenity_prelude::{self as serenity, ButtonKind, ChannelId, MessageId};
+use sqlx::PgPool;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +171,7 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     // resume이 성공하는 idle 경로에서 저장하면 transcript 중복 + "새 세션 시작"
     // 레이블 오표시가 발생한다. (#3591에서 100턴 세션 리셋도 제거되어 reset 기반
     // 저장 경로는 없다; resume 실패 복구만 auto_retry_with_history가 별도로 저장한다.)
-    // 명시적 세션 초기화는 idle recap의 `새 세션 시작` 버튼(idle_recap:clear)으로 한다.
+    // 명시적 세션 초기화는 !clear 또는 /clear 명령으로 한다.
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
         if cleared.removed_token.is_some() {
@@ -237,3 +238,319 @@ pub(in crate::services::discord) async fn mark_session_disconnected_for_idle_cle
 #[cfg(all(test, unix))]
 #[path = "session_idle_cleanup_tests.rs"]
 mod tests;
+
+// Old cards keep their captured-id delete and pointer CAS until the next user turn.
+const IDLE_RECAP_CLEAR_BUTTON_PREFIX: &str = "idle_recap:clear:";
+
+pub(super) fn content_looks_like_idle_recap_card(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed == "📦" || trimmed.starts_with("📦 ")
+}
+
+fn component_is_idle_recap_clear_button(component: &serenity::ActionRowComponent) -> bool {
+    match component {
+        serenity::ActionRowComponent::Button(button) => match &button.data {
+            ButtonKind::NonLink { custom_id, .. } => {
+                custom_id.starts_with(IDLE_RECAP_CLEAR_BUTTON_PREFIX)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn message_is_idle_recap_card(message: &serenity::Message) -> bool {
+    #[cfg(test)]
+    if recap_cleanup_mutant("bypass_card_guard") {
+        return true;
+    }
+    content_looks_like_idle_recap_card(&message.content)
+        && message.components.iter().any(|row| {
+            row.components
+                .iter()
+                .any(component_is_idle_recap_clear_button)
+        })
+}
+
+pub(crate) async fn delete_previous_card(http: &serenity::Http, channel_id: u64, message_id: u64) {
+    #[cfg(test)]
+    if recap_cleanup_mutant("skip_delete") {
+        return;
+    }
+    let channel = ChannelId::new(channel_id);
+    let message = MessageId::new(message_id);
+    match http.get_message(channel, message).await {
+        Ok(current) if message_is_idle_recap_card(&current) => {
+            let result = super::http::delete_channel_message(http, channel, message).await;
+            crate::services::observability::emit_relay_delete_result(
+                "",
+                channel_id,
+                message_id,
+                "idle_recap_previous_card",
+                "delete_nonterminal",
+                &result,
+            );
+        }
+        Ok(current) => {
+            tracing::warn!(
+                channel_id = channel_id,
+                message_id = message_id,
+                author_id = current.author.id.get(),
+                "idle_recap: preserving recorded message because it is not an idle recap card"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(
+                channel_id = channel_id,
+                message_id = message_id,
+                error = %error,
+                "idle_recap: previous card probe failed; skipping destructive delete"
+            );
+        }
+    }
+}
+
+pub(crate) async fn clear_recap_pointer(
+    pool: &PgPool,
+    session_key: &str,
+    expected_message_id: u64,
+) -> Result<bool, sqlx::Error> {
+    #[cfg(test)]
+    if recap_cleanup_mutant("skip_pointer_clear") {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE sessions
+         SET idle_recap_message_id = NULL,
+             idle_recap_channel_id = NULL
+         WHERE session_key = $1
+           AND idle_recap_message_id = $2",
+    )
+    .bind(session_key)
+    .bind(expected_message_id as i64)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected() > 0)
+}
+
+pub(crate) async fn lookup_active_recap_for_channel(
+    pool: &PgPool,
+    channel_id: u64,
+) -> Result<Option<(String, u64, u64)>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT session_key, idle_recap_channel_id, idle_recap_message_id
+         FROM sessions
+         WHERE idle_recap_channel_id = $1
+           AND idle_recap_message_id IS NOT NULL
+         LIMIT 1",
+    )
+    .bind(channel_id as i64)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(k, c, m)| (k, c as u64, m as u64)))
+}
+
+pub(in crate::services::discord) async fn spawn_clear_captured_idle_recap_for_channel(
+    http: std::sync::Arc<serenity::Http>,
+    pool: PgPool,
+    channel_id: u64,
+) {
+    let captured = match lookup_active_recap_for_channel(&pool, channel_id).await {
+        Ok(Some((session_key, chan, msg))) => (session_key, chan, msg),
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                channel_id = channel_id,
+                "idle_recap captured-clear lookup failed"
+            );
+            return;
+        }
+    };
+    let (session_key, chan, msg) = captured;
+    tokio::spawn(async move {
+        clear_specific_idle_recap_card(&http, &pool, &session_key, chan, msg).await;
+    });
+}
+
+async fn clear_specific_idle_recap_card(
+    http: &serenity::Http,
+    pool: &sqlx::PgPool,
+    session_key: &str,
+    channel_id: u64,
+    message_id: u64,
+) {
+    delete_previous_card(http, channel_id, message_id).await;
+    let _ = clear_recap_pointer(pool, session_key, message_id).await;
+}
+
+/// Test-only cleanup mutations; production retains the claim and card guards.
+#[cfg(test)]
+pub(in crate::services::discord) fn recap_cleanup_mutant(name: &str) -> bool {
+    std::env::var("ADK_RECAP_CLEANUP_MUTANT").ok().as_deref() == Some(name)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) mod recap_cleanup_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        http::{Method, StatusCode},
+        response::IntoResponse,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(in crate::services::discord) async fn discord(
+        content: &str,
+        with_button: bool,
+    ) -> (
+        Arc<serenity::Http>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let observed = deletes.clone();
+        let content = content.to_owned();
+        let app = Router::new().fallback(move |method: Method| {
+            let observed = observed.clone();
+            let content = content.clone();
+            async move {
+                if method == Method::DELETE {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                assert_eq!(method, Method::GET, "cleanup must never create or edit a message");
+                let components = if with_button {
+                    serde_json::json!([{"type":1,"components":[{"type":2,"style":2,"label":"새 세션 시작","custom_id":"idle_recap:clear:4242"}]}])
+                } else { serde_json::json!([]) };
+                Json(serde_json::json!({
+                    "id":"4242", "channel_id":"777", "content":content,
+                    "author":{"id":"1","username":"test","discriminator":"0001","avatar":null},
+                    "timestamp":"2026-09-27T00:00:00+00:00", "edited_timestamp":null,
+                    "tts":false, "mention_everyone":false, "mentions":[], "mention_roles":[],
+                    "attachments":[], "embeds":[], "pinned":false, "type":0,
+                    "components":components
+                })).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Arc::new(
+            serenity::HttpBuilder::new("test-token")
+                .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (http, deletes, server)
+    }
+
+    async fn seed(pool: &PgPool, message: i64) {
+        seed_for_channel(pool, message, 777).await;
+    }
+
+    pub(in crate::services::discord) async fn seed_for_channel(
+        pool: &PgPool,
+        message: i64,
+        channel: u64,
+    ) {
+        sqlx::query("INSERT INTO sessions (session_key, provider, idle_recap_message_id, idle_recap_channel_id) VALUES ('recap-cleanup', 'claude', $1, $2)")
+            .bind(message).bind(channel as i64).execute(pool).await.unwrap();
+    }
+
+    pub(in crate::services::discord) async fn assert_cleared(
+        pool: &PgPool,
+        deletes: &AtomicUsize,
+        boundary: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pointer(pool).await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{boundary} must clear the recorded idle-card pointer"));
+        assert_eq!(
+            deletes.load(Ordering::SeqCst),
+            1,
+            "{boundary} must delete the captured idle card exactly once"
+        );
+    }
+
+    pub(in crate::services::discord) async fn pointer(pool: &PgPool) -> Option<i64> {
+        sqlx::query_scalar(
+            "SELECT idle_recap_message_id FROM sessions WHERE session_key = 'recap-cleanup'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn next_claim_deletes_recorded_idle_card_and_clears_pointer_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "recap_cleanup",
+            "last idle card cleanup",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        seed(&pool, 4242).await;
+        let (http, deletes, server) = discord("📦 응답 완료 · 이어서 질문 가능", true).await;
+        spawn_clear_captured_idle_recap_for_channel(http, pool.clone(), 777).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pointer(&pool).await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the next claim must clear its recorded idle-card pointer");
+        assert_eq!(
+            deletes.load(Ordering::SeqCst),
+            1,
+            "the next claim must delete its recorded idle card exactly once"
+        );
+        let channel: Option<i64> = sqlx::query_scalar(
+            "SELECT idle_recap_channel_id FROM sessions WHERE session_key = 'recap-cleanup'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(channel, None);
+        server.abort();
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_preserves_normal_messages_and_a_successor_pointer_pg() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "recap_cleanup_guard",
+            "idle card deletion boundary",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        seed(&pool, 9999).await;
+        for (content, with_button, expected_deletes) in [
+            ("ordinary assistant answer", true, 0),
+            ("📦 quoted ordinary answer", false, 0),
+            ("📦 응답 완료 · 이어서 질문 가능", true, 1),
+        ] {
+            let (http, deletes, server) = discord(content, with_button).await;
+            clear_specific_idle_recap_card(&http, &pool, "recap-cleanup", 777, 4242).await;
+            assert_eq!(
+                deletes.load(Ordering::SeqCst),
+                expected_deletes,
+                "only a recorded idle card with both markers may be deleted"
+            );
+            assert_eq!(
+                pointer(&pool).await,
+                Some(9999),
+                "a captured old card must never clear a successor pointer"
+            );
+            server.abort();
+        }
+        pool.close().await;
+        db.drop().await;
+    }
+}

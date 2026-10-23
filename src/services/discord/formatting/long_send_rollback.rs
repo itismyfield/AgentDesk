@@ -576,10 +576,7 @@ mod sink_direct_receipt_tests {
 
     use super::*;
 
-    /// T7 (kills M7). `finish_fresh` classifies a delivery as `channel_mismatch`
-    /// by comparing the receipt's requested and returned channels. If this
-    /// transport collapsed them into the requested channel that branch would be
-    /// unreachable and a misrouted delivery would journal as delivered.
+    /// Receipt transport preserves the returned channel when it differs from the requested one.
     #[test]
     fn t7_rollback_receipts_preserve_a_returned_channel_mismatch() {
         let tempdir = tempfile::tempdir().expect("temp runtime root");

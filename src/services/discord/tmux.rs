@@ -111,11 +111,13 @@ pub(super) use self::tmux_session_files::read_generation_file_mtime_ns;
 pub(in crate::services::discord) use self::tmux_session_files::reset_relay_watermark_on_generation_change;
 pub(in crate::services::discord) use self::tmux_session_files::reset_stale_relay_watermark_if_output_regressed;
 pub(super) use self::tmux_session_files::session_panel_instance_key;
+pub(crate) use self::tmux_session_files::stamp_spawn_markers;
+#[cfg(test)]
+pub(crate) use self::tmux_session_files::write_spawn_nonce;
 use self::tmux_session_files::{
     preserve_session_generation_mtime_after_write,
     reset_stale_local_relay_offset_if_output_regressed, sweep_orphan_session_files,
 };
-pub(crate) use self::tmux_session_files::{stamp_spawn_markers, write_spawn_nonce};
 #[rustfmt::skip]
 #[cfg(test)]
 pub(in crate::services::discord) use self::watcher_lifecycle::{CLAIM_PAUSE, claim_cross_channel_tmux_watcher_for_test, claim_or_replace_watcher, claim_or_reuse_watcher, evict_claim_before_adoption_for_test};
@@ -876,19 +878,6 @@ async fn drain_missing_inflight_dead_tmux_tail_to_eof(
                 tmux_session_name,
                 drained_offset,
                 "src/services/discord/tmux.rs:missing_inflight_dead_tmux_tail_drain",
-            );
-            // #5071 T1 S3b: O+S only — the tail is drained to EOF so the frontier
-            // does not strand behind a dead wrapper; nothing is posted.
-            crate::services::discord::session_relay_sink::journal::watcher::settle_without_transport(
-                shared,
-                crate::services::discord::session_relay_sink::journal::watcher::WatcherObligationCoordinates {
-                    provider,
-                    channel_id,
-                    tmux_session_name,
-                    generation_mtime_ns: read_generation_file_mtime_ns(tmux_session_name),
-                    range: (current_offset, drained_offset),
-                },
-                crate::services::discord::session_relay_sink::journal::watcher::SettlementReason::MissingInflightDeadTmuxDrain,
             );
             drained_offset
         }

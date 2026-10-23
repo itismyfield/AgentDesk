@@ -1,4 +1,4 @@
-//! Record captured queue removals and report a positive verdict only for proved non-removal.
+//! Record what a cancel removed from the queue; only proved non-removal earns a positive verdict.
 
 use std::collections::HashSet;
 
@@ -123,21 +123,6 @@ pub(crate) async fn record_queue_loss_after_cancel(
     record_queue_loss(target, capture, pool, witness, reason, after).await
 }
 
-/// [`record_queue_loss_after_cancel`] reading the post-cancel queue of `handle`, the actor the
-/// capture and the removal used, never whichever one the channel registers by then.
-#[cfg(unix)]
-pub(crate) async fn record_queue_loss_after_cancel_on(
-    handle: &ChannelMailboxHandle,
-    target: &TurnLifecycleTarget,
-    capture: &CancelQueueCapture,
-    pool: Option<&PgPool>,
-    witness: CancelRemovalWitness,
-    reason: &'static str,
-) -> CancelQueueLoss {
-    let after = |_| Some(handle.clone());
-    record_queue_loss(target, capture, pool, witness, reason, after).await
-}
-
 async fn record_queue_loss(
     target: &TurnLifecycleTarget,
     capture: &CancelQueueCapture,
@@ -204,6 +189,63 @@ async fn record_queue_loss(
         outcome.dead_lettered_message_ids.is_empty() && outcome.unpreserved_message_ids.is_empty();
     report(target, &outcome, reason);
     outcome
+}
+
+/// Records each item a purge actually removed; the queue read afterwards only measures depth, so
+/// input queued after the purge never hides a removal. Only a `complete` empty receipt proves none.
+#[cfg(unix)]
+pub(crate) async fn record_purge_receipt_on(
+    handle: &ChannelMailboxHandle,
+    target: &TurnLifecycleTarget,
+    receipt: &[Intervention],
+    complete: bool,
+    pool: Option<&PgPool>,
+    reason: &'static str,
+) -> CancelQueueLoss {
+    #[cfg(test)]
+    if let Some(channel) = target.channel_id {
+        run_pre_record_probe_for_test(channel).await;
+    }
+    let mut outcome = CancelQueueLoss::default();
+    let channel_id = target.channel_id.map_or(0, ChannelId::get);
+    for item in receipt {
+        let message_id = item.message_id.get();
+        if dead_letter(pool, channel_id, item, reason).await {
+            outcome.dead_lettered_message_ids.push(message_id);
+        } else {
+            outcome.unpreserved_message_ids.push(message_id);
+        }
+    }
+    let snapshot = handle.try_snapshot().await.ok();
+    outcome.queue_depth_after = snapshot.map(|snapshot| snapshot.intervention_queue.len());
+    outcome.proved_nothing_removed = complete && receipt.is_empty();
+    report(target, &outcome, reason);
+    outcome
+}
+
+#[cfg(all(test, unix))]
+type PreRecordProbe = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
+
+#[cfg(all(test, unix))]
+static PRE_RECORD_PROBE_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<ChannelId, PreRecordProbe>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Runs `probe` once when a purge receipt of `channel` is about to be recorded.
+#[cfg(all(test, unix))]
+pub(crate) fn set_pre_record_probe_for_test(channel: ChannelId, probe: PreRecordProbe) {
+    PRE_RECORD_PROBE_FOR_TESTS
+        .lock()
+        .unwrap()
+        .insert(channel, probe);
+}
+
+#[cfg(all(test, unix))]
+async fn run_pre_record_probe_for_test(channel: ChannelId) {
+    let probe = PRE_RECORD_PROBE_FOR_TESTS.lock().unwrap().remove(&channel);
+    if let Some(probe) = probe {
+        probe().await;
+    }
 }
 
 /// Every place a captured message can legitimately be after the cancel. The
