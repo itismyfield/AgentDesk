@@ -495,6 +495,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_on_a_listed_herdr_channel_stays_refused
+  services::discord::health::turn_deliver::inject_codex_tests::queued_codex_production_origin_gate_stays_closed_without_cfg_test
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
   services::discord::health::turn_deliver::inject_tests::a_pane_veto_stays_logged_when_the_delivery_starts_or_fails
