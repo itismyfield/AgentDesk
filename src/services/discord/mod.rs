@@ -65,7 +65,6 @@ mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
-mod queue_park_ledger;
 mod queue_reactions;
 // #5191: catch-up recovery dedup identity set (queue + active + reservation).
 mod queued_placeholders_store;
@@ -943,7 +942,6 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
-    queue_park_ledger: queue_park_ledger::QueueParkLedger,
     /// Serializes `/resume` rebinds with intake session selection for each channel.
     /// Weak entries let inactive channels disappear once the final intake/resume
     /// guard drops; the map is opportunistically pruned on each lookup, so channel
@@ -1055,10 +1053,6 @@ pub(crate) struct SharedData {
     pub(super) api_port: u16,
     /// Shared PostgreSQL pool for PG-backed route and runtime helpers.
     pub(super) pg_pool: Option<sqlx::PgPool>,
-    /// Boot/reload-resolved intake delivery capabilities. Turn handling reads
-    /// this atomic snapshot without consulting config or probing PostgreSQL.
-    pub(in crate::services::discord) intake_delivery_capabilities:
-        Arc<runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache>,
     pub(in crate::services::discord) policy: PolicyRuntime,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
@@ -1261,21 +1255,6 @@ pub(crate) fn make_shared_data_for_tests() -> Arc<SharedData> {
 pub(super) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
-    make_shared_data_for_tests_with_storage_and_intake_capabilities(
-        pg_pool,
-        Arc::new(
-            runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::default(),
-        ),
-    )
-}
-
-#[cfg(test)]
-fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
-    pg_pool: Option<sqlx::PgPool>,
-    intake_delivery_capabilities: Arc<
-        runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache,
-    >,
-) -> Arc<SharedData> {
     let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
@@ -1283,7 +1262,6 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
-        queue_park_ledger: Default::default(),
         session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
@@ -1366,7 +1344,6 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
         provider: ProviderKind::Claude,
         api_port: 9,
         pg_pool,
-        intake_delivery_capabilities,
         policy: PolicyRuntime { engine: None },
         health_registry: std::sync::Weak::new(),
         known_slash_commands: tokio::sync::OnceCell::new(),
@@ -1837,7 +1814,6 @@ async fn apply_queue_exit_feedback(
     channel_id: ChannelId,
     queue_exit_events: &[QueueExitEvent],
 ) {
-    shared.queue_park_ledger.exit(channel_id, queue_exit_events);
     let queue_exit_events: Vec<&QueueExitEvent> = queue_exit_events
         .iter()
         .filter(|event| event.intervention.author_id.get() > 1)
@@ -2143,15 +2119,12 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
-            park.note_session_transition_hold(provider, channel_id);
             return MailboxTakeNextSoftOutcome::default();
         }
     };
-    park.clear_promote_hold(channel_id, "session_transition");
 
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane

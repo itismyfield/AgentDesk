@@ -381,8 +381,6 @@ impl super::SessionBoundDiscordRelaySink {
         // arm switches to the funnel; the task-card arm keeps its own fence.
         let mut plain_body_anchor_msg_id = None;
         let mut plain_body_posted = false;
-        let mut plain_journal_attempt = None;
-        let mut plain_transport_receipt = None;
         let prompt_anchor = super::relay_format::ssh_direct_prompt_anchor_for_response(
             provider,
             &delivery.session_name,
@@ -494,9 +492,6 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
-            if super::super::formatting::split_message(relay_text).len() == 1 {
-                plain_journal_attempt = self.journal.begin_fresh(shared, delivery);
-            }
             // The client is found before the claim: without one nothing is sent or claimed.
             let plain_http = match (shared.serenity_http_or_token_fallback(), _gateway) {
                 (Some(http), _) => Some(http),
@@ -508,7 +503,6 @@ impl super::SessionBoundDiscordRelaySink {
                     )));
                 }
             };
-            let receipt_slot = &mut plain_transport_receipt;
             let send = move || async move {
                 #[cfg(test)]
                 if let Some(gateway) = _gateway {
@@ -524,7 +518,7 @@ impl super::SessionBoundDiscordRelaySink {
                 let http = plain_http.ok_or_else(|| {
                     RelaySinkError::Transient("discord http unavailable".to_string())
                 })?;
-                let (message_ids, receipt) = self
+                let (message_ids, _receipt) = self
                     .send_plain_response_chunks(
                         shared,
                         &http,
@@ -533,7 +527,6 @@ impl super::SessionBoundDiscordRelaySink {
                         prompt_anchor_reference,
                     )
                     .await?;
-                *receipt_slot = receipt;
                 Ok(message_ids)
             };
             let message_ids =
@@ -604,14 +597,6 @@ impl super::SessionBoundDiscordRelaySink {
             None
         };
         if let Some(proof) = plain_body_proof {
-            if let (Some(attempt), Some(receipt)) = (plain_journal_attempt, plain_transport_receipt)
-            {
-                self.journal.finish_fresh(
-                    attempt,
-                    receipt,
-                    proof == super::delivery_frontier::SinkDeliveryProofResult::Persisted,
-                );
-            }
             // The plain-body arm and the task-card arm are mutually exclusive, so
             // no task-response heartbeat can be running here; the bounded final
             // delivery CAS below belongs to the card path only.

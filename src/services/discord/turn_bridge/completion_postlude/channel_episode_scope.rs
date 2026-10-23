@@ -547,7 +547,7 @@ mod tests {
             "spawn_turn_bridge(shared, token, rx, context);",
             Some(1),
         );
-        want(intake, &spawn, Some(2));
+        want(intake, &spawn, Some(1));
         want(headless, &spawn, Some(1));
         want(recovery, &spawn, Some(1));
         want(tui_direct, &spawn, Some(0));

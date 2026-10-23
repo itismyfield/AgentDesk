@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -500,8 +499,6 @@ pub(super) async fn handle_no_result_exits(
                         .await;
                 }
             }
-            // #5071 T1 S3b: captured before the next line overwrites it.
-            let settlement_start_offset = *state.all_data_start_offset;
             state.all_data.clear();
             *state.all_data_start_offset = current_offset;
             *state.all_data_fully_mirrored_to_session_relay = true;
@@ -523,18 +520,6 @@ pub(super) async fn handle_no_result_exits(
                 &tmux_session_name,
                 current_offset,
                 "src/services/discord/tmux.rs:ready_for_input_fresh_idle",
-            );
-            // #5071 T1 S3b: O+S only — pane-idle completion consumes the range, no POST.
-            journal_watcher::settle_without_transport(
-                &shared,
-                journal_watcher::WatcherObligationCoordinates {
-                    provider: &watcher_provider,
-                    channel_id,
-                    tmux_session_name: &tmux_session_name,
-                    generation_mtime_ns,
-                    range: (settlement_start_offset, current_offset),
-                },
-                journal_watcher::SettlementReason::ReadyForInputFreshIdle,
             );
             finish_monitor_auto_turn_if_claimed(
                 &shared,

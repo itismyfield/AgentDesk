@@ -203,7 +203,6 @@ jobs:
               # own comment declares itself temporary.
               - 'src/config_live_reload.rs'
               - 'src/services/dispatch_gate.rs'
-              - 'src/services/health_active_session_audit.rs'
               - 'src/services/platform/mod.rs'
               - 'src/services/session_activity.rs'
             pg_db:
@@ -444,7 +443,6 @@ jobs:
               - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
@@ -470,7 +468,6 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
               - 'src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
@@ -532,7 +529,6 @@ jobs:
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'
-              - 'src/services/discord/turn_bridge/intake_settlement/tests.rs'
               - 'src/services/discord/turn_bridge/recovery_text.rs'
               - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
               - 'src/services/discord/turn_bridge/stream_loop/provider_recovery.rs'
@@ -719,8 +715,6 @@ jobs:
               - 'src/services/cluster/intake_worker/**'
               - 'src/services/discord/router/message_handler/intake_turn.rs'
               - 'src/services/discord/router/message_handler/intake_turn/**'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability/**'
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
@@ -731,7 +725,6 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
               - 'src/services/discord/turn_bridge/headless_delivery.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/**'
-              - 'src/services/discord/turn_bridge/intake_settlement/**'
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/scheduled_messages.rs'
@@ -873,7 +866,6 @@ jobs:
               - 'src/utils/**'
               - 'src/voice/**'
               - 'src/services/*'
-              - 'src/services/writer_protocol/**'
               - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
@@ -943,8 +935,6 @@ jobs:
               - 'src/services/discord/queue_dispatch/**'
               - 'src/services/discord/queue_io.rs'
               - 'src/services/discord/queue_io/**'
-              - 'src/services/discord/queue_park_ledger.rs'
-              - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
               - 'src/services/discord/recovery_paths/**'
@@ -1750,7 +1740,6 @@ jobs:
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1
       # #5003: this production-path E2E previously ran only in main's broad
@@ -2342,7 +2331,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=44938e2d1499cd236b769702e92e19ed972dff761bf0d6a02443a7a0476419dd
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2595,7 +2584,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=44938e2d1499cd236b769702e92e19ed972dff761bf0d6a02443a7a0476419dd
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use tokio::time::{Instant, error::Elapsed, timeout_at};
 
-use crate::services::health_active_session_audit::ActiveSessionAuditReport;
 use crate::services::health_diagnostics::{
     self, AutoQueueCleanupBacklog, DispatchOutboxStats, HealthKvMeta, MailboxSessions,
     SessionLookups,
@@ -45,40 +44,23 @@ pub(super) struct Initial {
     pub(super) outbox: Result<Option<DispatchOutboxStats>, Elapsed>,
     pub(super) cleanup: Result<Option<AutoQueueCleanupBacklog>, Elapsed>,
     pub(super) kv: Result<HealthKvMeta, Elapsed>,
-    /// `None` on the public body.
-    pub(super) audit: Option<Result<ActiveSessionAuditReport, Elapsed>>,
 }
 
 impl Initial {
     /// Whether any read was still pending when the deadline passed.
     pub(super) fn timed_out(&self) -> bool {
-        self.server_up.is_err()
-            || self.outbox.is_err()
-            || self.cleanup.is_err()
-            || self.kv.is_err()
-            || matches!(self.audit, Some(Err(_)))
+        self.server_up.is_err() || self.outbox.is_err() || self.cleanup.is_err() || self.kv.is_err()
     }
 }
 
 /// Runs the initial reads concurrently with `alongside`, the snapshot and its late reads.
 pub(super) async fn read_initial_alongside<T>(
     state: &AppState,
-    detailed: bool,
     deadline: Instant,
     alongside: impl Future<Output = T>,
 ) -> (Initial, T) {
     let pool = state.pg_pool_ref();
-    let audit = async {
-        if !detailed {
-            return None;
-        }
-        let audit = health_diagnostics::build_active_session_audit(
-            pool,
-            state.cluster_instance_id.as_deref(),
-        );
-        Some(timeout_at(deadline, audit).await)
-    };
-    let (server_up, outbox, cleanup, kv, audit, alongside) = tokio::join!(
+    let (server_up, outbox, cleanup, kv, alongside) = tokio::join!(
         timeout_at(deadline, health_diagnostics::probe_server_up(pool)),
         timeout_at(
             deadline,
@@ -89,7 +71,6 @@ pub(super) async fn read_initial_alongside<T>(
             health_diagnostics::load_auto_queue_cleanup_backlog(pool)
         ),
         timeout_at(deadline, health_diagnostics::load_health_kv_meta(pool)),
-        audit,
         alongside,
     );
     let initial = Initial {
@@ -97,7 +78,6 @@ pub(super) async fn read_initial_alongside<T>(
         outbox,
         cleanup,
         kv,
-        audit,
     };
     (initial, alongside)
 }

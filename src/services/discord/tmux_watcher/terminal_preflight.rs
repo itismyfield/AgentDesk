@@ -1,8 +1,6 @@
 use super::*;
 use std::sync::Arc;
 
-use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
-
 pub(super) struct TerminalPreflightContext<'a> {
     pub(super) http: &'a Arc<serenity::Http>,
     pub(super) shared: &'a Arc<SharedData>,
@@ -197,18 +195,6 @@ pub(super) async fn run_terminal_preflight_suppression(
                 confirmed_end,
                 "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
             );
-            // #5071 T1 S3b: O+S only — the frontier moved on suppression, not a POST.
-            journal_watcher::settle_without_transport(
-                shared,
-                journal_watcher::WatcherObligationCoordinates {
-                    provider: &watcher_provider,
-                    channel_id,
-                    tmux_session_name: &tmux_session_name,
-                    generation_mtime_ns,
-                    range: (data_start_offset, confirmed_end),
-                },
-                journal_watcher::SettlementReason::SilentTurnSuppressed,
-            );
         }
         finish_monitor_auto_turn_if_claimed(
             &shared,
@@ -289,18 +275,6 @@ pub(super) async fn run_terminal_preflight_suppression(
                 &tmux_session_name,
                 confirmed_end,
                 "src/services/discord/tmux.rs:cancel_tombstone_suppressed_terminal_output",
-            );
-            // #5071 T1 S3b: O+S only — cancel-tombstone suppression, no POST.
-            journal_watcher::settle_without_transport(
-                shared,
-                journal_watcher::WatcherObligationCoordinates {
-                    provider: &watcher_provider,
-                    channel_id,
-                    tmux_session_name: &tmux_session_name,
-                    generation_mtime_ns,
-                    range: (data_start_offset, confirmed_end),
-                },
-                journal_watcher::SettlementReason::CancelTombstoneSuppressed,
             );
         }
         finish_monitor_auto_turn_if_claimed(

@@ -228,7 +228,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     } else {
                         let delivered_long_chunk_body = direct_terminal_response.to_string();
                         let mut long_chunk_anchor_msg_id = None;
-                        let mut long_chunk_anchor_receipt = None;
                         terminal_long_chunks::apply_watcher_long_chunks_legacy(
                             &http,
                             &shared,
@@ -241,7 +240,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                             &mut *watcher_streaming_rollover_frozen_msg_ids,
                             inflight_before_relay.as_ref(),
                             &mut long_chunk_anchor_msg_id,
-                            &mut long_chunk_anchor_receipt,
                             body_claim,
                             terminal_long_chunks::WatcherLongChunksLocals {
                                 relay_ok: &mut relay_ok,
@@ -265,7 +263,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
                                     anchor_msg_id: long_chunk_anchor_msg_id,
                                     raw_body: delivered_long_chunk_body,
-                                    receipt: long_chunk_anchor_receipt,
                                 });
                         }
                     }
@@ -326,8 +323,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         tmux_session_name,
                     );
                     let mut last_chunk_anchor = None;
-                    // Receipt of each arm's anchor: tail chunk on edit, first chunk on fallback.
-                    let mut edit_anchor_receipt = None;
                     let recheck = EditFailureRecheck {
                         provider: watcher_provider,
                         tmux_session_name,
@@ -341,7 +336,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         &relay_text,
                         recheck,
                         body_claim,
-                        (&mut last_chunk_anchor, &mut edit_anchor_receipt),
+                        &mut last_chunk_anchor,
                     )
                     .await
                     else {
@@ -370,7 +365,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
                                     anchor_msg_id: Some(footer_target_msg_id),
                                     raw_body: direct_terminal_response.to_string(),
-                                    receipt: edit_anchor_receipt.take(),
                                 });
                             remember_watcher_completion_footer_terminal_target(
                                 single_message_panel_footer_mode,
@@ -423,7 +417,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
                                     anchor_msg_id: replacement_anchor,
                                     raw_body: direct_terminal_response.to_string(),
-                                    receipt: edit_anchor_receipt.take(),
                                 });
                             if let Some(replacement_anchor) = replacement_anchor {
                                 let tail = crate::services::discord::formatting::split_message(
@@ -659,13 +652,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                 let Ok(BodySend::Sent(sent)) = claim_then_send(body_claim, send).await else {
                     return false; // Nothing was sent: O owns the channel or its identity is held.
                 };
-                match sent.and_then(|receipts| {
-                    crate::services::discord::formatting::message_ids_from_receipts(
-                        receipts.clone(),
-                    )
-                    .map(|message_ids| (message_ids, receipts))
-                }) {
-                    Ok((message_ids, receipts)) => {
+                match sent.and_then(crate::services::discord::formatting::message_ids_from_receipts)
+                {
+                    Ok(message_ids) => {
                         *tui_direct_anchor_or_lease_present_for_lifecycle |=
                             prompt_anchor.is_some();
                         external_input_lease_consumed_by_relay =
@@ -676,8 +665,6 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         *watcher_terminal_delivery_proof =
                             Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
                                 anchor_msg_id: message_ids.last().copied(),
-                                // D4.3: the frontier commits the tail chunk.
-                                receipt: receipts.last().cloned(),
                                 raw_body: direct_terminal_response.to_string(),
                             });
                         if let Some(msg_id) = message_ids.last().copied() {

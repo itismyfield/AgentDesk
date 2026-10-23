@@ -31,89 +31,17 @@ async fn seed(
     .expect("seed intake row")
 }
 
-async fn audit(pool: &PgPool, id: i64) -> (IntakeOutboxStatus, Option<DateTime<Utc>>) {
-    sqlx::query_as("SELECT status, dispatched_at FROM public.intake_outbox WHERE id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .expect("audit intake row")
-}
-
-#[tokio::test]
-async fn mark_dispatched_sets_clock_and_requires_spawned_pg() {
-    let database = TestPostgresDb::create().await;
-    let pool = database.connect_and_migrate().await;
-    let spawned = seed(&pool, "spawned", IntakeOutboxStatus::Spawned, None).await;
-
-    assert!(
-        mark_dispatched(&pool, spawned)
-            .await
-            .expect("stamp spawned")
-    );
-    let stamped = audit(&pool, spawned).await;
-    assert_eq!(stamped.0, IntakeOutboxStatus::Dispatched);
-    assert!(stamped.1.is_some());
-    assert!(!mark_dispatched(&pool, spawned).await.expect("repeat stamp"));
-    assert_eq!(audit(&pool, spawned).await, stamped);
-
-    let prior_clock = truncate_to_micros(Utc::now() - Duration::minutes(1));
-    for (key, status, clock) in [
-        ("accepted", IntakeOutboxStatus::Accepted, None),
-        (
-            "dispatched",
-            IntakeOutboxStatus::Dispatched,
-            Some(prior_clock),
-        ),
-        ("done", IntakeOutboxStatus::Done, None),
-        ("unknown", IntakeOutboxStatus::Unknown, None),
-    ] {
-        let id = seed(&pool, key, status, clock).await;
-        assert!(!mark_dispatched(&pool, id).await.expect("non-spawned CAS"));
-        assert_eq!(audit(&pool, id).await, (status, clock));
-        assert_eq!(observe_status(&pool, id).await.unwrap(), Some(status));
-    }
-    assert!(
-        !mark_dispatched(&pool, i64::MAX)
-            .await
-            .expect("missing-row CAS")
-    );
-    assert_eq!(observe_status(&pool, i64::MAX).await.unwrap(), None);
-
-    pool.close().await;
-    database.drop().await;
-}
-
-#[tokio::test]
-async fn mark_dispatched_satisfies_dispatched_requires_clock_check_pg() {
-    let database = TestPostgresDb::create().await;
-    let pool = database.connect_and_migrate().await;
-    let id = seed(&pool, "clock", IntakeOutboxStatus::Spawned, None).await;
-
-    let missing_clock =
-        sqlx::query("UPDATE public.intake_outbox SET status = 'dispatched' WHERE id = $1")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .expect_err("dispatched without a clock must violate the schema check");
-    assert_eq!(
-        missing_clock
-            .as_database_error()
-            .and_then(|error| error.code()),
-        Some(std::borrow::Cow::Borrowed("23514"))
-    );
-    assert!(mark_dispatched(&pool, id).await.expect("typed stamp"));
-    assert!(audit(&pool, id).await.1.is_some());
-
-    pool.close().await;
-    database.drop().await;
-}
-
 #[tokio::test]
 async fn dispatched_row_blocks_new_open_route_for_the_channel_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    let id = seed(&pool, "blocked-channel", IntakeOutboxStatus::Spawned, None).await;
-    assert!(mark_dispatched(&pool, id).await.unwrap());
+    let _id = seed(
+        &pool,
+        "blocked-channel",
+        IntakeOutboxStatus::Dispatched,
+        Some(Utc::now()),
+    )
+    .await;
 
     let error = sqlx::query(
         "INSERT INTO public.intake_outbox (
@@ -142,8 +70,13 @@ async fn dispatched_row_blocks_new_open_route_for_the_channel_pg() {
 async fn dispatched_row_is_reclaimed_by_sweep_pg() {
     let database = TestPostgresDb::create().await;
     let pool = database.connect_and_migrate().await;
-    let id = seed(&pool, "sweep-channel", IntakeOutboxStatus::Spawned, None).await;
-    assert!(mark_dispatched(&pool, id).await.unwrap());
+    let id = seed(
+        &pool,
+        "sweep-channel",
+        IntakeOutboxStatus::Dispatched,
+        Some(Utc::now()),
+    )
+    .await;
     let now = truncate_to_micros(Utc::now());
     let stale_at = now - Duration::hours(1);
     sqlx::query("UPDATE public.intake_outbox SET dispatched_at = $2 WHERE id = $1")
