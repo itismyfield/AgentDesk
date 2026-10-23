@@ -10,7 +10,7 @@ use super::turn_finalizer::{LedgerKey, TurnKey};
 use super::{ChannelId, SharedData, serenity};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_summary_line::{Outcome, render};
+use crate::services::turn_summary_line::{Outcome, quota, render};
 
 const TTL: Duration = Duration::from_secs(60 * 60);
 const CAP: usize = 1024;
@@ -69,6 +69,7 @@ pub(in crate::services::discord) struct LiveSummary {
     outcome: Outcome,
     elapsed_ms: Option<u64>,
     context_pct: Option<u8>,
+    started: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub(in crate::services::discord) fn outcome(cancelled: bool, failed: bool) -> Outcome {
@@ -96,6 +97,7 @@ impl LiveSummary {
             outcome,
             elapsed_ms,
             context_pct: None,
+            started: quota::legacy_started(&state.started_at),
         }
     }
 
@@ -143,6 +145,7 @@ impl LiveSummary {
                 },
                 elapsed_ms,
                 context_pct: None,
+                started: quota::legacy_started(&state.started_at),
             }
             .with_context(shared),
         )
@@ -221,7 +224,17 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
         return;
     }
     // An error may follow a successful POST, so the attempt remains consumed even on cancellation.
-    let text = render(summary.outcome, summary.elapsed_ms, summary.context_pct);
+    let quota = quota::snapshot(
+        provider.as_str(),
+        summary.key.channel_id.get(),
+        summary.started,
+    );
+    let text = render(
+        summary.outcome,
+        summary.elapsed_ms,
+        summary.context_pct,
+        quota,
+    );
     if let Err(error) =
         super::outbound::confirmation::send_terminal_notice(gateway, summary.key.channel_id, &text)
             .await

@@ -347,7 +347,7 @@ async fn answered_turn_keeps_its_completed_panel() {
         assert_eq!(posted, usize::from(!o), "o={o}: {finals:?}");
         let summaries = finals
             .values()
-            .filter(|text| text.starts_with("-# ✅ "))
+            .filter(|text| text.starts_with("-# ⏱️ "))
             .count();
         assert_eq!(summaries, usize::from(!o), "o={o}: {finals:?}");
         assert_eq!(finals.len(), 2 * usize::from(!o), "o={o}: {finals:?}");

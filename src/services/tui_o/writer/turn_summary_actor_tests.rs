@@ -73,7 +73,7 @@ async fn resumed_summary(provider: ShadowProvider, channel: u64) {
     append(&path, &native(end));
     polls(2).await;
     halt(stop, task).await;
-    assert_eq!(harness.port.posts(), ["answer", "-# ✅ 7초"]);
+    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초"]);
     let key = UnitKey {
         channel_id: channel,
         provider,
@@ -89,7 +89,7 @@ async fn resumed_summary(provider: ShadowProvider, channel: u64) {
     let (stop, task) = spawn_with(harness.writer(), provider, bindings);
     polls(3).await;
     halt(stop, task).await;
-    assert_eq!(harness.port.posts(), ["answer", "-# ✅ 7초"]);
+    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초"]);
 }
 
 #[tokio::test(start_paused = true)]

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::pieces::{Derived, PieceWork};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
-use crate::services::turn_summary_line::{Outcome, render};
+use crate::services::turn_summary_line::{Outcome, quota, render};
 
 pub const TURN_SUMMARY_OPEN: &str = "turn_summary_open";
 
@@ -203,10 +203,15 @@ impl TurnSummaryRun {
             });
         key.kind = UnitKind::Tool;
         key.native_key.push_str("#turn_end");
+        let provider = match self.provider {
+            ShadowProvider::Claude => "claude",
+            ShadowProvider::Codex => "codex",
+        };
+        let quota = quota::snapshot(provider, key.channel_id, turn.started);
         vec![Derived::Piece(PieceWork {
             unit_key: key,
             index: 0,
-            payload: render(outcome, elapsed, percent),
+            payload: render(outcome, elapsed, percent, quota),
         })]
     }
 }
