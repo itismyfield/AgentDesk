@@ -24,6 +24,7 @@ pub(crate) mod message_ops;
 mod pipeline_ops;
 mod quality_ops;
 mod queue_ops;
+mod read_bridge;
 mod review_automation_ops;
 mod review_ops;
 mod runtime_ops;
@@ -71,12 +72,16 @@ fn register_globals_pg_only(
     cards_ops::register_card_ops(ctx, pg_pool.clone())?;
     log_ops::register_log_ops(ctx)?;
     quality_ops::register_quality_ops(ctx)?;
-    config_ops::register_config_ops(ctx, pg_pool.clone())?;
+    // One reader per Context, shared by config.get and kv.get; none without PostgreSQL.
+    let reads = pg_pool
+        .as_ref()
+        .map(|pool| std::sync::Arc::new(read_bridge::ReadBridge::new(pool)));
+    config_ops::register_config_ops(ctx, reads.clone())?;
     http_ops::register_http_ops(ctx)?;
     dispatch_ops::register_dispatch_ops(ctx, pg_pool.clone())?;
     kanban_ops::register_kanban_ops(ctx, pg_pool.clone())?;
     ci_recovery_ops::register_ci_recovery_ops(ctx, pg_pool.clone())?;
-    kv_ops::register_kv_ops(ctx, pg_pool.clone())?;
+    kv_ops::register_kv_ops_with_reads(ctx, pg_pool.clone(), reads)?;
     review_ops::register_review_ops(ctx, pg_pool.clone())?;
     review_automation_ops::register_review_automation_ops(ctx, pg_pool.clone())?;
     queue_ops::register_queue_ops(ctx, pg_pool.clone())?;
