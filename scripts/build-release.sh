@@ -68,7 +68,7 @@ case "$TARGET" in
   *) echo "Error: unsupported release target: $TARGET" >&2; exit 2 ;;
 esac
 
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
 if ! setup_sccache_env; then
   export RUSTC_WRAPPER=""
   export CARGO_BUILD_RUSTC_WRAPPER=""
