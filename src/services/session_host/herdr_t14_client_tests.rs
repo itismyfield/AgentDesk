@@ -28,6 +28,7 @@ import select
 import sys
 import termios
 import time
+import traceback
 import tty
 import urllib.parse
 import urllib.request
@@ -53,7 +54,8 @@ def atomic(path, value):
     os.replace(temp, path)
 
 def provider_error(kind, value, trace):
-    atomic(CASE / "provider-error.json", {"type": kind.__name__, "message": str(value)})
+    atomic(CASE / "provider-error.json", {"type": kind.__name__, "message": str(value),
+        "traceback": "".join(traceback.format_exception(kind, value, trace))})
     sys.__excepthook__(kind, value, trace)
 
 sys.excepthook = provider_error
