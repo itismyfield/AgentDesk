@@ -35,7 +35,7 @@ pub(super) fn watchers() -> u64 {
 }
 
 /// The example config with every home path moved under `root` and the claim semaphore added,
-/// written to `root/agentdesk.yaml`; returns its path, sha256 and size.
+/// written to `root/agentdesk.yaml`; returns its path, and sha256 and size with the root elided.
 pub(super) fn write_config(root: &Path) -> (PathBuf, String, usize) {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("agentdesk.example.yaml");
     let example = std::fs::read_to_string(&example).expect("read agentdesk.example.yaml");
@@ -56,7 +56,12 @@ pub(super) fn write_config(root: &Path) -> (PathBuf, String, usize) {
         parsed.data.dir.starts_with(root) && parsed.cluster.semaphores.contains_key(SEMAPHORE),
         "the copy keeps its data under the root and carries the claim semaphore"
     );
-    (path, format!("{:x}", Sha256::digest(&yaml)), yaml.len())
+    let rootless = yaml.replace(&root.display().to_string(), "<root>");
+    (
+        path,
+        format!("{:x}", Sha256::digest(&rootless)),
+        rootless.len(),
+    )
 }
 
 /// The claim owner online for the whole run and `CLAIM_ROWS` pending dispatches needing the

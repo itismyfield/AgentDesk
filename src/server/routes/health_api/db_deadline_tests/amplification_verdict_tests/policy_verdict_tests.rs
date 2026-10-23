@@ -190,10 +190,11 @@ pub(in super::super) fn pooled_policy(
     (lanes, acquires)
 }
 
-/// The candidate owns one reader per Context: never more connections than Contexts.
+/// The `s2` candidate owns one reader per Context: never more connections than Contexts. An `s3`
+/// candidate may lack that reader, so its churn is reported, not bounded.
 pub(super) fn candidate_invalid(candidate: &[RunSummary]) -> Vec<String> {
     let mut invalid = Vec::new();
-    for run in candidate.iter().filter(|run| run.profile.has_policy()) {
+    for run in candidate.iter().filter(|run| run.profile == Profile::S2) {
         let contexts = run
             .conditions
             .get("contexts_with_pg")
