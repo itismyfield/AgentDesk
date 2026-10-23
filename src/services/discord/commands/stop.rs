@@ -84,7 +84,7 @@ impl StopReply {
             CommandStop::AlreadyStopping | CommandStop::HostRefused | CommandStop::NoActiveTurn => {
             }
         }
-        };
+        }
     }
 }
 

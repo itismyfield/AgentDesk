@@ -126,7 +126,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 ### 4.4 home 권위 직접 소비 전수표
 
-R1–R6 제거 뒤 home 권위를 직접 소비하는 production 파일은 없다. 이전 admission·라우팅·관측·진단 소비자 행과 전용 inventory 시험은 제거됐다. 아래 설계의 home·shadow 경로는 과거 계약 기록이며 현재 배선을 뜻하지 않는다.
+R1–R6 제거 뒤 home 권위를 직접 소비하는 production 파일은 없다. 이전 admission·라우팅·관측·진단 소비자 행과 전용 inventory 시험은 제거됐다. 이 문서의 나머지 home·shadow 설계는 과거 계약 기록이며 현재 배선을 뜻하지 않는다.
 
 ## 5. 운영 전제
 
