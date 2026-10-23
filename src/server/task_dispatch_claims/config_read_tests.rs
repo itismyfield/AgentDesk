@@ -16,7 +16,7 @@ use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 const WAIT: Duration = Duration::from_secs(10);
 const OWNER: &str = "mac-book-release";
 /// Ignored padding that makes the YAML parse take long enough to see where it runs.
-const PADDING_LINES: usize = 60_000;
+const PADDING_LINES: usize = 160_000;
 
 /// One online claim owner, a dispatch holding one `ue_editor` slot, and two pending dispatches
 /// that need it: capacity 2 claims exactly one of them.
@@ -108,6 +108,10 @@ fn feed_after_runtime_ran(
             match file.write(rest) {
                 Ok(written) => rest = &rest[written..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the reader stopped reading the FIFO"
+                    );
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(error) => panic!("write the config FIFO: {error}"),
@@ -115,6 +119,19 @@ fn feed_after_runtime_ran(
         }
         seen
     })
+}
+
+/// Opens the FIFO for writing once on drop, so a read still blocked in `open` sees EOF and the
+/// runtime's blocking pool can shut down after a failed assertion.
+struct Unblock(PathBuf);
+
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&self.0);
+    }
 }
 
 #[tokio::test]
@@ -135,6 +152,7 @@ async fn claim_config_read_yields_runtime_without_changing_snapshot() {
             .unwrap()
             .success()
     );
+    let _unblock = Unblock(path.clone());
     let yaml = config_yaml(root.path());
 
     // This runtime has one thread: the ticker runs only while the claim's future is pending.
@@ -159,7 +177,10 @@ async fn claim_config_read_yields_runtime_without_changing_snapshot() {
         "AGENTDESK_CONFIG",
         &path,
     );
-    let outcome = claim_task_dispatches(&pool, &request()).await.unwrap();
+    let outcome = tokio::time::timeout(WAIT * 3, claim_task_dispatches(&pool, &request()))
+        .await
+        .expect("the claim finishes")
+        .unwrap();
     ticker.abort();
     let longest = *longest.lock().unwrap();
 
