@@ -846,6 +846,7 @@ struct WireCase {
     posts: usize,
     valid_posts: usize,
     reads: usize,
+    total_reads: usize,
     early_tags: usize,
     late_tags: usize,
     allow_old: Option<bool>,
@@ -972,6 +973,19 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             .unwrap();
         drop(provenance);
         let server = WireServer::start(channel, &key).await;
+        // Reproduce unrelated listener traffic in each enabled case (#7302).
+        for _ in 0..2 {
+            let mut socket = TcpStream::connect(server.base.trim_start_matches("http://"))
+                .await
+                .unwrap();
+            socket
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        }
         let http = Arc::new(serenity::Http::new(&format!("loopback-{channel}")));
         let turns = Arc::new(WireTurns::default());
         let shared =
@@ -1129,7 +1143,8 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
             first_posts,
             posts: server.posts.load(Ordering::SeqCst),
             valid_posts: server.valid_posts.load(Ordering::SeqCst),
-            reads: server.reads.load(Ordering::SeqCst),
+            reads: server.probe_reads.load(Ordering::SeqCst),
+            total_reads: server.reads.load(Ordering::SeqCst),
             early_tags,
             late_tags: fixture_not_sent_tags(&ledger_path).unwrap(),
             allow_old,
@@ -1171,6 +1186,10 @@ async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
         assert_eq!(
             case.reads, 4,
             "two real permission/history passes supplied absence"
+        );
+        assert_eq!(
+            case.total_reads, 6,
+            "the listener also received exactly two unrelated GET / requests"
         );
         assert_eq!(
             case.early_tags, 0,
