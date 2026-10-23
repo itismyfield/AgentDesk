@@ -148,7 +148,7 @@ async fn r1_unsent_full_frame_keeps_external_direct_notice_pg() {
     submit_hook(&tx, &session, &frame);
     assert!(
         wait_until(WAIT, || {
-            let found = rt.notices().iter().any(|text| text == &expected);
+            let found = rt.notices().contains(&expected);
             Box::pin(async move { found })
         })
         .await,
