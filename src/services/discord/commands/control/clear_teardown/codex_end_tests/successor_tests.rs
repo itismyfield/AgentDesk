@@ -259,7 +259,6 @@ fn explicit_clear_then_actual_absence_fresh_seals_exactly_once() {
             &ProviderKind::Codex,
             channel,
             "!clear",
-            super::super::super::SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();
