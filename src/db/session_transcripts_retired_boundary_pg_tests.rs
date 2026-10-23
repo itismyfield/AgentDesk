@@ -20,13 +20,13 @@ async fn snapshot(
     Ok((recent, frontier, bounded, fence))
 }
 
-async fn native_marker(
-    pool: &PgPool,
-) -> Result<(
+type NativeMarker = (
     Option<i64>,
     Option<serde_json::Value>,
     Option<chrono::DateTime<chrono::Utc>>,
-)> {
+);
+
+async fn native_marker(pool: &PgPool) -> Result<NativeMarker> {
     Ok(sqlx::query_as("SELECT native_clear_generation, native_clear_ticket, native_clear_resolved_at FROM channel_session_clear_boundaries WHERE channel_id = $1")
         .bind(CHANNEL).fetch_one(pool).await?)
 }
