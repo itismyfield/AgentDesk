@@ -13971,6 +13971,13 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_t
 services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::burst_confirmed_clears_return_within_three_readers_once_validated
 services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::clear_ends_published_while_o_was_down_prove_on_resume_and_wake_the_old_reader
 services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::clear_ends_that_do_not_name_the_fresh_hop_prove_nothing
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_never_prove_foreign_or_unprepared_fresh_hops
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_prove_and_retire_with_the_dormant_engine
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_prove_and_retire_with_the_legacy_engine
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_reject_an_inode_replaced_after_the_successor_bound
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_retry_a_temporary_read_failure_without_another_bind
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_retry_an_incomplete_first_record_without_another_bind
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::empty_session::empty_sessions_revalidate_renumbered_successor_prefixes
 services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::spaced_confirmed_clears_never_exceed_three_readers
 services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_holds_checkpoint_delivers_tails_and_recovers_once_per_outage
 services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_readable_history_without_a_matching_hop_does_not_block
