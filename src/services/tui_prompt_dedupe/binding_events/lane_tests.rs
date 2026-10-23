@@ -555,10 +555,10 @@ fn binding_judgment_is_the_same_with_and_without_the_log() {
 fn launch_cause_comes_from_the_execution_context_only_once() {
     use crate::services::tmux_common as tc;
     use crate::services::tui_prompt_dedupe::binding_context::{
-        BindingContext, PreparedIncarnation, tests::fixture,
+        BindingContext, PreparedIncarnation, tests::fixture_after_shared_test_env_lock,
     };
-    let (context_root, _env) = fixture();
     let lane = Lane::new();
+    let (context_root, _env) = fixture_after_shared_test_env_lock();
     let (channel, tmux) = (7_050, "p5-launch");
     let launch = |mode: &str| {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
