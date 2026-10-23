@@ -350,7 +350,6 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
   db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
   db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
-  db::session_transcripts::retired_boundary_pg_tests::unresolved_retired_marker_preserves_general_clear_readers_and_turn_fences_pg
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
   engine::ops::config_ops::tests::config_get_raw_preserves_runtime_blob_json_types
