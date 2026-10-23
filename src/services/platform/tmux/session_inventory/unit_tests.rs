@@ -173,6 +173,7 @@ fn s1_inventory_prepared_snapshot_is_environment_independent() {
 
 #[test]
 fn u_inventory_command_context() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let bin = tempfile::tempdir().unwrap();
     let tool = bin.path().join("tmux");
     std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
@@ -226,8 +227,47 @@ fn u_inventory_command_context() {
     }
 }
 
+fn with_competing_namespace<R>(check: impl FnOnce() -> R) -> R {
+    std::thread::scope(|scope| {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let contender = scope.spawn(move || {
+            // Probe contention only; the actual environment change uses the canonical guard.
+            let available = match crate::config::shared_test_env_lock().try_lock() {
+                Ok(probe) => {
+                    drop(probe);
+                    true
+                }
+                Err(std::sync::TryLockError::Poisoned(poison)) => {
+                    drop(poison.into_inner());
+                    true
+                }
+                Err(std::sync::TryLockError::WouldBlock) => false,
+            };
+            let _env = available.then(crate::config::test_env_lock::acquire_shared_test_env_lock);
+            let _tmux = available.then(|| {
+                crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+                    "TMUX",
+                    std::ffi::OsStr::new("/tmp/inventory-competing-socket,42,0"),
+                )
+            });
+            ready_tx.send(()).unwrap();
+            // Dropping the sender on either success or panic releases the competing owner.
+            let _ = release_rx.recv();
+        });
+        ready_rx
+            .recv()
+            .expect("namespace contender reached the lock");
+        let result = check();
+        drop(release_tx);
+        contender.join().unwrap();
+        result
+    })
+}
+
 #[test]
 fn u_inventory_complete_stdout() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let ctx = context(Path::new("/tmp/s0u-none"));
     let bin = tempfile::tempdir().unwrap();
     let tool = bin.path().join("tmux");
@@ -273,7 +313,9 @@ fn u_inventory_complete_stdout() {
         ),
     ] {
         assert_eq!(
-            classify_output(&out, &portable, |_| SocketState::Missing),
+            with_competing_namespace(|| {
+                classify_output(&out, &portable, |_| SocketState::Missing)
+            }),
             expected
         );
     }
@@ -307,6 +349,7 @@ fn u_inventory_complete_stdout() {
 
 #[test]
 fn u_inventory_absence_recheck() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("socket");
     let ctx = context(&path);
@@ -375,6 +418,7 @@ fn u_inventory_absence_recheck() {
 
 #[test]
 fn u_inventory_execution_failures() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("socket");
     let ctx = context(&path);
@@ -448,6 +492,7 @@ fn u_inventory_execution_failures() {
 
 #[test]
 fn u_inventory_no_server_control() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let path = Path::new("/tmp/s0u-stale");
     let ctx = context(path);
     let out = output(1, b"", "no server running on /tmp/s0u-stale\n");

@@ -2,6 +2,7 @@
 //! session the host evidence, the channel's inflight row and sessions row included, leaves tmux.
 
 use super::*;
+use crate::services::discord::codex_absence::replacement::Probe as ReplacementProbe;
 use crate::services::discord::host_liveness;
 use crate::services::discord::host_teardown_gate::shared_teardown;
 use crate::services::discord::inflight::{KeyedTeardown, load_inflight_state_read_only_result};
@@ -95,10 +96,16 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn host_alive(
         tracing::debug!(name, "watcher kept the session: host is Herdr");
         return true;
     }
-    if probe.await {
+    let provider = watcher_provider(name);
+    let replacement =
+        (provider == ProviderKind::Codex).then(|| ReplacementProbe::new(channel_id.get(), name));
+    if replacement
+        .as_ref()
+        .is_some_and(ReplacementProbe::defer_death)
+        || probe.await
+    {
         return true;
     }
-    let provider = watcher_provider(name);
     let stands = host
         .death_stands(shared, &provider, channel_id.get(), name)
         .await;
@@ -109,6 +116,9 @@ pub(in crate::services::discord::tmux::tmux_watcher) async fn host_alive(
         );
     }
     !stands
+        || replacement
+            .as_ref()
+            .is_some_and(ReplacementProbe::defer_death)
 }
 
 /// The provider the watcher keys its own inflight reads by.

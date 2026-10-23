@@ -121,6 +121,12 @@ async fn assemble(
             .as_array()
             .cloned()
             .unwrap_or_default();
+        health::attach_turn_presence_unknown(
+            &mut status,
+            &mut degraded_reasons,
+            &mut json,
+            detailed,
+        );
         // Read from the snapshot's reasons before the `retain` below drops
         // `no_providers_registered` on a standby node.
         let cluster_standby_without_gateway = late.standby_without_gateway && server_up;

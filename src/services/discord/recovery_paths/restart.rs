@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::super::inflight::opt_channel_id;
 use super::super::recovery_engine::{finish_recovered_turn_mailbox, save_missing_session_handoff};
-use super::super::runtime_store::{atomic_write, discord_recovery_force_clear_root};
+use super::super::runtime_store::{discord_recovery_force_clear_root, durable_publish};
 use super::super::{SharedData, inflight};
 use super::shared::{
     ChannelProbeVerdict, RecoveryRelayOutcome, RowDisposition, classify_channel_probe_status,
@@ -904,7 +904,7 @@ fn persist_force_clear_report(report: &RecoveryForceClearReport) -> Result<PathB
 }
 
 /// Root-explicit inner form for unit tests.
-fn persist_force_clear_report_in_root(
+pub(in crate::services::discord) fn persist_force_clear_report_in_root(
     root: &Path,
     report: &RecoveryForceClearReport,
 ) -> Result<PathBuf, String> {
@@ -919,7 +919,7 @@ fn persist_force_clear_report_in_root(
         report.channel_id, report.reason_code
     ));
     let json = serde_json::to_string_pretty(report).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)?;
+    durable_publish::publish_store_row(&path, &json)?;
     Ok(path)
 }
 

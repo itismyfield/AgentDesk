@@ -1,5 +1,7 @@
 //! Read-only inflight observations for absent Codex TUI launch checks.
 
+pub(crate) mod replacement;
+
 use super::inflight::{load_inflight_state_read_only_result, read_only_owner_snapshot};
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::provider_hosting::{

@@ -16,6 +16,9 @@ use crate::services::tui_o::writer::adoption::{Hold, logged};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState};
 
+pub(in crate::services::discord) mod notice_identity;
+use notice_identity::{NoticeObservation, progress};
+
 /// New bytes one effect-point poll may read before it answers `catching_up`.
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
 /// Cold sources above this boundary use bounded observation when enabled.
@@ -82,6 +85,7 @@ struct Watch {
     /// Moves whenever an effect-point poll reads new records, halts or finds bytes left unread.
     revision: u64,
     outcome: Outcome,
+    notice: NoticeObservation,
     through: u64,
     grew_at: Instant,
 }
@@ -93,6 +97,7 @@ impl Default for Watch {
             generation: 0,
             revision: 0,
             outcome: Outcome::Rebuilding,
+            notice: NoticeObservation::legacy("not_observed", ""),
             through: 0,
             grew_at: Instant::now(),
         }
@@ -136,6 +141,7 @@ pub(in crate::services::discord) async fn activity_now(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Observed {
+    let _effect = effect_reads::begin(channel.get());
     reading_now(shared, provider, channel).await.observed
 }
 
@@ -146,11 +152,13 @@ struct Stamp {
     generation: u64,
     revision: u64,
     source: Option<String>,
+    notice: NoticeObservation,
 }
 
 /// One fresh judgment and the watch state it read.
 pub(in crate::services::discord) struct Reading {
     pub observed: Observed,
+    notice: NoticeObservation,
     stamp: Option<Stamp>,
     watch: Option<Arc<Mutex<Watch>>>,
     #[cfg(unix)]
@@ -158,6 +166,30 @@ pub(in crate::services::discord) struct Reading {
 }
 
 impl Reading {
+    pub(in crate::services::discord) fn notice_observation(&self) -> NoticeObservation {
+        self.notice.clone()
+    }
+
+    fn bound(
+        observed: Observed,
+        stamp: Option<Stamp>,
+        watch: Option<Arc<Mutex<Watch>>>,
+        label: Option<&str>,
+    ) -> Self {
+        let notice = stamp
+            .as_ref()
+            .map(|s| s.notice.clone())
+            .unwrap_or_else(|| NoticeObservation::bound(observed.reason, label));
+        Self {
+            observed,
+            notice,
+            stamp,
+            watch,
+            #[cfg(unix)]
+            unbound: None,
+        }
+    }
+
     pub(in crate::services::discord) fn session(&self) -> Option<&str> {
         self.stamp.as_ref().map(|stamp| stamp.key.session.as_str())
     }
@@ -181,6 +213,9 @@ impl Reading {
         let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
             return Some(publish());
         };
+        if !stamp.notice.current() {
+            return None;
+        }
         let guard = lock(watch);
         let current = guard.key.as_ref() == Some(&stamp.key)
             && (guard.generation, guard.revision) == (stamp.generation, stamp.revision);
@@ -206,14 +241,11 @@ impl Reading {
             generation: 0,
             revision: 0,
             source: source.map(str::to_string),
+            notice: NoticeObservation::legacy(observed.reason, session),
         });
-        Self {
-            observed,
-            stamp,
-            watch: None,
-            #[cfg(unix)]
-            unbound: None,
-        }
+        let mut reading = Self::bound(observed, stamp, None, session);
+        reading.notice = NoticeObservation::legacy(observed.reason, session.unwrap_or_default());
+        reading
     }
 
     /// A judgment whose watch has since moved one revision on under the same key and generation.
@@ -235,14 +267,14 @@ impl Reading {
             generation: 1,
             revision: 0,
             source: None,
+            notice: NoticeObservation::legacy(observed.reason, "overtaken"),
         };
-        Self {
+        Self::bound(
             observed,
-            stamp: Some(stamp),
-            watch: Some(Arc::new(Mutex::new(watch))),
-            #[cfg(unix)]
-            unbound: None,
-        }
+            Some(stamp),
+            Some(Arc::new(Mutex::new(watch))),
+            None,
+        )
     }
 }
 
@@ -260,8 +292,14 @@ fn at(guard: &Watch, answer: Observed) -> Answer {
         generation: guard.generation,
         revision: guard.revision,
         source,
+        notice: guard.notice.clone().observed(answer),
     });
-    (answer, stamp)
+    let answer = (answer, stamp);
+    if matches!(guard.outcome, Outcome::Rebuilding) {
+        progress(answer)
+    } else {
+        answer
+    }
 }
 
 /// A fresh judgment with the state it read, for publishers outside the effect points.
@@ -287,13 +325,7 @@ async fn read_now(
                 supersede_unstamped(&watch);
             }
         }
-        Reading {
-            observed,
-            stamp: None,
-            watch: None,
-            #[cfg(unix)]
-            unbound: None,
-        }
+        Reading::bound(observed, None, None, None)
     };
     let shadow = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
@@ -323,6 +355,7 @@ async fn read_now(
                     unbound::live::read(shared, provider, channel, watch.clone()).await;
                 return Reading {
                     observed,
+                    notice: stamp.notice.clone(),
                     stamp: None,
                     watch: Some(watch),
                     unbound: Some(stamp),
@@ -339,6 +372,11 @@ async fn read_now(
                 return unstamped(observed(Activity::Unknown, "session_probe_failed"));
             }
         }
+    };
+    let label = match &target {
+        Target::Bound(label) => label.clone(),
+        #[cfg(all(test, unix))]
+        Target::Unbound(label) => label.clone().unwrap_or_default(),
     };
     let watch = lock(&WATCHES).entry(channel.get()).or_default().clone();
     let ports: Arc<dyn Ports> = Arc::new(LivePorts {
@@ -363,13 +401,7 @@ async fn read_now(
         answer
     });
     match judged.await {
-        Ok((observed, stamp)) => Reading {
-            observed,
-            stamp,
-            watch: Some(watch),
-            #[cfg(unix)]
-            unbound: None,
-        },
+        Ok((observed, stamp)) => Reading::bound(observed, stamp, Some(watch), Some(&label)),
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
     }
 }
@@ -430,7 +462,9 @@ fn judge_with_policy(
         session,
         seq,
     };
+    let notice = NoticeObservation::bound("not_observed", Some(&key.session));
     let mut guard = lock(watch);
+    guard.notice = notice;
     let retry =
         matches!(guard.outcome, Outcome::Unreadable { retry_at } if Instant::now() >= retry_at);
     if guard.key.as_ref() != Some(&key) || retry {
@@ -490,7 +524,10 @@ fn judge_with_policy(
                 _ => None,
             };
             if let Some(resume) = resume {
-                let (_, stamp) = rebuild(watch, guard, ports, channel, key, Some(resume));
+                let (_, mut stamp) = rebuild(watch, guard, ports, channel, key, Some(resume));
+                if let Some(stamp) = &mut stamp {
+                    stamp.notice.reason = "facts_resumed";
+                }
                 return (observed(Activity::Unknown, "facts_resumed"), stamp);
             }
             guard.revision += 1;
@@ -506,7 +543,7 @@ fn judge_with_policy(
         guard.revision += 1;
     }
     if !caught_up {
-        return at(&guard, observed(Activity::Unknown, "catching_up"));
+        return progress(at(&guard, observed(Activity::Unknown, "catching_up")));
     }
     match fact.state {
         TurnState::Idle if allows_idle => at(&guard, observed(Activity::Idle, "closed")),
@@ -551,7 +588,11 @@ fn judge_presence(
             && (guard.generation, guard.revision) == (stamp.generation, stamp.revision)
         {
             guard.revision += 1;
-            return at(&guard, answer);
+            let mut fresh = at(&guard, answer);
+            if let Some(fresh) = &mut fresh.1 {
+                fresh.notice = stamp.notice;
+            }
+            return fresh;
         }
         return (observed(Activity::Unknown, "superseded"), Some(stamp));
     }
@@ -889,6 +930,11 @@ impl Ports for LivePorts {
 #[path = "activity_tests.rs"]
 pub(in crate::services::discord) mod tests;
 
+#[cfg(all(test, unix))]
+#[path = "activity_notice_tests.rs"]
+mod notice_tests;
+
+pub(in crate::services::discord) mod effect_reads;
 mod tail;
 #[cfg(unix)]
 mod unbound;

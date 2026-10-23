@@ -619,8 +619,21 @@ fn an_owned_draft_is_entered_once_and_confirmed_from_the_transcript() {
         let empty =
             busy_empty().replace(&format!("\n\n{BORDER}"), &format!("\n{status}\n{BORDER}"));
         fake.caps(&[empty, screen(&owned, status)]);
-        fake.accept_on_enter();
-        assert_eq!(fake.run(&FAST), Outcome::Injected, "{owned}");
+        fake.accept_on_enter_after("0");
+        fake.reply_after_record("0.5");
+        let timing = Timing {
+            confirm_window: Duration::from_secs(30),
+            ..FAST
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            fake.run(&timing),
+            Outcome::Injected,
+            "owned={owned:?} elapsed={:?} keys={:?} transcript={:?}",
+            started.elapsed(),
+            fake.keys(),
+            fs::read_to_string(&fake.transcript)
+        );
         assert_eq!(fake.keys(), (1, 1, 0));
         assert_eq!(
             fs::read_to_string(fake.dir.path().join("buffer")).unwrap(),

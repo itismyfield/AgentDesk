@@ -5,6 +5,7 @@ use super::super::{
 };
 use super::GuardedClearOutcome;
 use crate::services::discord::abandon_request_store;
+use crate::services::discord::runtime_store::sync_removed;
 use crate::services::provider::ProviderKind;
 use std::fs;
 
@@ -238,7 +239,7 @@ fn request_inflight_abandon_matching_in_root(
         "request_inflight_abandon_if_matches",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {

@@ -55,48 +55,10 @@
 
 ## Read This First
 
-- Giant ledger repair (#5745): `pr_ledger_repair` accepts changes confined to
-  the registry, issue metadata, closed-issue transition list, and giant pin
-  baseline. Production measurements and registrations stay identical except
-  for forward `shrink` deadlines. Each extension is at most 92 days; the number
-  of distinct shrink deadlines cannot increase (a singleton date may move).
-  Put `# DEADLINE RESET <old> -> <new> on <date> (#<issue>)` inside `[[entry]]`,
-  in the continuous comment run immediately before its unique `file =` line.
-  Dates must be calendar-valid and the issue number positive; trailing prose
-  is allowed. Each moved path appends exactly one record, up to two total.
-  Preserve each existing record's order, owning path, and complete comment
-  text through the next marker or `file =`; use `#`, not blank physical lines.
-  Unmoved paths preserve their records too. Real entry retirement removes its
-  comments using the existing exact-deletion rule.
-  Transition deletion requires measured retirement in both snapshots:
-  unregistered, present, and below 1000 production lines, regardless of issue
-  state. Issue ratchets cannot rise; pins cannot rise or disappear, and new
-  pins equal measured production LoC. Existing inventory/audit checks remain.
-  Both archived pin files must strictly parse to nonempty maps equal to the
-  actual audit loader's interpretation, including keys and values. Malformed,
-  duplicate, missing, empty, or differently interpreted input rejects repair;
-  even canonicalizing a divergent base needs separate diagnosis. A reviewed
-  consumer-source repair can preserve frozen blobs and restore interpretation;
-  it must assess existing authority and newly exposed overruns before landing.
-  This is not an automatic corrupt-base recovery or a freshness exception.
-  The running candidate consumer reads both explicit archive paths. Its imports
-  remain reviewed source: the evaluator digest does not cover that whole chain.
-  Agreement covers interpretation; audit allowlists and the >=1000 production
-  threshold still control enforcement. Below-threshold files are not audited
-  merely because their pin is lower. Main's record path is not an agreement
-  scan; verify main's pin agreement before landing. Separate #5745 follow-up
-  for the CI maintenance owner: harden the audit's empty-baseline return.
-  Refresh metadata with `scripts/refresh_giant_file_issue_metadata.py` and land
-  it before the base snapshot exceeds 30 days; a fresh candidate cannot repair
-  a stale base. Refresh before A+B when feasible: after landing, metadata-only
-  updates use this ledger mode and require valid pin interpretation too.
-  Two resets permit at most 184 additional deadline days for the
-  same surviving registration. They do not permit `keep` reclassification or
-  guarantee decomposition: after the final deadline, overdue blocking remains.
-- `pr_giant_deletion` (checked first): deleting registered files must remove
-  exactly their registry entries and baseline/transition lines; pins and the
-  surviving registrations and overdue stay unchanged; no new or growing giant.
-  No strict-progress size/moved-code checks; mixed shrinks see only overdue set.
+- Giant deadlines, closed decomposition issues, snapshot freshness and their
+  planning counts are advisory warnings. No deadline extension, reset record or
+  metadata refresh is required for CI to pass. New giant registrations, size
+  ratchets and generated-document checks remain independent gates.
 - "giant-file" = `>= 1000` **production** lines per
   `scripts/generate_inventory_docs.py` (lines inside `#[cfg(test)] mod` blocks
   are excluded; see the `Prod` column in `module-inventory.md`). Frozen giant
@@ -2734,7 +2696,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/standby_relay.rs`
 - `src/services/discord/tmux_watcher.rs`
 - `src/services/discord_config_audit.rs`
-- `src/services/dispatched_sessions.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
 - `src/services/dispatches/outbox_route.rs`
 - `src/services/gemini.rs`

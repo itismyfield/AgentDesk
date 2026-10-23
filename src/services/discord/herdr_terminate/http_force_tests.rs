@@ -872,7 +872,24 @@ fn force_duplicate_abort_restart_pg() {
         let node = Node::bind(&rig, herdr::HostedState::Bound, Some(DISPATCH)).await;
         node.start(51, "turn-a", Some(DISPATCH)).await;
         test_queue::queue_original(&node.shared, channel()).await;
-        let (first, second) = tokio::join!(node.cancel(), node.cancel());
+        // Both requests must capture the live turn before either may retire it.
+        let overlap = Arc::new(tokio::sync::Barrier::new(2));
+        let first_overlap = overlap.clone();
+        let (captured, reached) = tokio::sync::oneshot::channel();
+        probe_after_capture(Box::new(move || Box::pin(async move {
+            captured.send(()).unwrap();
+            first_overlap.wait().await;
+        })));
+        let first = node.spawn_cancel();
+        tokio::time::timeout(Duration::from_secs(60), reached)
+            .await.expect("first cancel did not capture the live turn").unwrap();
+        probe_after_capture(Box::new(move || Box::pin(async move {
+            overlap.wait().await;
+        })));
+        let (first, second) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(first, node.cancel())
+        }).await.expect("overlapping cancels did not settle after both captured the turn");
+        let first = first.unwrap();
         let mut statuses = [first.0, second.0];
         statuses.sort();
         assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT], "{first:?} {second:?}");

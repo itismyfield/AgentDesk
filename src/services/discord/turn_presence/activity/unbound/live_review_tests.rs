@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "collection_publication_tests.rs"]
 mod collection_publication_tests;
+#[path = "effect_read_defer_tests.rs"]
+mod effect_read_defer_tests;
 
 pub(in crate::services::discord::turn_presence::activity) struct Rig {
     pub(in crate::services::discord::turn_presence::activity) shared: Arc<SharedData>,
@@ -1080,4 +1082,55 @@ async fn s1f_publication_exact_change_during_inventory_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn s1f_publication_canonical_change_during_inventory_pg() {
     hosted_row_during_publication_inventory(Changed::Canonical, 69_182_014).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unbound_notice_keeps_the_canonical_nonce_and_hold_leaf_in_its_publication_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedOwner, HostedState, tests::record,
+    };
+    use crate::services::discord::turn_presence::activity::notice_identity::ExecutionIdentity;
+    let id = 69_182_119;
+    let rig = Rig::new(id, true, false).await;
+    let name = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{id}"));
+    let owner = HostedOwner {
+        provider: "claude".into(),
+        discord_token_hash: rig.shared.token_hash.clone(),
+        channel_id: id.to_string(),
+        logical_key: name.clone(),
+        owner_node: "test-node".into(),
+        runtime_root: rig.root.path().display().to_string(),
+    };
+    let key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        &name,
+    );
+    let execution = record(&owner, "notice-unbound-execution", HostedState::Pending);
+    let pool: &sqlx::PgPool = rig.shared.pg_pool.as_ref().unwrap();
+    crate::services::discord::inflight::seed_session_row_hashed(
+        pool,
+        &key,
+        id,
+        &rig.shared.token_hash,
+        Some(serde_json::to_value(execution).unwrap()),
+    )
+    .await;
+    let reading = crate::services::discord::turn_presence::activity::reading_now(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+    )
+    .await;
+    assert_eq!(reading.session(), None);
+    assert_eq!(reading.observed.reason, "session_identity_unresolved");
+    let notice = reading.notice_observation();
+    assert_eq!(
+        notice.identity,
+        ExecutionIdentity::Nonce("notice-unbound-execution".into())
+    );
+    assert_eq!(notice.target_label.as_deref(), Some(name.as_str()));
+    assert_eq!(notice.hold_leaf, Some("hosted_active_or_unknown"));
+    assert!(!notice.progress);
+    assert!(reading.publish_if_current(|| ()).await.is_some());
 }

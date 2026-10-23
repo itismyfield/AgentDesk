@@ -571,3 +571,6 @@ fn existing_durable_writers_do_not_double_flush() {
         "steady appends add no flush"
     );
 }
+
+#[path = "durable_stores_tests.rs"]
+mod stores;

@@ -42,7 +42,7 @@ setup_sccache_env() {
   fi
 
   export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
-  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
   export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
   export RUSTC_WRAPPER="$sccache_bin"
   mkdir -p "$SCCACHE_DIR"
@@ -741,7 +741,7 @@ _health_json_deploy_nonblocking_ere() {
   # reader-count reason is accepted, and only for a deploy verdict.
   # $6 is the smoke E2E channel ids alone: a held source start there is the
   # smoke's own known failure, so it does not block a deploy verdict either.
-  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+|turn_presence_unknown:(claude|codex):(~|([A-Za-z0-9_.-]|%[0-9A-F]{2})+):[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[1-9][0-9]*:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:deferred_hooks_backlog:[1-9][0-9]*"
