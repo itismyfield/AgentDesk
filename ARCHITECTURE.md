@@ -2773,8 +2773,6 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
-│   ├── discord_custody/
-│   │   └── tests.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -3576,7 +3574,6 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs
-│   ├── discord_custody.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_gate.rs
