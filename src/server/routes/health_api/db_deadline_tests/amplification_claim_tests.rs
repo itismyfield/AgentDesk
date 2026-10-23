@@ -25,6 +25,8 @@ const CLAIM_OWNER: &str = "amp-claim-node";
 /// The semaphore the copied config adds: a claim that did not parse the file skips every row.
 const SEMAPHORE: &str = "amp_claim";
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Blocking threads started beyond one per watcher, for claims and reads that meet them.
+const SPARE_BLOCKING_THREADS: usize = 16;
 
 pub(super) fn watchers() -> u64 {
     std::env::var(WATCHERS_ENV).map_or(0, |value| {
@@ -93,9 +95,31 @@ pub(super) fn conditions(config_sha: &str, config_bytes: usize) -> Vec<(&'static
         (WATCHERS_KEY, watchers().to_string()),
         ("watcher_pause_ms", WATCHER_PAUSE.as_millis().to_string()),
         ("watcher_file_bytes", WATCHER_FILE_BYTES.to_string()),
+        ("blocking_prewarmed", prewarmed().to_string()),
         (CONFIG_SHA_KEY, config_sha.to_string()),
         (CONFIG_BYTES_KEY, config_bytes.to_string()),
     ]
+}
+
+fn prewarmed() -> usize {
+    watchers() as usize + SPARE_BLOCKING_THREADS
+}
+
+/// Holds `prewarmed()` blocking tasks open at once so the pool starts that many threads; with
+/// a long keep-alive, later bursts reuse them instead of adding threads mid-window.
+pub(super) async fn prewarm_blocking() {
+    let all = std::sync::Arc::new(std::sync::Barrier::new(prewarmed()));
+    let started: Vec<_> = (0..prewarmed())
+        .map(|_| {
+            let all = std::sync::Arc::clone(&all);
+            tokio::task::spawn_blocking(move || {
+                all.wait();
+            })
+        })
+        .collect();
+    for thread in started {
+        thread.await.expect("a prewarm thread");
+    }
 }
 
 fn micros_since(origin: Instant) -> u64 {

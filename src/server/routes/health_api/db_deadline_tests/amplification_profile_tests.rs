@@ -114,7 +114,7 @@ fn measure(out: &Path) {
             .server_version_num()
             .expect("the server reports its version")
     });
-    // Blocking threads stay alive between claims and watcher reads, so the count holds still.
+    // Blocking threads, started up front, stay alive between claims and reads, so the count holds.
     let server = match profile {
         Profile::S3 => tokio::runtime::Builder::new_multi_thread()
             .worker_threads(SERVER_WORKERS)
@@ -156,6 +156,9 @@ fn measure(out: &Path) {
     });
     if let Some((main, _)) = &engines {
         policy::seed(main);
+    }
+    if profile == Profile::S3 {
+        server.block_on(claims::prewarm_blocking());
     }
 
     let origin = Instant::now() + Duration::from_secs(1);
