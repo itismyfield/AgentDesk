@@ -1,5 +1,6 @@
 //! `health_amplification_profile`: public and detail health under a fixed open-loop load on an
-//! isolated PostgreSQL, with a 1 s tick probe on the two-worker server runtime; exact name only.
+//! isolated PostgreSQL, with a 1 s tick probe on the two-worker server runtime; profile `s2` adds
+//! policy read hooks on main and tick engines; exact name only.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -10,14 +11,19 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::amplification_policy_tests as policy;
+use super::amplification_records_tests::{load_run, opt, write_run};
 use super::amplification_verdict_tests::{
-    self as verdict, Answer, Attempt, Comparison, Endpoint, EndpointSummary, MetricComparison,
-    Outcome, Plan, Resources, RunData, RunSummary, SEC, Sample, Stat,
+    self as verdict, Answer, Attempt, Comparison, Endpoint, EndpointSummary, Lane,
+    MetricComparison, Outcome, Peak, Plan, Profile, Resources, RunData, RunSummary, SEC, Sample,
+    Stat,
 };
 use super::resource_regression_tests::process_threads;
 use super::{Db, reasons, registry_with_mailboxes, serve};
 
 const OUT_ENV: &str = "ADK_HEALTH_AMP_OUT";
+/// `s1` (default) or `s2`.
+const PROFILE_ENV: &str = "ADK_HEALTH_AMP_PROFILE";
 /// `base_dir,...;candidate_dir,...` judges finished runs instead of measuring.
 const COMPARE_ENV: &str = "ADK_HEALTH_AMP_COMPARE";
 /// Shortened windows for a smoke run; the judge then refuses its sample counts.
@@ -34,12 +40,17 @@ const MAILBOXES: [u64; 3] = [7_236_100_001, 7_236_100_002, 7_236_100_003];
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 const MANIFEST: &str = r#"{"generated_at":"2026-10-23T00:00:00Z","repo_head":"0123456789abcdef0123456789abcdef01234567","latest_postgres_migration":"0104_example.sql","repo_dirty":"false"}"#;
 /// The harness as compiled, so a comparison can tell two binaries ran the same one.
-const HARNESS_SOURCES: [&str; 4] = [
+const HARNESS_SOURCES: [&str; 7] = [
     include_str!("amplification_profile_tests.rs"),
+    include_str!("amplification_policy_tests.rs"),
+    include_str!("amplification_records_tests.rs"),
     include_str!("amplification_verdict_tests.rs"),
+    include_str!("amplification_verdict_tests/policy_verdict_tests.rs"),
     include_str!("resource_regression_tests.rs"),
     include_str!("../db_deadline_tests.rs"),
 ];
+/// Spacing of the connection-high samples taken through the measured window.
+const PEAK_EVERY: Duration = Duration::from_millis(100);
 
 #[test]
 #[ignore = "a 7-minute load measurement against a pg_throwaway cluster: run by exact name with ADK_HEALTH_AMP_OUT"]
@@ -59,6 +70,9 @@ fn measure(out: &Path) {
     if let Err(refusal) = verdict::isolated_pg_base(base.as_deref()) {
         panic!("refusing to load this PostgreSQL: {refusal}");
     }
+    let profile = std::env::var(PROFILE_ENV).map_or(Profile::S1, |name| {
+        Profile::parse(&name).unwrap_or_else(|| panic!("{PROFILE_ENV}={name}"))
+    });
     let plan = Plan {
         seed: SEED,
         rps: RPS,
@@ -66,9 +80,8 @@ fn measure(out: &Path) {
         measure_secs: env_secs(MEASURE_ENV, MEASURE_SECS),
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let runtime_dir = crate::config::runtime_root()
-        .expect("the guard sets a runtime root")
-        .join("runtime");
+    let root = crate::config::runtime_root().expect("the guard sets a runtime root");
+    let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     std::fs::write(runtime_dir.join("release-source.json"), MANIFEST).expect("write manifest");
 
@@ -85,16 +98,25 @@ fn measure(out: &Path) {
             .expect("the server reports its version")
     });
     let server = runtime("amp-server", SERVER_WORKERS);
-    let addr = server.block_on(async {
-        let mut engine_config = crate::config::Config::default();
-        engine_config.policies.hot_reload = false;
-        let engine =
-            crate::engine::PolicyEngine::new_with_pg(&engine_config, Some(db.pool.clone()))
-                .expect("policy engine with PostgreSQL");
+    let (addr, engines) = server.block_on(async {
+        let (engine, engines) = match profile {
+            Profile::S1 => {
+                let mut engine_config = crate::config::Config::default();
+                engine_config.policies.hot_reload = false;
+                let engine =
+                    crate::engine::PolicyEngine::new_with_pg(&engine_config, Some(db.pool.clone()))
+                        .expect("policy engine with PostgreSQL");
+                (engine, None)
+            }
+            Profile::S2 => {
+                let (main, tick) = policy::engines(&root, &db.pool);
+                (main.clone(), Some((main, tick)))
+            }
+        };
         let registry = registry_with_mailboxes(&MAILBOXES).await;
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
-        serve(crate::server::routes::api_router_with_pg(
+        let addr = serve(crate::server::routes::api_router_with_pg(
             engine,
             crate::config::Config::default(),
             tx,
@@ -102,37 +124,89 @@ fn measure(out: &Path) {
             Some(registry),
             Some(db.pool.clone()),
         ))
-        .await
+        .await;
+        (addr, engines)
     });
+    if let Some((main, _)) = &engines {
+        policy::seed(main);
+    }
 
     let origin = Instant::now() + Duration::from_secs(1);
     let wakes = Arc::new(Mutex::new(Vec::new()));
     server.spawn(tick_probe(origin, plan.tick_slots(), Arc::clone(&wakes)));
-    let generator = runtime("amp-load", GENERATOR_WORKERS);
+    let generator = match profile {
+        Profile::S1 => runtime("amp-load", GENERATOR_WORKERS),
+        // Hook threads stay alive between hooks, so their count holds still through the window.
+        Profile::S2 => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(GENERATOR_WORKERS)
+            .thread_name("amp-load")
+            .thread_keep_alive(Duration::from_secs(3_600))
+            .enable_all()
+            .build()
+            .expect("runtime"),
+    };
     let load = generator.spawn(drive_load(addr, origin, plan));
+    let policy_load = engines.as_ref().map(|(main, tick)| {
+        (
+            generator.spawn(policy::drive_hooks(main.clone(), Lane::Main, origin, plan)),
+            generator.spawn(policy::drive_hooks(tick.clone(), Lane::Tick, origin, plan)),
+            generator.spawn(policy::acquire_probe(db.pool.clone(), origin, plan)),
+        )
+    });
     sleep_until(origin + Duration::from_micros(plan.warmup_end()));
     let start = sample(&db);
     db.proxy.reset_executions();
-    sleep_until(origin + Duration::from_micros(plan.end()));
-    let pg_statements = db.proxy.executions().len();
+    let window_end = origin + Duration::from_micros(plan.end());
+    let peak = match profile {
+        Profile::S1 => {
+            sleep_until(window_end);
+            Peak::default()
+        }
+        Profile::S2 => sample_peaks(&db, window_end),
+    };
+    let executions = db.proxy.executions();
     let end = sample(&db);
     let attempts = generator
         .block_on(load)
         .expect("the load generator finishes");
+    let mut hooks = Vec::new();
+    let mut acquires = Vec::new();
+    if let (Some((main_hooks, tick_hooks, probe)), Some((main, tick))) = (policy_load, &engines) {
+        for (fired, engine) in [(main_hooks, main), (tick_hooks, tick)] {
+            let mut lane = generator.block_on(fired).expect("the hook driver finishes");
+            policy::settle_reads(engine, &mut lane);
+            hooks.extend(lane);
+        }
+        acquires = generator
+            .block_on(probe)
+            .expect("the acquire probe finishes");
+    }
+    drop(engines);
     let ticks = wakes.lock().unwrap().clone();
     server.block_on(db.pool.close());
     server.shutdown_timeout(Duration::from_secs(5));
     generator.shutdown_timeout(Duration::from_secs(5));
     infra.block_on(db.finish());
 
-    let conditions = conditions(plan, pg_version);
-    let resources = Resources {
-        start,
-        end,
-        pool_max: POOL_MAX,
-        pg_statements,
+    let run = RunData {
+        name: String::new(),
+        conditions: conditions(plan, pg_version, profile),
+        attempts,
+        ticks,
+        resources: Resources {
+            start,
+            end,
+            pool_max: POOL_MAX,
+            pg_statements: executions.len(),
+            peak,
+            policy_statements: (profile == Profile::S2)
+                .then(|| policy::policy_statements(&executions)),
+        },
+        policy: hooks,
+        acquires,
+        invalid: Vec::new(),
     };
-    write_run(out, &conditions, &attempts, &ticks, &resources);
+    write_run(out, &run);
     let summary = verdict::summarize(&load_run(out, false));
     let rendered = render_run(&summary);
     std::fs::write(out.join("summary.txt"), &rendered).expect("write summary");
@@ -166,21 +240,42 @@ fn micros_since(origin: Instant) -> u64 {
 fn sample(db: &Db) -> Sample {
     Sample {
         threads: std::panic::catch_unwind(process_threads).ok(),
-        pool_size: db.pool.size(),
-        pool_idle: db.pool.num_idle(),
-        proxy_accepted: db.proxy.accepted(),
-        proxy_open: db.proxy.open(),
+        pool_size: Some(db.pool.size()),
+        pool_idle: Some(db.pool.num_idle()),
+        proxy_accepted: Some(db.proxy.accepted()),
+        proxy_open: Some(db.proxy.open()),
     }
 }
 
-fn conditions(plan: Plan, pg_version: u32) -> BTreeMap<String, String> {
+/// Highs of open proxy connections, server pool size and their difference until `until`.
+fn sample_peaks(db: &Db, until: Instant) -> Peak {
+    let (mut open, mut pool, mut beyond) = (0, 0, 0);
+    loop {
+        let (now_open, now_pool) = (db.proxy.open(), db.pool.size());
+        open = open.max(now_open);
+        pool = pool.max(now_pool);
+        beyond = beyond.max(now_open.saturating_sub(now_pool as usize));
+        if Instant::now() >= until {
+            break;
+        }
+        sleep_until((Instant::now() + PEAK_EVERY).min(until));
+    }
+    Peak {
+        proxy_open: Some(open),
+        pool_size: Some(pool),
+        beyond_pool: Some(beyond),
+    }
+}
+
+fn conditions(plan: Plan, pg_version: u32, profile: Profile) -> BTreeMap<String, String> {
     let mut harness = Sha256::new();
     for source in HARNESS_SOURCES {
         harness.update(source.as_bytes());
     }
     let binary = std::fs::read(std::env::current_exe().expect("test binary path"))
         .expect("read the test binary");
-    [
+    let mut conditions: BTreeMap<String, String> = [
+        ("profile", profile.name().to_string()),
         ("seed", plan.seed.to_string()),
         ("rps_per_endpoint", plan.rps.to_string()),
         ("warmup_secs", plan.warmup_secs.to_string()),
@@ -201,7 +296,13 @@ fn conditions(plan: Plan, pg_version: u32) -> BTreeMap<String, String> {
     ]
     .into_iter()
     .map(|(key, value)| (key.to_string(), value))
-    .collect()
+    .collect();
+    if profile == Profile::S2 {
+        for (key, value) in policy::conditions() {
+            conditions.insert(key.to_string(), value);
+        }
+    }
+    conditions
 }
 
 /// Wakes at `origin + k s`; a wake that comes after later slots were due skips them, so they stay
@@ -311,184 +412,6 @@ fn answer(raw: &[u8]) -> Option<Answer> {
     })
 }
 
-const NONE: &str = "-";
-
-fn opt(value: Option<impl ToString>) -> String {
-    value.map_or_else(|| NONE.to_string(), |value| value.to_string())
-}
-
-fn write_run(
-    out: &Path,
-    conditions: &BTreeMap<String, String>,
-    attempts: &[Attempt],
-    ticks: &[(u64, u64)],
-    resources: &Resources,
-) {
-    let lines = |rows: Vec<String>| rows.join("\n") + "\n";
-    let conditions = conditions
-        .iter()
-        .map(|(key, value)| format!("{key}\t{value}"));
-    std::fs::write(out.join("conditions.tsv"), lines(conditions.collect())).unwrap();
-    let mut rows = vec![
-        "endpoint\tseq\tmeasured\tscheduled_us\tsent_us\tlast_byte_us\toutcome\tstatus\tparsed\tobservation\thostname\treasons"
-            .to_string(),
-    ];
-    for attempt in attempts {
-        let (outcome, answer) = match &attempt.outcome {
-            Outcome::Unsent => ("unsent".to_string(), None),
-            Outcome::Timeout => ("timeout".to_string(), None),
-            Outcome::Failed(kind) => (format!("failed:{kind}"), None),
-            Outcome::Answered(answer) => ("answered".to_string(), Some(answer)),
-        };
-        rows.push(format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{outcome}\t{}\t{}\t{}\t{}\t{}",
-            attempt.endpoint.name(),
-            attempt.seq,
-            attempt.measured,
-            attempt.scheduled,
-            opt(attempt.sent),
-            opt(attempt.last_byte),
-            opt(answer.map(|a| a.status)),
-            opt(answer.map(|a| a.parsed)),
-            answer.map_or(NONE, |a| a.observation_status.as_str()),
-            opt(answer.map(|a| a.node_hostname)),
-            answer.map_or(NONE.to_string(), |a| a.reasons.join(",")),
-        ));
-    }
-    std::fs::write(out.join("requests.tsv"), lines(rows)).unwrap();
-    let ticks = ticks.iter().map(|(slot, woke)| format!("{slot}\t{woke}"));
-    std::fs::write(out.join("ticks.tsv"), lines(ticks.collect())).unwrap();
-    let mut rows = vec![
-        format!("pool_max\t{}", resources.pool_max),
-        format!("pg_statements\t{}", resources.pg_statements),
-    ];
-    for (point, sample) in [("start", resources.start), ("end", resources.end)] {
-        rows.push(format!("{point}.threads\t{}", opt(sample.threads)));
-        rows.push(format!("{point}.pool_size\t{}", sample.pool_size));
-        rows.push(format!("{point}.pool_idle\t{}", sample.pool_idle));
-        rows.push(format!("{point}.proxy_accepted\t{}", sample.proxy_accepted));
-        rows.push(format!("{point}.proxy_open\t{}", sample.proxy_open));
-    }
-    std::fs::write(out.join("resources.tsv"), lines(rows)).unwrap();
-}
-
-fn key_values(path: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect()
-}
-
-fn parse<T: std::str::FromStr>(field: &str) -> Option<T> {
-    (field != NONE).then(|| field.parse().ok()).flatten()
-}
-
-/// Reads a run back; with `runner` it also requires the runner's evidence that the test passed
-/// and that no foreign build overlapped it.
-fn load_run(dir: &Path, runner: bool) -> RunData {
-    let name = dir.file_name().map_or_else(
-        || dir.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let mut run = RunData {
-        name,
-        conditions: key_values(&dir.join("conditions.tsv")),
-        ..RunData::default()
-    };
-    let requests = std::fs::read_to_string(dir.join("requests.tsv")).expect("requests.tsv");
-    for line in requests.lines().skip(1) {
-        let fields: Vec<&str> = line.split('\t').collect();
-        let attempt = (fields.len() == 12)
-            .then(|| attempt_from(&fields))
-            .flatten();
-        match attempt {
-            Some(attempt) => run.attempts.push(attempt),
-            None => run.invalid.push("requests_unreadable".to_string()),
-        }
-    }
-    let ticks = std::fs::read_to_string(dir.join("ticks.tsv")).expect("ticks.tsv");
-    for line in ticks.lines() {
-        match line
-            .split_once('\t')
-            .and_then(|(slot, woke)| Some((slot.parse().ok()?, woke.parse().ok()?)))
-        {
-            Some(tick) => run.ticks.push(tick),
-            None => run.invalid.push("ticks_unreadable".to_string()),
-        }
-    }
-    let resources = key_values(&dir.join("resources.tsv"));
-    let number = |key: &str| resources.get(key).and_then(|value| parse::<usize>(value));
-    let point = |point: &str| Sample {
-        threads: number(&format!("{point}.threads")),
-        pool_size: number(&format!("{point}.pool_size")).unwrap_or(usize::MAX) as u32,
-        pool_idle: number(&format!("{point}.pool_idle")).unwrap_or_default(),
-        proxy_accepted: number(&format!("{point}.proxy_accepted")).unwrap_or_default(),
-        proxy_open: number(&format!("{point}.proxy_open")).unwrap_or_default(),
-    };
-    run.resources = Resources {
-        start: point("start"),
-        end: point("end"),
-        pool_max: number("pool_max").unwrap_or_default() as u32,
-        pg_statements: number("pg_statements").unwrap_or_default(),
-    };
-    if runner {
-        run.invalid.extend(runner_evidence(dir));
-    }
-    run.invalid.dedup();
-    run
-}
-
-fn attempt_from(fields: &[&str]) -> Option<Attempt> {
-    let outcome = match fields[6] {
-        "unsent" => Outcome::Unsent,
-        "timeout" => Outcome::Timeout,
-        "answered" => Outcome::Answered(Answer {
-            status: parse(fields[7])?,
-            parsed: parse(fields[8])?,
-            observation_status: fields[9].to_string(),
-            node_hostname: parse(fields[10])?,
-            reasons: fields[11]
-                .split(',')
-                .filter(|reason| !reason.is_empty())
-                .map(str::to_string)
-                .collect(),
-        }),
-        failed => Outcome::Failed(failed.strip_prefix("failed:")?.to_string()),
-    };
-    Some(Attempt {
-        endpoint: Endpoint::parse(fields[0])?,
-        seq: fields[1].parse().ok()?,
-        measured: fields[2].parse().ok()?,
-        scheduled: fields[3].parse().ok()?,
-        sent: parse(fields[4]),
-        last_byte: parse(fields[5]),
-        outcome,
-    })
-}
-
-/// `test.log` is this run's captured test output; `monitor.tsv` has one line per 5 s:
-/// epoch, 1-minute load, the count of foreign build processes, and their names.
-fn runner_evidence(dir: &Path) -> Vec<String> {
-    let mut invalid = Vec::new();
-    let log = std::fs::read_to_string(dir.join("test.log")).unwrap_or_default();
-    if !log.contains("test result: ok. 1 passed") {
-        invalid.push("test_not_passed".to_string());
-    }
-    let monitor = std::fs::read_to_string(dir.join("monitor.tsv")).unwrap_or_default();
-    let counts: Vec<Option<usize>> = monitor
-        .lines()
-        .map(|line| line.split('\t').nth(2).and_then(|count| count.parse().ok()))
-        .collect();
-    if counts.is_empty() || counts.contains(&None) {
-        invalid.push("monitor_missing".to_string());
-    } else if counts.iter().any(|count| *count != Some(0)) {
-        invalid.push("foreign_build_overlap".to_string());
-    }
-    invalid
-}
-
 fn compare_runs(spec: &str, out: &Path) {
     let (base, candidate) = spec
         .split_once(';')
@@ -506,6 +429,8 @@ fn compare_runs(spec: &str, out: &Path) {
         let (endpoints, ticks) = verdict::pooled(runs);
         rendered += &format!("\n== {version} pooled over {} runs\n", runs.len());
         rendered += &render_endpoints(&endpoints, &ticks);
+        let (lanes, acquires) = verdict::pooled_policy(runs);
+        rendered += &render_policy(&lanes, &acquires);
         for run in runs.iter() {
             rendered += &format!("\n{}", render_run(run));
         }
@@ -514,30 +439,53 @@ fn compare_runs(spec: &str, out: &Path) {
     println!("{rendered}");
 }
 
+/// One latency series: counts, scheduled-basis percentiles, sent-basis p99 and send lag.
+fn render_series(name: &str, summary: &EndpointSummary) -> String {
+    let c = summary.counts;
+    let judged = |permille| verdict::percentile(&summary.judged, permille);
+    format!(
+        "{name}: attempts {} completed {} errors {} timeouts {} unsent {}\n  scheduled-basis p50 {} p95 {} p99 {} max {}\n  sent-basis p99 {} | send lag p99 {} max {}\n",
+        c.attempts,
+        c.completed,
+        c.errors,
+        c.timeouts,
+        c.unsent,
+        judged(500),
+        judged(950),
+        judged(990),
+        judged(1000),
+        verdict::percentile(&summary.sent_basis, 990),
+        verdict::percentile(&summary.lag, 990),
+        verdict::percentile(&summary.lag, 1000),
+    )
+}
+
+/// Policy hook lanes and the server pool acquire probe; empty for a health-only run.
+fn render_policy(lanes: &BTreeMap<Lane, EndpointSummary>, acquires: &[Option<u64>]) -> String {
+    let mut text = String::new();
+    for (lane, summary) in lanes {
+        text += &render_series(&format!("policy {}", lane.name()), summary);
+    }
+    if !lanes.is_empty() {
+        let failed = acquires.iter().filter(|wait| wait.is_none()).count();
+        text += &format!(
+            "server pool acquire: samples {} failed {failed} | wait p50 {} p99 {} max {}\n",
+            acquires.len(),
+            verdict::percentile(acquires, 500),
+            verdict::percentile(acquires, 990),
+            verdict::percentile(acquires, 1000),
+        );
+    }
+    text
+}
+
 fn render_endpoints(
     endpoints: &BTreeMap<Endpoint, EndpointSummary>,
     ticks: &[Option<u64>],
 ) -> String {
     let mut text = String::new();
     for (endpoint, summary) in endpoints {
-        let c = summary.counts;
-        let judged = |permille| verdict::percentile(&summary.judged, permille);
-        text += &format!(
-            "{}: attempts {} completed {} errors {} timeouts {} unsent {}\n  scheduled-basis p50 {} p95 {} p99 {} max {}\n  sent-basis p99 {} | send lag p99 {} max {}\n",
-            endpoint.name(),
-            c.attempts,
-            c.completed,
-            c.errors,
-            c.timeouts,
-            c.unsent,
-            judged(500),
-            judged(950),
-            judged(990),
-            judged(1000),
-            verdict::percentile(&summary.sent_basis, 990),
-            verdict::percentile(&summary.lag, 990),
-            verdict::percentile(&summary.lag, 1000),
-        );
+        text += &render_series(endpoint.name(), summary);
     }
     let misses = ticks.iter().filter(|tick| tick.is_none()).count();
     text += &format!(
@@ -568,35 +516,51 @@ fn render_run(run: &RunSummary) -> String {
         );
     }
     text += &render_endpoints(&run.endpoints, &run.ticks);
+    text += &render_policy(&run.policy, &run.acquires);
     let r = &run.resources;
     for (point, sample) in [("start", r.start), ("end", r.end)] {
         text += &format!(
             "resources {point}: threads {} pool {}/{} idle (max {}) proxy accepted {} open {}\n",
             opt(sample.threads),
-            sample.pool_size,
-            sample.pool_idle,
+            opt(sample.pool_size),
+            opt(sample.pool_idle),
             r.pool_max,
-            sample.proxy_accepted,
-            sample.proxy_open,
+            opt(sample.proxy_accepted),
+            opt(sample.proxy_open),
+        );
+    }
+    if run.profile == Profile::S2 {
+        text += &format!(
+            "window highs: proxy open {} pool {} reader connections (open minus pool) {} | policy statements {}\n",
+            opt(r.peak.proxy_open),
+            opt(r.peak.pool_size),
+            opt(r.peak.beyond_pool),
+            opt(r.policy_statements),
         );
     }
     text + &format!("pg statements in window: {}\n", r.pg_statements)
 }
 
 fn render_comparison(comparison: &Comparison) -> String {
+    let policy = comparison.policy.as_ref().map_or(String::new(), |policy| {
+        format!(" policy={}", policy.verdict)
+    });
     let mut text = format!(
-        "VERDICT detail={} public={} tick={}\ninvalid: {}\n",
+        "VERDICT detail={} public={} tick={}{policy}\ninvalid: {}\n",
         comparison.detail.verdict,
         comparison.public.verdict,
         comparison.tick.verdict,
         listed(&comparison.invalid),
     );
     for (name, metric) in [
-        ("detail p99", &comparison.detail),
-        ("public p99", &comparison.public),
-        ("tick p99", &comparison.tick),
+        ("detail p99", Some(&comparison.detail)),
+        ("public p99", Some(&comparison.public)),
+        ("tick p99", Some(&comparison.tick)),
+        ("policy main p99", comparison.policy.as_ref()),
     ] {
-        text += &render_metric(name, metric);
+        if let Some(metric) = metric {
+            text += &render_metric(name, metric);
+        }
     }
     text
 }

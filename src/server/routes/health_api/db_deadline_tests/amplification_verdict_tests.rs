@@ -1,5 +1,5 @@
-//! The judge for `health_amplification_profile`: one class per scheduled attempt, percentiles
-//! that rank every attempt with unfinished ones at +inf, and the BASE-versus-candidate verdict.
+//! The judge for `health_amplification_profile`: one class per scheduled attempt or policy hook,
+//! percentiles that rank unfinished ones at +inf, and the BASE-versus-candidate verdict.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -7,6 +7,11 @@ use std::net::IpAddr;
 use super::resource_regression_tests::THREAD_SLACK;
 
 mod cases_tests;
+mod policy_verdict_tests;
+mod s2_cases_tests;
+
+pub(super) use policy_verdict_tests::{Acquire, Lane, PolicyAttempt, PolicyOutcome, pooled_policy};
+use policy_verdict_tests::{candidate_invalid, summarize_policy};
 
 pub(super) const SEC: u64 = 1_000_000;
 /// Per version and endpoint, summed over its runs.
@@ -16,6 +21,31 @@ pub(super) const MIN_TICKS: usize = 1_000;
 /// The one condition expected to differ between versions, and to match within one.
 pub(super) const BINARY_KEY: &str = "binary_sha256";
 const OPERATOR_PG_PORT: u16 = 15432;
+/// The one age reason whose number grows while the run lasts.
+const AGING_REASON: &str = "dispatch_outbox_oldest_pending_age";
+
+/// `s1` loads health only; `s2` adds the policy read hooks, the tick engine and their probes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Profile {
+    #[default]
+    S1,
+    S2,
+}
+
+impl Profile {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Profile::S1 => "s1",
+            Profile::S2 => "s2",
+        }
+    }
+
+    pub(super) fn parse(name: &str) -> Option<Self> {
+        [Profile::S1, Profile::S2]
+            .into_iter()
+            .find(|profile| profile.name() == name)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Endpoint {
@@ -111,8 +141,16 @@ impl Plan {
     /// Fixed intervals with seeded jitter inside the first half of each, so every run of either
     /// version replays the same send times.
     pub(super) fn schedule(&self, endpoint: Endpoint) -> Vec<u64> {
-        let interval = SEC / self.rps;
-        let mut state = self.seed ^ (endpoint as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.jittered(endpoint as u64 + 1, SEC / self.rps)
+    }
+
+    /// A lane's hooks every `interval_ms`, jittered like the endpoints but seeded apart.
+    pub(super) fn policy_schedule(&self, lane: Lane, interval_ms: u64) -> Vec<u64> {
+        self.jittered(lane as u64 + 3, interval_ms.max(1) * 1_000)
+    }
+
+    fn jittered(&self, salt: u64, interval: u64) -> Vec<u64> {
+        let mut state = self.seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         (0..self.end() / interval)
             .map(|slot| slot * interval + splitmix64(&mut state) % (interval / 2))
             .collect()
@@ -132,14 +170,44 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Each count is None when it was not observed or not readable back; never recorded as zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Sample {
-    /// None when the OS count could not be read; never recorded as zero.
     pub(super) threads: Option<usize>,
-    pub(super) pool_size: u32,
-    pub(super) pool_idle: usize,
-    pub(super) proxy_accepted: usize,
-    pub(super) proxy_open: usize,
+    pub(super) pool_size: Option<u32>,
+    pub(super) pool_idle: Option<usize>,
+    pub(super) proxy_accepted: Option<usize>,
+    pub(super) proxy_open: Option<usize>,
+}
+
+impl Sample {
+    pub(super) const FIELDS: [&str; 5] = [
+        "threads",
+        "pool_size",
+        "pool_idle",
+        "proxy_accepted",
+        "proxy_open",
+    ];
+
+    pub(super) fn field(&self, name: &str) -> Option<usize> {
+        match name {
+            "threads" => self.threads,
+            "pool_size" => self.pool_size.map(|size| size as usize),
+            "pool_idle" => self.pool_idle,
+            "proxy_accepted" => self.proxy_accepted,
+            "proxy_open" => self.proxy_open,
+            _ => None,
+        }
+    }
+}
+
+/// Highs sampled through the measured window; `beyond_pool` is open proxy connections minus
+/// server pool connections at one instant, the estimate of reader connections `C`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Peak {
+    pub(super) proxy_open: Option<usize>,
+    pub(super) pool_size: Option<u32>,
+    pub(super) beyond_pool: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +217,9 @@ pub(super) struct Resources {
     pub(super) pool_max: u32,
     /// Statements the proxy saw executed inside the measured window.
     pub(super) pg_statements: usize,
+    pub(super) peak: Peak,
+    /// Window executions of the two policy read SELECTs.
+    pub(super) policy_statements: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,11 +230,24 @@ pub(super) struct RunData {
     /// `(slot, woke)` for each slot the probe ran; a skipped slot is absent.
     pub(super) ticks: Vec<(u64, u64)>,
     pub(super) resources: Resources,
+    pub(super) policy: Vec<PolicyAttempt>,
+    pub(super) acquires: Vec<Acquire>,
     /// Problems already named while loading the run (runner evidence).
     pub(super) invalid: Vec<String>,
 }
 
 impl RunData {
+    /// A run recorded before profiles existed is the health-only one.
+    pub(super) fn profile(&self) -> Option<Profile> {
+        self.conditions
+            .get("profile")
+            .map_or(Some(Profile::S1), |name| Profile::parse(name))
+    }
+
+    pub(super) fn condition(&self, key: &str) -> Option<u64> {
+        self.conditions.get(key)?.parse().ok()
+    }
+
     pub(super) fn plan(&self) -> Option<Plan> {
         let get = |key: &str| self.conditions.get(key)?.parse::<u64>().ok();
         Some(Plan {
@@ -236,6 +320,25 @@ pub(super) struct EndpointSummary {
 }
 
 impl EndpointSummary {
+    /// Counts one measured attempt; only a completed one gets a finite latency.
+    fn record(&mut self, class: Class, scheduled: u64, sent: Option<u64>, last: Option<u64>) {
+        let counts = &mut self.counts;
+        counts.attempts += 1;
+        match class {
+            Class::Completed => counts.completed += 1,
+            Class::Error => counts.errors += 1,
+            Class::Timeout => counts.timeouts += 1,
+            Class::Unsent => counts.unsent += 1,
+        }
+        let done = (class == Class::Completed).then_some(last).flatten();
+        self.judged
+            .push(done.map(|last| last.saturating_sub(scheduled)));
+        self.sent_basis
+            .push(done.zip(sent).map(|(last, sent)| last.saturating_sub(sent)));
+        self.lag
+            .push(sent.map(|sent| sent.saturating_sub(scheduled)));
+    }
+
     fn absorb(&mut self, other: &EndpointSummary) {
         let (mine, theirs) = (&mut self.counts, &other.counts);
         mine.attempts += theirs.attempts;
@@ -258,6 +361,10 @@ pub(super) struct RunSummary {
     pub(super) ticks: Vec<Option<u64>>,
     pub(super) resources: Resources,
     pub(super) reference: BTreeMap<Endpoint, Reference>,
+    pub(super) profile: Profile,
+    pub(super) policy: BTreeMap<Lane, EndpointSummary>,
+    /// Server pool acquire waits, None for a failed one.
+    pub(super) acquires: Vec<Option<u64>>,
     pub(super) invalid: Vec<String>,
 }
 
@@ -288,13 +395,16 @@ fn answer_intact(endpoint: Endpoint, answer: &Answer) -> bool {
         && answer.node_hostname == (endpoint == Endpoint::Detail)
 }
 
-/// Reasons without a trailing numeric value, so a growing age such as
-/// `dispatch_outbox_oldest_pending_age:303` keeps its identity.
+/// Reasons with only the outbox age's growing number dropped; every other value stays.
 fn reason_set(reasons: &[String]) -> Vec<String> {
     let mut set: Vec<String> = reasons
         .iter()
         .map(|reason| match reason.rsplit_once(':') {
-            Some((name, value)) if value.bytes().all(|byte| byte.is_ascii_digit()) => name,
+            Some((AGING_REASON, value))
+                if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                AGING_REASON
+            }
             _ => reason.as_str(),
         })
         .map(str::to_string)
@@ -330,10 +440,11 @@ pub(super) fn summarize(run: &RunData) -> RunSummary {
         invalid: run.invalid.clone(),
         ..RunSummary::default()
     };
-    let Some(plan) = run.plan() else {
+    let (Some(plan), Some(profile)) = (run.plan(), run.profile()) else {
         summary.invalid.push("conditions_unreadable".to_string());
         return summary;
     };
+    summary.profile = profile;
     for endpoint in Endpoint::ALL {
         let mut attempts: Vec<&Attempt> = run
             .attempts
@@ -369,28 +480,7 @@ pub(super) fn summarize(run: &RunData) -> RunSummary {
         let mut out = EndpointSummary::default();
         for attempt in measured {
             let class = classify(attempt, reference.as_ref());
-            let counts = &mut out.counts;
-            counts.attempts += 1;
-            match class {
-                Class::Completed => counts.completed += 1,
-                Class::Error => counts.errors += 1,
-                Class::Timeout => counts.timeouts += 1,
-                Class::Unsent => counts.unsent += 1,
-            }
-            let done = (class == Class::Completed)
-                .then_some(attempt.last_byte)
-                .flatten();
-            out.judged
-                .push(done.map(|last| last.saturating_sub(attempt.scheduled)));
-            out.sent_basis.push(
-                done.zip(attempt.sent)
-                    .map(|(last, sent)| last.saturating_sub(sent)),
-            );
-            out.lag.push(
-                attempt
-                    .sent
-                    .map(|sent| sent.saturating_sub(attempt.scheduled)),
-            );
+            out.record(class, attempt.scheduled, attempt.sent, attempt.last_byte);
         }
         if out.counts.completed == 0 {
             summary
@@ -411,24 +501,71 @@ pub(super) fn summarize(run: &RunData) -> RunSummary {
     summary.ticks = (plan.warmup_secs..plan.tick_slots())
         .map(|slot| woke.get(&slot).map(|at| at.saturating_sub(slot * SEC)))
         .collect();
-    let resources = &run.resources;
-    match (resources.start.threads, resources.end.threads) {
-        (Some(start), Some(end)) if start.abs_diff(end) > THREAD_SLACK => {
-            summary.invalid.push("thread_drift".to_string());
-        }
-        (Some(_), Some(_)) => {}
-        _ => summary
-            .invalid
-            .push("resource_unobserved:threads".to_string()),
-    }
-    if resources.start.pool_size.max(resources.end.pool_size) > resources.pool_max {
-        summary.invalid.push("pool_over_cap".to_string());
-    }
-    if resources.pg_statements == 0 {
-        summary.invalid.push("pg_unqueried".to_string());
+    summary
+        .invalid
+        .extend(resource_invalid(&run.resources, profile));
+    if profile == Profile::S2 {
+        summarize_policy(run, plan, &mut summary);
     }
     summary.invalid.dedup();
     summary
+}
+
+/// Every count observed, threads steady, the server pool within its size and no larger at
+/// the end; health-only runs open no connection at all once warm.
+fn resource_invalid(resources: &Resources, profile: Profile) -> Vec<String> {
+    let mut invalid = Vec::new();
+    let (start, end) = (&resources.start, &resources.end);
+    for (point, sample) in [("start", start), ("end", end)] {
+        for field in Sample::FIELDS {
+            if sample.field(field).is_none() {
+                invalid.push(format!("resource_unobserved:{point}.{field}"));
+            }
+        }
+    }
+    let grew = |before: Option<usize>, after: Option<usize>| {
+        before.zip(after).filter(|(before, after)| after > before)
+    };
+    if let (Some(before), Some(after)) = (start.threads, end.threads)
+        && before.abs_diff(after) > THREAD_SLACK
+    {
+        invalid.push("thread_drift".to_string());
+    }
+    if start.pool_size.max(end.pool_size) > Some(resources.pool_max) {
+        invalid.push("pool_over_cap".to_string());
+    }
+    if grew(start.field("pool_size"), end.field("pool_size")).is_some() {
+        invalid.push("pool_growth".to_string());
+    }
+    if resources.pg_statements == 0 {
+        invalid.push("pg_unqueried".to_string());
+    }
+    match profile {
+        Profile::S1 => {
+            if let Some((before, after)) = grew(start.proxy_accepted, end.proxy_accepted) {
+                invalid.push(format!("connection_churn:{}", after - before));
+            }
+            if grew(start.proxy_open, end.proxy_open).is_some() {
+                invalid.push("connection_growth".to_string());
+            }
+        }
+        Profile::S2 => {
+            let peak = &resources.peak;
+            for (field, value) in [
+                ("proxy_open", peak.proxy_open),
+                ("pool_size", peak.pool_size.map(|size| size as usize)),
+                ("beyond_pool", peak.beyond_pool),
+            ] {
+                if value.is_none() {
+                    invalid.push(format!("resource_unobserved:peak.{field}"));
+                }
+            }
+            if resources.policy_statements.is_none() {
+                invalid.push("resource_unobserved:policy_statements".to_string());
+            }
+        }
+    }
+    invalid
 }
 
 /// Every run's attempts and measured ticks pooled into one version-wide summary.
@@ -495,6 +632,8 @@ pub(super) struct Comparison {
     pub(super) detail: MetricComparison,
     pub(super) public: MetricComparison,
     pub(super) tick: MetricComparison,
+    /// Main-engine policy hooks, judged only when every run carries the policy load.
+    pub(super) policy: Option<MetricComparison>,
 }
 
 fn values(stats: &[Stat]) -> Option<Vec<u64>> {
@@ -637,6 +776,15 @@ fn comparison_invalid(base: &[RunSummary], candidate: &[RunSummary]) -> Vec<Stri
     if !base.is_empty() && !candidate.is_empty() && binaries(base) == binaries(candidate) {
         invalid.insert("same_binary_both_versions".to_string());
     }
+    // A candidate that answers with another status or reason set is not the same health.
+    for endpoint in Endpoint::ALL {
+        let references: BTreeSet<Option<&Reference>> =
+            all.iter().map(|run| run.reference.get(&endpoint)).collect();
+        if references.len() > 1 {
+            invalid.insert(format!("reference_mismatch:{}", endpoint.name()));
+        }
+    }
+    invalid.extend(candidate_invalid(candidate));
     invalid.into_iter().collect()
 }
 
@@ -654,17 +802,32 @@ pub(super) fn compare(base: &[RunSummary], candidate: &[RunSummary]) -> Comparis
     let mut detail = metric(base, candidate, judged(Endpoint::Detail), valid);
     let public = metric(base, candidate, judged(Endpoint::Public), valid);
     let tick = metric(base, candidate, |run| run.ticks.clone(), valid);
-    // Public health never reads the hostname, so its movement means something else moved.
-    if detail.verdict == Verdict::Improved
+    let all_s2 = base
+        .iter()
+        .chain(candidate)
+        .all(|run| run.profile == Profile::S2);
+    // Health-only, public never reads the hostname, so its movement means something else moved.
+    if !all_s2
+        && detail.verdict == Verdict::Improved
         && matches!(public.verdict, Verdict::Improved | Verdict::Worse)
     {
         detail.verdict = Verdict::UnconfirmedControlMoved;
     }
+    let policy = (all_s2 && !base.is_empty() && !candidate.is_empty()).then(|| {
+        let main = |run: &RunSummary| {
+            run.policy
+                .get(&Lane::Main)
+                .map(|summary| summary.judged.clone())
+                .unwrap_or_default()
+        };
+        metric(base, candidate, main, valid)
+    });
     Comparison {
         invalid,
         detail,
         public,
         tick,
+        policy,
     }
 }
 

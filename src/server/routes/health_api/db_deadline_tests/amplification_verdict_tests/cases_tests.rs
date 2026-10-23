@@ -3,7 +3,7 @@
 
 use super::*;
 
-const FIXTURE_PLAN: Plan = Plan {
+pub(super) const FIXTURE_PLAN: Plan = Plan {
     seed: 7,
     rps: 10,
     warmup_secs: 2,
@@ -13,9 +13,9 @@ const FIXTURE_PLAN: Plan = Plan {
 /// Latency after the actual send, send lag after the schedule, and every n-th measured
 /// attempt left unfinished (timeouts and unsent in turn).
 #[derive(Clone, Copy)]
-struct Shape(u64, u64, Option<usize>);
+pub(super) struct Shape(pub(super) u64, pub(super) u64, pub(super) Option<usize>);
 
-fn intact(endpoint: Endpoint) -> Answer {
+pub(super) fn intact(endpoint: Endpoint) -> Answer {
     Answer {
         status: 200,
         parsed: true,
@@ -25,7 +25,7 @@ fn intact(endpoint: Endpoint) -> Answer {
     }
 }
 
-fn fixture_data(name: &str, binary: &str, public: Shape, detail: Shape) -> RunData {
+pub(super) fn fixture_data(name: &str, binary: &str, public: Shape, detail: Shape) -> RunData {
     let plan = FIXTURE_PLAN;
     let mut attempts = Vec::new();
     for (endpoint, Shape(latency, lag, unfinished_every)) in
@@ -56,10 +56,10 @@ fn fixture_data(name: &str, binary: &str, public: Shape, detail: Shape) -> RunDa
     }
     let healthy = Sample {
         threads: Some(40),
-        pool_size: 3,
-        pool_idle: 3,
-        proxy_accepted: 3,
-        proxy_open: 3,
+        pool_size: Some(3),
+        pool_idle: Some(3),
+        proxy_accepted: Some(3),
+        proxy_open: Some(3),
     };
     RunData {
         name: name.to_string(),
@@ -82,12 +82,13 @@ fn fixture_data(name: &str, binary: &str, public: Shape, detail: Shape) -> RunDa
             end: healthy,
             pool_max: 8,
             pg_statements: 100,
+            ..Resources::default()
         },
-        invalid: Vec::new(),
+        ..RunData::default()
     }
 }
 
-fn version(name: &str, binary: &str, public: Shape, detail: Shape) -> Vec<RunSummary> {
+pub(super) fn version(name: &str, binary: &str, public: Shape, detail: Shape) -> Vec<RunSummary> {
     (1..=3)
         .map(|run| {
             summarize(&fixture_data(
@@ -100,7 +101,7 @@ fn version(name: &str, binary: &str, public: Shape, detail: Shape) -> Vec<RunSum
         .collect()
 }
 
-const STEADY: Shape = Shape(50_000, 0, None);
+pub(super) const STEADY: Shape = Shape(50_000, 0, None);
 
 #[test]
 fn amplification_verdict_withholds_p99_when_two_percent_never_completed() {
