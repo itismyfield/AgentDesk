@@ -9,6 +9,9 @@ use crate::config::{ClusterConfig, ClusterSemaphoreConfig};
 const DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_TASK_DISPATCH_CLAIM_LIMIT: i64 = 10;
 
+mod config_read;
+pub use config_read::claim_task_dispatches;
+
 #[cfg(test)]
 #[path = "task_dispatch_claims_replay_tests.rs"]
 mod replay_tests;
@@ -51,14 +54,6 @@ pub struct TaskDispatchClaimSkip {
     pub id: String,
     pub reasons: Vec<String>,
     pub required_capabilities: Option<Value>,
-}
-
-pub async fn claim_task_dispatches(
-    pool: &PgPool,
-    request: &TaskDispatchClaimRequest,
-) -> Result<TaskDispatchClaimOutcome, String> {
-    let cluster_config = crate::config::load_graceful().cluster;
-    claim_task_dispatches_with_cluster_config(pool, request, &cluster_config).await
 }
 
 async fn claim_task_dispatches_with_cluster_config(
