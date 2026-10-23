@@ -252,6 +252,7 @@ struct FakeTransport {
     physical_posts: AtomicUsize,
     post_calls: AtomicUsize,
     edit_calls: AtomicUsize,
+    reconcile_calls: AtomicUsize,
     fail_next_post_after_commit: AtomicBool,
     fail_edits_transiently: AtomicBool,
     report_edit_missing: AtomicBool,
@@ -313,6 +314,7 @@ impl TaskCardTransport for FakeTransport {
         expected_content_hash: &str,
         _post_started_at: chrono::DateTime<chrono::Utc>,
     ) -> CardPostReconcile {
+        self.reconcile_calls.fetch_add(1, Ordering::AcqRel);
         let message_id = self
             .by_nonce
             .lock()
@@ -1587,6 +1589,42 @@ async fn unavailable_pinned_bot_releases_lease_for_immediate_retry() {
             usize::from(posted)
         );
     }
+
+    let transport = FakeTransport::new();
+    let event = event("pinned-body-provider-before-notify-available");
+    let content = event.payload.render(1);
+    let claim = store::claim_card(
+        None,
+        &event.scope,
+        "provider:claude",
+        &content,
+        &content_hash(&content),
+        StoreIntent::Observation,
+    )
+    .await
+    .expect("claim a body card when only its provider bot was available");
+    let CardClaim::Owned(claim) = claim else {
+        panic!("the isolated provider-pinned body must own its first lease: {claim:?}");
+    };
+    store::mark_post_failure(None, &claim, "fixture never crossed the POST boundary")
+        .await
+        .expect("release the provider-pinned body before notify becomes available");
+    let both = CardDeliveryClients::new([
+        CardBot::new("notify", Arc::new(serenity::Http::new("notify-test-token"))),
+        CardBot::new(
+            "provider:claude",
+            Arc::new(serenity::Http::new("provider-test-token")),
+        ),
+    ]);
+    let created = ensure_card(None, &both, &transport, &event, EnsureIntent::Observation)
+        .await
+        .expect("the available pinned body bot must send without legacy reconciliation");
+    assert_eq!(created.bot_key, "provider:claude");
+    assert_eq!(created.disposition, CardDisposition::Created);
+    assert_eq!(transport.physical_posts.load(Ordering::Acquire), 1);
+    assert_eq!(transport.post_calls.load(Ordering::Acquire), 1);
+    assert_eq!(transport.edit_calls.load(Ordering::Acquire), 0);
+    assert_eq!(transport.reconcile_calls.load(Ordering::Acquire), 0);
 }
 
 #[tokio::test]
