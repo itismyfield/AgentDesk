@@ -2334,8 +2334,6 @@ src/
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/
-│   │   │   │   │   ├── fixtures/
-│   │   │   │   │   │   └── codex_empty_turn.jsonl
 │   │   │   │   │   ├── recovery_retry_guard_tests/
 │   │   │   │   │   │   └── replay_turn_tests.rs
 │   │   │   │   │   ├── rowless_receipt_tests/
