@@ -384,7 +384,7 @@ async fn soft_clear_notifications(pool: &sqlx::PgPool, channel_id: ChannelId) ->
         "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE target = $1 AND reason_code = $2",
     )
     .bind(format!("channel:{}", channel_id.get()))
-    .bind(super::SOFT_CLEAR_REASON_CODE)
+    .bind("lifecycle.soft_clear")
     .fetch_one(pool)
     .await
     .expect("read soft-clear notifications")
