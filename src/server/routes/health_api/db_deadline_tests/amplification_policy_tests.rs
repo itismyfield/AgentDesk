@@ -157,9 +157,8 @@ fn micros_since(origin: Instant) -> u64 {
     Instant::now().saturating_duration_since(origin).as_micros() as u64
 }
 
-/// Open loop: each hook waits only for its scheduled time and runs on a blocking thread, so a
-/// slow actor queues hooks rather than delaying their sends; one unsent at the window's end
-/// stays unsent and one still running after the drain stays a timeout.
+/// Open loop: each hook fires at its scheduled time on a blocking thread, so a slow actor queues
+/// hooks without delaying sends; unsent at the window's end or running after the drain is recorded.
 pub(super) async fn drive_hooks(
     engine: crate::engine::PolicyEngine,
     lane: Lane,

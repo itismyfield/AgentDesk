@@ -1,6 +1,5 @@
-//! `health_amplification_profile`: public and detail health under a fixed open-loop load on an
-//! isolated PostgreSQL, with a 1 s tick probe on the two-worker server runtime; profile `s2` adds
-//! policy read hooks on main and tick engines; exact name only.
+//! `health_amplification_profile`: public and detail health under open-loop load on an isolated
+//! PostgreSQL with a 1 s tick probe; profile `s2` adds policy read hooks; exact name only.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
