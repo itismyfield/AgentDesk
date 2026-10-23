@@ -33,6 +33,11 @@ const ACTUAL_WAIT: Duration = Duration::from_secs(60);
 #[test]
 #[ignore = "requires approved pinned scratch Herdr, native client monitoring and throwaway PostgreSQL"]
 fn codex_actual_client_and_executor_keep_one_live_execution_pg() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("agentdesk::services::discord::tui_prompt_relay=debug,agentdesk::services::discord::turn_bridge=debug")
+        .with_test_writer()
+        .with_ansi(false)
+        .try_init();
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
         .lock()
@@ -565,7 +570,7 @@ async fn settled(
     id: u64,
     answer: &str,
 ) {
-    tokio::time::timeout(ACTUAL_WAIT, async {
+    let result = tokio::time::timeout(ACTUAL_WAIT, async {
         loop {
             let active = inflight::load_inflight_state_read_only(&ProviderKind::Codex, CHANNEL);
             let mailbox = discord::mailbox_snapshot(shared, ChannelId::new(CHANNEL)).await;
@@ -578,8 +583,18 @@ async fn settled(
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
     })
-    .await
-    .expect("actual native answer REST post and natural lifecycle completion");
+    .await;
+    if result.is_err() {
+        let active = inflight::load_inflight_state_read_only(&ProviderKind::Codex, CHANNEL);
+        let mailbox = discord::mailbox_snapshot(shared, ChannelId::new(CHANNEL)).await;
+        eprintln!(
+            "T14_SETTLEMENT {}",
+            json!({"anchor":id,"answer":answer,
+            "answer_count":answer_count(mock, answer),"messages":mock.message_snapshot(),
+            "inflight":active,"mailbox_active":mailbox.active_user_message_id})
+        );
+    }
+    result.expect("actual native answer REST post and natural lifecycle completion");
     let signal = tokio::time::timeout(ACTUAL_WAIT, completed.recv())
         .await
         .unwrap()

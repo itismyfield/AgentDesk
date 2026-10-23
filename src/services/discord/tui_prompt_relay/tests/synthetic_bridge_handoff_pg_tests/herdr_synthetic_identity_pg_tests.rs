@@ -287,10 +287,194 @@ impl Fixture {
         );
     }
 
+    fn remove_watcher_and_prepare_poll_owner(&self) {
+        self.shared.tmux_watchers.remove(&self.channel);
+        self.shared
+            .tmux_watchers
+            .clear_restored_owner_for_tmux_session(&self.logical);
+        let marker = crate::services::tmux_common::session_temp_path(&self.logical, "spawn_nonce");
+        std::fs::write(marker, N1).unwrap();
+        assert_eq!(
+            self.shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(&self.logical),
+            None,
+            "the live Herdr fixture begins without a watcher or restored poll owner"
+        );
+    }
+
     async fn close(self) {
         self.pool.close().await;
         self.db.drop().await;
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn herdr_poll_owner_publication_and_same_channel_noop_contract_pg() {
+    Box::pin(async {
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let _binding =
+            crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(root.path());
+        let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let channel = ChannelId::new(7_273_001);
+        let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+        let fixture = Fixture::new(root.path(), channel).await;
+        fixture.remove_watcher_and_prepare_poll_owner();
+        let record = fixture.pending(N1, &fixture.source, 7_273_002);
+        let lease = fixture.publish_pending_lease(&record);
+        for attempt in 0..2 {
+            let epoch =
+                crate::services::discord::tmux_watcher_registry::owner_observation_epoch().unwrap();
+            let (claim, _) = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                channel,
+                &fixture.logical,
+                (&record.prompt_text, MessageId::new(record.anchor_message_id)),
+                &lease,
+                (record.captured_source.as_ref(), None),
+            )
+            .await;
+            assert!(claim.claimed, "herdr_poll_owner_publication_contract: claim {attempt}");
+            assert_eq!(
+                fixture
+                    .shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(&fixture.logical),
+                Some(channel),
+                "herdr_poll_owner_publication_contract: the admitted source publishes its poll owner"
+            );
+            assert!(!fixture.shared.tmux_watchers.has_live_watcher_handle(&fixture.logical));
+            assert_eq!(
+                crate::services::discord::tmux_watcher_registry::owner_observation_epoch(),
+                Some(epoch + u64::from(attempt == 0)),
+                "herdr_poll_owner_publication_contract: publish once; the same channel is a no-op"
+            );
+        }
+        let saved = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get())
+            .expect("the production claim saved its admitted episode");
+        assert_eq!(saved.hosted_execution_nonce.as_deref(), Some(N1));
+        assert_eq!(saved.user_msg_id, record.anchor_message_id);
+        assert!(fixture.rig.sends().is_empty(), "routing publication sends no provider input");
+        fixture.close().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unverified_herdr_claims_do_not_publish_poll_owner_contract_pg() {
+    Box::pin(async {
+        for (index, case) in [
+            "no_pg",
+            "unreadable_pg",
+            "unknown",
+            "retired",
+            "dead",
+            "nonce",
+            "source",
+            "foreign_owner",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let _root = crate::config::set_agentdesk_root_for_test(root.path());
+            let _binding =
+                crate::services::discord::turn_presence::activity::tests::BindingRoot::enter(
+                    root.path(),
+                );
+            let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+            let channel = ChannelId::new(7_273_100 + index as u64 * 10);
+            let _hosts =
+                crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
+            let mut fixture = Fixture::new(root.path(), channel).await;
+            let record = fixture.pending(N1, &fixture.source, channel.get() + 1);
+            if case == "source" {
+                let path = root.path().join("different-current-source.jsonl");
+                std::fs::write(&path, b"").unwrap();
+                let source = crate::services::tui_o::shadow::binding_reader::source_id_for(
+                    "different-current-session",
+                    &path,
+                )
+                .unwrap();
+                fixture.publish_source(&source, N1, 2);
+            }
+            fixture.remove_watcher_and_prepare_poll_owner();
+            match case {
+                "no_pg" => Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = None,
+                "unreadable_pg" => fixture.pool.close().await,
+                "unknown" => {
+                    canonical_fixture::set_raw(
+                        &fixture.pool,
+                        &fixture.key,
+                        Some(serde_json::json!({"schema":999})),
+                    )
+                    .await;
+                }
+                "retired" => {
+                    let mut retired = fixture.execution.clone();
+                    retired.state = HostedState::Retired;
+                    canonical_fixture::set_raw(
+                        &fixture.pool,
+                        &fixture.key,
+                        Some(serde_json::to_value(retired).unwrap()),
+                    )
+                    .await;
+                }
+                "dead" => fixture.rig.provider_seen(&fixture.incarnation, false),
+                "nonce" => {
+                    let marker = crate::services::tmux_common::session_temp_path(
+                        &fixture.logical,
+                        "spawn_nonce",
+                    );
+                    std::fs::write(marker, N2).unwrap();
+                }
+                "foreign_owner" => {
+                    assert!(
+                        fixture
+                            .shared
+                            .tmux_watchers
+                            .restore_owner_channel_for_tmux_session(
+                                &fixture.logical,
+                                ChannelId::new(channel.get() + 2),
+                            )
+                    );
+                }
+                "source" => {}
+                _ => unreachable!(),
+            }
+            let before = fixture
+                .shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(&fixture.logical);
+            let epoch = crate::services::discord::tmux_watcher_registry::owner_observation_epoch();
+            assert!(
+                !fixture.claim(&record).await,
+                "herdr_poll_owner_refusal_contract: {case} must refuse its production claim"
+            );
+            assert_eq!(
+                fixture
+                    .shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(&fixture.logical),
+                before,
+                "herdr_poll_owner_refusal_contract: {case} publishes no owner"
+            );
+            assert_eq!(
+                crate::services::discord::tmux_watcher_registry::owner_observation_epoch(),
+                epoch,
+                "herdr_poll_owner_refusal_contract: {case} performs zero registry publications"
+            );
+            fixture.assert_quiet().await;
+            assert!(
+                fixture.rig.sends().is_empty(),
+                "{case} sends no provider input"
+            );
+            fixture.close().await;
+        }
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
