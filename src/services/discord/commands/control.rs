@@ -538,7 +538,7 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         return Ok(());
     };
 
-    async {
+    {
         let removed = mailbox_cancel_queued_primary_message(
             &ctx.data().shared,
             &ctx.data().provider,
@@ -558,7 +558,6 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         }
         Ok(())
     }
-    .await
 }
 
 /// /clear — Clear AI conversation history
@@ -574,7 +573,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    async {
+    {
         log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
         let http = ctx.serenity_context().http.clone();
@@ -598,7 +597,6 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         );
         Ok(())
     }
-    .await
 }
 
 #[cfg(test)]

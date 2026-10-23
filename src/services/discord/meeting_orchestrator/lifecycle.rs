@@ -396,29 +396,29 @@ pub(in crate::services::discord) async fn cancel_meeting(
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    async {
-    let meeting_info = {
-        let mut core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-            // #1008: drive the opt-in reducer; tolerant of already-cancelled
-            // meetings (cancel-race idempotency) so a second cancel is a no-op.
-            let _ = record_meeting_transition(&m.id, m.status.to_state(), MeetingEvent::Cancel);
-            // #1008: record a cancel artifact keyed by meeting id — concurrent
-            // cancels collapse onto one row.
-            let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
-            m.status = MeetingStatus::Cancelled;
-            let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
-            Some((mc, m.id.clone()))
-        } else {
-            None
-        }
-    };
+    {
+        let meeting_info = {
+            let mut core = shared.core.lock().await;
+            if let Some(m) = core.active_meetings.get_mut(&channel_id) {
+                // #1008: drive the opt-in reducer; tolerant of already-cancelled
+                // meetings (cancel-race idempotency) so a second cancel is a no-op.
+                let _ = record_meeting_transition(&m.id, m.status.to_state(), MeetingEvent::Cancel);
+                // #1008: record a cancel artifact keyed by meeting id — concurrent
+                // cancels collapse onto one row.
+                let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
+                m.status = MeetingStatus::Cancelled;
+                let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
+                Some((mc, m.id.clone()))
+            } else {
+                None
+            }
+        };
 
-    if let Some((mc, meeting_id)) = meeting_info {
-        // Save whatever transcript we have
-        let _ = save_meeting_record(shared, channel_id, None).await;
-        cleanup_meeting(shared, channel_id).await;
-        let _ = send_meeting_message_with_event(
+        if let Some((mc, meeting_id)) = meeting_info {
+            // Save whatever transcript we have
+            let _ = save_meeting_record(shared, channel_id, None).await;
+            cleanup_meeting(shared, channel_id).await;
+            let _ = send_meeting_message_with_event(
             http,
             mc,
             shared,
@@ -426,12 +426,12 @@ pub(in crate::services::discord) async fn cancel_meeting(
             "🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어.",
         )
         .await;
-        Ok(())
-    } else {
-        let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
-        Ok(())
+            Ok(())
+        } else {
+            let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
+            Ok(())
+        }
     }
-}.await
 }
 
 fn meeting_cancel_event_key(channel_id: ChannelId, meeting_id: &str) -> String {

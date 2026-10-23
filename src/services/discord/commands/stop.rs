@@ -55,7 +55,7 @@ impl StopReply {
         provider: &ProviderKind,
         channel: ChannelId,
     ) {
-        async {
+        {
             match self.stop {
             CommandStop::Native(stop) => {
                 if stop.finish().await.token.is_some() {
@@ -84,8 +84,7 @@ impl StopReply {
             CommandStop::AlreadyStopping | CommandStop::HostRefused | CommandStop::NoActiveTurn => {
             }
         }
-        }
-        .await;
+        };
     }
 }
 
@@ -94,7 +93,7 @@ pub(in crate::services::discord) async fn run_slash_stop(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> StopReply {
-    async {
+    {
         #[cfg(test)]
         if crate::services::provider::cancel_token_claude_interrupt::herdr_interrupt_mutant(
             "slash_stop_uses_unnamed_begin",
@@ -110,7 +109,6 @@ pub(in crate::services::discord) async fn run_slash_stop(
             stop: turn_bridge::begin_user_stop(shared, provider, channel, false, "/stop").await,
         }
     }
-    .await
 }
 
 /// A non-forced cancel's `/stop` on a live Herdr turn of this runtime, as the holder answers it;

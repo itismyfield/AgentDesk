@@ -193,7 +193,7 @@ where
     Warn: FnOnce() -> WarnFut,
     WarnFut: std::future::Future<Output = Result<(), Error>>,
 {
-    async {
+    {
         // Refused before the in-flight turn is cancelled: the session is not a legacy tmux one.
         let refusal = super::super::admin_host_guard::managed_reset_refusal;
         if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
@@ -232,7 +232,6 @@ where
             ManagedReset::Refused(reason) => Err(reason),
         })
     }
-    .await
 }
 
 async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(), Error> {
@@ -245,7 +244,7 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
         return Ok(());
     }
 
-    async {
+    {
         log_command_received!(ctx.channel_id().get(), user_name, command_name);
         ctx.say("♻ 세션 재시작 중...").await?;
 
@@ -288,7 +287,6 @@ async fn run_restart(ctx: Context<'_>, command_name: &'static str) -> Result<(),
         );
         Ok(())
     }
-    .await
 }
 
 /// Restart the current provider session immediately.

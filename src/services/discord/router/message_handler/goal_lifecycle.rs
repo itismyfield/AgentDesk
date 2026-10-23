@@ -161,7 +161,7 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
     command: GoalLifecycleCommand,
     stale_session_id: Option<String>,
 ) {
-    async {
+    {
         let active_turn = shared
             .mailbox(channel_id)
             .has_active_turn()
@@ -188,8 +188,7 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
         }
 
         send_codex_goal_lifecycle_notice(http, shared, channel_id, command, active_turn).await;
-    }
-    .await;
+    };
 }
 
 pub(super) async fn record_fresh_session_context_boundary(

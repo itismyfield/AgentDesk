@@ -126,26 +126,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 ### 4.4 home 권위 직접 소비 전수표
 
-`src/` 아래 시험 파일이 아닌 파일 중 `o_channel_homes`, `channel_home::`, `channel_home_boot`, `channel_home_drain`, `home_fence`, `home_availability`를 직접 참조하는 파일 전부다.
-`home_authority_inventory_lists_every_direct_consumer` 시험이 이 표와 소스를 대조한다. 새 직접 소비자를 추가하면 여기에 분류해야 시험이 통과한다.
-
-구분: 생성(권위·epoch·gate 개방) / 변경(조건부 전이·철회) / admission(실행·명령·출력 직전 거절) / 라우팅(배치·전달 결정) / readiness(위임 가능 여부, 소유 발급 아님) / 진단 / 배선 / 시험 / 관측(읽어서 로그만 남김).
-
-| 파일 | 구분 | 직접 소비 지점 |
-|---|---|---|
-| `src/db/o_channel_homes.rs` | 관측·시험 fixture | `read_home_at`·`read_home`, 조건부 renewal·drain 전이. `delegate`·`adopt`·`begin_reclaim`·`force_orphan`·`abort_release`는 보존된 core/drain/worker 시험 fixture 전용. |
-| `src/db/mod.rs` | 배선 | 모듈 선언 :32 |
-| `src/lib.rs` | readiness | `home_availability::{Availability, Unavailable, state}` 재노출 :291 |
-| `src/services/cluster/mod.rs` | 배선 | 모듈 선언 |
-| `src/services/cluster/channel_home.rs` | 잔류 gate·admission | `confirm`·`renewal`, registry, `intake_hold`·`intake_held_channels`, `run_lease`와 drain 관측. 명령 scope/fence는 제거됐고 남은 permit 시험은 실제 core/drain 경계를 다룬다. |
-| `src/services/cluster/channel_home_drain.rs` | 변경 | `drain_round` :133(renew :117, read :138), `run_drain` :212, `finish_return` :235 |
-| `src/services/cluster/channel_home_port.rs` | 변경 | drain 의무 포트 :12 |
-| `src/services/cluster/channel_home/ingress_snapshot.rs` | 관측 | `try_sample`·`sample_gate`: registry·local·inner gate를 `try_lock` 한 번씩 읽어 복사만 한다. expire·prune·close·초기화 없음 |
-| `src/services/cluster/channel_ingress.rs` | 관측 | 이 계약. 호출자는 shadow worker뿐 |
-| `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
-| `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
-| `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
-| `src/server/routes/health_api/runtime_profile.rs` | 진단 | `channel_home::health` :10(메모리 읽기만) |
+R1–R6 제거 뒤 home 권위를 직접 소비하는 production 파일은 없다. 이전 admission·라우팅·관측·진단 소비자 행과 전용 inventory 시험은 제거됐다. 아래 설계의 home·shadow 경로는 과거 계약 기록이며 현재 배선을 뜻하지 않는다.
 
 ## 5. 운영 전제
 

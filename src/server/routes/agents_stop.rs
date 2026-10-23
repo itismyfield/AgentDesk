@@ -62,7 +62,7 @@ pub async fn stop_agent_turn(
         );
     }
 
-    async {
+    {
         let session_key = session.session_key.clone();
         let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
         let lifecycle = stop_turn_preserving_queue(
@@ -117,5 +117,4 @@ pub async fn stop_agent_turn(
         });
         (status, Json(body))
     }
-    .await
 }

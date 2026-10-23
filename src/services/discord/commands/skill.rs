@@ -181,7 +181,7 @@ async fn run_skill_slash_command(
                 return Ok(());
             }
             ctx.defer().await?;
-            return async {
+            return {
                 let (shared, provider) = (&ctx.data().shared, &ctx.data().provider);
                 let begin = super::super::turn_bridge::begin_user_stop;
                 let reason = format!("{invoked_as} stop");
@@ -222,8 +222,7 @@ async fn run_skill_slash_command(
                     }
                 }
                 Ok(())
-            }
-            .await;
+            };
         }
         "pwd" => {
             let current_path = {
