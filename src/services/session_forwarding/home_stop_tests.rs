@@ -9,6 +9,9 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::cluster::channel_home;
 
+/// The trusted target's loopback seam, opened to forwarding tests outside this module.
+pub(crate) use super::super::trusted_target::loopback_seam;
+
 const CHANNEL: u64 = 5_340_300_000;
 const HOLDER: &str = "holder-a";
 

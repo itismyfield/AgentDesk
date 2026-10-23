@@ -416,3 +416,6 @@ impl HerdrLaunchHost for Successor {
         Ok(hosted::tests::expected(&probe.execution_nonce, 300))
     }
 }
+
+#[path = "http_force_forward_tests.rs"]
+mod forward;
