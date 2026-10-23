@@ -206,7 +206,6 @@ impl RuntimeSettingsConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn retired_native_clear_keys_are_ignored_by_config_loading() {

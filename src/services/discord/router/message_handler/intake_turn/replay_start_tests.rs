@@ -497,7 +497,7 @@ mod kickoff_tests {
             return;
         }
         assert_eq!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
-        crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
             let channels = [100_000_006_008_881, 100_000_006_008_882, 100_000_006_008_883, 100_000_006_008_884].map(ChannelId::new);
             let fixture = configured_host(&[channels[case]]).await;
             let host = &fixture.host;
@@ -653,7 +653,7 @@ mod kickoff_tests {
             return;
         }
         assert_eq!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
-        crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
             let channel = ChannelId::new(100_000_006_008_885);
             let fixture = configured_host(&[channel]).await;
             let host = &fixture.host;
@@ -793,7 +793,7 @@ mod kickoff_tests {
             return;
         }
         assert_eq!(std::env::var("AGENTDESK_REQUIRE_PG").as_deref(), Ok("1"));
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(
             async {
                 let channel = ChannelId::new(if cas {
                     100_000_006_008_887
@@ -1373,7 +1373,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             let channel = ChannelId::new(6_008_801);
             let message = 6_008_811;
             let sources = Some(vec![message.to_string(), (message+1).to_string()]);
@@ -1418,7 +1418,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             let channel = ChannelId::new(6_008_802);
             let message = 6_008_821;
             let sources = Some(vec![message.to_string(), (message+1).to_string()]);
@@ -1460,7 +1460,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(
             async {
                 let channel = ChannelId::new(6_008_803);
                 let message = 6_008_831;
@@ -1515,7 +1515,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             let (dormant,active) = (ChannelId::new(6_008_804),ChannelId::new(6_008_805));
             let (host,_registry) = worker_host(&[dormant,active]).await;
             let _rest = crate::services::discord::shared_state::test_rest::install(host.api.http.clone());
@@ -1553,7 +1553,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             use crate::services::discord::router::intake_dispatch::{IntakeAdmission,IntakeOrigin,IntakeSubmission,admit_text_intake};
             let channel = ChannelId::new(6_008_806);
             let message = 6_008_861;
@@ -1602,7 +1602,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             let channels = [ChannelId::new(6_008_807),ChannelId::new(6_008_808)];
             let (host,_registry) = worker_host(&channels).await;
             let _rest = crate::services::discord::shared_state::test_rest::install(host.api.http.clone());
@@ -1640,7 +1640,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             let channels = [6_008_809,6_008_810,6_008_811].map(ChannelId::new);
             let (host,_registry) = worker_host(&channels).await;
             let _rest = crate::services::discord::shared_state::test_rest::install(host.api.http.clone());
@@ -1699,7 +1699,7 @@ mod worker_entry_tests {
         )) {
             return;
         }
-        crate::services::discord::commands::control::native::tests::runtime().block_on(Box::pin(async {
+        crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(Box::pin(async {
             use crate::services::discord::router::intake_dispatch::{
                 IntakeAdmission,IntakeOrigin,IntakeSubmission,admit_text_intake,finish_text_intake_admission,
             };
@@ -2041,7 +2041,7 @@ fn intake_start_begins_its_receipt_before_the_first_input_only_when_active_pg() 
     )) {
         return;
     }
-    crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+    crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
         let (dormant, active) = (ChannelId::new(6_008_701), ChannelId::new(6_008_702));
         let host = host(&[dormant, active]).await;
         let submitted = run(&host, request(dormant, 6_008_711, "dormant start")).await;
@@ -2115,7 +2115,7 @@ fn undecided_or_held_intake_start_keeps_custody_without_input_pg() {
     )) {
         return;
     }
-    crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+    crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
         let channels = [6_008_731, 6_008_732, 6_008_733, 6_008_734].map(ChannelId::new);
         let [held, lost, fenced, owned] = channels;
         let host = host(&channels).await;
@@ -2226,7 +2226,7 @@ fn exact_retry_starts_only_through_its_continuation_pg() {
     )) {
         return;
     }
-    crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+    crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
         let channels = [6_008_771, 6_008_772].map(ChannelId::new);
         let host = host(&channels).await;
         let mut outcomes = Vec::new();
@@ -2313,7 +2313,7 @@ fn held_dispatch_is_not_inherited_by_an_active_start_pg() {
     )) {
         return;
     }
-    crate::services::discord::commands::control::native::tests::runtime().block_on(async {
+    crate::services::discord::admin_host_guard::tests::intake_replay_rt().block_on(async {
         let (dormant, active) = (ChannelId::new(6_008_771), ChannelId::new(6_008_772));
         // Once set, the thread's card link answers with this dispatch, as for a card thread.
         let linked = Arc::new(std::sync::Mutex::new(None::<String>));

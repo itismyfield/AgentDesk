@@ -111,7 +111,6 @@ pub(super) fn check_reviewed_calls() {
                     1,
                     MISSING,
                 ),
-                ("src/services/discord/commands/control/native.rs", 1, NATIVE),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
                 ("src/services/discord/admin_host_guard.rs", 1, MISSING),
@@ -265,10 +264,7 @@ fn authority_cleanup_inventory_follows_aliases_and_function_values() {
     const COMMON: &str = "src/services/tmux_common.rs";
     const OTHER: &str = "src/services/other.rs";
     const REVIEWED: Listed = &[(COMMON, 1, "the reviewed call")];
-    for needle in [
-        "cleanup_session_temp_files_under_source_authority",
-        "cleanup_native_clear_fallback_under_source_authority",
-    ] {
+    for needle in ["cleanup_session_temp_files_under_source_authority"] {
         let calls = [(needle, REVIEWED)];
         let base = format!(
             "pub(crate) fn {needle}(a: &Authority, n: &str) {{}}\n\
