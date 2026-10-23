@@ -189,3 +189,76 @@ async fn automatic_retention_retires_every_source_from_two_historical_panes() {
     );
     halt(actor.stop, actor.task).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_retention_uses_the_superseded_nonce_of_a_live_herdr_logical_key() {
+    use crate::services::discord::health::o_transition::automatic::termination::for_hop;
+    use crate::services::session_host::HostKind;
+    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let chain = chain_named(3, true, |n| (format!("h{n}"), aged_row(n, 8, true)));
+    let current_nonce = "nonce";
+    let events = {
+        let mut events = chain.bindings.events.lock().unwrap();
+        for event in events.iter_mut() {
+            event.tmux_session = chain.pane.clone();
+            event.execution_nonce = if event.seq < 4 {
+                "old-nonce"
+            } else {
+                current_nonce
+            }
+            .into();
+        }
+        events.clone()
+    };
+    let marker = crate::services::tmux_common::session_temp_path(&chain.pane, "host_kind");
+    std::fs::write(marker, "herdr").unwrap();
+    assert_eq!(
+        read_host_kind_marker(&chain.pane),
+        HostKindMarker::Known(HostKind::Herdr)
+    );
+    let _current = chain.current();
+    let actor = run(&chain);
+    settle(&chain).await;
+
+    for hop_seq in [3, 4] {
+        if let Ok(end) = for_hop(
+            CHANNEL,
+            &chain.pane,
+            current_nonce,
+            hop_seq,
+            &chain.pane,
+            &events,
+        ) {
+            let mut request = chain.request(&format!("automatic-nonce-hop-{hop_seq}"));
+            request.termination = Some(Termination::Confirmed(end));
+            automatic_request(&chain, &actor, request, idle(true)).await;
+        }
+    }
+    assert!(
+        chain.cursor(1).retired,
+        "[auto:nonce_old] eight-day source of the superseded execution must retire despite the Herdr marker"
+    );
+    assert!(
+        !chain.cursor(2).retired && !chain.cursor(3).retired,
+        "[auto:nonce_current] the current execution's noncurrent hop and latest source must remain readable"
+    );
+    assert!(
+        for_hop(
+            CHANNEL,
+            &chain.pane,
+            current_nonce,
+            99,
+            &chain.pane,
+            &events
+        )
+        .is_err(),
+        "[auto:nonce_unknown] missing binding evidence must preserve the source"
+    );
+    assert!(
+        for_hop(CHANNEL, &chain.pane, "", 3, &chain.pane, &events).is_err(),
+        "[auto:nonce_unknown] missing current nonce must preserve the source"
+    );
+    halt(actor.stop, actor.task).await;
+}

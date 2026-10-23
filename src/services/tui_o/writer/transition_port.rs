@@ -11,7 +11,7 @@ use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
-pub(crate) use super::transition_cleanup::{Request, Termination};
+pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
 use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;

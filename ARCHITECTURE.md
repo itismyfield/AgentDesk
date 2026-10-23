@@ -1109,6 +1109,8 @@ src/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── o_transition/
+│   │   │   │   ├── automatic/
+│   │   │   │   │   └── termination.rs
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_idle.rs
 │   │   │   │   └── automatic_idle_tests.rs

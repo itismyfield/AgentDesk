@@ -13988,6 +13988,7 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_keeps_unknown_dialogue_age
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_retires_every_source_from_two_historical_panes
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_retires_old_noncurrent_source
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_uses_the_superseded_nonce_of_a_live_herdr_logical_key
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
