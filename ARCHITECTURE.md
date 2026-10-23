@@ -761,8 +761,6 @@ src/
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
-│   │   ├── channel_home/
-│   │   ├── channel_ingress/
 │   │   ├── execution_capacity/
 │   │   │   ├── store.rs
 │   │   │   └── tests.rs
