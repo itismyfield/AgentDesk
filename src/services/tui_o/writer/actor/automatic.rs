@@ -8,9 +8,21 @@ pub(super) async fn ready(job: &mut Job, key: &str) -> bool {
     };
     let last = job.probes.get(key).and_then(|probe| probe.last_dialogue);
     let old = super::automatic_age::old_enough(last, (job.wall)());
-    // A missing automatic path retains every source until the policy is implemented.
-    let _ = (idle, old);
-    false
+    #[cfg(test)]
+    if super::transition::test_hooks::retention_mutant("old") {
+        return false;
+    }
+    #[cfg(test)]
+    let old = old
+        || (last.is_some() && super::transition::test_hooks::retention_mutant("recent"))
+        || (last.is_none() && super::transition::test_hooks::retention_mutant("unknown"));
+    if !old {
+        return false;
+    }
+    let idle = (idle.0)().await;
+    #[cfg(test)]
+    let idle = idle || super::transition::test_hooks::retention_mutant("active");
+    idle
 }
 
 /// Completion is recorded by the actor even when the sweep stopped waiting for its reply.

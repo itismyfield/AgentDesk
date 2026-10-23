@@ -40,7 +40,7 @@ pub(super) struct Transitions {
     job: Option<Job>,
     /// The actor's stop, read again just before each retirement write.
     stop: watch::Receiver<bool>,
-    /// Which receipt takes the candidate kept for one, in turns across this run's jobs.
+    /// Rotates automatic candidates and the reserved receipt across this run's jobs.
     turn: usize,
 }
 
@@ -288,6 +288,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         let (mut unprobed, mut receipts): (Vec<&Judged>, Vec<&Judged>) =
             first.iter().filter(unprobed).partition(pending);
+        let rotate = automatic.is_some() && unprobed.len() > CANDIDATES;
+        #[cfg(test)]
+        let rotate = rotate && !test_hooks::retention_mutant("budget");
+        if rotate {
+            let offset = self.transitions.turn % unprobed.len();
+            unprobed.rotate_left(offset);
+            self.transitions.turn = self.transitions.turn.wrapping_add(CANDIDATES);
+        }
         if unprobed.len() >= CANDIDATES && !receipts.is_empty() {
             let turn = self.transitions.turn % receipts.len();
             self.transitions.turn = self.transitions.turn.wrapping_add(1);
@@ -611,6 +619,10 @@ pub(crate) mod test_hooks {
         static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
         static AT_RETIRE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static SKEW: Cell<(Option<Duration>, Duration)> = const { Cell::new((None, Duration::ZERO)) };
+    }
+
+    pub(crate) fn retention_mutant(tag: &str) -> bool {
+        std::env::var("AGENTDESK_OTRANSITION_MUTANT").is_ok_and(|value| value == tag)
     }
 
     pub(super) fn receiving() {

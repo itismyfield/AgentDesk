@@ -109,3 +109,41 @@ async fn automatic_retention_retires_old_noncurrent_source() {
     );
     halt(actor.stop, actor.task).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn automatic_retention_eventually_retires_old_sources_past_unknown_budget() {
+    let chain = chain_named(66, true, |n| {
+        (format!("h{n}"), row(&format!("n{n}"), "unknown age"))
+    });
+    let target = (1..66).max_by_key(|n| chain.key(*n)).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&row(&format!("n{target}"), "old dialogue")).unwrap();
+    value["timestamp"] = serde_json::json!((Utc::now() - TimeDelta::days(8)).to_rfc3339());
+    let mut bytes = serde_json::to_vec(&value).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&chain.paths[target], bytes).unwrap();
+    let _current = chain.current();
+    let actor = run(&chain);
+    for _ in 0..200 {
+        polls(1).await;
+        if chain.harness.port.posts().len() as u64 >= chain.hops() {
+            break;
+        }
+    }
+    assert_eq!(
+        chain.harness.port.posts().len() as u64,
+        chain.hops(),
+        "fixture must finish its output"
+    );
+    for _ in 0..3 {
+        automatic(&chain, &actor, idle(true)).await;
+        if chain.cursor(target).retired {
+            break;
+        }
+    }
+    assert!(
+        chain.cursor(target).retired,
+        "[auto:budget] unknown ages must not starve an eligible source"
+    );
+    halt(actor.stop, actor.task).await;
+}
