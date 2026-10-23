@@ -21,8 +21,16 @@ async fn inject(shared: &Arc<SharedData>, channel: u64, message: u64) {
 
 async fn settled(shared: &SharedData, message: u64) {
     for (emoji, add, assertion) in [
-        ('⏳', false, "idle must remove each immediate injection hourglass"),
-        ('✅', true, "idle must add a completion checkmark to each immediate injection"),
+        (
+            '⏳',
+            false,
+            "idle must remove each immediate injection hourglass",
+        ),
+        (
+            '✅',
+            true,
+            "idle must add a completion checkmark to each immediate injection",
+        ),
     ] {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -67,8 +75,8 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
         MessageId::new(1514500851761287324),
     );
     let reconciler = &shared.turn_view_reconciler;
-    let owner = TurnViewOwner::new(1, "ordinary-turn".into());
-    for item in [anchor, queued_running, synthetic] {
+    let owner = TurnViewOwner::new(1, "ordinary-turn");
+    for item in [anchor, synthetic] {
         assert!(
             reconciler
                 .note_turn_started(
@@ -81,15 +89,28 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
                 .await
         );
     }
+    for item in [queued, queued_running] {
+        assert!(
+            reconciler
+                .note_queue_marker_added(
+                    &shared,
+                    item,
+                    owner.clone(),
+                    TurnViewIdentity::Test("ordinary"),
+                    '📬',
+                    "fixture",
+                )
+                .await
+        );
+    }
     assert!(
         reconciler
-            .note_queue_marker_added(
+            .note_turn_started(
                 &shared,
-                queued,
+                queued_running,
                 owner.clone(),
                 TurnViewIdentity::Test("ordinary"),
-                '📬',
-                "fixture",
+                "fixture_dispatch",
             )
             .await
     );
@@ -182,7 +203,7 @@ async fn idle_retries_each_failed_reaction_once_then_discards_the_list() {
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     Arc::get_mut(&mut shared).unwrap().turn_view_reconciler =
         TurnViewReconciler::with_test_deliveries(vec![
-            TurnViewDelivery::Delivered,
+            TurnViewDelivery::Failed,
             TurnViewDelivery::Failed,
             TurnViewDelivery::Delivered,
             TurnViewDelivery::Failed,

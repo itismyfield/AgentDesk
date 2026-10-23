@@ -6,7 +6,7 @@ pub(super) struct Pending {
 }
 
 impl TurnViewReconciler {
-    /// Keeps only successful immediate-injection marks, with the identity that added them.
+    /// Remembers immediate-injection messages separately from turn and queue markers.
     pub(in crate::services::discord) async fn note_busy_injected(
         &self,
         shared: &SharedData,
@@ -16,24 +16,21 @@ impl TurnViewReconciler {
         if !reaction_lifecycle::is_real_discord_message_id(target.message_id) {
             return;
         }
-        if self
-            .note_untracked_reaction_added(
-                shared,
-                target,
-                identity.clone(),
-                '⏳',
-                "busy_inject_reaction",
-            )
-            .await
-        {
-            self.injected
-                .channels
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .entry(target.channel_id)
-                .or_default()
-                .insert(target.message_id, identity);
-        }
+        self.note_untracked_reaction_added(
+            shared,
+            target,
+            identity.clone(),
+            '⏳',
+            "busy_inject_reaction",
+        )
+        .await;
+        self.injected
+            .channels
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(target.channel_id)
+            .or_default()
+            .insert(target.message_id, identity);
     }
 
     /// Takes the list synchronously at the idle observation; later arrivals keep their own list.

@@ -84,6 +84,24 @@ impl Drop for LiveSupervisor {
     }
 }
 
+pub(in crate::services::discord) async fn injected_idle_tick(
+    shared: Arc<SharedData>,
+    channel: u64,
+) {
+    let fake = Fake::new(&[channel], IDLE);
+    *lock(&fake.live_mailbox) = Some(shared);
+    let mut supervisor = Supervisor::new(fake);
+    let presence = supervisor.presence(channel);
+    supervisor.tick(Instant::now()).await;
+    let mut published = lock(&PRESENCE);
+    if published
+        .get(&channel)
+        .is_some_and(|current| Arc::ptr_eq(current, &presence))
+    {
+        published.remove(&channel);
+    }
+}
+
 /// Scripted reads and recorded sends, timed from the test's start on tokio's paused clock.
 type Reader = Arc<dyn Fn(u64) -> Reading + Send + Sync>;
 

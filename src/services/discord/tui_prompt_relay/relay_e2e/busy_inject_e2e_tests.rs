@@ -211,6 +211,23 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     let taken = (keys, vec!["⏳".to_string()], Some(message), vec![], 0, disk);
     rt.finish().await;
     assert_eq!(observed, taken);
+    let before_idle = rt.h.shared.turn_view_reconciler.ops().len();
+    crate::services::discord::turn_presence::supervisor::tests::injected_idle_tick(
+        rt.h.shared.clone(),
+        CHANNEL_ID,
+    )
+    .await;
+    wait_until(WAIT, || rt.marks(message).contains(&"✅".to_string())).await;
+    let changes: Vec<_> =
+        rt.h.shared
+            .turn_view_reconciler
+            .ops()
+            .into_iter()
+            .skip(before_idle)
+            .filter(|op| op.target.message_id.get() == message)
+            .map(|op| (op.emoji, op.add))
+            .collect();
+    assert_eq!(changes, [('⏳', false), ('✅', true)]);
 }
 
 /// A message an injection already took ends at the lookup however the channel stands: held
