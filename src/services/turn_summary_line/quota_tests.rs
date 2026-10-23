@@ -54,6 +54,24 @@ fn active_claude_quota_renders_one_line_in_order_with_kst_resets() {
     );
     assert!(!line.chars().any(char::is_control));
     assert_eq!(line.lines().count(), 1);
+    let mut rollover = accounts();
+    rollover.accounts[1]
+        .usage
+        .as_mut()
+        .unwrap()
+        .seven_day
+        .as_mut()
+        .unwrap()
+        .resets_at = Some("2026-10-26T23:45:00Z".into());
+    assert_eq!(
+        render(
+            Outcome::Completed,
+            Some(150_000),
+            Some(45),
+            claude(&rollover, now())
+        ),
+        "-# ⏱️ 2분 30초 · 📦 45% · 5h 15% (11:30) · 7d 38% (10/27 08:45)"
+    );
 }
 
 #[test]
