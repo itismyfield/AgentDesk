@@ -1663,7 +1663,10 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
     registry
         .set_utility_bot_http_for_tests(
             crate::services::discord::bot_role::UtilityBotRole::Notify,
-            fixture.shared.serenity_http_or_token_fallback(),
+            fixture
+                .shared
+                .serenity_http_or_token_fallback()
+                .expect("fixture REST mock installed"),
         )
         .await;
     let observed = ObservedTuiPrompt {
