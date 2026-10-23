@@ -101,6 +101,7 @@ assert context.is_relative_to(ROOT), "T14 context must be in the owned scratch"
 herdr_all_env = {k: v for k, v in os.environ.items() if k.startswith("HERDR_")}
 herdr_env = {k: os.environ[k] for k in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_BIN_PATH", "HERDR_SOCKET_PATH", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_CONFIG_PATH") if k in os.environ}
 assert not herdr_env, "T14 ADK provider must have Herdr injection variables removed"
+assert not herdr_all_env, "T14 provider must not inherit server-only diagnostics"
 seen = {"pid": os.getpid(), "pgid": os.getpgrp(), "ppid": os.getppid(),
         "provider": PROVIDER, "script": str(pathlib.Path(sys.argv[0]).resolve()),
         "argv": sys.argv, "context": str(context), "context_sha256": hashlib.sha256(context.read_bytes()).hexdigest(),
@@ -527,7 +528,7 @@ impl RealServer {
         let home = dir.join("home");
         let sealed = format!("{}:/usr/bin:/bin", root.join("bin").display());
         let rc = format!(
-            "export PATH='{sealed}'\nexport CODEX_HOME='{}'\nexport CLAUDE_CONFIG_DIR='{}'\n",
+            "export PATH='{sealed}'\nexport CODEX_HOME='{}'\nexport CLAUDE_CONFIG_DIR='{}'\nunset HERDR_LOG\n",
             dir.join("codex-home").display(),
             dir.join("claude-config").display()
         );
