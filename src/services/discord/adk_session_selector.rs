@@ -18,35 +18,6 @@ pub(in crate::services::discord) async fn clear_provider_session_id(
     }
 }
 
-/// Requires the existing durable clear route's acknowledgement, including legacy aliases.
-pub(in crate::services::discord) async fn clear_provider_session_id_checked(
-    session_key: &str,
-) -> Result<(), String> {
-    let response = super::super::internal_api::clear_session_id(session_key).await?;
-    if response
-        .get("cleared")
-        .and_then(serde_json::Value::as_u64)
-        .is_none()
-    {
-        return Err(format!(
-            "invalid selector clear acknowledgement: {response}"
-        ));
-    }
-    if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
-        let response = super::super::internal_api::clear_session_id(&legacy_key).await?;
-        if response
-            .get("cleared")
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
-        {
-            return Err(format!(
-                "invalid legacy selector clear acknowledgement: {response}"
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// The same selector clear written straight to PostgreSQL, the store the route itself writes, so
 /// a clear learns whether it landed without a running API.
 pub(in crate::services::discord) async fn clear_provider_session_id_pg(
@@ -85,27 +56,6 @@ pub(in crate::services::discord) async fn save_provider_session_id(
     }
 }
 
-pub(in crate::services::discord) async fn save_provider_session_id_checked(
-    session_key: &str,
-    session_id: &str,
-    raw_provider_session_id: Option<&str>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-) -> Result<(), String> {
-    let body = provider_session_body(
-        session_key,
-        session_id,
-        raw_provider_session_id,
-        provider,
-        channel_id,
-    );
-    let response = super::super::internal_api::hook_session(body).await?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(format!("invalid selector save acknowledgement: {response}"));
-    }
-    Ok(())
-}
-
 fn provider_session_body(
     session_key: &str,
     session_id: &str,
@@ -135,7 +85,3 @@ fn provider_session_body(
         dispatched_origin: None,
     }
 }
-
-#[cfg(test)]
-#[path = "adk_session_selector_checked_tests.rs"]
-mod selector_checked_tests;

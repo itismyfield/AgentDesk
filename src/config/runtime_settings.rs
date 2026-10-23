@@ -92,14 +92,6 @@ pub struct RuntimeSettingsConfig {
     /// Independent of rate_limit_danger_pct used by dashboard coloring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_rate_limit_gate_danger_pct: Option<u8>,
-    /// Live switch for Claude native `/clear` on O-owned tmux channels; unset or false keeps
-    /// the managed process reset and skips the native recovery check at admission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_clear_enabled: Option<bool>,
-    /// Live native-clear channel allowlist; unset keeps all O-owned channels eligible.
-    /// An empty list selects no channels; the enabled switch still gates every channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_clear_channels: Option<Vec<u64>>,
     /// Live switch for Claude turns on a Herdr-configured channel; unset or false keeps refusing
     /// them before any pane I/O.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,14 +122,6 @@ pub struct RuntimeSettingsConfig {
 }
 
 impl RuntimeSettingsConfig {
-    pub(crate) fn native_clear_enabled_for_channel(&self, channel_id: u64) -> bool {
-        self.native_clear_enabled == Some(true)
-            && self
-                .native_clear_channels
-                .as_ref()
-                .is_none_or(|channels| channels.contains(&channel_id))
-    }
-
     pub fn is_empty(&self) -> bool {
         self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.publication_permit_mode == PublicationPermitMode::Legacy
@@ -170,8 +154,6 @@ impl RuntimeSettingsConfig {
             && self.codex_rollout_index_cache_enabled.is_none()
             && self.dispatch_rate_limit_gate_enabled.is_none()
             && self.dispatch_rate_limit_gate_danger_pct.is_none()
-            && self.native_clear_enabled.is_none()
-            && self.native_clear_channels.is_none()
             && self.herdr_turn_enabled.is_none()
             && self.herdr_codex_turn_enabled.is_none()
             && self.herdr_cancel_enabled.is_none()
@@ -199,56 +181,35 @@ impl RuntimeSettingsConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
-    fn native_clear_channel_policy_requires_enabled_and_matches_optional_allowlist() {
-        for (enabled, channels, member, outsider) in [
-            (None, None, false, false),
-            (None, Some(vec![]), false, false),
-            (None, Some(vec![42]), false, false),
-            (Some(false), None, false, false),
-            (Some(false), Some(vec![]), false, false),
-            (Some(false), Some(vec![42]), false, false),
-            (Some(true), None, true, true),
-            (Some(true), Some(vec![]), false, false),
-            (Some(true), Some(vec![42]), true, false),
+    fn retired_native_clear_keys_are_ignored_by_config_loading() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidate.yaml");
+        std::fs::write(&path, "server: {}\n").unwrap();
+        let baseline = crate::config::load_from_path(&path).unwrap();
+        for runtime in [
+            "native_clear_enabled: true\n  native_clear_channels: [42]",
+            "native_clear_enabled: false\n  native_clear_channels: []",
         ] {
-            let runtime = RuntimeSettingsConfig {
-                native_clear_enabled: enabled,
-                native_clear_channels: channels,
-                ..RuntimeSettingsConfig::default()
-            };
-            assert_eq!(runtime.native_clear_enabled_for_channel(42), member);
-            assert_eq!(runtime.native_clear_enabled_for_channel(43), outsider);
-        }
-    }
-
-    #[test]
-    fn native_clear_channel_allowlist_preserves_absent_empty_and_selected_values() {
-        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(absent.native_clear_enabled, None);
-        assert_eq!(absent.native_clear_channels, None);
-        assert!(absent.is_empty());
-
-        for (yaml, expected) in [
-            ("native_clear_channels: []", vec![]),
-            (
-                "native_clear_channels: [1509350490461180105, 42]",
-                vec![1509350490461180105, 42],
-            ),
-        ] {
-            let runtime: RuntimeSettingsConfig = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(runtime.native_clear_channels, Some(expected));
-            assert!(!runtime.is_empty());
-            let config = Config {
-                runtime,
-                ..Config::default()
-            };
-            let serialized = serde_yaml::to_string(&config).unwrap();
-            assert!(serialized.contains("native_clear_channels:"));
-            let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
-            assert_eq!(reparsed.runtime, config.runtime);
+            let yaml = format!("server: {{}}\nruntime:\n  {runtime}\n");
+            std::fs::write(&path, &yaml).unwrap();
+            let loaded = crate::config::load_from_path(&path).unwrap();
+            assert_eq!(
+                loaded.runtime, baseline.runtime,
+                "retired keys changed runtime settings"
+            );
+            assert!(loaded.runtime.is_empty());
+            let yaml = format!("{yaml}  max_retries: 4\n");
+            std::fs::write(&path, yaml).unwrap();
+            assert_eq!(
+                crate::config::load_from_path(&path)
+                    .unwrap()
+                    .runtime
+                    .max_retries,
+                Some(4)
+            );
         }
     }
 }

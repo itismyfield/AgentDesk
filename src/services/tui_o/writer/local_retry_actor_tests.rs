@@ -24,9 +24,18 @@ async fn local_retry_rejected_child_cannot_be_resumed_into_a_third_post() {
         Some(PieceOutcome::Rejected(403))
     );
     drop(writer);
-    let approval = harness
-        .store
-        .record_operator_resume(CHANNEL, 1, "operator", "restored");
+    // Replayed approvals still pass through the retained reader after the operator CLI is retired.
+    let at = Utc::now();
+    let entry = LedgerEntry::OperatorResume {
+        rejected_serial: 1,
+        approval_id: uuid::Uuid::new_v4(),
+        operator: "operator".into(),
+        reason: "restored".into(),
+        at,
+    };
+    let mut line = serde_json::to_vec(&serde_json::json!({"at": at, "entry": entry})).unwrap();
+    line.push(b'\n');
+    append(&ledger_path(&harness), &line);
     for _ in 0..3 {
         let mut writer = harness.writer();
         writer.deliver(&item).await;
@@ -41,10 +50,6 @@ async fn local_retry_rejected_child_cannot_be_resumed_into_a_third_post() {
         ["twice only", "twice only"],
         "Attempt approval must not produce POST 3"
     );
-    assert!(matches!(
-        approval,
-        Err(crate::services::tui_o::store::StoreError::Rejected(_))
-    ));
     assert!(harness.channel().ledger().approval(1).is_none());
     assert_eq!(harness.channel().ledger().next_serial(), 2);
 }

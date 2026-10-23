@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 57
-- Commands including nested subcommands: 110
+- Top-level commands: 56
+- Commands including nested subcommands: 106
 
 ## Global options
 
@@ -122,10 +122,6 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk health`](#agentdesk-health) | Show consolidated health snapshot of the current node (server status, dcserver pid, last deploy time, queue lag, Discord/disk/outbox). |  |
 | [`agentdesk machine-compare`](#agentdesk-machine-compare) | Compare release/main/dev state across every registered worker node (`mac-mini`, `mac-book`, …). Renders a side-by-side table with dcserver pid, last deploy, queue lag, and a `diff` column. |  |
 | [`agentdesk activity`](#agentdesk-activity) | Time-windowed activity report: commits / closed issues / merged PRs / deploys / incidents in a single table. Uses gh + git + AgentDesk API. |  |
-| [`agentdesk o`](#agentdesk-o) |  |  |
-| [`agentdesk o boundary`](#agentdesk-o-boundary) | Source boundaries the writer could not decide |  |
-| [`agentdesk o status`](#agentdesk-o-status) | Rejected pieces of a channel and their operator approvals; writes nothing |  |
-| [`agentdesk o resume`](#agentdesk-o-resume) | Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start |  |
 | [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
@@ -1251,47 +1247,6 @@ Usage: `agentdesk activity [OPTIONS]`
 | `--until <UNTIL>` | `String` |  | Optional window end (RFC3339). Defaults to `now` when omitted. |
 | `--repo <REPO>` | `String` |  | Repository in owner/repo form. Defaults to the current repo's `origin` remote when omitted. |
 | `--no-agentdesk` | flag |  | Skip the AgentDesk-side deploy / incident lookup (useful when the local API is offline). Pure git + gh report. |
-
-## `agentdesk o`
-
-Usage: `agentdesk o <COMMAND>`
-
-Subcommands:
-
-- `boundary` — Source boundaries the writer could not decide
-- `status` — Rejected pieces of a channel and their operator approvals; writes nothing
-- `resume` — Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start
-
-### `agentdesk o boundary`
-
-Source boundaries the writer could not decide
-
-Usage: `agentdesk o boundary`
-
-### `agentdesk o status`
-
-Rejected pieces of a channel and their operator approvals; writes nothing
-
-Usage: `agentdesk o status [OPTIONS]`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `--channel <CHANNEL>` (required) | `u64` |  |  |
-
-### `agentdesk o resume`
-
-Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start
-
-Usage: `agentdesk o resume [OPTIONS]`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `--channel <CHANNEL>` (required) | `u64` |  |  |
-| `--rejected-serial <REJECTED_SERIAL>` (required) | `u64` |  |  |
-| `--reason <REASON>` (required) | `String` |  |  |
-| `--operator <OPERATOR>` | `String` | `operator` |  |
-
-> Exit: 0 recorded, 1 no store, 3 already recorded, 4 refused, 5 busy, 6 not written, 7 unknown
 
 ## `agentdesk herdr`
 

@@ -106,7 +106,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
   --skip services::discord::commands::control::home_fence::tests
-  --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
@@ -160,9 +159,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::codex_resume_companion_queue_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
-  --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
   --skip services::discord::router::message_handler::intake_turn::replay_start_tests
-  --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -246,7 +243,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::routines::session_control::tests
   --skip services::session_forwarding::home_stop::tests
   --skip services::session_forwarding::tests
-  --skip services::session_host::herdr_clear_adapter::tests
   --skip services::session_host::herdr_gate::tests
   --skip services::session_host::herdr_terminate_real_tests
   --skip services::session_host::session_record::tests
@@ -354,7 +350,6 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
   db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
   db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
-  db::session_transcripts::native_clear_pg_tests::record_and_classification_agree_on_every_row_shape
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
   engine::ops::config_ops::tests::config_get_raw_preserves_runtime_blob_json_types

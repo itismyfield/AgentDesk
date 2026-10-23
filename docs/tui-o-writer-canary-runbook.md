@@ -248,42 +248,14 @@ verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 
 ## 7. Recover a piece Discord refused
 
-A POST refused with 400, 403 or 404 blocks the channel's O output with a `Blocked` alarm. A restart
-alone keeps it blocked. After the cause is fixed, one explicit approval lets the next writer send
-the original piece once, then the output that followed. Run these on the O home, in order:
+A POST refused with 400, 403 or 404 blocks the channel's O output with a `Blocked` alarm.
+The operator status and approval CLI was retired (#7266). Fix the refusal's cause and use
+ordinary `/clear` to start a fresh session. The blocked piece stays in the retained ledger;
+`/clear` does not approve or retry that piece. Existing durable approvals remain readable.
+Do not edit the ledger to bypass a hold.
 
-1. Note the channel and serial from the `Blocked` log.
-2. `agentdesk o status --channel <CHANNEL_ID>` lists every refused piece with its latest attempt
-   and approval (`absent`, `unconsumed` or `consumed by serial <n> <outcome>`). It writes nothing,
-   but it holds the ledger lock while it reads, so do not run it during a restart.
-3. Fix the cause of the refusal, for example the channel permission. Do not send a test POST.
-4. `agentdesk o resume --channel <CHANNEL_ID> --rejected-serial <SERIAL> --reason "<what was
-   fixed>"`. `--operator` defaults to `operator`. Only the latest refused attempt of a piece, with
-   no POST in flight, can be approved. The approval sends nothing and does not check the cause.
-5. Wait for the command to exit, then run the managed restart. The new writer sends the original
-   piece, which gets a new serial, and continues with later output. Check the new serial's result.
-
-`o resume` exits with:
-
-| Exit | Meaning | Next step |
-|---|---|---|
-| 0 | This command wrote the approval and it is durable | Managed restart |
-| 1 | No runtime root, or no `o_store` under it; nothing was written | Run it on the O home |
-| 3 | The serial already had an approval, possibly from a command that ran at the same time; the first one stands, with its state | Nothing more to record |
-| 4 | The store refused the request or the ledger check: not the latest 400/403/404 attempt, a POST in flight, blank input, a ledger violation or an unfinished tail; nothing was written | Run `o status`; an unfinished ledger tail is recovered by the next writer start |
-| 5 | The ledger is locked by a writer or another operator; nothing was written | Retry once the other command or the restart is done |
-| 6 | Any other error, such as store damage, a missing channel ledger or an I/O error, with the rollback floor confirmed absent, so this command appended no approval | Fix the cause the message names and retry |
-| 7 | Any other error while the floor exists or cannot be checked, so the command cannot tell whether an approval is durable. It does not mean the append was reached | Run `o status`, then the same command again |
-
-- A writer that starts while the ledger is locked holds the channel; the next managed restart
-  recovers it.
-- If the retry is refused again, its new serial needs a new approval. A retry whose result is
-  uncertain is recorded and alarmed as any other POST, and the output continues.
-- A piece Discord refuses with 400 again has no exit in this build: its payload cannot be changed
-  or discarded. Escalate it as a separate fix.
-- The first approval creates `<runtime_root>/o_store/operator_resume.floor`. From then on the deploy
-  script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
-  `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
+If `o_store/operator_resume.floor` exists, deployment rejects source or rollback targets
+without `OPERATOR_RESUME_SUPPORTED = true`; the retained approval reader still requires it.
 
 Re-post runs automatically for eligible gateway writer channels; it has no configuration switch or
 separate channel allowlist. Old `tui_o.repost` settings are ignored. An uncertain original is only
@@ -355,34 +327,9 @@ untrimmed text hash. The extractor only selects real input. Incomplete native ev
 registration to a later tick. See the [fresh conditions](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary).
 This does not automatically resolve old Pending links, including the investigated sequence 122.
 
-Run the following procedure on the O home:
-
-1. Identify the channel and resumed source from the `BoundaryPending` alarm. Inspect the transcript
-   and establish the first record that should be delivered after resume. Keep its exact byte start
-   or unique record UUID, excluding the historical prefix while retaining all new owed output.
-2. Record that start using the source's spool key or transcript path:
-
-   ```sh
-   agentdesk o boundary resolve --channel <CHANNEL_ID> --source '<KEY_OR_PATH>' --from '<BYTE_OFFSET_OR_UUID>' --operator '<NAME>'
-   ```
-
-   `--operator` defaults to `operator`. A `--from` that parses as an unsigned integer is a byte
-   offset; otherwise it is a UUID. The source selector must match exactly one stored source,
-   whose boundary must be Pending and whose file identity must still match. A numeric `--from`
-   validates a line-start byte offset, not the existence of a complete record: newline-aligned
-   EOF, offset 0 in an empty file, and the start of an incomplete trailing line can pass. UUID
-   lookup requires exactly one matching complete JSON line. An already recorded resolution is
-   refused with an instruction to restart the writer (`src/cli/o.rs:48–83`,
-   `src/services/tui_o/store/rotation.rs:220–285`).
-   Neither check proves the resume boundary; leave the source Pending unless the first owed
-   position can be established.
-3. Wait for the command to succeed, then use the managed restart path. The command only appends
-   and fsyncs `BoundaryResolved`; it sends no output and applies at the next writer start. That
-   start changes Pending to `Owed { from }` and replays the retained spool. Confirm that the
-   writer actually reopened, the historical range `[0, from)` is not posted and the owed output
-   at or after `from` is delivered. Check `/api/health` after the successful resume/capture:
-   `tui_o:boundary_pending:<channel>` clears only when no selected Pending link remains.
-   Suspended sources are excluded from that count; retired selected sources still count.
+The operator boundary-resolution CLI was retired (#7266). Use ordinary `/clear` for a fresh
+session; keep the old unresolved source Pending;
+this build provides no command to choose its delivery start. Do not edit its ledger or cursor.
 
 Automatic resume byte boundaries and automatic re-evaluation of existing resume Pending states
 are not provided. Hook publication time, elapsed time and current EOF do not prove the resume
