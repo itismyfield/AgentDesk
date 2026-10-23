@@ -1958,6 +1958,11 @@ services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_ch
 services::discord::health::turn_deliver::inject_codex_tests::claude_injection_keeps_reading_a_separate_relay_pg
 services::discord::health::turn_deliver::inject_codex_tests::codex_injection_reads_native_with_a_separate_relay_pg
 services::discord::health::turn_deliver::inject_codex_tests::codex_listed_channel_uses_production_enablement_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_preserves_each_gate_and_live_discord_catchup_scope_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_real_entry_settles_native_receipt_once_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_receipt_rejects_session_file_and_legacy_attempt_mismatch_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_same_owner_serializes_two_inputs_across_effect_pg
+services::discord::health::turn_deliver::inject_codex_tests::queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg

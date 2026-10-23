@@ -11,7 +11,9 @@ pub(super) async fn own_queued_head(
     let Origin::Discord { message, .. } = &origin else {
         return Err(origin);
     };
-    if !Origin::queued_head_ready(&request.provider, request.channel_id) {
+    if request.provider != ProviderKind::Claude
+        || !Origin::queued_head_ready(&request.provider, request.channel_id)
+    {
         return Err(origin);
     }
     let snapshot = crate::services::discord::mailbox_snapshot(shared, request.channel_id).await;

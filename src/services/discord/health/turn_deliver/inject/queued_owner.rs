@@ -1,6 +1,6 @@
 //! The queued-head owner: a head already proven taken is consumed first, otherwise the first ready
 //! input is reserved, its paste recorded before it can start, typed once and settled by the actor.
-use super::queued_reconcile::transcript_session;
+use super::queued_provider::QueuedProvider;
 use super::queued_support::ATTEMPT_UNNAMED;
 use super::*;
 
@@ -16,6 +16,9 @@ pub(super) async fn queued_attempt(
     if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
         return mended;
     }
+    let Some(provider) = QueuedProvider::select(&request.provider, request.channel_id.get()) else {
+        return InjectAttempt::NotSent("provider_unsupported");
+    };
     // Named before the session transition is held, which nothing then waits on.
     let primary = expected.primary;
     let named = match source.as_ref() {
@@ -98,7 +101,7 @@ pub(super) async fn queued_attempt(
             test_hook::before_queued(input.channel, "name_paste").await;
             // The paste is named before it can start, so a later Unknown can still be proven.
             let bound = target.binding.as_ref().map(|binding| binding.4.as_deref());
-            let session = bound.and_then(|bound| transcript_session(&target.transcript, bound));
+            let session = bound.and_then(|bound| provider.session(&target.transcript, bound));
             let held = ticket.as_mut().unwrap();
             if let Err(error) = held.name_paste(&input.nonce, &target.transcript, session) {
                 let channel_id = input.channel;
@@ -139,12 +142,13 @@ pub(super) async fn queued_attempt(
                     turn_id.clone(),
                 );
                 let herdr = target.herdr.clone();
+                let native_turn = target.native_turn.clone();
                 move || {
-                    run(
+                    provider.run(
                         (&pane(input.channel, &session), herdr.as_ref()),
-                        &session,
-                        &transcript,
+                        (&session, &transcript, native_turn.as_deref()),
                         turn_id,
+                        MessageId::new(primary),
                         &input,
                     )
                 }

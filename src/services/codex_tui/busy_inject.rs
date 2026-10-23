@@ -14,7 +14,7 @@ pub(crate) use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{
     Generation, Guard, MAX_INPUT_BYTES, at_offsets, frame, unix_seconds,
 };
-pub(crate) use rollout::{TurnVerdict, read_turn};
+pub(crate) use rollout::{TurnVerdict, read_turn, submitted};
 
 /// Codex folds a paste longer than this many characters into a `[Pasted Content N chars]` row.
 const MAX_UNFOLDED_CHARS: usize = 1000;
