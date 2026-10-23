@@ -223,7 +223,10 @@ fn late_claude_source_posts_with_body_disabled_while_legacy_still_relays() {
                 .await;
             assert!(f.pane.shared.http.cached_serenity_ctx.set(ctx).is_ok());
             registry
-                .register(ProviderKind::Claude.as_str().to_string(), f.pane.shared.clone())
+                .register(
+                    ProviderKind::Claude.as_str().to_string(),
+                    f.pane.shared.clone(),
+                )
                 .await;
             let owner_http = crate::services::discord::session_notice::provider_http(
                 registry.as_ref(),
