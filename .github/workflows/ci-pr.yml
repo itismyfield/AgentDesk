@@ -886,6 +886,8 @@ jobs:
               # queue/ and the cancel lookup wire the forced Herdr cancel behind cfg(unix).
               - 'src/services/queue/**'
               - 'src/services/session_forwarding/cancel_lookup.rs'
+              # home_stop_tests opens the trusted target's loopback seam to unix tests only.
+              - 'src/services/session_forwarding/home_stop_tests.rs'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
