@@ -1,6 +1,7 @@
 //! A force-kill whose effects meet a dispatch another writer already finished keeps that terminal
 //! status, retry off or on: no failure is written over it and no retry is made from it.
 
+use super::super::Node;
 use super::*;
 
 /// The rig for test `name` in its own child, on a current-thread runtime so every probe runs.

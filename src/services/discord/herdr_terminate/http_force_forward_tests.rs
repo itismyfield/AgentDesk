@@ -9,6 +9,7 @@ use axum::extract::ConnectInfo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
+use super::super::super::Node;
 use super::*;
 use crate::config::ClusterNodeConfig;
 use crate::services::session_forwarding::home_stop::tests::loopback_seam;

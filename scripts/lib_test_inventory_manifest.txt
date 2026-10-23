@@ -4717,9 +4717,14 @@ services::discord::herdr_terminate::http_force::tests::e08::e08_retry_waits_for_
 services::discord::herdr_terminate::http_force::tests::e08::e08_selection_change_refuses_before_close_pg
 services::discord::herdr_terminate::http_force::tests::e08::identity::e07_initial_execution_identity_is_immutable_pg
 services::discord::herdr_terminate::http_force::tests::e08::identity::e08_initial_execution_identity_is_immutable_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e07_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::forward::e08_non_owner_real_forward_once_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_e08_terminates_pg
+services::discord::herdr_terminate::http_force::tests::e08::identity::writer::force_production_launch_heartbeat_lookup_pg
 services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_records_exact_receipt_pg
 services::discord::herdr_terminate::http_force::tests::e08::purge::e07_snapshot_purge_refuses_late_durable_input_pg
 services::discord::herdr_terminate::http_force::tests::e08::purge::hydrate::e07_force_absorbs_unhydrated_own_queue_pg
+services::discord::herdr_terminate::http_force::tests::e08::terminal::e08_terminal_dispatch_is_preserved_pg
 services::discord::herdr_terminate::http_force::tests::force_duplicate_abort_restart_pg
 services::discord::herdr_terminate::http_force::tests::force_home_permit_survives_http_abort_pg
 services::discord::herdr_terminate::http_force::tests::force_non_target_equivalence_pg
@@ -12588,6 +12593,12 @@ services::session_forwarding::tests::resolve_forward_target_rejects_invalid_owne
 services::session_forwarding::tests::resolve_forward_target_returns_trusted_foreign_owner
 services::session_forwarding::tests::source_guard_tests::trusted_request_guard_rejects_commented_calls_and_counts_coded_bypasses
 services::session_forwarding::tests::stale_capability_and_missing_trust_config_fail_before_forwarding
+services::session_forwarding::trusted_target::loopback_seam_tests::consents_still_apply_to_the_registered_socket
+services::session_forwarding::trusted_target::loopback_seam_tests::dropping_the_guard_restores_the_refusal
+services::session_forwarding::trusted_target::loopback_seam_tests::no_guard_keeps_loopback_refused
+services::session_forwarding::trusted_target::loopback_seam_tests::other_loopbacks_stay_refused
+services::session_forwarding::trusted_target::loopback_seam_tests::registered_with_consent_is_pinned_and_reachable
+services::session_forwarding::trusted_target::loopback_seam_tests::registration_is_confined_to_its_thread
 services::session_forwarding::trusted_target::tests::address_policy_rejects_unsafe_ipv4_ipv6_and_mixed_dns
 services::session_forwarding::trusted_target::tests::canonical_origin_and_endpoint_preserve_authority
 services::session_forwarding::trusted_target::tests::capability_is_validated_before_dns_or_request_construction
