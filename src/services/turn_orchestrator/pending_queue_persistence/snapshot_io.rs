@@ -57,7 +57,7 @@ pub(super) fn save_channel_queue_locked(
             )
         })
         .collect();
-    let json = super::queued_head::snapshot_json(items, meta)
+    let json = super::super::queued_head::snapshot_json(items, meta)
         .map_err(|error| format!("serialize pending queue {}: {error}", path.display()))?;
     let context = runtime_store::AtomicWriteContext::new("discord_pending_queue")
         .provider(provider.as_str())

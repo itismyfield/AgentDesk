@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5845546851b4495980173fa57544d8e1a7a9a8fa",
+  "measured_at_sha": "9a41621334efce703b7474458dc176202aafb71f",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -229,7 +229,8 @@
         "src/services/tui_prompt_dedupe/binding_context.rs": 3,
         "src/services/tui_prompt_dedupe/handoff.rs": 1,
         "src/services/turn_orchestrator/clear_channel.rs": 1,
-        "src/services/turn_orchestrator/pending_queue_persistence.rs": 4,
+        "src/services/turn_orchestrator/pending_queue_persistence.rs": 3,
+        "src/services/turn_orchestrator/pending_queue_persistence/snapshot_io.rs": 1,
         "src/voice/receiver/recording.rs": 1,
         "src/voice/stt.rs": 1,
         "src/voice/tts/edge.rs": 1,
