@@ -61,7 +61,7 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
             "paste-buffer".to_string(),
             "send-keys".to_string(),
         ],
-        vec!["📥".to_string()],
+        vec!["⏳".to_string()],
         Some(second),
         0,
         Some("\"observed\"".to_string()),

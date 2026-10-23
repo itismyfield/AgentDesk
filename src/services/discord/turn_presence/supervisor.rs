@@ -206,6 +206,7 @@ trait Effects: Send + Sync + 'static {
     /// Whether a mailbox token holds the channel, and its oldest waiting input.
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>);
     async fn typing(&self, channel: u64) -> Result<(), String>;
+    fn idle(&self, channel: u64);
     fn kickoff(&self, channel: u64);
     async fn legacy_gate_blocked(&self, channel: u64) -> bool;
     async fn notice(&self, channel: u64, text: String) -> Result<(), String>;
@@ -322,14 +323,18 @@ impl<E: Effects> Supervisor<E> {
             let published = reading
                 .publish_if_current(|| {
                     let mut presence = lock(&presence);
-                    apply(
+                    let actions = apply(
                         &mut presence,
                         channel,
                         now,
                         &reading,
                         (token, head),
                         self.effects.agent_id(channel),
-                    )
+                    );
+                    if reading.observed.activity == Activity::Idle {
+                        self.effects.idle(channel);
+                    }
+                    actions
                 })
                 .await;
             let Some(actions) = published else {
@@ -719,6 +724,12 @@ impl Effects for LiveEffects {
             ChannelId::new(channel),
             "turn_presence_idle",
         );
+    }
+
+    fn idle(&self, channel: u64) {
+        self.shared
+            .turn_view_reconciler
+            .clear_busy_injected(self.shared.clone(), ChannelId::new(channel));
     }
 
     async fn legacy_gate_blocked(&self, channel: u64) -> bool {

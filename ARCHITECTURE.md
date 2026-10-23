@@ -2532,6 +2532,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
+│   │   │   ├── supervisor_injected_tests.rs
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
@@ -2541,6 +2542,7 @@ src/
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
+│   │   │   ├── injected.rs
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── queue_repair.rs
 │   │   │   ├── reaction_set.rs

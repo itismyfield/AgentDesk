@@ -23,7 +23,7 @@ use crate::services::turn_orchestrator::HANDBACK_NOT_WRITTEN;
 #[cfg(not(test))]
 const DISCORD_INJECT_ENV: &str = "ADK_BUSY_INJECT_DISCORD_CHANNELS";
 
-const INJECTED_REACTION: char = '📥';
+const INJECTED_REACTION: char = '⏳';
 const UNCONFIRMED_REACTION: char = '❓';
 const UNCONFIRMED_NOTICE: &str = "❓ 터미널 입력을 확인하지 못했습니다. 중복이면 무시하세요.";
 const QUEUE_UNKNOWN_NOTICE: &str = "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.";
@@ -326,9 +326,15 @@ async fn settle(
     let identity = TurnViewIdentity::IntakeHttp(ctx.http.clone());
     let reconciler = &shared.turn_view_reconciler;
     let source = "busy_inject_reaction";
-    reconciler
-        .note_untracked_reaction_added(shared, target, identity, reaction, source)
-        .await;
+    if reaction == INJECTED_REACTION {
+        reconciler
+            .note_busy_injected(shared, target, identity)
+            .await;
+    } else {
+        reconciler
+            .note_untracked_reaction_added(shared, target, identity, reaction, source)
+            .await;
+    }
     if reaction == UNCONFIRMED_REACTION {
         say(ctx, shared, channel, UNCONFIRMED_NOTICE).await;
     }

@@ -161,7 +161,7 @@ fn in_memory(message: u64) -> Option<InjectionOutcome> {
 }
 
 /// A turn mid-run takes the text under the name Discord shows (nickname, else global name, else
-/// username) and the id: pasted once, marked 📥, nothing queued or started, recorded for a restart.
+/// username) and the id: pasted once, marked ⏳, nothing queued or started, recorded for a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     for (nick, global_name) in [
@@ -208,7 +208,7 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     );
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
-    let taken = (keys, vec!["📥".to_string()], Some(message), vec![], 0, disk);
+    let taken = (keys, vec!["⏳".to_string()], Some(message), vec![], 0, disk);
     rt.finish().await;
     assert_eq!(observed, taken);
 }
@@ -384,7 +384,7 @@ async fn parked_at_capture(busy: &Busy, message: u64) -> tokio::task::JoinHandle
 }
 
 /// A vetoed paste hands the message back ahead of input queued meanwhile, also past a failed
-/// first write: marked queued, never 📥, the checkpoint past it as a queue commit moves it.
+/// first write: marked queued, never ⏳, the checkpoint past it as a queue commit moves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vetoed_paste_hands_the_message_back_ahead_of_input_sent_meanwhile_pg() {
     let busy = busy().await;
@@ -746,7 +746,7 @@ async fn deliver_from_announce(rt: &Runtime, message: u64, text: &str) {
     rt.h.spawn_message(arrival).await.unwrap().unwrap();
 }
 
-/// The announce bot's text on a busy pane is pasted once and marked 📥, nothing queued or started.
+/// The announce bot's text on a busy pane is pasted once and marked ⏳, nothing queued or started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let busy = busy_with_announce().await;
@@ -769,7 +769,7 @@ async fn a_busy_pane_takes_the_announce_bot_s_text_pg() {
     let keys = vec!["paste-buffer".to_string(), "send-keys".to_string()];
     let disk = Some("\"observed\"".to_string());
     rt.finish().await;
-    assert_eq!(observed, (keys, vec!["📥".to_string()], vec![], 0, disk));
+    assert_eq!(observed, (keys, vec!["⏳".to_string()], vec![], 0, disk));
 }
 
 /// A vetoed paste queues as intake would have: the bot's entry is a bot's and drops on cancel,

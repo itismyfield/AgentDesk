@@ -233,6 +233,16 @@ impl Effects for Fake {
         lock(&self.kicks).push((channel, self.since()));
     }
 
+    fn idle(&self, channel: u64) {
+        if let Some(shared) = lock(&self.live_mailbox).clone() {
+            LiveEffects {
+                shared,
+                provider: ProviderKind::Claude,
+            }
+            .idle(channel);
+        }
+    }
+
     async fn legacy_gate_blocked(&self, _: u64) -> bool {
         self.gate_blocked.load(Ordering::SeqCst)
     }
@@ -257,6 +267,9 @@ impl Effects for Fake {
 
 #[path = "supervisor_deadline_tests.rs"]
 mod deadline_tests;
+
+#[path = "supervisor_injected_tests.rs"]
+mod injected_tests;
 
 /// Publishes a presence for `channel` as a running supervisor would.
 pub(crate) fn seed_presence_for_tests(channel: u64, busy: bool) {

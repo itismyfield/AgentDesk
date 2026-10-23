@@ -22,6 +22,7 @@ mod orphan_sweep;
 // #4554: mailbox-truth repair is isolated to keep this giant module net-zero.
 mod api;
 mod apply;
+mod injected;
 pub(in crate::services::discord) use api::*;
 mod queue_repair;
 mod reaction_set;
@@ -32,7 +33,7 @@ pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_react
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '➕', '🔄', '⏳', '✅', '⚠', '🛑'];
 const QUEUE_EXIT_FEEDBACK_REACTIONS: [char; 3] = ['🚫', '⌛', '⏏'];
 /// Marks on a message a busy turn's pane took or may have taken; never tracked as turn view state.
-const INJECTION_REACTIONS: [char; 2] = ['📥', '❓'];
+const INJECTION_REACTIONS: [char; 2] = ['⏳', '❓'];
 const PERSISTED_STATE_VERSION: u32 = 1;
 const LEGACY_QUEUED_HOURGLASS_STATE_VERSION: u32 = 2;
 const QUEUED_MARKER_ONLY_STATE_VERSION: u32 = 3;
@@ -347,6 +348,7 @@ struct PersistedTargetState {
 
 #[derive(Default)]
 pub(in crate::services::discord) struct TurnViewReconciler {
+    injected: injected::Pending,
     targets: DashMap<TurnViewTarget, AppliedTarget>,
     target_locks: std::sync::Mutex<HashMap<TurnViewTarget, Arc<tokio::sync::Mutex<()>>>>,
     next_start_attempt: AtomicU64,
