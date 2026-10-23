@@ -1,6 +1,5 @@
-//! `health_amplification_profile`: public and detail health under a fixed open-loop load against
-//! an isolated PostgreSQL, with a 1 s tick probe on the same two-worker server runtime.
-//! It runs only by exact name; the raw samples and the judge's summary go to `ADK_HEALTH_AMP_OUT`.
+//! `health_amplification_profile`: public and detail health under a fixed open-loop load on an
+//! isolated PostgreSQL, with a 1 s tick probe on the two-worker server runtime; exact name only.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
