@@ -291,7 +291,7 @@ pub(super) async fn claim(
         claimed.monitor = Some(Observation { payload, source });
     }
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(CardClaim::Owned(claimed))
+    Ok(CardClaim::Owned(Box::new(claimed)))
 }
 
 pub(super) async fn mark_edited(

@@ -403,6 +403,7 @@ pub(in crate::services::discord) fn response_chunk_nonce_for_generation(
     format!("adktr{}", &digest[..20])
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn claim_task_response_delivery(
     pool: Option<&PgPool>,
@@ -432,6 +433,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn claim_task_response_delivery_with_recovery_key(
     pool: Option<&PgPool>,
@@ -750,7 +752,7 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
                     && intent == EnsureIntent::Observation
                     && claimed.monitor.is_none();
                 let outcome =
-                    deliver_claim(pool, clients, transport, event, intent, claimed, metadata)
+                    deliver_claim(pool, clients, transport, event, intent, *claimed, metadata)
                         .await?;
                 if pending_other_monitor {
                     continue;
@@ -810,7 +812,8 @@ async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
                     "another worker owns the missing-card replacement lease (bot={bot_key})"
                 )));
             }
-            store::MissingCardReplacementClaim::Owned(mut claimed) => {
+            store::MissingCardReplacementClaim::Owned(claimed) => {
+                let mut claimed = *claimed;
                 if event.payload.is_monitor() {
                     claimed.monitor = Some(store::monitor::Observation {
                         payload: event.payload.monitor_fingerprint(),

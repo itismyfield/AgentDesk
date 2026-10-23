@@ -36,12 +36,12 @@ pub(super) fn claim_card_memory(
         last_error: None,
     });
     if row.lease_owner.as_deref() == Some(lease_owner.as_str()) {
-        return Ok(CardClaim::Owned(memory_claim(
+        return Ok(CardClaim::Owned(Box::new(memory_claim(
             scope,
             &lease_owner,
             row,
             ClaimAction::Post,
-        )));
+        ))));
     }
     let lease_active = row
         .lease_expires_at
@@ -110,5 +110,5 @@ pub(super) fn claim_card_memory(
     };
     let mut claimed = memory_claim(scope, &lease_owner, row, action);
     claimed.new_terminal_completion = new_terminal_completion;
-    Ok(CardClaim::Owned(claimed))
+    Ok(CardClaim::Owned(Box::new(claimed)))
 }

@@ -343,7 +343,7 @@ async fn seed_old_card(
         .rows_affected();
         assert_eq!(changed, 1);
     }
-    claim
+    *claim
 }
 
 async fn seed_actual_legacy_render(pool: &PgPool, event: &TaskCardEvent, count: u64) -> String {

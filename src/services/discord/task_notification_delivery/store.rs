@@ -92,7 +92,7 @@ pub(super) struct ClaimedCard {
 #[derive(Clone, Debug)]
 pub(super) enum CardClaim {
     Existing { message_id: u64, bot_key: String },
-    Owned(ClaimedCard),
+    Owned(Box<ClaimedCard>),
     Busy { bot_key: String },
 }
 

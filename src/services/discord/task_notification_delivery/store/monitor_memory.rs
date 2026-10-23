@@ -126,5 +126,5 @@ pub(in crate::services::discord::task_notification_delivery::store) fn claim(
         claimed.monitor = Some(Observation { payload, source });
     }
     claimed.update_count = count;
-    Ok(CardClaim::Owned(claimed))
+    Ok(CardClaim::Owned(Box::new(claimed)))
 }

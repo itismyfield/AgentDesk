@@ -5,7 +5,7 @@ use super::*;
 #[derive(Clone, Debug)]
 pub(in crate::services::discord::task_notification_delivery) enum MissingCardReplacementClaim {
     Existing { message_id: u64, bot_key: String },
-    Owned(ClaimedCard),
+    Owned(Box<ClaimedCard>),
     Busy { bot_key: String },
 }
 
@@ -123,12 +123,9 @@ async fn claim_missing_card_replacement_pg(
         let Some(row) = row else {
             return Ok(MissingCardReplacementClaim::Busy { bot_key });
         };
-        return Ok(MissingCardReplacementClaim::Owned(claimed_from_row(
-            scope,
-            lease_owner,
-            &row,
-            ClaimAction::Post,
-        )?));
+        return Ok(MissingCardReplacementClaim::Owned(Box::new(
+            claimed_from_row(scope, lease_owner, &row, ClaimAction::Post)?,
+        )));
     }
     if state != "card_posted" || lease_active {
         return Ok(MissingCardReplacementClaim::Busy { bot_key });
@@ -189,7 +186,7 @@ async fn claim_missing_card_replacement_pg(
     if claimed.rendered_content.is_empty() {
         claimed.rendered_content = rendered_content;
     }
-    Ok(MissingCardReplacementClaim::Owned(claimed))
+    Ok(MissingCardReplacementClaim::Owned(Box::new(claimed)))
 }
 
 fn claim_missing_card_replacement_memory(
@@ -230,12 +227,12 @@ fn claim_missing_card_replacement_memory(
                 row.bot_key = super::super::provider_bot_key(&scope.provider);
             }
         }
-        return Ok(MissingCardReplacementClaim::Owned(memory_claim(
+        return Ok(MissingCardReplacementClaim::Owned(Box::new(memory_claim(
             scope,
             &lease_owner,
             row,
             ClaimAction::Post,
-        )));
+        ))));
     }
     if row.state != MemoryState::CardPosted || lease_active {
         return Ok(MissingCardReplacementClaim::Busy {
@@ -259,12 +256,12 @@ fn claim_missing_card_replacement_memory(
     row.lease_owner = Some(lease_owner.clone());
     row.lease_expires_at = Some(now + Duration::from_secs(LEASE_SECONDS as u64));
     row.last_error = None;
-    Ok(MissingCardReplacementClaim::Owned(memory_claim(
+    Ok(MissingCardReplacementClaim::Owned(Box::new(memory_claim(
         scope,
         &lease_owner,
         row,
         ClaimAction::Post,
-    )))
+    ))))
 }
 
 fn replacement_content(

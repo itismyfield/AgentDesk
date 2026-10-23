@@ -133,7 +133,7 @@ async fn repin(
     let mut claim = claimed_from_row(&actual_scope, owner, &changed, ClaimAction::Post)?;
     claim.new_terminal_completion = next;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(Some(CardClaim::Owned(claim)))
+    Ok(Some(CardClaim::Owned(Box::new(claim))))
 }
 
 fn repin_memory(event: &TaskCardEvent, bot: &str, content: &str, hash: &str, intent: StoreIntent) {

@@ -84,12 +84,12 @@ pub(super) async fn claim_card_pg(
     .await
     .map_err(|error| format!("insert task card lease: {error}"))?
     {
-        return Ok(CardClaim::Owned(claimed_from_row(
+        return Ok(CardClaim::Owned(Box::new(claimed_from_row(
             scope,
             lease_owner,
             &row,
             ClaimAction::Post,
-        )?));
+        )?)));
     }
 
     let current = sqlx::query(
@@ -306,7 +306,7 @@ pub(super) async fn claim_card_pg(
     };
     let mut claimed = claimed_from_row(&current_scope, lease_owner, &row, action)?;
     claimed.new_terminal_completion = new_terminal_completion;
-    Ok(CardClaim::Owned(claimed))
+    Ok(CardClaim::Owned(Box::new(claimed)))
 }
 
 pub(super) async fn find_terminal_delivery_pg(
