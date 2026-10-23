@@ -141,6 +141,7 @@ pub(in crate::services::discord) async fn activity_now(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Observed {
+    let _effect = effect_reads::begin(channel.get());
     reading_now(shared, provider, channel).await.observed
 }
 
@@ -933,6 +934,7 @@ pub(in crate::services::discord) mod tests;
 #[path = "activity_notice_tests.rs"]
 mod notice_tests;
 
+pub(in crate::services::discord) mod effect_reads;
 mod tail;
 #[cfg(unix)]
 mod unbound;

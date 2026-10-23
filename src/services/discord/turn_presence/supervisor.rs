@@ -194,6 +194,10 @@ enum Action {
 #[async_trait]
 trait Effects: Send + Sync + 'static {
     fn channels(&self) -> Vec<u64>;
+    /// Whether an effect point is reading the channel; a read now would supersede it.
+    fn effect_read_pending(&self, _channel: u64) -> bool {
+        false
+    }
     fn notice_scope(&self, channel: u64) -> notice_store::Scope;
     fn agent_id(&self, _channel: u64) -> Option<String> {
         None
@@ -305,6 +309,13 @@ impl<E: Effects> Supervisor<E> {
             let Some(presence) = self.channels.get(&channel).cloned() else {
                 continue;
             };
+            if self.effects.effect_read_pending(channel) {
+                tracing::debug!(
+                    channel,
+                    "[turn_presence] observation deferred to an effect read"
+                );
+                continue;
+            }
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
@@ -680,6 +691,10 @@ impl Effects for LiveEffects {
 
     fn channels(&self) -> Vec<u64> {
         registered(&self.provider)
+    }
+
+    fn effect_read_pending(&self, channel: u64) -> bool {
+        super::activity::effect_reads::pending(channel)
     }
 
     async fn read(&self, channel: u64) -> Reading {

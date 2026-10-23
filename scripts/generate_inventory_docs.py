@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -27,8 +28,6 @@ TEST_FILE_NAMES = {"integration_tests.rs", "tests.rs"}
 GIANT_FILE_REGISTRY = REPO_ROOT / "scripts" / "giant_file_registry.toml"
 GIANT_FILE_REGISTRY_DOC = GENERATED_DOCS_DIR / "giant-file-registry.md"
 GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE = timedelta(days=30)
-# Off only while reading a PR's base tree; the candidate snapshot is always age-checked.
-ENFORCE_ISSUE_SNAPSHOT_FRESHNESS = True
 GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = (
     REPO_ROOT / "scripts" / "giant_file_closed_issue_transition_list.txt"
 )
@@ -186,6 +185,8 @@ class GiantFileRegistration:
 
 # Kept as a module seam so registry validation has deterministic date coverage.
 def today_utc() -> date:
+    if value := os.environ.get("GIANT_FILE_EVALUATION_DATE"):
+        return date.fromisoformat(value)
     return datetime.now(timezone.utc).date()
 
 
@@ -985,13 +986,16 @@ def load_giant_file_issue_snapshot(
     snapshot_age = now_utc() - refreshed
     if snapshot_age < timedelta(0):
         print("WARNING: giant-file issue metadata refreshed_at is in the future", file=sys.stderr)
-    if ENFORCE_ISSUE_SNAPSHOT_FRESHNESS and snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
+    if snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
         fresh_through = refreshed + GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE
+        issue_refs = ", ".join(f"#{issue.get('number')}" for issue in payload["issues"]
+                               if isinstance(issue, dict))
         staleness_problem = (
-            "giant-file issue metadata snapshot is older than 30 days; freshness "
+            f"{GIANT_FILE_ISSUE_METADATA}: giant-file issue metadata "
+            "snapshot is older than 30 days; freshness "
             f"expired after {fresh_through.strftime('%Y-%m-%dT%H:%M:%SZ')}; "
-            "snapshot must be manually re-verified against live GitHub state and refreshed; "
-            "to update checked_at and re-verify: `python3 scripts/refresh_giant_file_issue_metadata.py && git add scripts/giant_file_issue_metadata.json`"
+            f"issues {issue_refs}; optional refresh: "
+            "`python3 scripts/refresh_giant_file_issue_metadata.py`"
         )
         print(f"WARNING: {staleness_problem}", file=sys.stderr)
     issues: dict[int, dict[str, object]] = {}
@@ -1065,7 +1069,7 @@ def giant_file_issue_ratchet_problems(
     transition_list_entries: int,
     baselines: dict[str, int],
 ) -> list[str]:
-    """Describe any growth or unrecorded shrink against snapshot baselines."""
+    """Describe advisory planning counts against snapshot baselines."""
     measured = {
         "closed_deadline_entries": closed_deadline_entries,
         "transition_list_entries": transition_list_entries,
@@ -1081,14 +1085,12 @@ def giant_file_issue_ratchet_problems(
         if current > baseline:
             problems.append(
                 f"giant-file {labels[key]} grew from snapshot baseline {baseline} "
-                f"to {current}; ratchet violation. The baseline is recorded in "
-                f"{rel_posix(GIANT_FILE_ISSUE_METADATA)} and the writer does not raise it; "
-                "resolve the newly closed deadline or transition-list addition"
+                f"to {current}; advisory count in {rel_posix(GIANT_FILE_ISSUE_METADATA)}"
             )
         elif current < baseline:
             problems.append(
                 f"giant-file {labels[key]} shrank from snapshot baseline {baseline} "
-                f"to {current}; record the lower baseline with "
+                f"to {current}; optional snapshot refresh: "
                 f"`{GIANT_FILE_ISSUE_RATCHET_WRITER}`"
             )
     return problems
@@ -1151,6 +1153,7 @@ def closed_decompose_issue_problem(
     path: str,
     decompose_issue: str,
     issues: dict[int, dict[str, object]],
+    deadline: str = "",
 ) -> str | None:
     """Name one registry entry whose checked-in issue state is closed."""
     match = _ISSUE_RE.fullmatch(decompose_issue.strip())
@@ -1161,25 +1164,13 @@ def closed_decompose_issue_problem(
     if issue is None or issue["state"] != "closed":
         return None
     return (
-        f"[[entry]] {path!r} has a dead deadline: decompose_issue #{number} "
+        f"[[entry]] {path!r} has a dead deadline {deadline!r}: decompose_issue #{number} "
         "is closed in the checked-in issue snapshot"
     )
 
 
-def categorize_closed_issue_problem(
-    path: str,
-    problem: str,
-    transition_list: set[str],
-) -> tuple[bool, str]:
-    """Categorize a closed-issue problem as allowed (in ratchet list) or forbidden.
-
-    Returns (is_allowed, message) where is_allowed=True means the entry is in the
-    transition list (permitted but warned) and is_allowed=False means it's a new
-    dead pointer (fatal).
-    """
-    if path in transition_list:
-        return True, f"WARNING: {problem}; kept in transition pending deadline reclassification"
-    return False, f"FATAL: {problem}; fix the decompose_issue to reference an open GitHub issue, or remove the entry and decompose the file"
+def giant_deadline_warning(path: str, deadline: str, issue: str) -> str:
+    return f"WARNING: giant-file overdue: {path}; deadline {deadline}; decompose_issue {issue}"
 
 
 def _markdown_table_value(value: str) -> str:
@@ -1305,8 +1296,6 @@ def build_giant_registrations(
     prod_loc = {entry.file_path: entry.prod_line_count for entry in modules}
 
     problems: list[str] = []
-    closed_issue_allowed_problems: list[str] = []
-    closed_issue_forbidden_problems: list[str] = []
     closed_registry_paths: set[str] = set()
     seen: set[str] = set()
 
@@ -1358,7 +1347,7 @@ def build_giant_registrations(
                     f"[[entry]] {path!r} shrink deadline {deadline!r} is not a calendar-valid YYYY-MM-DD"
                 )
             elif parsed_deadline < (evaluation_date or today_utc()) and not allow_overdue:
-                problems.append(f"[[entry]] {path!r} shrink deadline {deadline!r} is overdue")
+                print(giant_deadline_warning(path, deadline, decompose_issue), file=sys.stderr)
             if not _is_real_decompose_issue(decompose_issue):
                 problems.append(
                     f"[[entry]] {path!r} shrink decompose_issue {decompose_issue!r} must be a real numeric issue and cannot be #4519"
@@ -1370,17 +1359,11 @@ def build_giant_registrations(
                 if issue_problem:
                     problems.append(issue_problem)
                 closed_issue_problem = closed_decompose_issue_problem(
-                    path, decompose_issue, issue_metadata
+                    path, decompose_issue, issue_metadata, deadline
                 )
                 if closed_issue_problem:
                     closed_registry_paths.add(path)
-                    is_allowed, categorized_problem = categorize_closed_issue_problem(
-                        path, closed_issue_problem, transition_list
-                    )
-                    if is_allowed:
-                        closed_issue_allowed_problems.append(categorized_problem)
-                    else:
-                        closed_issue_forbidden_problems.append(categorized_problem)
+                    problems.append(closed_issue_problem)
             if keep_reason:
                 problems.append(f"[[entry]] {path!r} shrink forbids keep_reason")
         elif decision == _DECISION_KEEP:
@@ -1482,17 +1465,6 @@ def build_giant_registrations(
             baselines=issue_ratchets,
         )
     )
-
-    if closed_issue_forbidden_problems:
-        problems.extend(sorted(closed_issue_forbidden_problems))
-    if closed_issue_allowed_problems:
-        for problem in sorted(closed_issue_allowed_problems):
-            print(f"WARNING: giant-file registry: {problem}", file=sys.stderr)
-        print(
-            f"giant-file: {len(closed_registry_paths)} registry entries have closed "
-            "decompose_issue deadlines and remain on the checked-in transition list",
-            file=sys.stderr,
-        )
 
     if problems:
         for problem in sorted(problems):

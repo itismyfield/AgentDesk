@@ -30,7 +30,7 @@ impl HeartbeatRefreshOutcome {
 
 // Tmux watcher output is activity, but reusing hook_session here would also
 // overwrite status/tokens defaults. Touch only last_heartbeat instead.
-pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
+pub(in crate::services::discord) async fn refresh_session_heartbeat_from_tmux_output(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -44,13 +44,14 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output(
         tmux_session_name,
         thread_channel_id,
     )
+    .await
     .refreshed()
 }
 
 /// Same as `refresh_session_heartbeat_from_tmux_output` but reports which
 /// candidate key matched and how many rows were touched, so callers can emit
 /// auditable activity logs (#3053).
-pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_detailed(
+pub(in crate::services::discord) async fn refresh_session_heartbeat_from_tmux_output_detailed(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -67,52 +68,49 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
         let provider_name = provider.as_str().to_string();
         let thread_channel_id = thread_channel_id.map(|value| value.to_string());
         let activity_at = runtime_activity_heartbeat_at(tmux_session_name, chrono::Utc::now());
-        return crate::utils::async_bridge::block_on_pg_result(
-            pg_pool,
-            move |pool| async move {
-                let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE session_key = $1 OR session_key = $2")
+        let result = async {
+            let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE session_key = $1 OR session_key = $2")
                 .bind(&session_keys[0])
                 .bind(&session_keys[1])
                 .bind(activity_at)
-                .execute(&pool)
+                .execute(pg_pool)
                 .await
                 .map_err(|error| format!("refresh pg watcher heartbeat by session key: {error}"))?
                 .rows_affected();
-                if updated > 0 {
-                    return Ok(HeartbeatRefreshOutcome {
-                        matched: HeartbeatRefreshMatch::SessionKey,
-                        rows_affected: updated,
-                    });
-                }
+            if updated > 0 {
+                return Ok(HeartbeatRefreshOutcome {
+                    matched: HeartbeatRefreshMatch::SessionKey,
+                    rows_affected: updated,
+                });
+            }
 
-                let Some(thread_channel_id) = thread_channel_id else {
-                    return Ok(HeartbeatRefreshOutcome {
-                        matched: HeartbeatRefreshMatch::NoMatch,
-                        rows_affected: 0,
-                    });
-                };
-                let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE provider = $1 AND thread_channel_id = $2 AND status IN ('idle', 'working')")
+            let Some(thread_channel_id) = thread_channel_id else {
+                return Ok(HeartbeatRefreshOutcome {
+                    matched: HeartbeatRefreshMatch::NoMatch,
+                    rows_affected: 0,
+                });
+            };
+            let updated = sqlx::query("UPDATE sessions SET last_heartbeat = GREATEST(COALESCE(last_heartbeat, TIMESTAMPTZ 'epoch'), $3) WHERE provider = $1 AND thread_channel_id = $2 AND status IN ('idle', 'working')")
                 .bind(&provider_name)
                 .bind(&thread_channel_id)
                 .bind(activity_at)
-                .execute(&pool)
+                .execute(pg_pool)
                 .await
                 .map_err(|error| {
                     format!("refresh pg watcher heartbeat by thread channel: {error}")
                 })?
                 .rows_affected();
-                Ok(HeartbeatRefreshOutcome {
-                    matched: if updated > 0 {
-                        HeartbeatRefreshMatch::ThreadChannelFallback
-                    } else {
-                        HeartbeatRefreshMatch::NoMatch
-                    },
-                    rows_affected: updated,
-                })
-            },
-            |message| message,
-        )
-        .unwrap_or(HeartbeatRefreshOutcome {
+            Ok::<_, String>(HeartbeatRefreshOutcome {
+                matched: if updated > 0 {
+                    HeartbeatRefreshMatch::ThreadChannelFallback
+                } else {
+                    HeartbeatRefreshMatch::NoMatch
+                },
+                rows_affected: updated,
+            })
+        }
+        .await;
+        return result.unwrap_or(HeartbeatRefreshOutcome {
             matched: HeartbeatRefreshMatch::NoMatch,
             rows_affected: 0,
         });
@@ -132,7 +130,7 @@ pub(in crate::services::discord) fn refresh_session_heartbeat_from_tmux_output_d
 /// `thread_channel_id` fallback was used — the original #3053 failure mode was
 /// a silent no-op refresh of a non-matching row, after which idle-kill killed
 /// the live session. Returns true when at least one row was touched.
-pub(in crate::services::discord) fn touch_session_activity(
+pub(in crate::services::discord) async fn touch_session_activity(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -152,7 +150,8 @@ pub(in crate::services::discord) fn touch_session_activity(
         provider,
         tmux_session_name,
         thread_channel_id,
-    );
+    )
+    .await;
 
     let used_thread_fallback = outcome.matched == HeartbeatRefreshMatch::ThreadChannelFallback;
     if outcome.refreshed() {
@@ -185,7 +184,7 @@ pub(in crate::services::discord) fn touch_session_activity(
     outcome.refreshed()
 }
 
-pub(in crate::services::discord::tmux) fn maybe_refresh_watcher_activity_heartbeat(
+pub(in crate::services::discord::tmux) async fn maybe_refresh_watcher_activity_heartbeat(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
@@ -206,7 +205,119 @@ pub(in crate::services::discord::tmux) fn maybe_refresh_watcher_activity_heartbe
         provider,
         tmux_session_name,
         thread_channel_id,
-    ) {
+    )
+    .await
+    {
         *last_heartbeat_at = Some(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_heartbeat_yields_while_session_row_is_locked_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let provider = ProviderKind::Claude;
+        let session = "adk-heartbeat-7207";
+        let key = crate::services::discord::adk_session::build_session_key_candidates(
+            "heartbeat-test",
+            &provider,
+            session,
+        )[0]
+        .clone();
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, cwd, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', '/tmp', NOW())",
+        )
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .expect("seed session");
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let lock_database_url = db.database_url.clone();
+        let holder = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("lock runtime")
+                .block_on(async move {
+                    let lock_pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect(&lock_database_url)
+                        .await
+                        .expect("connect row lock holder pool");
+                    let mut tx = lock_pool.begin().await.expect("begin row lock");
+                    sqlx::query(
+                        "SELECT session_key FROM sessions WHERE session_key = $1 FOR UPDATE",
+                    )
+                    .bind(&key)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("lock session row");
+                    let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .expect("read lock holder backend pid");
+                    locked_tx.send(backend_pid).expect("signal row lock");
+                    let main_thread_ran = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                    tx.commit().await.expect("release row lock");
+                    lock_pool.close().await;
+                    main_thread_ran
+                })
+        });
+        let lock_holder_pid = locked_rx.recv().expect("wait for row lock");
+
+        let heartbeat_pool = pool.clone();
+        let heartbeat = tokio::spawn(async move {
+            refresh_session_heartbeat_from_tmux_output(
+                Some(&heartbeat_pool),
+                "heartbeat-test",
+                &provider,
+                session,
+                None,
+            )
+            .await
+        });
+        let heartbeat_waited_on_lock = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let blocked_by_lock_holder = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_stat_activity
+                        WHERE wait_event_type = 'Lock'
+                          AND $1 = ANY(pg_blocking_pids(pid))
+                    )",
+                )
+                .bind(lock_holder_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("inspect blocked heartbeat query");
+                if blocked_by_lock_holder {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        release_tx.send(()).expect("release row lock");
+        let holder_observed_runtime_progress = holder.join().expect("row lock holder");
+        let heartbeat_succeeded = heartbeat.await.expect("heartbeat task");
+        pool.close().await;
+        db.drop().await;
+        assert!(
+            heartbeat_waited_on_lock.is_ok(),
+            "heartbeat query never waited on the row lock while the current-thread runtime remained responsive"
+        );
+        assert!(
+            holder_observed_runtime_progress,
+            "the heartbeat blocked the current-thread runtime while waiting for a row lock"
+        );
+        assert!(heartbeat_succeeded);
     }
 }

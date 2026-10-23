@@ -2,7 +2,6 @@
 //! a piece PostgreSQL holds a receipt for reads as settled; ledger and shared rows stay as written.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use sqlx::Row;
 use sqlx::postgres::PgPool;
@@ -17,15 +16,13 @@ type Stored = (String, String, String, i64);
 
 #[derive(Default)]
 pub(crate) enum ReceiptOverlay {
-    /// Re-post is off for the channel; the local ledger decides alone.
+    /// No re-post hook is installed; the local ledger decides alone.
     #[default]
     Disabled,
     /// The channel's receipted pieces, each with the payload hash it was admitted under.
     Known {
         channel: u64,
         receipted: BTreeMap<Stored, String>,
-        /// The channel's live re-post policy; withdrawn, the view settles nothing.
-        live: Arc<dyn Fn() -> bool + Send + Sync>,
     },
     /// The read failed or held a row this build cannot read; nothing reads as settled.
     Unknown(String),
@@ -33,30 +30,16 @@ pub(crate) enum ReceiptOverlay {
 
 impl ReceiptOverlay {
     /// One read of the channel's receipted pieces by `sender` under this build's identity rules.
-    pub(crate) async fn load(
-        pool: &PgPool,
-        channel: u64,
-        sender: u64,
-        live: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Self {
+    pub(crate) async fn load(pool: &PgPool, channel: u64, sender: u64) -> Self {
         match receipted(pool, channel, sender).await {
-            Ok(receipted) => Self::Known {
-                channel,
-                receipted,
-                live,
-            },
+            Ok(receipted) => Self::Known { channel, receipted },
             Err(error) => Self::Unknown(error.to_string()),
         }
     }
 
-    /// Whether a shared receipt resolves this local attempt: same key and payload, re-post on.
+    /// Whether a shared receipt resolves this local attempt with the same key and payload.
     fn settles(&self, record: &PieceRecord) -> bool {
-        let Self::Known {
-            channel,
-            receipted,
-            live,
-        } = self
-        else {
+        let Self::Known { channel, receipted } = self else {
             return false;
         };
         let Some(key) = piece_of(record) else {
@@ -73,7 +56,6 @@ impl ReceiptOverlay {
             && receipted
                 .get(&stored)
                 .is_some_and(|sha| *sha == payload_sha256(&record.payload))
-            && live()
     }
 
     /// The ledger's disposition, with a receipted rejection or approval read as settled.
