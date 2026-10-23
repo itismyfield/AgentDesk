@@ -171,7 +171,7 @@ fn append(path: &Path, records: &[Value]) {
     file.sync_all().unwrap();
 }
 
-fn records(session: &str, prompt: &str, answer: &str) -> [Value; 3] {
+fn records(session: &str, prompt: &str, answer: &str) -> [Value; 4] {
     let native_id = uuid::Uuid::new_v4().to_string();
     let stamp = |mut record: Value| {
         record["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
@@ -184,6 +184,9 @@ fn records(session: &str, prompt: &str, answer: &str) -> [Value; 3] {
             json!({"type":"assistant", "uuid":format!("t14-{native_id}"), "apiBlockIndex":0,
          "message":{"id":native_id, "role":"assistant", "stop_reason":"end_turn",
          "content":[{"type":"text", "text":answer}]}}),
+        ),
+        stamp(
+            json!({"type":"system", "subtype":"stop_hook_summary", "hookCount":1, "hasOutput":true}),
         ),
         stamp(json!({"type":"system", "subtype":"turn_duration"})),
     ]
