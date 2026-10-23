@@ -298,5 +298,20 @@ async fn idle_keeps_failed_removals_for_the_next_observation_without_marking_com
             .pending_injected_count(ChannelId::new(channel)),
         0
     );
-    assert_eq!(shared.turn_view_reconciler.ops().len(), 5);
+    assert_eq!(
+        shared
+            .turn_view_reconciler
+            .ops()
+            .iter()
+            .map(|op| (op.emoji, op.add))
+            .collect::<Vec<_>>(),
+        [
+            ('⏳', true),
+            ('⏳', false),
+            ('⏳', false),
+            ('⏳', false),
+            ('✅', true)
+        ],
+        "the next idle must remove the hourglass before adding completion"
+    );
 }

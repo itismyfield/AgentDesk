@@ -36,6 +36,7 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
         .await
         .unwrap();
     assert_eq!(busy.pane.keys(), ["paste-buffer", "send-keys"]);
+    assert_eq!(rt.marks(first), ["⏳"]);
     let frame = busy.pane.read("buffer").unwrap();
     let mut transcript = std::fs::OpenOptions::new()
         .append(true)
@@ -102,6 +103,7 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
             .pending_injected_count(ChannelId::new(CHANNEL_ID)),
         2
     );
+    let before_idle = rt.h.shared.turn_view_reconciler.ops().len();
     assert!(
         wait_until(WAIT, || {
             let presence = presence.clone();
@@ -145,10 +147,11 @@ async fn bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg()
                 .turn_view_reconciler
                 .ops()
                 .into_iter()
+                .skip(before_idle)
                 .filter(|op| op.target.message_id.get() == message)
                 .map(|op| (op.emoji, op.add))
                 .collect();
-        assert_eq!(changes, [('⏳', true), ('⏳', false), ('✅', true)]);
+        assert_eq!(changes, [('⏳', false), ('✅', true)]);
     }
     assert_eq!(
         rt.h.shared
