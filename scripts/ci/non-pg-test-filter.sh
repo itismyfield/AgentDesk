@@ -393,13 +393,12 @@ NON_PG_FILTER_REPLAY=(
   server::routes::campaigns::tests::ledger_put_accepts_a_document_larger_than_the_axum_default_limit
   server::routes::campaigns::tests::ledger_put_over_the_limit_reports_the_limit_and_the_remedy
   server::routes::departments::tests::ensure_pg_missing_pool_preserves_503_and_message
-  server::routes::health_api::db_deadline_tests::amplification_profile_tests::health_amplification_profile
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_pg_guard_refuses_the_operator_port_remote_hosts_and_a_missing_base
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_verdict_counts_unobserved_hostless_or_shifted_answers_as_errors
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_verdict_judges_from_the_scheduled_send_not_the_late_actual_send
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_verdict_rejects_runs_that_lose_an_attempt_or_fall_short_of_the_minimum
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_verdict_reports_separated_complete_runs_and_a_moved_control
-  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::amplification_verdict_withholds_p99_when_two_percent_never_completed
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_pg_guard_refuses_the_operator_port_remote_hosts_and_a_missing_base
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_verdict_counts_unobserved_hostless_or_shifted_answers_as_errors
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_verdict_judges_from_the_scheduled_send_not_the_late_actual_send
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_verdict_rejects_runs_that_lose_an_attempt_or_fall_short_of_the_minimum
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_verdict_reports_separated_complete_runs_and_a_moved_control
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::cases_tests::amplification_verdict_withholds_p99_when_two_percent_never_completed
   server::routes::memory_api::request_body_tests::detect_memory_backend_force_local_overrides_active_memento
   server::routes::memory_api::request_body_tests::detect_memory_backend_uses_local_when_memento_runtime_unavailable
   server::routes::memory_api::request_body_tests::detect_memory_backend_uses_memento_when_runtime_config_is_active
