@@ -348,7 +348,7 @@ fn handler_guards_reject_commented_steps() {
     let busy = |src: &str| busy_enqueue_view_gaps(src, BUSY_RETRY);
     let abort = |src: &str| abort_branch_gaps(STALE_GUARD, src);
     let param = |src: &str| preserve_param_gaps(src, STALE_GUARD);
-    let transition = |src: &str| transition_provider_gaps(src);
+    let transition = transition_provider_gaps;
     let cases: [(DynJudge<'_>, &[&str]); 9] = [
         (
             &transition,
