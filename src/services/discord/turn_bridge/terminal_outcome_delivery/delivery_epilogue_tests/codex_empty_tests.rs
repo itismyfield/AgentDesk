@@ -54,6 +54,18 @@ fn hook(tmux: &str) {
     );
 }
 
+struct DedupeGuard {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock_dedupe() -> DedupeGuard {
+    DedupeGuard {
+        _held: dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    }
+}
+
 struct NativeTail {
     path: std::path::PathBuf,
     token: Arc<CancelToken>,
@@ -74,6 +86,12 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
         "stale_origin" => {
             rows[2]["payload"]["internal_chat_message_metadata_passthrough"]["create_time"] =
                 json!(1.0)
+        }
+        "late_before_origin" => {
+            let mut previous = event("task_complete", "previous-turn");
+            previous["payload"]["last_agent_message"] =
+                json!("previous answer must not be adopted");
+            rows.insert(2, previous);
         }
         _ => {}
     }
@@ -121,7 +139,7 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
     if case != "hook_after" {
         hook(tmux);
     }
-    if case != "hook_only" {
+    if !matches!(case, "hook_only" | "late_before_origin") {
         let terminal = if case == "foreign" {
             event("task_complete", "foreign-turn")
         } else {
@@ -138,7 +156,7 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
     }
     let negative = matches!(
         case,
-        "previous" | "foreign" | "open_tool" | "hook_only" | "stale_origin"
+        "previous" | "foreign" | "open_tool" | "hook_only" | "stale_origin" | "late_before_origin"
     );
     let mut messages = Vec::new();
     let deadline =
@@ -218,11 +236,10 @@ async fn managed_empty_native_turn_rejects_unrelated_completion_and_open_tools()
         "hook_only",
         "open_tool",
         "stale_origin",
+        "late_before_origin",
     ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
-        let _state = dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _state = lock_dedupe();
         replay(&driver, case);
     }
 }
@@ -291,9 +308,7 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
         (true, "hook_after"),
     ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
-        let _state = dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _state = lock_dedupe();
         let selected = [(DRIVER_CHANNEL_ID, RuntimeHandoffKind::CodexTui)];
         let _o = crate::services::tui_o::cutover::test_override::force_channels(if o {
             &selected
@@ -484,9 +499,7 @@ async fn native_footer(driver: &TerminalDeliveryDriver, path: &std::path::Path) 
 async fn managed_empty_native_turn_admission_rejects_wrong_source_nonce_and_range() {
     for case in ["source", "nonce", "range"] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
-        let _state = dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _state = lock_dedupe();
         let native = replay(&driver, "hook_before");
         let mut local = row(&driver, &native);
         if case == "range" {

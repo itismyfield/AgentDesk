@@ -486,9 +486,11 @@ fn event_msg_message(json: &Value, state: &mut RolloutParseState) -> Option<Stre
             state.lifecycle_activity = true;
             None
         }
-        // A reader seeded with its native turn takes no other turn's completion or its text.
+        // Managed inputs and seeded readers take no other turn's completion or fallback body.
         "task_complete"
-            if (state.native_seeded || state.managed_turn.is_some())
+            if (state.native_seeded
+                || state.managed_turn.is_some()
+                || state.discord_origin_prompt.is_some())
                 && !started_turn_named_by(state, payload) =>
         {
             state.lifecycle_activity = true;

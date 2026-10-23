@@ -378,8 +378,8 @@ pub(super) async fn run_terminal_outcome_delivery(
             inflight_state.silent_turn,
             &full_response,
         );
-        // O posts only native answers, so on its channel the bridge still shows its own failure
-        // notice in full; like other bridge chrome it is no answer and sends without a claim.
+        // O posts native answers; the bridge still shows its failure and empty-response notices.
+        // These notices are chrome and send without an answer claim.
         let o_notice = (provider_failure || terminal_empty_response_notice.is_some())
             && direct
             && o_body_cut == Ok(true);
