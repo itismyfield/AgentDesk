@@ -14,7 +14,6 @@ mod finalize_epilogue;
 pub(in crate::services::discord) mod followup_requeue;
 mod guards;
 mod headless_delivery;
-pub(in crate::services::discord) mod intake_settlement;
 mod memory_lifecycle;
 mod output_lifecycle;
 mod panel_lifecycle;
@@ -243,7 +242,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         bridge.channel_id.get(),
         &cancel_token,
     );
-    intake_settlement::bind_bridge_turn_snapshot(&shared_owned, &mut bridge);
     let bridge_turn_id = discord_turn_id(
         &bridge.provider,
         bridge.channel_id,

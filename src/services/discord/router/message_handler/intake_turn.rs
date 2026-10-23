@@ -10,7 +10,6 @@ use intake_dispatch::build_intake_inflight_state;
 mod adk_thread;
 mod claim_bootstrap;
 mod dispatch_runtime;
-mod dispatch_stamp;
 mod host_refusal;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
@@ -148,15 +147,6 @@ mod intake_outbox_state_builder_tests {
             vec![source_a.get(), source_b.get()],
             "durable inflight row must retain every absorbed source message id"
         );
-    }
-
-    /// 호출 인접성·개수 검사이지 등록 성공 증명이 아님.
-    #[test]
-    fn bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge() {
-        use super::recovery_context_take_order_tests::source_guard_tests::{
-            INTAKE_TURN, bridge_stamp_gaps,
-        };
-        assert_eq!(bridge_stamp_gaps(INTAKE_TURN), Vec::<String>::new());
     }
 }
 
@@ -2364,7 +2354,6 @@ pub(super) async fn handle_text_message(
             channel_id,
             inflight_state.effective_finalizer_turn_id(),
         );
-        dispatch_stamp::stamp_before_bridge_handoff(shared, intake_outbox_id).await;
         spawn_turn_bridge(
             shared.clone(),
             cancel_token.clone(),

@@ -458,7 +458,7 @@ pub(crate) mod exact_tests {
 mod mixed_tests {
     use super::*;
     #[test]
-    fn mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged() {
+    fn mixed_strict_rows_leave_legacy_fold_frontier_bytes_unchanged() {
         let id = Uuid::from_u128(900);
         let attempt = Uuid::from_u128(901);
         let mut legacy = super::super::admission_events(
@@ -485,15 +485,11 @@ mod mixed_tests {
         ));
         let view = |events: &[JournalEvent]| {
             let fold = super::super::exact_delivery_predicate(events);
-            let shadow = format!(
-                "{:?}",
-                super::super::classify_shadow_observation(events, false)
-            );
             let frontier = super::super::legacy_events(events)
                 .iter()
                 .filter_map(super::super::event_frontier)
                 .collect::<Vec<_>>();
-            serde_json::to_vec(&(fold, shadow, frontier)).unwrap()
+            serde_json::to_vec(&(fold, frontier)).unwrap()
         };
         for count in [2, 3, 4] {
             let original = &legacy[..count];

@@ -54,13 +54,6 @@ pub(in crate::services::discord) enum GuardedWatcherDeliveryResult {
 pub(in crate::services::discord) struct WatcherTerminalDeliveryProof {
     pub(in crate::services::discord) anchor_msg_id: Option<MessageId>,
     pub(in crate::services::discord) raw_body: String,
-    /// #5071 T1 S3a: the Discord response behind `anchor_msg_id`, carrying the
-    /// channel Discord actually returned. `None` on the controller/gateway path,
-    /// which reports message ids only — the shadow journal then leaves the
-    /// obligation open rather than synthesising a receipt that could never trip
-    /// the `channel_mismatch` branch.
-    pub(in crate::services::discord) receipt:
-        Option<crate::services::discord::outbound::DiscordTransportReceipt>,
 }
 
 /// Admit a delivery epilogue for the captured source identity.
@@ -482,11 +475,6 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
     frozen_rollover_msg_ids: &mut Vec<MessageId>,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
     watcher_long_chunk_anchor_msg_id: &mut Option<MessageId>,
-    // #5071 T1 S3a: the receipt for the same chunk `watcher_long_chunk_anchor_msg_id`
-    // names, so the journal's `T` carries Discord's returned channel.
-    watcher_long_chunk_anchor_receipt: &mut Option<
-        crate::services::discord::outbound::DiscordTransportReceipt,
-    >,
     body_claim: Option<BodyClaim<'_>>,
     locals: WatcherLongChunksLocals<'_>,
 ) {
@@ -500,12 +488,8 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
         *locals.relay_ok = false;
         return;
     };
-    match sent.and_then(|receipts| {
-        crate::services::discord::formatting::message_ids_from_receipts(receipts.clone())
-            .map(|message_ids| (message_ids, receipts))
-    }) {
-        Ok((message_ids, receipts)) => {
-            *watcher_long_chunk_anchor_receipt = receipts.last().cloned();
+    match sent.and_then(crate::services::discord::formatting::message_ids_from_receipts) {
+        Ok(message_ids) => {
             *locals.direct_send_delivered = true;
             *locals.tui_direct_anchor_terminal_body_visible = true;
             *locals.external_input_lease_consumed_by_relay =

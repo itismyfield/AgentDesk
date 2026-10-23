@@ -7,8 +7,7 @@ use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::SharedData;
 use crate::services::discord::formatting::{
-    DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome,
-    replace_long_message_raw_deferred_returning_receipt,
+    DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome, replace_long_message_raw_deferred,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send_held};
@@ -38,18 +37,11 @@ pub(super) async fn replace_or_post_after_edit_failure(
     relay_text: &str,
     recheck: EditFailureRecheck<'_>,
     body_claim: Option<BodyClaim<'_>>,
-    (last_chunk_anchor, edit_anchor_receipt): (
-        &mut Option<crate::services::discord::formatting::ReplaceLastChunkAnchor>,
-        &mut Option<crate::services::discord::outbound::DiscordTransportReceipt>,
-    ),
+    last_chunk_anchor: &mut Option<crate::services::discord::formatting::ReplaceLastChunkAnchor>,
 ) -> Option<Result<WatcherDeferredReplaceOutcome, Box<dyn std::error::Error + Send + Sync>>> {
-    let (anchor, receipt) = (&mut *last_chunk_anchor, &mut *edit_anchor_receipt);
     let replace = move || {
-        // Moved in whole, so the send may keep them for as long as it runs.
-        let (anchor, receipt) = (anchor, receipt);
-        replace_long_message_raw_deferred_returning_receipt(
-            http, channel_id, msg_id, relay_text, shared, anchor, receipt,
-        )
+        let anchor = last_chunk_anchor;
+        replace_long_message_raw_deferred(http, channel_id, msg_id, relay_text, shared, anchor)
     };
     let Ok((BodySend::Sent(replace_outcome), legacy_send)) =
         claim_then_send_held(body_claim, replace).await
@@ -82,9 +74,8 @@ pub(super) async fn replace_or_post_after_edit_failure(
                 .and_then(|receipts| {
                     let message_ids =
                         crate::services::discord::formatting::message_ids_from_receipts(
-                            receipts.clone(),
+                            receipts,
                         )?;
-                    *edit_anchor_receipt = receipts.first().cloned();
                     Ok(WatcherDeferredReplaceOutcome::Replace(
                         ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                             edit_error,

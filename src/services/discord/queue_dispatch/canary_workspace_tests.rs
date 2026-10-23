@@ -101,16 +101,6 @@ async fn canary_without_core_session_and_unresolved_workspace_parks_original_pg(
     let retained = fixture.shared.mailbox(channel).snapshot().await;
     assert_eq!(retained.intervention_queue.len(), 1);
     assert_eq!(QueueIdentity::of(&retained.intervention_queue[0]), identity);
-    let parked = fixture.shared.queue_park_ledger.project(
-        &fixture.shared,
-        &ProviderKind::Codex,
-        channel,
-        &retained,
-    );
-    assert_eq!(
-        parked.reason.as_deref(),
-        Some("canary_workspace_held:workspace_unresolved")
-    );
     let sent = api.take();
     assert!(
         !sent.iter().any(|call| call.contains("No active session")),

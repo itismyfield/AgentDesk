@@ -13,7 +13,6 @@ use crate::services::discord::health::{
     HealthRegistry, build_health_snapshot, build_public_health_snapshot,
 };
 use crate::services::discord::host_teardown_gate::test_support::nameless_turn;
-use crate::services::discord::queue_park_ledger::Origin;
 use crate::services::discord::relay_health::RelayStallState;
 use crate::services::discord::{self, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -401,8 +400,7 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
     let registry = HealthRegistry::new();
     let claude = main.block_on(provider(&registry, "claude"));
     let base = 6_871_340_000;
-    let (parked_channel, missing, row_channel) =
-        (channel(base, 1), channel(base, 2), channel(base, 5));
+    let (parked_channel, row_channel) = (channel(base, 1), channel(base, 5));
     let source = base + 90;
     let parked = parked_runtime();
     let queued = parked.block_on(async {
@@ -423,11 +421,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
             .await
             .unwrap()
     });
-    for tracked in [parked_channel, missing] {
-        claude
-            .queue_park_ledger
-            .register(tracked, &queued, Origin::PostCancelPreserved);
-    }
     let row = crate::services::discord::inflight::InflightTurnState::new(
         ProviderKind::Claude,
         row_channel.get(),
@@ -444,12 +437,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
     );
     super::super::super::test_support::seed_backfill_row(&row);
     let files_before = super::super::super::test_support::tree_fingerprint(&root);
-    let tracked = || {
-        let mut channels = claude.queue_park_ledger.tracked_channels();
-        channels.sort();
-        channels
-    };
-    let tracked_before = tracked();
     let json = main.block_on(async {
         claude.mailboxes.handle(row_channel);
         let (json, elapsed) = detail(&registry).await;
@@ -457,20 +444,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
         json
     });
 
-    let park = json["queue_park_observation_failures"]
-        .as_array()
-        .expect("tracked failures");
-    for (channel, failure) in [(parked_channel, "unreachable"), (missing, "missing")] {
-        let entry = park
-            .iter()
-            .find(|entry| entry["channel_id"] == channel.get())
-            .unwrap_or_else(|| panic!("{failure} tracked channel is named: {park:?}"));
-        assert_eq!(entry["observation_failure"], failure);
-        assert_eq!(
-            entry["queue_park_tracked_source_ids"],
-            serde_json::json!([source])
-        );
-    }
     assert_eq!(
         read_failures(&json),
         vec![failed("claude", parked_channel, "snapshot")]
@@ -479,7 +452,6 @@ fn health_snapshot_timeout_preserves_park_and_episode() {
         super::super::super::test_support::tree_fingerprint(&root),
         files_before
     );
-    assert_eq!(tracked(), tracked_before);
     let after = parked.block_on(async {
         claude
             .mailbox_peek(parked_channel)
