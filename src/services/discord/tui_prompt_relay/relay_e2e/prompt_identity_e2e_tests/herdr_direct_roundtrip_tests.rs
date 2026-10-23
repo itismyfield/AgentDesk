@@ -531,15 +531,14 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     );
     let started = kick_off(&h).await;
     let after_kickoff = h.mailbox().await;
-    assert!(
-        started,
-        "T14 the first Discord input starts: queue_before={} queue_after={} active={:?} checkpoint={:?} requests={:?} unhandled={:?}",
-        before_kickoff.intervention_queue.len(),
-        after_kickoff.intervention_queue.len(),
-        after_kickoff.active_user_message_id,
-        h.checkpoint(),
-        rig.requests(),
-        h.unhandled_requests()
+    // Catch-up's deferred drain may already own this input; the explicit kick is level-triggered.
+    eprintln!(
+        "T14_KICKOFF_RESULT {}",
+        json!({
+            "manual_started":started, "queue_before":before_kickoff.intervention_queue.len(),
+            "queue_after":after_kickoff.intervention_queue.len(),
+            "active":format!("{:?}", after_kickoff.active_user_message_id),
+        })
     );
     assert!(
         wait_until(TIMEOUT, || {
@@ -551,7 +550,9 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
             })
         })
         .await,
-        "T14 launch persists Pending before provider evidence"
+        "T14 the first Discord input starts and persists canonical Pending before provider evidence: manual_started={started} requests={:?} unhandled={:?}",
+        rig.requests(),
+        h.unhandled_requests()
     );
     let pending = execution(&pool, &h.shared.token_hash).await.unwrap();
     let nonce = pending.execution_nonce.clone();
