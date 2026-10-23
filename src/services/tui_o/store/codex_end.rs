@@ -8,7 +8,7 @@ use std::sync::{Mutex, PoisonError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::durable;
+use super::{ChannelStore, STORE_DIR_NAME, durable};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
@@ -213,9 +213,29 @@ fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
 
 /// Missing is empty; malformed, foreign or oversized files are unavailable and remain untouched.
 pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
+    read_records(root, channel).map(|(records, _)| records)
+}
+
+/// Returns existing records only after any sealed evidence is durably published.
+/// Every consumer retry, including restore, must cross this boundary before using a seal.
+pub(crate) fn read_durable(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
+    let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+    let (records, bytes) = read_records(root, channel)?;
+    if records.iter().any(|record| record.successor.is_some()) {
+        match publish(root, channel, &bytes)? {
+            Appended::Durable => {}
+            Appended::PublishedUnsynced(error) => return Err(error),
+        }
+    }
+    Ok(records)
+}
+
+fn read_records(root: &Path, channel: u64) -> Result<(Vec<CodexEnd>, Vec<u8>), String> {
     let file = match fs::File::open(path(root, channel)) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
         Err(error) => return Err(error.to_string()),
     };
     let mut bytes = Vec::new();
@@ -247,7 +267,7 @@ pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
     {
         return Err("Codex ends identity mismatch".into());
     }
-    Ok(records.records)
+    Ok((records.records, bytes))
 }
 
 fn encode(records: &[CodexEnd]) -> Result<Vec<u8>, String> {
@@ -349,6 +369,30 @@ fn publish(root: &Path, channel: u64, bytes: &[u8]) -> Result<Appended, String> 
             Ok(Appended::PublishedUnsynced(error.to_string()))
         }
         Err(error) => Err(error.to_string()),
+    }
+}
+
+impl ChannelStore {
+    fn codex_end_root(&self) -> Result<&Path, String> {
+        self.dir
+            .parent()
+            .filter(|parent| {
+                parent
+                    .file_name()
+                    .is_some_and(|name| name == STORE_DIR_NAME)
+            })
+            .and_then(Path::parent)
+            .ok_or_else(|| "the store has no runtime root".into())
+    }
+
+    /// Strictly reads this channel's existing End records beside its store.
+    pub(crate) fn codex_ends(&self) -> Result<Vec<CodexEnd>, String> {
+        read(self.codex_end_root()?, self.init.channel)
+    }
+
+    /// Reads this channel's records only after existing sealed evidence is durable.
+    pub(crate) fn durable_codex_ends(&self) -> Result<Vec<CodexEnd>, String> {
+        read_durable(self.codex_end_root()?, self.init.channel)
     }
 }
 

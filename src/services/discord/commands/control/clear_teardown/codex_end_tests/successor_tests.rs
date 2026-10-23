@@ -4,6 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use crate::services::codex_tui::execution_end::producer::LaunchObservation;
 use crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker;
 
+#[path = "reader_retirement_tests.rs"]
+mod reader_retirement_tests;
+
 fn isolated(test: &str) -> bool {
     const CHILD: &str = "ADK_CODEX_SUCCESSOR_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -293,6 +296,7 @@ fn explicit_clear_then_actual_absence_fresh_seals_exactly_once() {
         Some(seal),
         "retry preserves the first Seal"
     );
+    reader_retirement_tests::actual_end_retires_only_its_old_reader(&pane);
 }
 
 #[test]
@@ -313,6 +317,7 @@ fn direct_replacement_actual_absence_fresh_seals_exactly_once() {
         successor(&pane).is_some(),
         "actual direct replacement must seal its fresh launch"
     );
+    reader_retirement_tests::actual_end_retires_only_its_old_reader(&pane);
 }
 
 #[test]
@@ -715,6 +720,71 @@ fn done_candidate_can_retry_late_prompt_without_another_binding_publication() {
         successor(&pane).unwrap()["execution_nonce"],
         context.execution_nonce
     );
+}
+
+#[test]
+fn generic_pending_resolution_seals_done_candidate_on_idle_sources_follow() {
+    if !isolated(concat!(
+        module_path!(),
+        "::generic_pending_resolution_seals_done_candidate_on_idle_sources_follow"
+    )) {
+        return;
+    }
+    let fixture = Fixture::new();
+    let pane = Pane::start(fixture.logs.path());
+    assert!(!pane.end(true).end_unconfirmed);
+    let dispatch = attempt::begin(Some(pane.channel), Some(&pane.name));
+    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let prompt = "prompt after generic resolution and dispatch completion";
+    let (context, alias_path, session) = fresh(&pane, Some(prompt));
+    let path = alias_path.canonicalize().unwrap();
+    let header = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    spawn(&pane, &context, &mut observation);
+    dedupe::register_launched_tmux_runtime_binding(
+        &pane.name,
+        TuiRuntimeBinding {
+            runtime_kind: CodexTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(session.clone()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let pending = p5::records_strict(pane.channel)
+        .unwrap()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(matches!(&pending.new, p5::BindingTarget::Pending {
+        payload_session_id, payload_transcript_path
+    } if payload_session_id == &session && payload_transcript_path.as_deref() == path.to_str()));
+    assert!(successor(&pane).is_none());
+
+    std::fs::write(&path, header).unwrap();
+    // This real generic publisher resolves P5 and updates the binding without the launched
+    // publisher's execution-end callback. O's idle poll must finish its retained Candidate.
+    dedupe::register_tmux_runtime_binding(&pane.name, binding(&path, &session));
+    let rows = p5::records_strict(pane.channel).unwrap().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(matches!(&rows[2].new, p5::BindingTarget::Resolved {
+        pending_seq, source
+    } if *pending_seq == pending.seq && source.path == path && source.session_id == session));
+    assert!(
+        successor(&pane).is_none(),
+        "generic resolution has no Seal callback"
+    );
+    let id = attempt::current(pane.channel, &pane.name).unwrap();
+    drop(dispatch);
+    tc::with_tmux_source_authority(&pane.name, |authority| {
+        assert_eq!(
+            attempt::phase_under(&id, authority),
+            Some(attempt::Phase::Done)
+        );
+    });
+    reader_retirement_tests::idle_follow_seals_generic_resolution(&pane, &context, &path, prompt);
 }
 
 #[test]
