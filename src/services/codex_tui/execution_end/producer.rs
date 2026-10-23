@@ -28,11 +28,13 @@ pub(super) struct Candidate {
 pub(crate) struct LaunchObservation {
     id: Option<attempt::AttemptId>,
     old: Option<OldEnd>,
+    capture_failure: Option<(String, Option<u32>)>,
 }
 
 impl LaunchObservation {
     pub(crate) fn new(channel: Option<u64>, pane: &str) -> Self {
         let id = channel.and_then(|channel| attempt::current(channel, pane));
+        let mut capture_failure = None;
         let old = id.as_ref().and_then(|id| {
             if let Some(end) = attempt::take_ticket(id) {
                 return Some(OldEnd::Stored(end));
@@ -45,19 +47,34 @@ impl LaunchObservation {
             capture::capture(id.channel(), pane)
                 .map(|capture| OldEnd::Replacement(Box::new(capture)))
                 .inspect_err(|reason| {
-                    tracing::warn!(channel = id.channel(), pane,
-                    pid = ?crate::services::platform::tmux::pane_pid(pane), pgid = ?None::<u32>,
-                    attempt_state = ?id, reason, "Codex replacement End not captured")
+                    capture_failure = Some((
+                        reason.clone(),
+                        crate::services::platform::tmux::pane_pid(pane),
+                    ));
                 })
                 .ok()
         });
-        Self { id, old }
+        Self {
+            id,
+            old,
+            capture_failure,
+        }
     }
 
     pub(crate) fn prepare(&mut self, context: &BindingContext) {
         let Some(id) = &self.id else {
             return;
         };
+        if context.launch_mode == "fresh"
+            && context.expected_native_session_id.is_none()
+            && context.source_policy.as_deref() == Some("shadow")
+            && let Some((reason, pid)) = self.capture_failure.take()
+            && !super::mutant("capture_reason_removed")
+        {
+            tracing::warn!(channel = id.channel(), pane = id.pane(), ?pid,
+                pgid = ?None::<u32>, attempt_state = ?id, reason,
+                "Codex replacement End not captured");
+        }
         let Some(old) = self.old.take() else {
             return;
         };
@@ -68,7 +85,8 @@ impl LaunchObservation {
             || context.expected_native_session_id.is_some()
             || context.source_policy.as_deref() != Some("shadow")
         {
-            warn(
+            diagnostic(
+                false,
                 id.channel(),
                 id.pane(),
                 &old,
@@ -85,7 +103,7 @@ impl LaunchObservation {
         tc::with_tmux_source_authority(id.pane(), |authority| {
             let phase = attempt::phase_under(id, authority);
             if !attempt::put_candidate_under(id, authority, candidate) {
-                tracing::warn!(channel = id.channel(), pane = id.pane(), pid = ?None::<u32>,
+                tracing::debug!(channel = id.channel(), pane = id.pane(), pid = ?None::<u32>,
                     pgid = ?None::<u32>, attempt_state = ?phase, reason = "attempt superseded",
                     "Codex successor Seal not recorded");
             }
@@ -101,7 +119,7 @@ impl LaunchObservation {
             if attempt::bound_under(id, authority, &context.execution_nonce) {
                 retry_bound_candidate(id.channel(), authority, &context.execution_nonce);
             } else {
-                tracing::warn!(channel = id.channel(), pane = id.pane(), pid = ?None::<u32>,
+                tracing::debug!(channel = id.channel(), pane = id.pane(), pid = ?None::<u32>,
                     pgid = ?None::<u32>, attempt_state = ?attempt::phase_under(id, authority),
                     reason = "spawn attempt superseded", "Codex successor Seal not recorded");
             }
@@ -156,7 +174,8 @@ pub(crate) fn retry_bound_candidate(
                     Failure::Pending(reason) => (true, reason),
                     Failure::Rejected(reason) => (false, reason),
                 };
-                warn(
+                diagnostic(
+                    !pending,
                     channel,
                     authority.session(),
                     &candidate.old,
@@ -174,6 +193,17 @@ pub(crate) fn retry_bound_candidate(
 }
 
 impl Candidate {
+    pub(super) fn discarded(&self, pane: &str, state: &str, reason: &str) {
+        diagnostic(
+            true,
+            self.context.channel_id.unwrap_or_default(),
+            pane,
+            &self.old,
+            reason,
+            state,
+        );
+    }
+
     fn old_record(&self) -> Result<CodexEnd, Failure> {
         match &self.old {
             OldEnd::Replacement(capture) => Ok(capture.record.clone()),
@@ -232,7 +262,8 @@ impl Candidate {
             .filter(|row| row.seq > old.binding_seq && row.tmux_session == context.tmux_session)
             .collect();
         let Some(first) = pane_rows.first().copied() else {
-            warn(
+            diagnostic(
+                false,
                 channel,
                 authority.session(),
                 &self.old,
@@ -254,7 +285,8 @@ impl Candidate {
         let (seq, source) =
             first_source(first, &pane_rows, &context.execution_nonce).map_err(Failure::Rejected)?;
         let Some(source) = source else {
-            warn(
+            diagnostic(
+                false,
                 channel,
                 authority.session(),
                 &self.old,
@@ -311,7 +343,7 @@ impl Candidate {
         };
         match codex_end::seal(&root, channel, &old.end_id, &successor)? {
             Appended::Durable => {
-                tracing::debug!(
+                tracing::info!(
                     channel,
                     pane = authority.session(),
                     end_id = old.end_id,
@@ -368,8 +400,8 @@ fn first_source<'a>(
     }
 }
 
-fn warn(channel: u64, pane: &str, old: &OldEnd, reason: &str, state: &str) {
-    if super::mutant("seal_reason_removed") {
+fn diagnostic(terminal: bool, channel: u64, pane: &str, old: &OldEnd, reason: &str, state: &str) {
+    if terminal && super::mutant("seal_reason_removed") {
         tracing::warn!("Codex successor Seal not recorded");
         return;
     }
@@ -377,13 +409,25 @@ fn warn(channel: u64, pane: &str, old: &OldEnd, reason: &str, state: &str) {
         OldEnd::Replacement(capture) => (Some(capture.pane_pid), Some(capture.pgid)),
         OldEnd::Stored(_) | OldEnd::Confirmed(_) => (None, None),
     };
-    tracing::warn!(
-        channel,
-        pane,
-        ?pid,
-        ?pgid,
-        attempt_state = state,
-        reason,
-        "Codex successor Seal not recorded"
-    );
+    if terminal {
+        tracing::warn!(
+            channel,
+            pane,
+            ?pid,
+            ?pgid,
+            attempt_state = state,
+            reason,
+            "Codex successor Seal not recorded"
+        );
+    } else {
+        tracing::debug!(
+            channel,
+            pane,
+            ?pid,
+            ?pgid,
+            attempt_state = state,
+            reason,
+            "Codex successor Seal not recorded"
+        );
+    }
 }

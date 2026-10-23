@@ -3455,6 +3455,7 @@ services::codex_tui::session::tests::shared_discovery_primitive_matches_direct_s
 services::codex_tui::session::tests::warm_lookup_picks_up_newer_rollout_after_first_resolve
 services::codex_tui::verified_tail::diagnostic_tests::verified_tail_hold_diagnostic_is_bounded_to_one_warning_per_minute
 services::codex_tui::warm_followup::submit::tests::submitted_warm_binds_current_nonce_and_consumes_clear_ticket_without_a_seal
+services::codex_tui::warm_followup::submit::tests::submitted_warm_capture_failure_warns_only_for_fresh_shadow_successor
 services::codex_tui::warm_followup::submit::tests::tracked_retry_safe_draft_carries_replacement_through_its_pane_kill
 services::codex_tui::warm_followup::submit::verified_warm_tests::actual_verified_warm_consumes_ticket_without_sealing_or_later_reuse
 services::codex_tui::warm_followup::tests::eligibility_requires_all_reuse_axes
@@ -3814,6 +3815,7 @@ services::discord::commands::control::clear_teardown::codex_end_tests::successor
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::first_binding_before_context_blocks_a_later_matching_fresh_source
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::first_live_and_rehydrated_publishers_seal_only_the_observed_fresh
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_source
+services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::next_begin_warns_once_when_discarding_bound_candidate
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::overlapping_dispatch_and_resume_each_discard_adjacent_ticket
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::restart_before_binding_and_old_unsealed_end_do_not_backfill
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::seven_historical_unsealed_ends_stay_unsealed_when_only_the_adjacent_end_seals

@@ -120,6 +120,139 @@ mod tests {
     use crate::services::tui_o::store::codex_end::{self, CodexEnd, ContextSnapshot, EndBasis};
     use std::sync::Arc;
 
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(body: impl FnOnce()) -> String {
+        let logs = Logs::default();
+        let copy = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || copy.clone())
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        tracing::subscriber::with_default(subscriber, body);
+        String::from_utf8(logs.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn submitted_warm_capture_failure_warns_only_for_fresh_shadow_successor() {
+        use crate::services::codex_tui::execution_end::producer::LaunchObservation;
+        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        attempt::reset_for_tests();
+        let channel = 62_841_781;
+        let pane = format!("a2-warm-capture-{}", uuid::Uuid::new_v4().simple());
+        let nonce = "c".repeat(32);
+        let fake = FakeTmux::install(&pane);
+        fake.run_pane(std::process::id());
+        std::fs::write(tc::session_temp_path(&pane, "spawn_nonce"), &nonce).unwrap();
+        assert_eq!(
+            binding_context::execution_context("codex", &nonce).unwrap_err(),
+            "Unreadable"
+        );
+        let dispatch = attempt::begin(Some(channel), Some(&pane));
+        let id = attempt::current(channel, &pane).unwrap();
+        assert!(attempt::take_ticket(&id).is_none());
+        let target = resolved(known(HostKind::Tmux));
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        let mut observation = None;
+        let warm_logs = capture_logs(|| {
+            observation = Some(LaunchObservation::new(Some(channel), &pane));
+            assert!(
+                settle_submit(
+                    &target,
+                    &pane,
+                    CodexFollowupPromptSubmitOutcome::Submitted,
+                    rollout.path(),
+                    0,
+                    "warm input",
+                    (Some(channel), None),
+                )
+                .is_none()
+            );
+        });
+        let calls = fake.take_calls();
+        assert!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("has-session"))
+                .count()
+                >= 2
+        );
+        assert!(calls.iter().any(|call| call.starts_with("display-message")));
+        assert!(calls.iter().all(|call| !call.starts_with("kill-session")));
+        assert_eq!(
+            warm_logs
+                .lines()
+                .filter(|line| line.contains("WARN")
+                    && line.contains("Codex replacement End not captured"))
+                .count(),
+            0,
+            "Submitted warm resume must not warn about unused replacement evidence: {warm_logs}"
+        );
+        tc::with_tmux_source_authority(&pane, |authority| {
+            assert_eq!(
+                attempt::phase_under(&id, authority),
+                Some(Phase::Bound { nonce })
+            );
+        });
+        let root = crate::config::runtime_root().unwrap();
+        let fresh = BindingContext {
+            schema: 1,
+            provider: "codex".into(),
+            created_at: chrono::Utc::now(),
+            execution_nonce: "d".repeat(32),
+            tmux_session: pane.clone(),
+            channel_id: Some(channel),
+            owner_runtime_root: root.display().to_string(),
+            host: None,
+            expected_native_session_id: None,
+            launch_mode: "fresh".into(),
+            provider_root: Some(root.join("codex")),
+            first_prompt_digest: None,
+            source_policy: Some("shadow".into()),
+        };
+        let fresh_logs = capture_logs(|| observation.as_mut().unwrap().prepare(&fresh));
+        let warnings = fresh_logs
+            .lines()
+            .filter(|line| {
+                line.contains("WARN") && line.contains("Codex replacement End not captured")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "fresh shadow must report its deferred capture failure exactly once: {fresh_logs}"
+        );
+        for field in [
+            "pane=",
+            "pid=",
+            "pgid=",
+            "attempt_state=",
+            "reason=",
+            "Unreadable",
+        ] {
+            assert!(warnings[0].contains(field), "missing {field}: {fresh_logs}");
+        }
+        assert!(codex_end::read(&root, channel).unwrap().is_empty());
+        drop(dispatch);
+    }
+
     pub(super) fn install_clear_end(channel: u64, pane: &str) -> CodexEnd {
         use crate::services::tui_o::shadow::SourceId;
         let root = crate::config::runtime_root().unwrap();

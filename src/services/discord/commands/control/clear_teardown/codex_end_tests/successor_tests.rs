@@ -191,7 +191,7 @@ PY
     ]
 }
 
-fn cold_launch(fixture: &Fixture, pane: &Pane) {
+fn cold_launch(fixture: &Fixture, pane: &Pane) -> String {
     let _cli = cold_cli(fixture, pane);
     let successor_process = FixtureProcess::start(0);
     let fake_pid = std::env::split_paths(&std::env::var_os("PATH").unwrap())
@@ -226,6 +226,7 @@ fn cold_launch(fixture: &Fixture, pane: &Pane) {
         pane.source.to_string_lossy(),
         "new source must actually bind"
     );
+    logs
 }
 
 #[test]
@@ -265,7 +266,23 @@ fn explicit_clear_then_actual_absence_fresh_seals_exactly_once() {
         assert!(!report.end_unconfirmed);
     });
     assert!(successor(&pane).is_none());
-    cold_launch(&fixture, &pane);
+    let logs = cold_launch(&fixture, &pane);
+    assert_eq!(
+        logs.lines()
+            .filter(
+                |line| line.contains("WARN") && line.contains("Codex successor Seal not recorded")
+            )
+            .count(),
+        0,
+        "successful actual clear/fresh must not report a failed Seal: {logs}"
+    );
+    assert_eq!(
+        logs.lines()
+            .filter(|line| line.contains("INFO") && line.contains("Codex successor Seal durable"))
+            .count(),
+        1,
+        "the actual fresh successor must report its durable Seal once: {logs}"
+    );
     let seal = successor(&pane).expect("actual !clear followed by actual fresh launch must seal");
     assert_ne!(seal["execution_nonce"], pane.context.execution_nonce);
     assert_eq!(seal["context"]["launch_mode"], "fresh");
@@ -424,10 +441,19 @@ fn late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_sour
         successor(&pane).is_none(),
         "missing prompt evidence stays pending"
     );
-    let warning = logs
+    assert_eq!(
+        logs.lines()
+            .filter(
+                |line| line.contains("WARN") && line.contains("Codex successor Seal not recorded")
+            )
+            .count(),
+        0,
+        "pending evidence remains retryable: {logs}"
+    );
+    let diagnostic = logs
         .lines()
-        .find(|line| line.contains("Codex successor Seal not recorded"))
-        .unwrap_or_else(|| panic!("missing pending-evidence warning: {logs}"));
+        .find(|line| line.contains("DEBUG") && line.contains("Codex successor Seal not recorded"))
+        .unwrap_or_else(|| panic!("missing pending-evidence diagnostic: {logs}"));
     for field in [
         &format!("channel={}", pane.channel),
         "pane=",
@@ -437,7 +463,7 @@ fn late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_sour
         "attempt_state=\"Bound:PendingEvidence\"",
         "reason=\"fresh source evidence pending\"",
     ] {
-        assert!(warning.contains(field), "missing {field}: {warning}");
+        assert!(diagnostic.contains(field), "missing {field}: {diagnostic}");
     }
     let count = p5::records_strict(pane.channel).unwrap().unwrap().len();
     use std::io::Write;
@@ -461,6 +487,56 @@ fn late_first_prompt_retries_on_unchanged_binding_without_retroactive_other_sour
         successor(&pane).unwrap()["execution_nonce"],
         context.execution_nonce
     );
+}
+
+#[test]
+fn next_begin_warns_once_when_discarding_bound_candidate() {
+    let fixture = Fixture::new();
+    let pane = Pane::start(fixture.logs.path());
+    pane.end(true);
+    let _attempt = attempt::begin(Some(pane.channel), Some(&pane.name));
+    let mut observation = LaunchObservation::new(Some(pane.channel), &pane.name);
+    let (context, path, session) = fresh(&pane, None);
+    spawn(&pane, &context, &mut observation);
+    assert!(
+        successor(&pane).is_none(),
+        "the bound Candidate awaits its first binding"
+    );
+
+    let mut next = None;
+    let logs = capture_logs(|| {
+        next = Some(attempt::begin(Some(pane.channel), Some(&pane.name)));
+    });
+    let warnings = logs
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("Codex successor Seal not recorded"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a superseded bound Candidate must warn once: {logs}"
+    );
+    for field in [
+        &format!("channel={}", pane.channel),
+        "pane=",
+        &pane.name,
+        "pid=None",
+        "pgid=None",
+        "attempt_state=",
+        "reason=\"superseded by next attempt\"",
+    ] {
+        assert!(
+            warnings[0].contains(field),
+            "missing {field}: {}",
+            warnings[0]
+        );
+    }
+    publish(&pane, &path, &session, false);
+    assert!(
+        successor(&pane).is_none(),
+        "the superseded Candidate cannot seal later"
+    );
+    drop(next);
 }
 
 #[test]

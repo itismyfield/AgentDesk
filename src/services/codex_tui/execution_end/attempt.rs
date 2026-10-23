@@ -186,6 +186,15 @@ pub(crate) fn begin(channel: Option<u64>, pane: Option<&str>) -> AttemptGuard {
         let tracked = if let Some(entry) = registry.entry(&scope) {
             let overlapping = entry.active.values().any(|phase| *phase == Phase::MaySpawn);
             if !super::mutant("adjacent_removed") {
+                if let Some(candidate) = &entry.candidate
+                    && !super::mutant("begin_discard_warn_removed")
+                {
+                    candidate.value.discarded(
+                        pane,
+                        "Bound:Discarded",
+                        "superseded by next attempt",
+                    );
+                }
                 entry.candidate = None;
                 entry.claims.clear();
             }
@@ -363,6 +372,12 @@ pub(super) fn with_candidate_under(
             && entry.bound.as_ref() == Some(&(slot.id.token, nonce.to_owned()))
         {
             entry.candidate = Some(CandidateSlot { id: slot.id, value });
+        } else {
+            value.discarded(
+                authority.session(),
+                "Bound:Discarded",
+                "candidate reinsertion failed",
+            );
         }
     }
     true
@@ -427,6 +442,13 @@ pub(crate) fn install_ticket(
     };
     if entry.epoch != epoch || entry.active.values().any(|phase| *phase == Phase::MaySpawn) {
         return false;
+    }
+    if let Some(candidate) = &entry.candidate {
+        candidate.value.discarded(
+            authority.session(),
+            "Bound:Discarded",
+            "superseded by confirmed clear",
+        );
     }
     entry.candidate = None;
     entry.claims.clear();
