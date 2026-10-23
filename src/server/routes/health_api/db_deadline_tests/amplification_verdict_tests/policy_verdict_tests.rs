@@ -33,6 +33,9 @@ impl Lane {
     }
 }
 
+/// The mismatch of a hook whose records went to another Context after a hot reload.
+pub(in super::super) const RELOADED: &str = "reloaded";
+
 /// What one policy hook produced: its reads all matched, some did not, or it never ran.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in super::super) enum PolicyOutcome {
@@ -96,14 +99,15 @@ pub(super) fn summarize_policy(run: &RunData, plan: Plan, summary: &mut RunSumma
                 .push(format!("policy_warmup_overlap:{}", lane.name()));
         }
         let mut out = EndpointSummary::default();
-        let mut mismatches = 0;
+        let (mut mismatches, mut reloaded) = (0, 0);
         for hook in attempts.into_iter().filter(|hook| hook.measured) {
             let class = match &hook.outcome {
                 PolicyOutcome::Read if hook.end.is_some() => Class::Completed,
                 PolicyOutcome::Unsent => Class::Unsent,
                 PolicyOutcome::Timeout => Class::Timeout,
-                PolicyOutcome::Mismatch(_) => {
+                PolicyOutcome::Mismatch(detail) => {
                     mismatches += 1;
+                    reloaded += usize::from(detail == RELOADED);
                     Class::Error
                 }
                 _ => Class::Error,
@@ -128,6 +132,11 @@ pub(super) fn summarize_policy(run: &RunData, plan: Plan, summary: &mut RunSumma
             summary
                 .invalid
                 .push(format!("policy_read_mismatch:{}:{mismatches}", lane.name()));
+        }
+        if reloaded > 0 {
+            summary
+                .invalid
+                .push(format!("policy_reloaded:{}:{reloaded}", lane.name()));
         }
         summary.policy.insert(lane, out);
     }

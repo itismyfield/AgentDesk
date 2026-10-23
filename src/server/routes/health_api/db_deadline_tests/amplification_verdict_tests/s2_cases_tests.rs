@@ -93,6 +93,17 @@ fn amplification_verdict_refuses_s2_runs_whose_policy_load_did_not_run() {
     assert!(has(&idle.invalid, "policy_read_mismatch:main"));
     assert!(has(&idle.invalid, "policy_no_completed:main"));
 
+    // A hot reload moved the hooks to another Context, so their records never came back.
+    let mut moved = s2_data("moved", "c", Shape(10_000, 0, None));
+    for hook in moved
+        .policy
+        .iter_mut()
+        .filter(|hook| hook.lane == Lane::Main)
+    {
+        hook.outcome = PolicyOutcome::Mismatch(RELOADED.to_string());
+    }
+    assert!(has(&summarize(&moved).invalid, "policy_reloaded:main"));
+
     // No hook was ever fired: every attempt unsent.
     let mut unsent = s2_data("unsent", "c", Shape(10_000, 0, None));
     for hook in &mut unsent.policy {

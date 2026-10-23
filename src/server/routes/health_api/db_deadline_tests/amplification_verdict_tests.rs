@@ -10,7 +10,9 @@ mod cases_tests;
 mod policy_verdict_tests;
 mod s2_cases_tests;
 
-pub(super) use policy_verdict_tests::{Acquire, Lane, PolicyAttempt, PolicyOutcome, pooled_policy};
+pub(super) use policy_verdict_tests::{
+    Acquire, Lane, PolicyAttempt, PolicyOutcome, RELOADED, pooled_policy,
+};
 use policy_verdict_tests::{candidate_invalid, summarize_policy};
 
 pub(super) const SEC: u64 = 1_000_000;

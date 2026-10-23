@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::amplification_verdict_tests::{Acquire, Lane, Plan, PolicyAttempt, PolicyOutcome, SEC};
+use super::amplification_verdict_tests::{
+    Acquire, Lane, Plan, PolicyAttempt, PolicyOutcome, RELOADED, SEC,
+};
 
 pub(super) const HOOK: &str = "onAmplificationRead";
 /// Main-engine hook spacing unless overridden; the tick engine fires once a second.
@@ -98,14 +100,23 @@ agentdesk.registerPolicy({{
     )
 }
 
+fn policy_dir(root: &Path) -> std::path::PathBuf {
+    root.join("amplification-policies")
+}
+
+/// Written before the database starts, so the file's own creation is old news to the watchers.
+pub(super) fn write_policy(root: &Path) {
+    let dir = policy_dir(root);
+    std::fs::create_dir_all(&dir).expect("create the policy dir");
+    std::fs::write(dir.join("amplification-read.js"), policy_source()).expect("write the policy");
+}
+
 /// Main and tick engines on `pool`, hot reload on as in operation, loading only the test policy.
 pub(super) fn engines(
     root: &Path,
     pool: &sqlx::PgPool,
 ) -> (crate::engine::PolicyEngine, crate::engine::PolicyEngine) {
-    let dir = root.join("amplification-policies");
-    std::fs::create_dir_all(&dir).expect("create the policy dir");
-    std::fs::write(dir.join("amplification-read.js"), policy_source()).expect("write the policy");
+    let dir = policy_dir(root);
     let mut config = crate::config::Config::default();
     config.policies.dir = dir;
     config.policies.hot_reload = true;
@@ -215,13 +226,20 @@ pub(super) async fn drive_hooks(
     attempts
 }
 
-/// A returned hook counts as read only when the policy recorded all ten values as expected.
+/// A returned hook counts as read only when the policy recorded all ten values as expected; a
+/// probe hook missing from this Context means a hot reload moved later hooks to another one.
 pub(super) fn settle_reads(engine: &crate::engine::PolicyEngine, attempts: &mut [PolicyAttempt]) {
+    let probe =
+        engine.try_fire_hook_by_name(HOOK, serde_json::json!({ "lane": "probe", "seq": 0 }));
     let recorded: BTreeMap<String, String> = engine
         .eval_js::<String>("JSON.stringify(globalThis.__ampReads || {})")
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
+    let missing = match probe.is_ok() && !recorded.contains_key("probe:0") {
+        true => RELOADED,
+        false => "unrecorded",
+    };
     for attempt in attempts {
         if attempt.outcome != PolicyOutcome::Read {
             continue;
@@ -230,7 +248,7 @@ pub(super) fn settle_reads(engine: &crate::engine::PolicyEngine, attempts: &mut 
         match recorded.get(&key).map(String::as_str) {
             Some("read") => {}
             Some(detail) => attempt.outcome = PolicyOutcome::Mismatch(detail.to_string()),
-            None => attempt.outcome = PolicyOutcome::Mismatch("unrecorded".to_string()),
+            None => attempt.outcome = PolicyOutcome::Mismatch(missing.to_string()),
         }
     }
 }

@@ -83,6 +83,9 @@ fn measure(out: &Path) {
     let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     std::fs::write(runtime_dir.join("release-source.json"), MANIFEST).expect("write manifest");
+    if profile == Profile::S2 {
+        policy::write_policy(&root);
+    }
 
     let infra = runtime("amp-infra", 2);
     let db = infra.block_on(async {
