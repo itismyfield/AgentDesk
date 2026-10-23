@@ -177,7 +177,6 @@ async fn legacy_actual_clear_ignores_unreadable_consent_storage() {
         &ProviderKind::Claude,
         channel,
         "/clear",
-        super::super::SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -267,7 +266,6 @@ async fn actual_user_default_clear_settlement(retired: bool) {
         &provider,
         channel,
         "/clear",
-        super::super::SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
