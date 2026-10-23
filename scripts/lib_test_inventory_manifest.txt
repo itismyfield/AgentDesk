@@ -1046,6 +1046,7 @@ engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
 engine::ops::pipeline_ops::auto_queue_phase_gate_js_contract_tests::quickjs_phase_gate_declarations_match_rust_registry_serialization
 engine::ops::read_bridge::contract_tests::policy_read_bridge_bounds_connecting_by_the_acquire_timeout_or_an_earlier_deadline
 engine::ops::read_bridge::contract_tests::policy_read_bridge_deadline_and_context_isolation
+engine::ops::read_bridge::contract_tests::policy_read_bridge_engines_read_through_their_own_source
 engine::ops::read_bridge::contract_tests::policy_read_bridge_reuses_context_resources
 engine::ops::read_bridge::epoch_tests::policy_read_bridge_returns_connections_and_threads_across_engine_epochs
 engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
@@ -1462,6 +1463,10 @@ server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_c
 server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_refuses_s2_runs_whose_policy_load_did_not_run
 server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_refuses_to_compare_runs_of_different_profiles
 server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_withholds_the_policy_p99_while_hooks_never_finished
+server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_a_run_whose_server_pool_acquire_failed
+server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_s3_runs_whose_claims_did_not_reach_sql
+server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_to_compare_s3_runs_under_different_conditions
+server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_withholds_the_claim_p99_while_claims_never_finished
 server::routes::health_api::db_deadline_tests::health_handler_acquire_budget_public_and_detail
 server::routes::health_api::db_deadline_tests::health_handler_cold_pool_is_bounded_and_marked_slow
 server::routes::health_api::db_deadline_tests::health_handler_db_deadline_covers_late_queries
@@ -1675,6 +1680,8 @@ server::routes::voice_config::tests::put_body_rejects_duplicate_dashboard_aliase
 server::routes::voice_config::tests::put_voice_config_keeps_disk_secrets
 server::routes::voice_config::tests::version_changes_when_voice_alias_changes
 server::startup_preflight::tests::startup_preflight_runs_the_resolved_check_without_propagating_failure
+server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_panic_fails_the_claim_before_any_sql
+server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_yields_runtime_without_changing_snapshot
 server::task_dispatch_claims::replay_tests::replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg
 server::task_dispatch_claims::replay_tests::replay_schema_keeps_actual_dispatch_claim_without_a_hold_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node

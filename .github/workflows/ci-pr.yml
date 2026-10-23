@@ -310,6 +310,7 @@ jobs:
               - 'src/server/routes/stats.rs'
               - 'src/server/routes/tests/auto_queue_preflight_harness_tests.rs'
               - 'src/server/task_dispatch_claims.rs'
+              - 'src/server/task_dispatch_claims/config_read_tests.rs'
               - 'src/server/task_dispatch_claims_replay_tests.rs'
               - 'src/services/agent_quality/regression_alerts.rs'
               - 'src/services/agent_recovery/durable/postgres_tests.rs'

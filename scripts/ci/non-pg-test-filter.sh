@@ -67,6 +67,7 @@ NON_PG_SKIP_ARGS=(
   --skip server::routes::pipeline::stage_save_tests
   --skip server::routes::scheduled_messages::image_input::tests
   --skip server::routes::session_evidence::tests
+  --skip server::task_dispatch_claims::config_read::config_read_tests
   --skip server::task_dispatch_claims::replay_tests
   --skip services::agent_quality::regression_alerts::explicit_decode_fallback_tests
   --skip services::auto_queue::route::campaign_handoff::tests
@@ -408,6 +409,10 @@ NON_PG_FILTER_REPLAY=(
   server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_refuses_s2_runs_whose_policy_load_did_not_run
   server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_refuses_to_compare_runs_of_different_profiles
   server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s2_cases_tests::amplification_verdict_withholds_the_policy_p99_while_hooks_never_finished
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_a_run_whose_server_pool_acquire_failed
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_s3_runs_whose_claims_did_not_reach_sql
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_refuses_to_compare_s3_runs_under_different_conditions
+  server::routes::health_api::db_deadline_tests::amplification_verdict_tests::s3_cases_tests::amplification_verdict_withholds_the_claim_p99_while_claims_never_finished
   server::routes::memory_api::request_body_tests::detect_memory_backend_force_local_overrides_active_memento
   server::routes::memory_api::request_body_tests::detect_memory_backend_uses_local_when_memento_runtime_unavailable
   server::routes::memory_api::request_body_tests::detect_memory_backend_uses_memento_when_runtime_config_is_active

@@ -97,6 +97,7 @@ src/server/routes/session_evidence_tests.rs
 src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
+src/server/task_dispatch_claims/config_read_tests.rs
 src/server/task_dispatch_claims_replay_tests.rs
 src/services/agent_quality/regression_alerts.rs
 src/services/agent_recovery/durable/postgres_tests.rs
@@ -517,6 +518,7 @@ server::routes::scheduled_messages::image_input::tests
 server::routes::scheduled_messages::postgres_tests
 server::routes::session_evidence::tests
 server::routes::stats::memento_feedback_stats_pg_tests
+server::task_dispatch_claims::config_read::config_read_tests
 server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
@@ -1350,6 +1352,7 @@ engine::ops::kanban_ops::tests::set_status_raw_pg_windows_rework_over_stale_pass
 engine::ops::message_ops::tests::policy_dynamic_source_rejected_before_insert_pg
 engine::ops::read_bridge::contract_tests::policy_read_bridge_bounds_connecting_by_the_acquire_timeout_or_an_earlier_deadline
 engine::ops::read_bridge::contract_tests::policy_read_bridge_deadline_and_context_isolation
+engine::ops::read_bridge::contract_tests::policy_read_bridge_engines_read_through_their_own_source
 engine::ops::read_bridge::contract_tests::policy_read_bridge_reuses_context_resources
 engine::ops::read_bridge::epoch_tests::policy_read_bridge_returns_connections_and_threads_across_engine_epochs
 engine::ops::timeouts_ops::host_repair::tests::legacy_row_repairs_match_the_base_policy_writes_pg
@@ -1524,6 +1527,8 @@ server::routes::session_evidence::tests::session_evidence_missing_raw_identity_i
 server::routes::session_evidence::tests::session_evidence_provider_channels_ignore_unbound_history_pg
 server::routes::session_evidence::tests::session_evidence_stale_working_pending_is_observation_only_pg
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
+server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_panic_fails_the_claim_before_any_sql
+server::task_dispatch_claims::config_read::config_read_tests::claim_config_read_yields_runtime_without_changing_snapshot
 server::task_dispatch_claims::replay_tests::replay_hold_prevents_actual_dispatch_claim_and_expired_lease_reclaim_pg
 server::task_dispatch_claims::replay_tests::replay_schema_keeps_actual_dispatch_claim_without_a_hold_pg
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_acquires_first_per_node_semaphore_on_preferred_node
