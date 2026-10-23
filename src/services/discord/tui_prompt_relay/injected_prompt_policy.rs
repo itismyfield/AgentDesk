@@ -7,13 +7,6 @@
 //! parent. Items are `pub(super)` and re-imported by the parent via
 //! `use self::injected_prompt_policy::{...}`, so call sites are unchanged.
 
-use super::*;
-
-// #3075: the terminal sanitizer is service-level so prompt observation can use
-// it before Discord relay state exists; `tui_task_card` delegates to that same
-// definition. The ASCII truncator remains task-card owned. The parent's glob
-// (`use super::*`) does not re-export these `use`-imported names, so the child
-// module imports them directly.
 use super::super::response_sanitizer::subagent_notification_card;
 use super::super::tui_task_card::strip_terminal_controls;
 
@@ -302,6 +295,7 @@ pub(super) fn format_ssh_direct_prompt_notification(
     super::super::session_notice::subtext("⌨️", prompt)
 }
 
+#[cfg(test)]
 pub(super) fn format_subagent_notification_card(tmux_session_name: &str, prompt: &str) -> String {
     subagent_notification_card::format_subagent_notification_card(Some(tmux_session_name), prompt)
 }

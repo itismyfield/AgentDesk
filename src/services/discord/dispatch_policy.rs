@@ -530,19 +530,6 @@ pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
         .await
 }
 
-/// Cached lookup for the notify bot's Discord user id. Used by the message
-/// router to classify incoming messages as `BackgroundTrigger` turns —
-/// see `TurnKind` in `router/message_handler.rs` and the race-handler
-/// preservation rule from #796.
-pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
-    shared: &SharedData,
-) -> Option<u64> {
-    let registry = shared.health_registry()?;
-    registry
-        .utility_bot_user_id(super::bot_role::UtilityBotRole::Notify)
-        .await
-}
-
 pub(in crate::services::discord) fn should_phase2_recover_message(
     message_id: u64,
     checkpoint: Option<u64>,

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 const CHANNEL: u64 = 72_280_700;
 const TARGET: &str = "channel:72280700";
-const SESSION: &str = "AgentDesk-claude-notify-inline-cc";
+const SESSION: &str = "fixture-host:AgentDesk-claude-notify-inline-cc";
 const ORIGINAL: &str = "♻️ 이전 대화 이어가기 실패\n사유: **new** reason\n복구: retained";
 const REASON: &str = "lifecycle.session_resume_failed";
 const NOTIFY: &str = "notify-inline-test-token";

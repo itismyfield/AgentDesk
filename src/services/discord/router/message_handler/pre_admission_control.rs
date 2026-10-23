@@ -54,10 +54,10 @@ pub(super) fn route(
     }
     // 4. goals-disabled carve-out. `classify_codex_goal_command` matches `/goal`
     //    case-sensitively and `raw_slash_invocation_parts` keeps raw case, so
-    //    this branch lowercases itself; otherwise `/GOAL clear` would fall
+    //    this branch compares case-insensitively; otherwise `/GOAL clear` would fall
     //    through and be refused as an unsupported command.
     if raw_slash_invocation_parts(user_text)
-        .is_some_and(|(raw_name, _)| raw_name.to_ascii_lowercase() == "/goal")
+        .is_some_and(|(raw_name, _)| raw_name.eq_ignore_ascii_case("/goal"))
     {
         return PreAdmissionRoute::Continue(GoalCommandKind::NotGoal);
     }
