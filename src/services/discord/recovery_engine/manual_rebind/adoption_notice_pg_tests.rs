@@ -12,9 +12,7 @@ type Seen = Arc<Mutex<Vec<(String, String, String, serde_json::Value)>>>;
 /// row and the worker's real drain must post it through the provider bot and settle it `sent`.
 #[tokio::test]
 async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("root");
     let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
