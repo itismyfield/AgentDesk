@@ -384,14 +384,14 @@ async fn clear_specific_idle_recap_card(
     let _ = clear_recap_pointer(pool, session_key, message_id).await;
 }
 
-/// Test-only deletion mutations; production always keeps the card and pointer guards.
+/// Test-only cleanup mutations; production retains the claim and card guards.
 #[cfg(test)]
-fn recap_cleanup_mutant(name: &str) -> bool {
+pub(in crate::services::discord) fn recap_cleanup_mutant(name: &str) -> bool {
     std::env::var("ADK_RECAP_CLEANUP_MUTANT").ok().as_deref() == Some(name)
 }
 
 #[cfg(test)]
-mod recap_cleanup_tests {
+pub(in crate::services::discord) mod recap_cleanup_tests {
     use super::*;
     use axum::{
         Json, Router,
@@ -400,7 +400,7 @@ mod recap_cleanup_tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn discord(
+    pub(in crate::services::discord) async fn discord(
         content: &str,
         with_button: bool,
     ) -> (
@@ -447,11 +447,38 @@ mod recap_cleanup_tests {
     }
 
     async fn seed(pool: &PgPool, message: i64) {
-        sqlx::query("INSERT INTO sessions (session_key, provider, idle_recap_message_id, idle_recap_channel_id) VALUES ('recap-cleanup', 'claude', $1, 777)")
-            .bind(message).execute(pool).await.unwrap();
+        seed_for_channel(pool, message, 777).await;
     }
 
-    async fn pointer(pool: &PgPool) -> Option<i64> {
+    pub(in crate::services::discord) async fn seed_for_channel(
+        pool: &PgPool,
+        message: i64,
+        channel: u64,
+    ) {
+        sqlx::query("INSERT INTO sessions (session_key, provider, idle_recap_message_id, idle_recap_channel_id) VALUES ('recap-cleanup', 'claude', $1, $2)")
+            .bind(message).bind(channel as i64).execute(pool).await.unwrap();
+    }
+
+    pub(in crate::services::discord) async fn assert_cleared(
+        pool: &PgPool,
+        deletes: &AtomicUsize,
+        boundary: &str,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pointer(pool).await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{boundary} must clear the recorded idle-card pointer"));
+        assert_eq!(
+            deletes.load(Ordering::SeqCst),
+            1,
+            "{boundary} must delete the captured idle card exactly once"
+        );
+    }
+
+    pub(in crate::services::discord) async fn pointer(pool: &PgPool) -> Option<i64> {
         sqlx::query_scalar(
             "SELECT idle_recap_message_id FROM sessions WHERE session_key = 'recap-cleanup'",
         )

@@ -184,7 +184,20 @@ pub(super) async fn claim_tui_direct_synthetic_turn_prepared(
     let active_turn_nonce = admitted_actor.turn_nonce().map(str::to_owned);
     identity.register_episode(active_turn_nonce.as_deref());
 
-    // The original actor allocation owns this save and its failure cleanup.
+    let recap_pool = shared.pg_pool.as_ref().cloned();
+    #[cfg(test)]
+    let recap_pool = recap_pool.filter(|_| {
+        !crate::services::discord::session_idle_cleanup::recap_cleanup_mutant("skip_tui_cleanup")
+    });
+    if let Some(pool) = recap_pool
+        && let Some(http) = shared.serenity_http_or_token_fallback()
+    {
+        crate::services::discord::session_idle_cleanup::spawn_clear_captured_idle_recap_for_channel(
+            http, pool, channel_id.get(),
+        ).await;
+    }
+
+    // The lookup can yield to a successor; recheck the admitted actor before saving.
     if !bridge_handoff::actor_is_current(shared, channel_id, anchor_message_id, &admitted_actor)
         .await
     {
