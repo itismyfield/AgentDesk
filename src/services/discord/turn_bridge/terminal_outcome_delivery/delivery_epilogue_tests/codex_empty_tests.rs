@@ -216,9 +216,9 @@ fn replay(driver: &TerminalDeliveryDriver, case: &str) -> NativeTail {
             "previous_nonempty: managed nonempty completion finishes promptly: {messages:?}"
         );
         assert_eq!(
-            messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result == "current native answer")).count(),
+            messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } | StreamMessage::CodexTuiTerminalDone { result, .. } if result == "current native answer")).count(),
             1,
-            "previous_nonempty: one Done retains the current answer"
+            "previous_nonempty: one Done retains the current answer: {messages:?}"
         );
         assert_eq!(
             messages
@@ -364,6 +364,11 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
             driver.gateway = Arc::new(crate::services::discord::gateway::HeadlessGateway);
             assert!(!driver.gateway.can_deliver_directly());
         }
+        let headless_rest = if order == "headless" {
+            Some(discord::shared_state::test_rest::recording_mock(727_600, DRIVER_CHANNEL_ID).await)
+        } else {
+            None
+        };
         let _state = lock_dedupe();
         let selected = [(DRIVER_CHANNEL_ID, RuntimeHandoffKind::CodexTui)];
         let _o = crate::services::tui_o::cutover::test_override::force_channels(if o {
@@ -398,6 +403,16 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
             inflight::load_inflight_state(&ProviderKind::Codex, DRIVER_CHANNEL_ID).is_none(),
             "inflight removed"
         );
+        if let Some((calls, _)) = headless_rest.as_ref() {
+            assert!(
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, _)| method == "POST"),
+                "headless delivery is confirmed by the isolated REST mock"
+            );
+        }
         if order != "headless" {
             let bodies = driver.published_bodies.lock().unwrap().clone();
             let writes = driver.observations();
