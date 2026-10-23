@@ -6,7 +6,7 @@ pub(super) fn needs_reconciliation(
     clients: &CardDeliveryClients,
     claimed: &ClaimedCard,
 ) -> bool {
-    if event.payload.is_completion_card() {
+    if !claimed.post_started || event.payload.is_completion_card() {
         return false;
     }
     let desired = clients.for_event(event);

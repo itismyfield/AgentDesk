@@ -60,7 +60,7 @@ use supervision::{LegacySessionRelayConsumer, run_idle_jsonl_relay_loop};
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
 mod relay_format;
-mod task_notification_context;
+pub(in crate::services::discord) mod task_notification_context;
 mod terminal_handoff;
 pub(in crate::services::discord) mod turn_parser;
 use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
@@ -68,11 +68,11 @@ use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
-    idle_jsonl_current_eof, idle_jsonl_payload_contains_init_event,
-    idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
-    idle_jsonl_prepare_dedup_shared, idle_jsonl_relay_source_for_matched,
-    idle_jsonl_session_has_init, idle_jsonl_suppressed_range_action, idle_relay_range_action,
-    prune_idle_jsonl_session_state, read_jsonl_range,
+    idle_jsonl_current_eof, idle_jsonl_payload_contains_schedule_wakeup_setup,
+    idle_jsonl_payload_contains_user_event, idle_jsonl_prepare_dedup_shared,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
+    idle_jsonl_suppressed_range_action, idle_relay_range_action, prune_idle_jsonl_session_state,
+    read_jsonl_range,
 };
 use self::task_notification_context::ensure_card_and_route;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
@@ -550,7 +550,7 @@ impl SessionBoundDiscordRelaySink {
                     None,
                 );
                 return short_controller::deliver_short_replace_via_controller(
-                    gateway.unwrap_or(&live_gateway),
+                    short_controller::choose_gateway(gateway, &live_gateway),
                     short_controller::SinkShortReplaceCtx {
                         shared: &shared,
                         provider: &provider,

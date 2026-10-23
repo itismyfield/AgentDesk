@@ -17,28 +17,61 @@ async fn receipt(
     event: &TaskCardEvent,
     payload: &str,
 ) -> Result<Option<CardClaim>, sqlx::Error> {
-    let candidates = sqlx::query(
-        "SELECT id,source_fingerprint,discord_message_id,bot_key,payload_fingerprint,legacy_render_count
-         FROM task_notification_monitor_receipt WHERE channel_id=$1 AND provider=$2
-           AND (($3::TEXT IS NOT NULL AND source_fingerprint=$3)
-                OR (event_key=$4 AND ($3::TEXT IS NULL OR source_fingerprint IS NULL)
-                    AND (payload_fingerprint=$5 OR legacy_render_count IS NOT NULL)))
-         ORDER BY CASE WHEN source_fingerprint=$3 THEN 0 ELSE 1 END,id FOR UPDATE",
-    ).bind(event.scope.channel_id as i64).bind(&event.scope.provider)
-        .bind(&event.scope.terminal_delivery_fingerprint).bind(&event.scope.event_key).bind(payload)
-        .fetch_all(&mut *connection).await?;
-    let row = candidates.into_iter().find(|row| {
-        (event.scope.terminal_delivery_fingerprint.is_some()
-            && event.scope.terminal_delivery_fingerprint
-                == row.get::<Option<String>, _>("source_fingerprint"))
-            || row.get::<String, _>("payload_fingerprint") == payload
-            || row
+    let mut row = if let Some(source) = &event.scope.terminal_delivery_fingerprint {
+        sqlx::query(
+            "SELECT id,source_fingerprint,discord_message_id,bot_key,payload_fingerprint,legacy_render_count
+             FROM task_notification_monitor_receipt
+             WHERE channel_id=$1 AND provider=$2 AND source_fingerprint=$3
+             FOR UPDATE",
+        )
+        .bind(event.scope.channel_id as i64)
+        .bind(&event.scope.provider)
+        .bind(source)
+        .fetch_optional(&mut *connection)
+        .await?
+    } else {
+        None
+    };
+    if row.is_none() {
+        row = sqlx::query(
+            "SELECT id,source_fingerprint,discord_message_id,bot_key,payload_fingerprint,legacy_render_count
+             FROM task_notification_monitor_receipt
+             WHERE channel_id=$1 AND provider=$2 AND event_key=$3 AND payload_fingerprint=$4
+               AND ($5::TEXT IS NULL OR source_fingerprint IS NULL)
+             ORDER BY id LIMIT 1 FOR UPDATE",
+        )
+        .bind(event.scope.channel_id as i64)
+        .bind(&event.scope.provider)
+        .bind(&event.scope.event_key)
+        .bind(payload)
+        .bind(&event.scope.terminal_delivery_fingerprint)
+        .fetch_optional(&mut *connection)
+        .await?;
+    }
+    if row.is_none() {
+        let candidates = sqlx::query(
+            "SELECT id,source_fingerprint,discord_message_id,bot_key,payload_fingerprint,legacy_render_count
+             FROM task_notification_monitor_receipt
+             WHERE channel_id=$1 AND provider=$2 AND event_key=$3
+               AND legacy_render_count IS NOT NULL
+               AND ($4::TEXT IS NULL OR source_fingerprint IS NULL)
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(event.scope.channel_id as i64)
+        .bind(&event.scope.provider)
+        .bind(&event.scope.event_key)
+        .bind(&event.scope.terminal_delivery_fingerprint)
+        .fetch_all(&mut *connection)
+        .await?;
+        row = candidates.into_iter().find(|candidate| {
+            candidate
                 .get::<Option<i64>, _>("legacy_render_count")
                 .is_some_and(|count| {
                     content_hash(&event.payload.legacy_render(count as u64))
-                        == row.get::<String, _>("payload_fingerprint")
+                        == candidate.get::<String, _>("payload_fingerprint")
                 })
-    });
+        });
+    }
     let Some(row) = row else {
         return Ok(None);
     };
@@ -259,7 +292,7 @@ pub(super) async fn claim(
          terminal_delivery_fingerprint=CASE WHEN $6 THEN terminal_delivery_fingerprint ELSE $10 END,
          lease_owner=$11, lease_expires_at=NOW()+make_interval(secs=>$12), last_error=NULL,
          updated_at=NOW() WHERE id=$1
-         RETURNING bot_key,discord_nonce,revision,update_count,rendered_content",
+         RETURNING bot_key,discord_nonce,revision,update_count,rendered_content, post_started_at",
     )
     .bind(row.get::<i64, _>("id"))
     .bind(if editing { "card_posted" } else { "posting" })

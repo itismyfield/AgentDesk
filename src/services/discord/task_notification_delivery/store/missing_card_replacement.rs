@@ -108,7 +108,7 @@ async fn claim_missing_card_replacement_pg(
              WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
                AND delivery_state = 'posting'
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
-             RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+             RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -159,7 +159,7 @@ async fn claim_missing_card_replacement_pg(
            AND delivery_state = 'card_posted' AND discord_message_id = $5
            AND revision = $6 AND content_hash = $13 AND bot_key = $14
            AND (lease_owner IS NULL OR lease_expires_at <= NOW())
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(channel_id)
     .bind(&scope.provider)

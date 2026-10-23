@@ -69,7 +69,7 @@ pub(super) async fn claim_card_pg(
          VALUES ($1, $2, $3, $4, 'card', 'posting', $5, $6, 1, 1, $7, $8,
                  $9, NOW() + make_interval(secs => $10), $11)
          ON CONFLICT DO NOTHING
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(channel_id)
     .bind(&scope.provider)
@@ -203,7 +203,7 @@ pub(super) async fn claim_card_pg(
                AND revision = $12
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -231,7 +231,7 @@ pub(super) async fn claim_card_pg(
                AND delivery_state = 'card_posted'
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -275,7 +275,7 @@ pub(super) async fn claim_card_pg(
                AND delivery_state IN ('footer_only', 'posting')
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)

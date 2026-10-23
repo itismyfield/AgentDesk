@@ -87,6 +87,7 @@ pub(super) struct ClaimedCard {
     pub(super) action: ClaimAction,
     pub(super) new_terminal_completion: bool,
     pub(super) monitor: Option<monitor::Observation>,
+    pub(super) post_started: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +273,9 @@ fn claimed_from_row(
         action,
         new_terminal_completion: false,
         monitor: None,
+        post_started: row
+            .get::<Option<DateTime<Utc>>, _>("post_started_at")
+            .is_some(),
     })
 }
 
@@ -506,7 +510,7 @@ async fn prepare_replacement_pg(
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
            AND lease_owner = $5 AND delivery_state = 'card_posted'
            AND discord_message_id = $6
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(db_id(claimed.scope.channel_id, "channel_id")?)
     .bind(&claimed.scope.provider)
@@ -767,6 +771,7 @@ fn memory_claim(
         action,
         new_terminal_completion: false,
         monitor: None,
+        post_started: row.post_started_at.is_some(),
     }
 }
 

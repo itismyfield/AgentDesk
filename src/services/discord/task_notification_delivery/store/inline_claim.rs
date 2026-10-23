@@ -124,7 +124,7 @@ async fn repin(
         row.get::<Option<String>, _>("terminal_delivery_fingerprint")
             .or_else(|| scope.terminal_delivery_fingerprint.clone())
     };
-    let changed=sqlx::query("UPDATE task_notification_card_state SET surface_owner='card',delivery_state='posting',bot_key=$2,rendered_content=$3,content_hash=$4,discord_message_id=NULL,revision=$5,discord_nonce=$6,update_count=CASE WHEN $7 THEN 1 ELSE update_count END,terminal_delivery_fingerprint=$8,lease_owner=$9,lease_expires_at=NOW()+make_interval(secs=>$10),updated_at=NOW() WHERE id=$1 RETURNING bot_key,discord_nonce,revision,update_count,rendered_content")
+    let changed=sqlx::query("UPDATE task_notification_card_state SET surface_owner='card',delivery_state='posting',bot_key=$2,rendered_content=$3,content_hash=$4,discord_message_id=NULL,revision=$5,discord_nonce=$6,update_count=CASE WHEN $7 THEN 1 ELSE update_count END,terminal_delivery_fingerprint=$8,lease_owner=$9,lease_expires_at=NOW()+make_interval(secs=>$10),updated_at=NOW() WHERE id=$1 RETURNING bot_key,discord_nonce,revision,update_count,rendered_content, post_started_at")
         .bind(row.get::<i64,_>("id")).bind(target_bot).bind(content).bind(hash).bind(revision)
         .bind(stable_nonce(scope,revision)).bind(next).bind(&fingerprint).bind(&owner).bind(LEASE_SECONDS)
         .fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;

@@ -1914,7 +1914,8 @@ src/
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── inline_contract_tests/
-│   │   │   │   └── replacement_receipt_tests.rs
+│   │   │   │   ├── replacement_receipt_tests.rs
+│   │   │   │   └── retention_tests.rs
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
 │   │   │   │   ├── inline_claim.rs
@@ -1931,6 +1932,7 @@ src/
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
+│   │   │   ├── card_render_tests.rs
 │   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── footer_retirement_tests.rs

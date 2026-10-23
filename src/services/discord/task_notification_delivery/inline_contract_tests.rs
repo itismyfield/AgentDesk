@@ -12,6 +12,45 @@ use crate::dispatch::test_support::DispatchPostgresTestDb;
 mod footer_surface_tests;
 #[path = "inline_contract_tests/replacement_receipt_tests.rs"]
 mod replacement_receipt_tests;
+#[path = "inline_contract_tests/retention_tests.rs"]
+mod retention_tests;
+
+#[tokio::test]
+async fn reconciliation_guard_only_accepts_started_posts_pg() {
+    let (database, pool) = database("reconciliation guard start boundary").await;
+    let unstarted = monitor(Some("guard-never-started"), 1);
+    let claim = seed_old_card(&pool, &unstarted, "provider:claude", false, None).await;
+    assert!(
+        !inline_delivery::needs_reconciliation(&unstarted, &clients("claude"), &claim),
+        "a never-started row must not enter legacy POST reconciliation"
+    );
+    let event = event(
+        "guard-started",
+        Some("guard-started"),
+        None,
+        "Monitor event: \"coord events\"",
+        "latest event",
+    );
+    seed_old_card(&pool, &event, "notify", false, Some(0)).await;
+    let claim = store::claim_card(
+        Some(&pool),
+        &event.scope,
+        "notify",
+        LEGACY_CONTENT,
+        &content_hash(LEGACY_CONTENT),
+        StoreIntent::Promotion,
+    )
+    .await
+    .unwrap();
+    let CardClaim::Owned(claim) = claim else {
+        panic!("started row must be claimable")
+    };
+    assert!(
+        inline_delivery::needs_reconciliation(&event, &clients("claude"), &claim),
+        "a started legacy row must retain its reconciliation guard"
+    );
+    database.drop().await;
+}
 
 const CHANNEL: u64 = 72_280_100;
 const LEGACY_MESSAGE: u64 = 72_280_900;
@@ -1077,34 +1116,84 @@ async fn legacy_source_free_old_renderer_replay_survives_new_provider_revision_p
     database.drop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn monitor_auto_turn_stream_context_uses_provider_inline_once_pg() {
     let (database, pool) = database("MonitorAutoTurn actual stream context entrypoint").await;
-    let context = TaskNotificationContext::from_stream_json(
-        &serde_json::json!({
-            "type": "system",
-            "subtype": "task_notification",
-            "task_notification_kind": "monitor_auto_turn",
-            "task_id": "monitor-auto-turn",
-            "summary": "heartbeat event",
-        }),
-        &StreamLineState::new(),
-    )
-    .expect("the actual stream entrypoint must recognize a status-free MonitorAutoTurn");
+    let context = |summary| {
+        TaskNotificationContext::from_stream_json(
+            &serde_json::json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_notification_kind": "monitor_auto_turn",
+                "task_id": "monitor-auto-turn",
+                "summary": summary,
+            }),
+            &StreamLineState::new(),
+        )
+        .expect("the actual stream entrypoint must recognize a status-free MonitorAutoTurn")
+    };
+    let prior_context = context("before stream promotion");
+    let context = context("heartbeat event");
     assert_eq!(
         context.routing_kind(),
         TaskNotificationKind::MonitorAutoTurn
     );
+    let prior_event = prior_context.to_event(CHANNEL, "claude", "inline-contract-session");
     let event = context.to_event(CHANNEL, "claude", "inline-contract-session");
     let transport = Transport::default();
-    let first = deliver(&pool, &transport, &event).await;
-    assert_eq!(transport.counts(), (1, 0));
-    assert_inline(&transport.latest(), "claude", "📡", "heartbeat event");
+    let first = deliver(&pool, &transport, &prior_event).await;
     let before = snapshot(&pool, &event).await;
     assert_eq!(before.count, 1);
+    assert_inline(
+        &transport.latest(),
+        "claude",
+        "📡",
+        "before stream promotion",
+    );
+
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let promoted = crate::services::discord::session_relay_sink::task_notification_context::confirm_task_context_card(
+        Some(&shared),
+        &clients("claude"),
+        &transport,
+        &shared.ui.placeholder_live_events,
+        CHANNEL,
+        "claude",
+        "inline-contract-session",
+        Some(&context),
+    )
+    .await
+    .expect("the actual stream gate must confirm the current Monitor card")
+    .expect("the Monitor context must resolve a card");
+    assert_eq!(promoted.message_id, first.message_id);
+    assert_eq!(promoted.bot_key, "provider:claude");
+    assert_eq!(
+        transport.counts(),
+        (1, 0),
+        "stream Promotion must not count or publish an unobserved Monitor event"
+    );
+    assert_eq!(
+        snapshot(&pool, &event).await,
+        before,
+        "stream Promotion must preserve the last observed Monitor payload and count"
+    );
+
+    let observed = deliver(&pool, &transport, &event).await;
+    assert_eq!(observed.message_id, first.message_id);
+    assert_eq!(transport.counts(), (1, 1));
+    assert_inline(&transport.latest(), "claude", "📡", "heartbeat event");
+    let after = snapshot(&pool, &event).await;
+    assert_eq!(
+        after.count, 2,
+        "only the subsequent TUI Observation increments the Monitor count"
+    );
+    assert!(after.content.ends_with(" · 2회"));
     let replay = deliver(&pool, &transport, &event).await;
     assert_eq!(replay.message_id, first.message_id);
-    assert_eq!(transport.counts(), (1, 0));
-    assert_eq!(snapshot(&pool, &event).await, before);
+    assert_eq!(transport.counts(), (1, 1));
+    assert_eq!(snapshot(&pool, &event).await, after);
+    drop(shared);
     database.drop().await;
 }

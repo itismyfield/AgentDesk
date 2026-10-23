@@ -485,6 +485,7 @@ jobs:
               - 'src/services/discord/task_notification_delivery/footer_surface_tests.rs'
               - 'src/services/discord/task_notification_delivery/inline_contract_tests.rs'
               - 'src/services/discord/task_notification_delivery/inline_contract_tests/replacement_receipt_tests.rs'
+              - 'src/services/discord/task_notification_delivery/inline_contract_tests/retention_tests.rs'
               - 'src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'

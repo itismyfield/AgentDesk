@@ -90,9 +90,12 @@ impl TaskCardPayload {
                     "✅"
                 } else if header.starts_with('❌') {
                     "❌"
+                } else if header.starts_with("⚠️") {
+                    "⚠️"
                 } else {
                     "📋"
                 };
+                let header = header.strip_prefix(icon).unwrap_or(header).trim_start();
                 let body = lines
                     .filter(|line| !line.trim().is_empty())
                     .collect::<Vec<_>>()
@@ -122,3 +125,7 @@ impl TaskCardPayload {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "card_render_tests.rs"]
+mod tests;
