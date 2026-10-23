@@ -3,7 +3,7 @@ use super::v2_types::SnapshotV2;
 use super::*;
 
 pub(crate) enum SnapshotRead {
-    Legacy(Vec<PendingQueueItem>, Option<SnapshotMeta>),
+    Legacy(Vec<PendingQueueItem>, Option<Box<SnapshotMeta>>),
     ReadOnlyV2(Box<SnapshotV2>),
 }
 
@@ -14,7 +14,7 @@ pub(crate) fn inspect(content: &str) -> Result<SnapshotRead, String> {
         return Ok(SnapshotRead::ReadOnlyV2(Box::new(snapshot)));
     }
     let (items, meta) = parse_snapshot(content)?;
-    Ok(SnapshotRead::Legacy(items, meta))
+    Ok(SnapshotRead::Legacy(items, meta.map(Box::new)))
 }
 
 /// Runs before any unlink, marker change or legacy publish, even in an adopted actor.

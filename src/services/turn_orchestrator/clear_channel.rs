@@ -42,7 +42,7 @@ pub(crate) struct ClearPersistence {
     pub(crate) retried: Vec<&'static str>,
     /// Writes that failed twice; a restart may restore what they would have removed.
     pub(crate) failed: Vec<&'static str>,
-    /// The mailbox did not answer or the dispatch marker was unreadable, so the count is unknown.
+    /// Durable input could not be counted, or the mailbox did not answer.
     pub(crate) count_unknown: bool,
     /// The running turn's ids with its absorbed sources and a starting turn's: never waiting.
     pub(crate) not_waiting: Vec<MessageId>,

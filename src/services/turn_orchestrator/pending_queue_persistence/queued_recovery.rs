@@ -33,7 +33,7 @@ pub(crate) fn load_pending_queues_checked(
     for (channel, snapshot) in catalog.snapshots {
         let items = match snapshot {
             SnapshotRead::Legacy(items, meta) => {
-                if items.is_empty() && meta.as_ref().is_some_and(super::SnapshotMeta::is_set) {
+                if items.is_empty() && meta.as_deref().is_some_and(super::SnapshotMeta::is_set) {
                     tracing::debug!(%channel, "metadata-only queue remains in recovery catalog");
                 }
                 items
