@@ -318,7 +318,7 @@ pub(super) enum Drawn {
     Rows(Vec<String>),
 }
 
-/// Wrap predictions are optional: the full captured body can prove any printable paste.
+/// Wrap predictions are optional for ownership; an unfolded body must remain fully visible.
 pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
     let (width, height) = size?;
     if width < 6
@@ -329,7 +329,26 @@ pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn>
     {
         return None;
     }
-    Some(drawn(frame, size).unwrap_or(Drawn::Body))
+    if let Some(drawn) = drawn(frame, size) {
+        return Some(drawn);
+    }
+    let columns = width - 4;
+    let rows: usize = frame
+        .split('\n')
+        .map(|line| match wrap(line, columns) {
+            Some(rows) => rows.len(),
+            None => {
+                // Word wrapping may use half a row; only unknown lines need this upper bound.
+                let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+                if bound <= columns {
+                    1
+                } else {
+                    2 * bound.div_ceil(columns) + 1
+                }
+            }
+        })
+        .sum();
+    (rows <= height.saturating_sub(10) / 2).then_some(Drawn::Body)
 }
 
 /// Proves the complete composer body, or a whole placeholder only when the paste should fold.

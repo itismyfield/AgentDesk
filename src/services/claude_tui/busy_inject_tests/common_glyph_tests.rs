@@ -5,7 +5,14 @@ const CORPUS: &str = "한글 English 123 'plain' \"quotes\" “둥근” ‘따�
 #[test]
 fn common_glyphs_inject_after_full_body_or_folded_confirmation_at_any_length() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    for repetitions in [1, 3, 6, 7, 20] {
+    // Unfolded bodies must fit the composer; folded bodies need only their placeholder.
+    for (repetitions, width, height, chunk) in [
+        (1, 46, 37, 20),
+        (3, 160, 40, 70),
+        (6, 160, 40, 70),
+        (7, 46, 37, 20),
+        (20, 46, 37, 20),
+    ] {
         let payload = CORPUS.repeat(repetitions);
         let expected = frame("iMessage", "200", "ann", NONCE, &payload);
         // Deliberately different wrap positions: ownership depends on the full body.
@@ -20,13 +27,13 @@ fn common_glyphs_inject_after_full_body_or_folded_confirmation_at_any_length() {
             expected
                 .chars()
                 .collect::<Vec<_>>()
-                .chunks(23)
+                .chunks(chunk)
                 .map(|chunk| chunk.iter().collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         };
         let fake = Fake::new();
-        fake.answers("attach", &["0,,46,37"]);
+        fake.answers("attach", &[&format!("0,,{width},{height}")]);
         fake.caps(&[busy_empty(), screen(&shown, "")]);
         fs::write(fake.dir.path().join("on_enter"), enqueue_record(&expected)).unwrap();
         assert_eq!(
@@ -69,5 +76,20 @@ fn common_glyph_confirmation_never_submits_a_foreign_or_partial_body() {
                 "shown={shown}"
             );
         }
+    }
+}
+
+#[test]
+fn common_glyphs_only_inject_if_visible_or_folded_and_veto_overflow_before_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for payload in [format!("“{}”", "가".repeat(300)), "가".repeat(300)] {
+        let expected = frame("iMessage", "200", "ann", NONCE, &payload);
+        assert!(expected.encode_utf16().count() <= 800);
+        let fake = Fake::new();
+        fake.answers("attach", &["0,,46,37"]);
+        fake.caps(&[busy_empty()]);
+        let outcome = fake.run_text(&payload, &MULTILINE_TIMING);
+        assert_eq!(fake.keys(), (0, 0, 0), "overflow must not reach the pane");
+        assert_eq!(outcome, Outcome::NotSent(Veto::UnpredictableRender));
     }
 }

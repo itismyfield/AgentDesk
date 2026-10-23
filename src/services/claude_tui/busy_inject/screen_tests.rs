@@ -347,13 +347,9 @@ fn common_glyph_plans_accept_direct_and_preserve_the_flat_stash_boundary() {
         "😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷",
         "漢字 かな カナ （全角）、。！？",
     ] {
-        for count in [1, 3, 20] {
+        for (count, size) in [(1, (46, 37)), (3, (160, 40)), (20, (160, 40))] {
             let frame = super::frame("discord", "200", "ann", "abcd1234", &corpus.repeat(count));
-            assert_eq!(
-                plan_for(BUSY, &frame, (46, 37)),
-                Ok(None),
-                "{corpus} x{count}"
-            );
+            assert_eq!(plan_for(BUSY, &frame, size), Ok(None), "{corpus} x{count}");
         }
         let flat = super::frame("discord", "200", "ann", "abcd1234", corpus);
         assert_eq!(
@@ -361,4 +357,25 @@ fn common_glyph_plans_accept_direct_and_preserve_the_flat_stash_boundary() {
             Ok(Some(vec!["js".into()]))
         );
     }
+}
+
+#[test]
+fn common_glyph_body_plans_require_all_unfolded_rows_to_be_visible() {
+    let payload = format!("“{}”", "가".repeat(300));
+    let frame = super::frame("discord", "200", "ann", "abcd1234", &payload);
+    assert!(frame.encode_utf16().count() <= 800);
+    assert_eq!(
+        plan_for(BUSY, &frame, (46, 37)),
+        Err(Veto::UnpredictableRender)
+    );
+    assert_eq!(plan_for(BUSY, &frame, (160, 40)), Ok(None));
+    let measured = super::frame("discord", "200", "ann", "abcd1234", &"가".repeat(300));
+    assert_eq!(
+        plan_for(BUSY, &measured, (46, 37)),
+        Err(Veto::UnpredictableRender)
+    );
+    // Exact rows for the measured line leave room for the unknown line's upper bound.
+    let mixed = format!("{}\n“{}”", "가".repeat(63), "가".repeat(80));
+    let frame = super::frame("discord", "200", "ann", "abcd1234", &mixed);
+    assert_eq!(plan_for(BUSY, &frame, (46, 37)), Ok(None));
 }
