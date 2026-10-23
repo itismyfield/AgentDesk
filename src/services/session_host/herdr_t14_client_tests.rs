@@ -16,7 +16,7 @@ use crate::services::session_host::herdr::{observe, pane_probe::start_text, prov
 use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
 
 const PINNED_SHA256: &str = "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157";
-const FAKE_TEMPLATE: &str = include_str!("fixtures/herdr_t14_fake_provider.py");
+const FAKE_TEMPLATE: &str = include_str!("../../../tests/fixtures/herdr_t14_fake_provider.py");
 const PTY_DRIVER: &str = r####"#!/usr/bin/python3
 """Native Herdr terminal attach driven through a real OS PTY, never socket input RPC."""
 import fcntl
