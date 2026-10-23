@@ -319,6 +319,8 @@ enum DriverCall {
 struct DriverObservation {
     call: DriverCall,
     marker_at_entry: bool,
+    #[cfg(unix)]
+    content: String,
 }
 
 /// What the driver's terminal replace resolves to.
@@ -380,13 +382,15 @@ impl DriverGateway {
         }
     }
 
-    fn observe(&self, call: DriverCall) {
+    fn observe(&self, call: DriverCall, _content: &str) {
         self.observations
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .push(DriverObservation {
                 call,
                 marker_at_entry: self.marker.load(Ordering::Acquire),
+                #[cfg(unix)]
+                content: _content.to_owned(),
             });
     }
 }
@@ -397,7 +401,7 @@ impl TurnGateway for DriverGateway {
         channel_id: ChannelId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        self.observe(DriverCall::Send);
+        self.observe(DriverCall::Send, _content);
         self.sink(channel_id, SinkOp::Post, _content);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
@@ -430,7 +434,7 @@ impl TurnGateway for DriverGateway {
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.observe(DriverCall::Edit);
+        self.observe(DriverCall::Edit, _content);
         self.sink(channel_id, SinkOp::Patch, _content);
         let yields = self.yields_per_call;
         Box::pin(async move {
@@ -444,7 +448,7 @@ impl TurnGateway for DriverGateway {
         _channel_id: ChannelId,
         _message_id: MessageId,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.observe(DriverCall::Delete);
+        self.observe(DriverCall::Delete, "");
         let yields = self.yields_per_call;
         Box::pin(async move {
             Yields(yields).await;
@@ -458,7 +462,7 @@ impl TurnGateway for DriverGateway {
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
-        self.observe(DriverCall::Replace);
+        self.observe(DriverCall::Replace, _content);
         self.sink(channel_id, SinkOp::Patch, _content);
         let (yields, behaviour) = (self.yields_per_call, self.replace);
         let completed = Arc::clone(&self.completed_publications);

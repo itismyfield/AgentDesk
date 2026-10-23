@@ -363,6 +363,15 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
             "inflight removed"
         );
         let bodies = driver.published_bodies.lock().unwrap().clone();
+        let writes = driver.observations();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| write.content.contains("응답 내용 없이 턴을 종료"))
+                .count(),
+            usize::from(order != "commentary_only"),
+            "send, edit and replace show one empty-response notice"
+        );
         assert_eq!(
             bodies
                 .iter()
@@ -387,7 +396,7 @@ async fn managed_empty_native_turn_releases_mailbox_through_finalizer_and_shows_
             assert_eq!(footer_posts.len(), 1, "O posts the native completion once");
             assert!(footer_posts[0].starts_with("-# ✅"));
             assert!(
-                !bodies.iter().any(|body| body.contains("-# ✅")),
+                !writes.iter().any(|write| write.content.contains("-# ✅")),
                 "bridge does not duplicate O's footer"
             );
         }
