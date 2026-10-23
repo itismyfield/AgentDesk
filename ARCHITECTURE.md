@@ -1002,6 +1002,8 @@ src/
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
+│   │   │   │   │   ├── codex_end_tests/
+│   │   │   │   │   │   └── capture_fold_tests.rs
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   ├── clear_end_record_tests.rs
 │   │   │   │   │   ├── codex_end_record.rs
@@ -3425,6 +3427,7 @@ src/
 │   │   │   │   ├── commit/
 │   │   │   │   │   └── resume_companions.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs

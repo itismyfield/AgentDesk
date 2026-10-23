@@ -3794,6 +3794,9 @@ services::discord::commands::control::clear_teardown::codex_end_tests::actual_lo
 services::discord::commands::control::clear_teardown::codex_end_tests::actual_same_pane_dispatch_during_clear_preserves_end_but_invalidates_its_ticket
 services::discord::commands::control::clear_teardown::codex_end_tests::an_attempt_active_before_clear_prevents_a_ticket_and_later_attempts_change_the_epoch
 services::discord::commands::control::clear_teardown::codex_end_tests::an_immutable_context_changed_during_kill_invalidates_confirmation
+services::discord::commands::control::clear_teardown::codex_end_tests::capture_fold_tests::current_resume_companion_pair_allows_exact_clear_end_and_ticket
+services::discord::commands::control::clear_teardown::codex_end_tests::capture_fold_tests::two_historical_resume_companion_pairs_allow_exact_clear_end_and_ticket
+services::discord::commands::control::clear_teardown::codex_end_tests::capture_fold_tests::unsettled_or_malformed_companion_history_never_records_end_or_ticket
 services::discord::commands::control::clear_teardown::codex_end_tests::codex_clear_records_exact_end_after_marker_cleanup
 services::discord::commands::control::clear_teardown::codex_end_tests::context_owner_root_host_and_source_mismatches_record_nothing
 services::discord::commands::control::clear_teardown::codex_end_tests::explicit_clear_command_path_records_end_with_only_its_existing_kill

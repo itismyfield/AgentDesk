@@ -6,9 +6,7 @@ use crate::services::process::{ProcessIdentity, ProcessIdentityProbe};
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_o::store::codex_end::{CodexEnd, ContextSnapshot, EndBasis};
 use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
-use crate::services::tui_prompt_dedupe::binding_events::{
-    self as p5, BindingEvent, BindingTarget, SourceId,
-};
+use crate::services::tui_prompt_dedupe::binding_events as p5;
 
 pub(crate) struct CapturedOldExecution {
     pub(super) record: CodexEnd,
@@ -47,11 +45,10 @@ fn capture_under(
     {
         return Err("execution context channel/pane/host/owner mismatch".into());
     }
-    let events = p5::records_strict(channel)
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("binding log corrupt: {e:?}"))?;
-    let (source, binding_nonce) =
-        pane_source(&events, channel, pane).ok_or("pane source unsettled")?;
+    let settled = p5::codex::settled::read(channel, pane)
+        .map_err(|e| format!("binding log corrupt: {e}"))?
+        .ok_or("pane source unsettled")?;
+    let (source, binding_nonce) = (settled.source, settled.execution_nonce);
     if context.launch_mode == "fresh"
         && binding_nonce.as_deref() != Some(nonce.as_str())
         && !super::mutant("nonce_unchecked")
@@ -88,7 +85,7 @@ fn capture_under(
         owner_runtime_root: context.owner_runtime_root.clone(),
         provider_root,
         source,
-        binding_seq: events.last().map_or(0, |e| e.seq),
+        binding_seq: settled.binding_seq,
         captured_at: Utc::now(),
         ended_at: Utc::now(),
         basis: EndBasis::ExplicitClear,
@@ -101,39 +98,6 @@ fn capture_under(
         pgid,
         epoch,
     })
-}
-
-fn pane_source(
-    events: &[BindingEvent],
-    channel: u64,
-    pane: &str,
-) -> Option<(SourceId, Option<String>)> {
-    if events.iter().any(|event| event.channel_id != channel) {
-        return None;
-    }
-    let (mut source, mut pending) = (None, None);
-    for event in events.iter().filter(|e| e.tmux_session == pane) {
-        if event.provider != "codex" {
-            return None;
-        }
-        match &event.new {
-            BindingTarget::Source(current) => {
-                source = Some((current.clone(), event.execution_nonce.clone()));
-                pending = None;
-            }
-            BindingTarget::Pending { .. } => pending = Some(event.seq),
-            BindingTarget::Resolved {
-                pending_seq,
-                source: current,
-            } if pending == Some(*pending_seq) => {
-                source = Some((current.clone(), event.execution_nonce.clone()));
-                pending = None;
-            }
-            BindingTarget::Resolved { .. } => return None,
-            BindingTarget::Rejected { .. } => {}
-        }
-    }
-    source.filter(|_| pending.is_none())
 }
 
 fn process_group(pid: u32) -> Option<u32> {
