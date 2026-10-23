@@ -3,9 +3,11 @@
 use super::*;
 
 #[cfg(test)]
-static NEW_TERMINAL_CLAIM_RACE_HOOK: LazyLock<
-    Mutex<Option<(String, std::sync::Arc<tokio::sync::Barrier>)>>,
-> = LazyLock::new(|| Mutex::new(None));
+type TerminalClaimRaceHook = Option<(String, std::sync::Arc<tokio::sync::Barrier>)>;
+
+#[cfg(test)]
+static NEW_TERMINAL_CLAIM_RACE_HOOK: LazyLock<Mutex<TerminalClaimRaceHook>> =
+    LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 pub(in crate::services::discord::task_notification_delivery) fn install_new_terminal_claim_race_hook(
