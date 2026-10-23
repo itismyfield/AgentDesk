@@ -81,6 +81,7 @@ src/server/routes/dispatched_sessions_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/health_api/db_deadline_tests.rs
+src/server/routes/health_api/db_deadline_tests/amplification_profile_tests.rs
 src/server/routes/health_api/host_guard_tests.rs
 src/server/routes/health_api/kv_gate_tests.rs
 src/server/routes/herdr_legacy_tests.rs
@@ -500,6 +501,7 @@ server::routes::dispatched_sessions::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::health_api::db_deadline_tests
+server::routes::health_api::db_deadline_tests::amplification_profile_tests
 server::routes::health_api::host_guard_tests
 server::routes::health_api::response::kv_gate_tests
 server::routes::herdr_legacy_tests
@@ -1469,6 +1471,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_deliver
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_sends_only_to_configured_owner_dm
+server::routes::health_api::db_deadline_tests::amplification_profile_tests::health_amplification_profile
 server::routes::health_api::db_deadline_tests::health_handler_acquire_budget_public_and_detail
 server::routes::health_api::db_deadline_tests::health_handler_cold_pool_is_bounded_and_marked_slow
 server::routes::health_api::db_deadline_tests::health_handler_db_deadline_covers_late_queries

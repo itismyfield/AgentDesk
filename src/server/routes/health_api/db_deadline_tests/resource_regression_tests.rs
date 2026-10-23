@@ -17,7 +17,7 @@ const REQUESTS: usize = 16;
 const MAX_CONNECTIONS: usize = 8;
 /// Blocking threads the runtime may still start lazily after the warm-up; a per-request leak
 /// adds one per request, 16 a segment.
-const THREAD_SLACK: usize = 4;
+pub(super) const THREAD_SLACK: usize = 4;
 
 /// In the test's own process, reruns `test` (a full test path) alone in a new process of this
 /// binary and checks that it ran and passed; returns false inside that rerun.
@@ -59,14 +59,14 @@ pub(super) fn rerun_alone(test: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn process_threads() -> usize {
+pub(super) fn process_threads() -> usize {
     std::fs::read_dir("/proc/self/task")
         .expect("read /proc/self/task")
         .count()
 }
 
 #[cfg(target_os = "macos")]
-fn process_threads() -> usize {
+pub(super) fn process_threads() -> usize {
     // SAFETY: `info` is a plain C struct the call fills, and `size` is its exact size.
     let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
@@ -85,7 +85,7 @@ fn process_threads() -> usize {
 
 /// An unobservable thread count fails the test instead of passing it unmeasured.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_threads() -> usize {
+pub(super) fn process_threads() -> usize {
     panic!("no process thread count on this platform")
 }
 
