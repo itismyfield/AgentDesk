@@ -115,13 +115,16 @@ async fn automatic_retention_eventually_retires_old_sources_past_unknown_budget(
     let chain = chain_named(66, true, |n| {
         (format!("h{n}"), row(&format!("n{n}"), "unknown age"))
     });
+    let first = (1..66).min_by_key(|n| chain.key(*n)).unwrap();
     let target = (1..66).max_by_key(|n| chain.key(*n)).unwrap();
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&row(&format!("n{target}"), "old dialogue")).unwrap();
-    value["timestamp"] = serde_json::json!((Utc::now() - TimeDelta::days(8)).to_rfc3339());
-    let mut bytes = serde_json::to_vec(&value).unwrap();
-    bytes.push(b'\n');
-    std::fs::write(&chain.paths[target], bytes).unwrap();
+    for source in [first, target] {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&row(&format!("n{source}"), "old dialogue")).unwrap();
+        value["timestamp"] = serde_json::json!((Utc::now() - TimeDelta::days(8)).to_rfc3339());
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&chain.paths[source], bytes).unwrap();
+    }
     let _current = chain.current();
     let actor = run(&chain);
     for _ in 0..200 {
@@ -135,6 +138,16 @@ async fn automatic_retention_eventually_retires_old_sources_past_unknown_budget(
         chain.hops(),
         "fixture must finish its output"
     );
+    automatic(&chain, &actor, idle(true)).await;
+    assert!(
+        chain.cursor(first).retired,
+        "[auto:budget_seed] first job must create a retired receipt"
+    );
+    assert!(
+        !chain.cursor(target).retired,
+        "[auto:budget_seed] last candidate must remain beyond the first job's budget"
+    );
+    // The remaining 64 pending sources must all get a turn beside the first job's receipt.
     for _ in 0..3 {
         automatic(&chain, &actor, idle(true)).await;
         if chain.cursor(target).retired {
