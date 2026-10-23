@@ -193,7 +193,7 @@ async fn scenario(server: &mut RealServer, mut config: crate::config::Config) {
         context_path.to_string_lossy().as_ref()
     );
     server.write_control(
-        &json!({"provider":"claude","session_id":session,"transcript_path":path,
+        &json!({"provider":"claude","execution_node":NODE,"session_id":session,"transcript_path":path,
         "hook_url":url,"binding_envelope":envelope,
         "prompts":[FIRST,DIRECT,FOLLOWUP],"answers":ANSWERS}),
     );

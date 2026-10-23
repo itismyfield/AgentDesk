@@ -52,6 +52,12 @@ def atomic(path, value):
         os.fsync(f.fileno())
     os.replace(temp, path)
 
+def provider_error(kind, value, trace):
+    atomic(CASE / "provider-error.json", {"type": kind.__name__, "message": str(value)})
+    sys.__excepthook__(kind, value, trace)
+
+sys.excepthook = provider_error
+
 def wait_file(path):
     end = time.monotonic() + 90
     while not pathlib.Path(path).is_file():
@@ -106,7 +112,9 @@ assert control["provider"] == PROVIDER
 assert len(control["prompts"]) == len(control["answers"]) == 3
 assert hashlib.sha256(context.read_bytes()).hexdigest() == seen["context_sha256"]
 context_data = json.loads(context.read_text())
-assert context_data["provider"] == PROVIDER and context_data["host"] == "herdr"
+assert context_data["provider"] == PROVIDER
+# BindingContext.host identifies the execution node; the actual pane proves its backend.
+assert context_data["host"] == control["execution_node"]
 assert context_data["launch_mode"] == "fresh"
 args = sys.argv[1:]
 assert not any(arg in ("resume", "continue") or arg.startswith(("--resume", "--continue")) for arg in args)

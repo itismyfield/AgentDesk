@@ -235,7 +235,7 @@ async fn scenario(server: &mut RealServer, home: &Path) {
         .join("sessions")
         .join(format!("rollout-t14-{session}.jsonl"));
     server.write_control(
-        &json!({"provider":"codex", "session_id":session, "transcript_path":path,
+        &json!({"provider":"codex", "execution_node":NODE, "session_id":session, "transcript_path":path,
         "hook_url":hook_url, "binding_envelope":envelope,
         "prompts":[FIRST_ACTUAL,DIRECT_ACTUAL,FOLLOWUP_ACTUAL], "answers":ANSWERS_ACTUAL}),
     );
