@@ -703,7 +703,7 @@ if run_check cargo "Generate env + CLI reference docs (README source-of-truth ta
 fi
 
 if run_check cargo "Inventory prod/test split regression tests (#4394)"; then
-"$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split
+"$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split tests.test_giant_deadline_entrypoints
 fi
 
 if run_check contracts "Structural Clippy allow occurrence ratchet (#4519)"; then
