@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::TestRuntimeRootGuard;
 
 #[tokio::test]
 async fn v2_real_owner_entry_and_persistent_notice_are_independent_pg() {
