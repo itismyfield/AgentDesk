@@ -497,7 +497,6 @@ src/
 │   │   ├── herdr_terminate_tests.rs
 │   │   ├── home_metrics.rs
 │   │   ├── hooks.rs
-│   │   ├── idle_recap.rs
 │   │   ├── kakao_calendar.rs
 │   │   ├── kanban.rs
 │   │   ├── kanban_repos.rs
@@ -690,6 +689,8 @@ src/
 │   │   │   ├── stash.rs
 │   │   │   ├── stash_tests.rs
 │   │   │   └── submit.rs
+│   │   ├── busy_inject_tests/
+│   │   │   └── common_glyph_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -1245,11 +1246,6 @@ src/
 │   │   │   └── root_replaced.rs
 │   │   ├── host_teardown_gate/
 │   │   │   └── test_support.rs
-│   │   ├── idle_recap/
-│   │   │   ├── card.rs
-│   │   │   ├── context_display.rs
-│   │   │   ├── relay_integrity.rs
-│   │   │   └── scrollback.rs
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
@@ -1272,6 +1268,8 @@ src/
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
+│   │   │   │   ├── custody_notice/
+│   │   │   │   │   └── retention.rs
 │   │   │   │   ├── loader_gate_observation_tests/
 │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   ├── boot_custody.rs
@@ -2549,6 +2547,7 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
+│   │   │   ├── supervisor_injected_tests.rs
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
 │   │   │   ├── supervisor_tests.rs
@@ -2558,6 +2557,7 @@ src/
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
+│   │   │   ├── injected.rs
 │   │   │   ├── orphan_sweep.rs
 │   │   │   ├── queue_repair.rs
 │   │   │   ├── reaction_set.rs
@@ -2656,8 +2656,6 @@ src/
 │   │   ├── host_teardown_gate.rs
 │   │   ├── http.rs
 │   │   ├── idle_detector.rs
-│   │   ├── idle_recap.rs
-│   │   ├── idle_recap_interaction.rs
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
@@ -2791,8 +2789,6 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   ├── watcher_summary_authority_tests.rs
 │   │   └── zombie_foreground_release.rs
-│   ├── discord_custody/
-│   │   └── tests.rs
 │   ├── dispatch_gate/
 │   │   ├── auth_profiles/
 │   │   │   └── selection_tests.rs
@@ -3310,6 +3306,7 @@ src/
 │   │   │   ├── binding.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
+│   │   │   ├── clear_end_empty_session_tests.rs
 │   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
@@ -3581,6 +3578,9 @@ src/
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs
+│   ├── turn_summary_line/
+│   │   ├── quota.rs
+│   │   └── quota_tests.rs
 │   ├── writer_protocol/
 │   │   ├── namespace/
 │   │   │   ├── catalog.rs
@@ -3603,7 +3603,6 @@ src/
 │   ├── codex_tmux_wrapper.rs
 │   ├── cswap.rs
 │   ├── discord_config_audit.rs
-│   ├── discord_custody.rs
 │   ├── discord_dm_reply_store.rs
 │   ├── disk_monitor.rs
 │   ├── dispatch_gate.rs

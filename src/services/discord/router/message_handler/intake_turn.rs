@@ -1216,8 +1216,6 @@ pub(super) async fn handle_text_message(
             started,
             channel_id,
             user_msg_id,
-            &provider,
-            adk_session_key.as_deref(),
         )
         .await;
 

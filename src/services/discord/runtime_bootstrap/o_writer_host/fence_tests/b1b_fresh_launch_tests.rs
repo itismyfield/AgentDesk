@@ -464,7 +464,6 @@ async fn scenario(retained: bool, before: BeforeInput) {
                     &ProviderKind::Codex,
                     serenity::ChannelId::new(CANARY_CHANNEL),
                     "!clear",
-                    crate::services::discord::commands::SoftClearNotifyMode::Suppress,
                 )
                 .await
                 .unwrap();

@@ -165,7 +165,7 @@ async fn fresh_proof_preserves_tool_cards_and_turn_summary_after_deriver_reset()
         [
             "-# ▸ Bash  cargo check  ·",
             "fresh tool answer",
-            "-# ✅ 7초"
+            "-# ⏱️ 7초"
         ],
         "fresh N3 deriver reset must keep tool cards and turn summaries enabled: {alarms:?}"
     );

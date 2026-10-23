@@ -786,3 +786,32 @@ fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
         Some(Some("target".into()))
     );
 }
+
+#[test]
+fn common_glyphs_use_body_confirmation_without_a_width_allowlist() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let payload = "한글 English 123 “둥근” ‘따옴표’ … — (괄호) 😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷 漢字 かな カナ （全角）、。！？".repeat(3);
+    let expected = frame(SOURCE, AUTHOR, NAME, NONCE, &payload);
+    let shown = format!(
+        "\n› {}\n\n  90% context left\n",
+        expected.replace('\n', "\n  ")
+    );
+    let fake = Fake::new();
+    fake.answers("attach", &["0,,80,50"]);
+    fake.answers("cap", &[&fixture("busy_empty.ansi"), &shown]);
+    fake.accept_into(T);
+    let on_enter = fake.dir.path().join("on_enter");
+    let record = fs::read_to_string(&on_enter).unwrap().replace(
+        &serde_json::to_string(&frame_text()).unwrap(),
+        &serde_json::to_string(&expected).unwrap(),
+    );
+    fs::write(on_enter, record).unwrap();
+    assert_eq!(
+        fake.run_with(&FakeLedger::default(), &payload),
+        Outcome::Injected {
+            observed_turn: Some(T.into()),
+            joined: true,
+        }
+    );
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
+}

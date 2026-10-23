@@ -487,7 +487,7 @@
 # the two test mods were already merged into one). Dual-CLEAN (codex + Fable).
 # 2824 -> 2827.
 # #4552: behavior-preserving decomposition lowers 2827 -> 2695 by moving the
-# claim-success request-anchor recording and idle-recap bootstrap into
+# claim-success request-anchor recording into
 # `intake_turn/claim_bootstrap.rs`. The helper remains after the stale-dispatch
 # guard and before the placeholder handoff; won-claim gating and bump-before-
 # captured-clear ordering are unchanged.
@@ -620,9 +620,6 @@
 # its ratchet entry is deleted (win; no baseline raises).
 # #3034 batch-8: lowered 2333 -> 2332 (dropped `assistant_turns` construction site).
 "src/services/discord/watchers/lifecycle.rs" = 2332
-# #3479: idle_recap.rs decomposed (scrollback + context_display submodules) —
-# dropped below the giant threshold, so its ratchet entry is deleted (win; no
-# baseline raises).
 # #3034 batch-8: lowered 2241 -> 2011 (deleted the dead #826/#897/#898 bg-trigger
 # notify-outbox subsystem — build/enqueue/reconcile/parse/rollback).
 # suppressed-label noise, user report 2026-06-12: +38 for provider-aware

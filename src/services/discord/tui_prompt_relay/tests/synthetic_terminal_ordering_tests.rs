@@ -439,7 +439,7 @@ fn terminal_ordering_fixture(
                     assert_eq!(terminal_bodies[0], body,
                         "{source_race:?}/{provider:?}: terminal publication preserves the exact body");
                     if live_completion {
-                        assert!(terminal_bodies[1].starts_with("-# ✅ ") && !terminal_bodies[1].contains('\n'),
+                        assert!(terminal_bodies[1].starts_with("-# ⏱️ ") && !terminal_bodies[1].contains('\n'),
                             "{source_race:?}/{provider:?}: completion summary is a separate single line: {:?}", terminal_bodies[1]);
                     } else {
                         assert_eq!(terminal_bodies.iter().filter(|text| text.starts_with("-# ")).count(), 0,

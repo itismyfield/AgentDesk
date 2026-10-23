@@ -117,7 +117,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 | 경계 | 좌표 | 부수효과 |
 |---|---|---|
-| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, idle recap, node picker, sidecar |
+| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, node picker, sidecar |
 | slash command | `src/services/discord/runtime_bootstrap/gateway_runtime.rs:56–83` | Poise `command_check`와 event handler가 별개 |
 | live 메시지 | `src/services/discord/router/intake_gate.rs:356–650` | 로컬 message-ID dedup, thread 문맥, raw/effective 채널 |
 | DM·첨부 | `src/services/discord/router/intake_gate.rs:650–930` | pending DM 회신 소비, checkpoint, 첨부 admission |
