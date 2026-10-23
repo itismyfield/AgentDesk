@@ -912,7 +912,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 &inflight_state,
                 adk_session_name.as_deref(),
                 &mut last_activity_heartbeat_at,
-            );
+            )
+            .await;
             state_dirty = true;
         }
     }
