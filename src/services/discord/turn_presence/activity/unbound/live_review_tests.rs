@@ -552,9 +552,20 @@ async fn s1e_publication_rechecks_new_related_tmux_session_pg() {
         socket.exists(),
         "live fixture never created its private socket"
     );
+    let channel = rig.channel.get();
+    let live = tokio::task::spawn_blocking(move || observe_inventory(channel))
+        .await
+        .unwrap();
+    assert_eq!(live.inventory, Inventory::Sessions(vec![name]));
+    let probes_before_publication = counter.calls();
     assert!(
         publish(&stamp, &watch).await.is_none(),
         "new related live tmux reused an old empty inventory at publication"
+    );
+    assert_eq!(
+        counter.calls(),
+        probes_before_publication + 1,
+        "publication did not recheck the live inventory"
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -842,7 +853,7 @@ impl InventoryPause {
             quote(&finished),
             crate::services::process::shell_escape(&format!(
                 "error connecting to {} (No such file or directory)",
-                root.join("missing").display()
+                root.canonicalize().unwrap().join("missing").display()
             ))
         );
         let wrapper = bin.join("tmux");
