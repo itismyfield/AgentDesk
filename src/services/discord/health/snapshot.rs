@@ -10,7 +10,7 @@ mod relay_probe;
 pub(super) mod health_observation;
 
 use super::liveness_authority::CaptureCoordinateObservation;
-use super::mailbox::{MailboxHealthSnapshot, QueueParkHealthObservations as ParkObservations};
+use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
 // #5071 T4-B6: `health::reachability` is `#[cfg(unix)]` (see the `mod` decl in
 // `health.rs`), so the composition wiring built on it — this import,
@@ -238,8 +238,6 @@ pub struct DiscordHealthSnapshot {
     restart_marking_short_passes: Vec<discord::inflight::ShortPass>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    queue_park_observation_failures: Vec<super::mailbox::QueueParkObservationFailureSnapshot>,
     /// Mailbox reads that did not answer by the deadline; their channels are not in `mailboxes`
     /// as idle.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -867,7 +865,6 @@ pub(super) async fn build_health_snapshot_with_options(
     let mut watcher_count = 0usize;
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
-    let mut failures = Vec::new();
     let mut read_failures = Vec::new();
     let mut provider_active_turns = 0usize;
     // Read the authority switch once per snapshot. Structural polarity is a
@@ -888,7 +885,7 @@ pub(super) async fn build_health_snapshot_with_options(
     }
 
     let first_reads =
-        health_observation::first_reads(&providers, include_mailbox_details, deadline).await;
+        health_observation::first_reads(&providers, deadline).await;
     for (entry, observations) in providers.iter().zip(&first_reads) {
         let provider_probe = provider_probe::probe_provider(entry, observations);
 
@@ -897,12 +894,6 @@ pub(super) async fn build_health_snapshot_with_options(
         watcher_count += provider_probe.watcher_count;
         recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
         let provider_kind = ProviderKind::from_str(&entry.name);
-        let park = ParkObservations::from_observations(
-            entry,
-            include_mailbox_details,
-            observations,
-            &mut failures,
-        );
         health_observation::record_first_read_failures(
             &entry.name,
             observations,
@@ -917,7 +908,6 @@ pub(super) async fn build_health_snapshot_with_options(
                 registry,
                 entry,
                 provider_kind: &provider_kind,
-                park: &park,
                 include_mailbox_details,
                 #[cfg(unix)]
                 composite_governs_polarity,
@@ -1008,7 +998,6 @@ pub(super) async fn build_health_snapshot_with_options(
         restart_marking_short_passes: discord::inflight::short_passes(),
         providers: provider_entries,
         mailboxes: tmux.with_process_presence(mailbox_entries).await,
-        queue_park_observation_failures: failures,
         mailbox_observation_failures: read_failures,
     }
 }

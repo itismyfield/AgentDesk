@@ -67,7 +67,6 @@ mod queue_dispatch;
 mod queue_io;
 mod queue_marker;
 mod queue_overflow_dlq;
-mod queue_park_ledger;
 mod queue_reactions;
 // #5191: catch-up recovery dedup identity set (queue + active + reservation).
 mod queued_placeholders_store;
@@ -945,7 +944,6 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
-    queue_park_ledger: queue_park_ledger::QueueParkLedger,
     /// Serializes `/resume` rebinds with intake session selection for each channel.
     /// Weak entries let inactive channels disappear once the final intake/resume
     /// guard drops; the map is opportunistically pruned on each lookup, so channel
@@ -1266,7 +1264,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
-        queue_park_ledger: Default::default(),
         session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
@@ -1819,7 +1816,6 @@ async fn apply_queue_exit_feedback(
     channel_id: ChannelId,
     queue_exit_events: &[QueueExitEvent],
 ) {
-    shared.queue_park_ledger.exit(channel_id, queue_exit_events);
     let queue_exit_events: Vec<&QueueExitEvent> = queue_exit_events
         .iter()
         .filter(|event| event.intervention.author_id.get() > 1)
@@ -2125,15 +2121,12 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
-            park.note_session_transition_hold(provider, channel_id);
             return MailboxTakeNextSoftOutcome::default();
         }
     };
-    park.clear_promote_hold(channel_id, "session_transition");
 
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane

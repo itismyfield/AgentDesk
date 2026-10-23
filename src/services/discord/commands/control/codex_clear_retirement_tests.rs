@@ -525,13 +525,6 @@ async fn parked_until_clear(mode: crate::services::codex::CodexSourceMode) {
     assert_eq!(after.intervention_queue.len(), 1);
     assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
     assert!(after.pending_user_dispatch.is_none() && after.cancel_token.is_none());
-    let parked = fixture.shared.queue_park_ledger.project(
-        &fixture.shared,
-        &ProviderKind::Codex,
-        channel,
-        &after,
-    );
-    assert_eq!(parked.owner, Some("codex_verified"), "{parked:?}");
     assert!(
         !fixture
             .fake
