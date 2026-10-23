@@ -217,7 +217,21 @@ async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
         CHANNEL_ID,
     )
     .await;
-    wait_until(WAIT, || rt.marks(message).contains(&"✅".to_string())).await;
+    let shared = rt.h.shared.clone();
+    assert!(
+        wait_until(WAIT, move || {
+            let shared = shared.clone();
+            Box::pin(async move {
+                shared
+                    .turn_view_reconciler
+                    .ops()
+                    .iter()
+                    .any(|op| op.target.message_id.get() == message && op.emoji == '✅' && op.add)
+            })
+        })
+        .await,
+        "idle must complete the message taken by the real intake"
+    );
     let changes: Vec<_> =
         rt.h.shared
             .turn_view_reconciler

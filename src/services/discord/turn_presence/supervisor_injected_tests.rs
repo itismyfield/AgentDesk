@@ -178,6 +178,14 @@ async fn idle_completes_only_its_injections_and_preserves_anchor_and_queue_lifec
         before_b + 2,
         "the other channel retains its own list"
     );
+    assert!(
+        reconciler
+            .ops()
+            .iter()
+            .filter(|op| op.target.message_id.get() == ids[2])
+            .all(|op| op.target.channel_id.get() == b),
+        "another channel's injection must complete in its own channel"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
