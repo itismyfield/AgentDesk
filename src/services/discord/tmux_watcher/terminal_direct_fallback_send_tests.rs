@@ -54,7 +54,7 @@ async fn a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post(
         expected: None,
         range_end: 1,
     };
-    let (mut anchor, mut receipt) = (None, None);
+    let mut anchor = None;
     let sent = replace_or_post_after_edit_failure(
         &http,
         &shared,
@@ -62,7 +62,7 @@ async fn a_failed_edit_keeps_the_claimed_send_counted_through_its_fallback_post(
         "the fallback body",
         recheck,
         Some(BodyClaim::new(CHANNEL, Some(ClaudeTui))),
-        (&mut anchor, &mut receipt),
+        &mut anchor,
     )
     .await;
     server.abort();

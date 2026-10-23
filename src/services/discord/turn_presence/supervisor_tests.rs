@@ -21,6 +21,7 @@ pub(in crate::services::discord) struct LiveSupervisor {
     inner: Supervisor<LiveEffects>,
     provider: ProviderKind,
     channel: u64,
+    _started: Started,
 }
 
 impl LiveSupervisor {
@@ -33,6 +34,7 @@ impl LiveSupervisor {
         channel: u64,
     ) -> Self {
         register(&provider, &[channel]);
+        let started = Started::new(&provider);
         let mut inner = Supervisor::new(Arc::new(LiveEffects {
             shared,
             provider: provider.clone(),
@@ -42,6 +44,7 @@ impl LiveSupervisor {
             inner,
             provider,
             channel,
+            _started: started,
         }
     }
 
@@ -233,6 +236,16 @@ impl Effects for Fake {
         lock(&self.kicks).push((channel, self.since()));
     }
 
+    fn idle(&self, channel: u64) {
+        if let Some(shared) = lock(&self.live_mailbox).clone() {
+            LiveEffects {
+                shared,
+                provider: ProviderKind::Claude,
+            }
+            .idle(channel);
+        }
+    }
+
     async fn legacy_gate_blocked(&self, _: u64) -> bool {
         self.gate_blocked.load(Ordering::SeqCst)
     }
@@ -257,6 +270,9 @@ impl Effects for Fake {
 
 #[path = "supervisor_deadline_tests.rs"]
 mod deadline_tests;
+
+#[path = "supervisor_injected_tests.rs"]
+mod injected_tests;
 
 /// Publishes a presence for `channel` as a running supervisor would.
 pub(crate) fn seed_presence_for_tests(channel: u64, busy: bool) {
@@ -704,4 +720,30 @@ async fn only_confirmed_channels_are_supervised_and_reported() {
         typing,
         ["last_error", "last_ok_at", "late_ok_total", "sent_ok_total"]
     );
+}
+
+#[test]
+fn injection_hourglass_requires_registration_confirmation_and_a_running_supervisor() {
+    let provider = ProviderKind::Unsupported("injection-observation-contract".into());
+    let channel = 7_269_005;
+    let confirmed = TestConfirmation::new(channel);
+    let started = Started::new(&provider);
+    assert!(
+        !observes(&provider, channel),
+        "confirmation alone must not register a channel"
+    );
+    register(&provider, &[channel]);
+    assert!(observes(&provider, channel));
+    drop(confirmed);
+    assert!(
+        !observes(&provider, channel),
+        "registration alone must not confirm turn mode"
+    );
+    let _confirmed = TestConfirmation::new(channel);
+    drop(started);
+    assert!(
+        !observes(&provider, channel),
+        "a stopped supervisor cannot finish hourglasses"
+    );
+    lock(&REGISTERED).remove(provider.as_str());
 }

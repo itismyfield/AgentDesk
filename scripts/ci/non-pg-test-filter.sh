@@ -95,7 +95,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::codex_clear_relaunch_tests
   --skip services::discord::commands::control::codex_clear_retirement_tests
-  --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
   --skip services::discord::commands::tui_passthrough::host_guard_tests
@@ -114,8 +113,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::host_defer_gate::tests
   --skip services::discord::host_key_derivation::tests
   --skip services::discord::idle_cleanup_selector_tests
-  --skip services::discord::idle_recap_interaction::host_guard_tests
-  --skip services::discord::idle_recap_interaction::tests
   --skip services::discord::idle_relay_drift::tests
   --skip services::discord::inflight::host_recovery_guard::keyed_tests
   --skip services::discord::inflight::rebind_reap::tests
@@ -148,9 +145,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::codex_resume_companion_queue_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
-  --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
+  --skip services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
   --skip services::discord::router::message_handler::intake_turn::replay_start_tests
-  --skip services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -165,6 +161,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+  --skip services::discord::session_idle_cleanup::recap_cleanup_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::retired_metadata::tests::pg
@@ -176,6 +173,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
+  --skip services::discord::tmux::watcher_lifecycle::activity::tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
   --skip services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests
@@ -193,9 +191,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests
   --skip services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
-  --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
@@ -229,7 +227,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::routines::agent_executor::reliability::tests
   --skip services::routines::session_control::tests
   --skip services::session_forwarding::tests
-  --skip services::session_host::herdr_clear_adapter::tests
   --skip services::session_host::herdr_gate::tests
   --skip services::session_host::herdr_terminate_real_tests
   --skip services::session_host::session_record::tests
@@ -336,7 +333,6 @@ NON_PG_FILTER_REPLAY=(
   db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
   db::scheduled_messages::attachments_pg_tests::image_byte_limit_matches_immutable_definition_and_outbox_migrations
   db::scheduled_messages::attachments_pg_tests::image_create_json_preserves_optional_contract
-  db::session_transcripts::native_clear_pg_tests::record_and_classification_agree_on_every_row_shape
   engine::ops::config_ops::tests::config_get_raw_keeps_scalar_string_semantics_and_precedence
   engine::ops::config_ops::tests::config_get_raw_never_exposes_the_reserved_runtime_blob_key
   engine::ops::config_ops::tests::config_get_raw_preserves_runtime_blob_json_types
@@ -451,19 +447,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
   services::discord::herdr_terminate::tests::m2_natural_a_then_b_late_settlement_preserves_b
   services::discord::herdr_terminate::tests::m2_unreadable_mailbox_is_never_an_idle_channel
-  services::discord::idle_recap_interaction::tests::claim_database_error_fails_closed_without_injection
-  services::discord::idle_recap_interaction::tests::compact_uses_claimed_recap_target_and_native_prompt
-  services::discord::idle_recap_interaction::tests::concurrent_compact_claims_allow_exactly_one_injection
-  services::discord::idle_recap_interaction::tests::foreign_or_missing_owner_never_claims_local_host_target
-  services::discord::idle_recap_interaction::tests::foreign_session_identity_preserves_pointer_without_claim_or_injection
-  services::discord::idle_recap_interaction::tests::idle_recap_component_router_accepts_all_recap_actions
-  services::discord::idle_recap_interaction::tests::injection_failure_is_terminal_after_claim
-  services::discord::idle_recap_interaction::tests::owner_handoff_after_claim_is_fenced_immediately_before_injection
-  services::discord::idle_recap_interaction::tests::rebinding_cannot_redirect_compact_to_current_channel_session
-  services::discord::idle_recap_interaction::tests::recap_component_message_id_parser_rejects_zero_and_foreign_prefixes
-  services::discord::idle_recap_interaction::tests::recap_prompt_route_rejects_unrelated_custom_ids
-  services::discord::idle_recap_interaction::tests::recap_prompt_route_sends_suggest_to_internal_followup_handler
-  services::discord::idle_recap_interaction::tests::recap_prompt_sent_ephemeral_includes_actual_prompt_text
   services::discord::idle_relay_drift::tests::all_sources_miss_is_no_source
   services::discord::idle_relay_drift::tests::confirmed_dead_orphan_drains_pending_emissions_once
   services::discord::idle_relay_drift::tests::db_channel_disagrees_with_mirror_blocks_misdelivery
@@ -483,6 +466,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
+  services::discord::inflight::removal::custody_notice_tests::custody_retention_boundary_and_symlinks_never_follow_external_paths
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
@@ -584,7 +568,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_gate::busy_inject::payload_tests::failed_download_existing_error_never_reaches_injection
   services::discord::router::intake_gate::busy_inject::payload_tests::incomplete_uploads_and_unresolved_voice_never_attempt_pane_input
   services::discord::router::intake_gate::busy_inject::payload_tests::normal_busy_voice_spec_keeps_readable_ref_uploads_and_no_accepted_payload
-  services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::handoff_path_guard_rejects_commented_anchors_and_coded_stamps
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
@@ -619,6 +602,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_read_failure_and_incomplete_text_refuse
   services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_rollback_scan_requires_wait_and_every_activated_ledger
   services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::discord_mock_tests::discord_mock_duplicate_history_fails_the_restart_assertion
+  services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::discord_mock_tests::discord_mock_ignores_foreign_gets_around_history
   services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::native_output::native_terminal_fixture_has_a_postable_stable_unit_and_idle_boundary
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
@@ -626,7 +611,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b3a1_scoped_probe_excludes_stale_planned_restart
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::scoped_probe_backfills_old_rows_under_the_sidecar_lock
-  services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
+  services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_prefers_live_tmux_over_divergent_db_cwd
@@ -695,6 +680,15 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::a_markerless_endpoint_still_refuses_an_unpinned_prepared_claim
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::a_non_herdr_fence_survives_an_unknown_exact_lookup_without_bypassing_the_actor_pin
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::a_nonce_pinned_tmux_input_keeps_the_non_herdr_production_claim_available
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::failed_existing_actor_readoption_preserves_the_original_actor_and_saved_row
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::old_unpinned_known_tmux_pending_still_claims_its_captured_source
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_borrows_the_exact_held_transition_and_leaves_it_with_the_caller
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::prepared_claim_rejects_a_guard_for_another_channel_runtime_or_mutex
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::synthetic_readoption_nonce_transition_7219
+  services::discord::tui_prompt_relay::synthetic_start::claim::admitted::tests::synthetic_readoption_replaced_episode_7219
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
   services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_injected_new_turn_hook_first_delivers_its_answer
@@ -715,10 +709,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::headless_delivery::production_seam_tests::direct_fallback_notify_http_preference_is_caller_supplied_only
   services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_path_observes_cancellation_before_database_work
   services::discord::turn_bridge::headless_delivery::production_seam_tests::outbox_enqueue_error_reaches_cancel_check_then_direct_fallback
-  services::discord::turn_bridge::intake_settlement::tests::classify_preserve_precedes_every_terminal_receipt
-  services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_is_swallowed_and_counted
-  services::discord::turn_bridge::intake_settlement::tests::settlement_wiring_guard_rejects_commented_calls_and_counts_coded_copies
-  services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
   services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors
   services::discord::turn_bridge::recovery_text::tests::discord_recent_recovery_context_preserves_existing_format_and_limits
   services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
@@ -911,7 +901,6 @@ NON_PG_FILTER_REPLAY=(
   services::session_resume::tests::off_runtime_discovery_preserves_selection_and_runtime_progress
   services::session_resume::tests::resume_runtime_binding_clear_absence_is_success
   services::session_resume::tests::transition_busy_response_exposes_retryable_korean_contract
-  services::settings::tests::delivery_journal_mode_stays_yaml_only
   services::settings::tests::explicit_metadata_still_allows_full_replacement
   services::settings::tests::explicit_runtime_config_keys_respects_payload_metadata
   services::settings::tests::metadata_less_empty_runtime_config_omits_saved_non_explicit_keys
@@ -936,19 +925,12 @@ NON_PG_FILTER_REPLAY=(
   services::tui_o::repost::admission_tests::f6_a_conflicting_record_of_an_activation_never_moves_its_frontier
   services::tui_o::repost::admission_tests::local_retry_mark_excludes_both_root_and_child_before_pg_candidate_classification
   services::tui_o::repost::admission_tests::only_an_uncertain_original_sent_while_on_is_eligible_and_the_rest_is_reported_once
-  services::tui_o::repost::admission_tests::with_the_switch_off_no_admitter_exists_to_reach_postgres_or_the_sidecar
   services::tui_o::repost::runner_tests::f5_a_request_dropped_after_its_first_pending_is_gone_and_stays_counted
   services::tui_o::repost::runner_tests::f5_aborting_the_owning_task_ends_the_request_without_a_retry
   services::tui_o::repost::runner_tests::f5_admission_mapping_is_exhaustive
-  services::tui_o::repost::runner_tests::f5_default_off_tick_executes_zero_pg_statements
-  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_reads_nothing_off_or_unlisted
+  services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_receipt_overlay_unreadable_pool_is_unknown
   services::tui_o::writer::tests::actor::host_start::receipt_projection::d4d_stop_during_receipt_read_starts_no_actor
   services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
-  services::tui_o::writer::tests::actor::repost_turn::allowlist::d4b_off_approved_piece_still_posts_once_through_actor
-  services::tui_o::writer::tests::actor::repost_turn::d4b_old_config_without_channels_denies_real_channel_turn
-  services::tui_o::writer::tests::actor::repost_turn::f6_a_live_reload_switches_the_next_turn_without_a_restart
-  services::tui_o::writer::tests::actor::repost_turn::f6_default_off_actor_turn_reads_nothing
-  services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only

@@ -26,7 +26,6 @@ pub mod github_dashboard;
 pub mod health_api;
 pub mod home_metrics;
 pub mod hooks;
-pub mod idle_recap;
 pub(crate) mod kakao_calendar;
 pub mod kanban;
 pub mod kanban_repos;
@@ -54,7 +53,6 @@ mod runtime_profile_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod herdr_legacy_tests;
-pub(crate) mod o_transition;
 pub mod scheduled_messages;
 pub(crate) mod session_activity;
 mod session_evidence;

@@ -17,7 +17,6 @@ pub mod dispatches;
 mod fixture_target;
 pub mod idempotency;
 pub mod imsg_reply;
-pub(crate) mod intake_delivery_required_migrations;
 pub mod intake_outbox;
 pub(crate) mod intake_outbox_delivery_proof;
 pub(crate) mod intake_outbox_dispatch_stamp;

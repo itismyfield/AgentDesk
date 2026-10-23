@@ -204,7 +204,6 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();

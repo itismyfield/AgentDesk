@@ -352,7 +352,6 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     &data.provider,
                     channel_id,
                     "!clear",
-                    super::SoftClearNotifyMode::Suppress,
                 )
                 .await?;
                 let _ = msg.reply(&ctx.http, report.excluding(msg.id).reply()).await;

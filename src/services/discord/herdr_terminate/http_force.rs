@@ -9,6 +9,7 @@ use super::{
     HealthRegistry, HostedObservation, Logged, OperatorTerminate, RetiredExclusion,
     TerminationResult, runtime_of, terminate_enabled, terminate_scoped,
 };
+use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
 
 /// A postlude's outcome, finished once the exclusion is gone: work that must not run while the
@@ -17,12 +18,19 @@ pub(crate) trait Released: Send + Sized + 'static {
     fn released(self) -> BoxFuture<'static, Self>;
 }
 
-/// Runs the scoped terminate bound to `dispatch`, on a retire `postlude` under the held exclusion
-/// and then its released step, before the result is logged.
+/// What an HTTP force selected besides key and nonce: the execution's whole owner and its row's
+/// dispatch, none included. The operator route and a clear expect neither.
+pub(crate) struct Expected {
+    pub(crate) owner: HostedOwner,
+    pub(crate) dispatch: Option<String>,
+}
+
+/// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion
+/// and then its released step before the result is logged.
 pub(crate) async fn terminate_for_http<T, P>(
     registry: &HealthRegistry,
     pool: PgPool,
-    (request, dispatch): (OperatorTerminate, Option<String>),
+    (request, expected): (OperatorTerminate, Expected),
     reason: &str,
     postlude: P,
 ) -> (TerminationResult, Option<T>)
@@ -48,7 +56,7 @@ where
     };
     let run = tokio::spawn(async move {
         let service = async {
-            match terminate_scoped(request, shared, &pool, Some(dispatch)).await {
+            match terminate_scoped(request, shared, &pool, Some(expected)).await {
                 Ok(exclusion) => {
                     #[cfg(test)]
                     super::run_probe(&super::BEFORE_POSTLUDE).await;
@@ -77,16 +85,16 @@ where
     run.await.unwrap_or((cancelled, None))
 }
 
-/// Whether the row still names `dispatch` as its active one; no expectation always holds.
+/// Whether the row still names the expected dispatch as its active one; no expectation holds.
 pub(super) async fn dispatch_holds(
     pool: &PgPool,
     row: &HostedObservation,
-    dispatch: Option<&Option<String>>,
+    expected: Option<&Expected>,
 ) -> bool {
-    let Some(expected) = dispatch else {
+    let Some(expected) = expected else {
         return true;
     };
-    active_dispatch_pg(pool, row.session_id()).await.as_ref() == Ok(expected)
+    active_dispatch_pg(pool, row.session_id()).await.as_ref() == Ok(&expected.dispatch)
 }
 
 #[cfg(test)]

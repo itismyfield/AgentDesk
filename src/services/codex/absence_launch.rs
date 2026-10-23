@@ -170,6 +170,11 @@ pub(super) fn execute_observed(
         tmux_session_name,
     )?;
     let session_exists = tmux_present_bool(tmux_session_name);
+    let mut end_observation =
+        crate::services::codex_tui::execution_end::producer::LaunchObservation::new(
+            report_channel_id,
+            tmux_session_name,
+        );
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
@@ -365,6 +370,7 @@ pub(super) fn execute_observed(
         inherited_verified,
     )
     .map_err(|error| error.to_string())?;
+    end_observation.prepare(&prepared.context);
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
         Some(working_dir),
@@ -398,6 +404,8 @@ pub(super) fn execute_observed(
         tmux_session_name,
         Some(&prepared),
     ))?;
+
+    end_observation.spawned(&prepared.context);
 
     if let Some(replacement) = replacement {
         replacement.complete();

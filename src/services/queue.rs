@@ -358,6 +358,9 @@ impl QueueService {
                     .with_operation("cancel_turn.query_active_session.no_pool")
                     .with_context("channel_id", channel_id)
             })?;
+            #[cfg(unix)]
+            let (session_info, selected) = http_force::select(pool, channel_id, force).await?;
+            #[cfg(not(unix))]
             let session_info =
                 crate::services::session_forwarding::load_cancel_turn_session(pool, channel_id)
                     .await?;
@@ -455,10 +458,7 @@ impl QueueService {
             };
             #[cfg(unix)]
             {
-                let pool = self.pg_pool.as_ref();
-                let selected = (session_key.as_deref(), dispatch_id.as_deref());
-                let forced =
-                    http_force::herdr_force(force, health_registry, pool, channel_id, selected);
+                let forced = http_force::herdr_force(health_registry, pool, channel_id, selected);
                 if let Some(answer) = forced.await {
                     return answer;
                 }

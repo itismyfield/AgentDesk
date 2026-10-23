@@ -132,3 +132,182 @@ fn process_restart_discards_pending_tickets_and_rejects_the_previous_generation(
     );
     attempt::reset_for_tests();
 }
+
+#[test]
+fn typed_calling_attempt_restores_nested_scope_and_hides_it_from_headless_dispatch() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    attempt::reset_for_tests();
+    let names = panes();
+    let (first, second) = (&names[0], &names[1]);
+    let outer = attempt::begin(Some(CHANNEL), Some(first));
+    let outer_id = attempt::current(CHANNEL, first).expect("outer calling token");
+    assert_eq!(outer_id.channel(), CHANNEL);
+    assert_eq!(outer_id.pane(), first);
+    assert_eq!(
+        Some(outer_id.root().to_path_buf()),
+        crate::config::runtime_root()
+    );
+    assert!(attempt::current(CHANNEL + 1, first).is_none());
+    assert!(attempt::current(CHANNEL, second).is_none());
+    {
+        let _inner = attempt::begin(Some(CHANNEL), Some(second));
+        assert!(attempt::current(CHANNEL, first).is_none());
+        let inner = attempt::current(CHANNEL, second).expect("inner calling token");
+        assert_ne!(inner, outer_id);
+        assert!(
+            std::thread::spawn({
+                let pane = second.clone();
+                move || attempt::current(CHANNEL, &pane)
+            })
+            .join()
+            .unwrap()
+            .is_none(),
+            "TLS token must stay on its dispatch thread"
+        );
+    }
+    assert_eq!(attempt::current(CHANNEL, first), Some(outer_id.clone()));
+    {
+        let _headless = attempt::begin(None, None);
+        assert!(attempt::current(CHANNEL, first).is_none());
+    }
+    assert_eq!(attempt::current(CHANNEL, first), Some(outer_id));
+    drop(outer);
+    assert!(attempt::current(CHANNEL, first).is_none());
+    attempt::reset_for_tests();
+}
+
+#[test]
+fn first_dispatch_claim_is_typed_once_and_cannot_leak_through_a_resume_or_refusal() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    attempt::reset_for_tests();
+    let pane = &panes()[0];
+    assert!(install(pane, generation(pane), "first-end"));
+    {
+        let _dispatch = attempt::begin(Some(CHANNEL), Some(pane));
+        let id = attempt::current(CHANNEL, pane).unwrap();
+        assert_eq!(
+            attempt::ticket(CHANNEL, pane),
+            None,
+            "begin must consume its ticket"
+        );
+        assert_eq!(attempt::take_ticket(&id).as_deref(), Some("first-end"));
+        assert_eq!(attempt::take_ticket(&id), None);
+    }
+    {
+        let _later_fresh = attempt::begin(Some(CHANNEL), Some(pane));
+        let id = attempt::current(CHANNEL, pane).unwrap();
+        assert_eq!(
+            attempt::take_ticket(&id),
+            None,
+            "later fresh must not reuse first dispatch's End"
+        );
+    }
+    assert!(install(pane, generation(pane), "refused-end"));
+    drop(attempt::begin(Some(CHANNEL), Some(pane)));
+    let _later = attempt::begin(Some(CHANNEL), Some(pane));
+    let id = attempt::current(CHANNEL, pane).unwrap();
+    assert_eq!(
+        attempt::take_ticket(&id),
+        None,
+        "a refusal still consumes its first attempt"
+    );
+}
+
+#[test]
+fn overlapping_dispatch_erases_the_old_claim_and_never_substitutes_the_newest_token() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    attempt::reset_for_tests();
+    let pane = &panes()[0];
+    assert!(install(pane, generation(pane), "overlapped-end"));
+    let first = attempt::begin(Some(CHANNEL), Some(pane));
+    let first_id = attempt::current(CHANNEL, pane).unwrap();
+    assert_eq!(
+        attempt::claim_for_tests(&first_id).as_deref(),
+        Some("overlapped-end")
+    );
+    let second = attempt::begin(Some(CHANNEL), Some(pane));
+    let second_id = attempt::current(CHANNEL, pane).unwrap();
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        attempt::claim_for_tests(&first_id),
+        None,
+        "overlap must erase the stale claim"
+    );
+    assert_eq!(attempt::take_ticket(&second_id), None);
+    drop(second);
+    assert_eq!(
+        attempt::current(CHANNEL, pane),
+        Some(first_id.clone()),
+        "caller retains its exact stale token"
+    );
+    tc::with_tmux_source_authority(pane, |authority| {
+        assert!(
+            !attempt::bound_under(&first_id, authority, "late-nonce"),
+            "epoch rejects delayed old dispatch after overlap ends"
+        );
+    });
+    drop(first);
+    assert!(attempt::current(CHANNEL, pane).is_none());
+}
+
+#[test]
+fn submitted_bound_stream_allows_clear_ticket_while_mayspawn_does_not() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    attempt::reset_for_tests();
+    let pane = &panes()[0];
+    let dispatch = attempt::begin(Some(CHANNEL), Some(pane));
+    let id = attempt::current(CHANNEL, pane).unwrap();
+    let epoch = generation(pane);
+    assert!(!install(pane, epoch, "before-submit"));
+    tc::with_tmux_source_authority(pane, |authority| {
+        assert_eq!(
+            attempt::phase_under(&id, authority),
+            Some(attempt::Phase::MaySpawn)
+        );
+        assert!(attempt::bound_under(&id, authority, "submitted-nonce"));
+        assert_eq!(
+            attempt::phase_under(&id, authority),
+            Some(attempt::Phase::Bound {
+                nonce: "submitted-nonce".into()
+            })
+        );
+        assert!(!attempt::bound_under(&id, authority, "another-nonce"));
+    });
+    assert!(install(pane, epoch, "during-bound-tail"));
+    assert_eq!(
+        attempt::ticket(CHANNEL, pane).as_deref(),
+        Some("during-bound-tail")
+    );
+    drop(dispatch);
+    tc::with_tmux_source_authority(pane, |authority| {
+        assert_eq!(
+            attempt::phase_under(&id, authority),
+            Some(attempt::Phase::Done)
+        );
+    });
+    let _next = attempt::begin(Some(CHANNEL), Some(pane));
+    let next_id = attempt::current(CHANNEL, pane).unwrap();
+    assert_eq!(
+        attempt::take_ticket(&next_id).as_deref(),
+        Some("during-bound-tail")
+    );
+}
+
+#[test]
+fn bound_submit_discards_an_unclaimed_clear_ticket_without_waiting_for_tail_completion() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    attempt::reset_for_tests();
+    let pane = &panes()[0];
+    assert!(install(pane, generation(pane), "warm-resume-end"));
+    let _dispatch = attempt::begin(Some(CHANNEL), Some(pane));
+    let id = attempt::current(CHANNEL, pane).unwrap();
+    assert_eq!(
+        attempt::claim_for_tests(&id).as_deref(),
+        Some("warm-resume-end")
+    );
+    tc::with_tmux_source_authority(pane, |authority| {
+        assert!(attempt::bound_under(&id, authority, "existing-execution"));
+    });
+    assert_eq!(attempt::claim_for_tests(&id), None);
+    assert_eq!(attempt::take_ticket(&id), None);
+}

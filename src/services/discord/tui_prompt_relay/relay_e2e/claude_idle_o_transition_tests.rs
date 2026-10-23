@@ -884,7 +884,6 @@ fn explicit_hook_clear_keeps_zero_start_and_parentless_resume_keeps_pending() {
 
 #[test]
 fn an_operator_resolution_written_after_capture_cannot_be_overwritten_by_auto_open() {
-    use crate::services::tui_o::store::rotation::ResolveFrom;
     run(async |f| {
         f.initialize(0);
         let mut e = f.engine();
@@ -894,12 +893,7 @@ fn an_operator_resolution_written_after_capture_cannot_be_overwritten_by_auto_op
         e.capture().unwrap();
         pending(&f);
         f.store
-            .record_boundary_resolved(
-                f.pane.channel.get(),
-                f.pane.b_path().to_str().unwrap(),
-                &ResolveFrom::Offset(0),
-                "operator",
-            )
+            .seed_boundary_resolved(f.pane.channel.get(), &f.b(), 0)
             .unwrap();
         f.gate.acquired();
         e.deliver(100).await;

@@ -240,15 +240,12 @@ impl HostIo for GatewayHost {
 
     /// The re-post transport is built only on its first enabled turn.
     fn repost(&self, channel: u64, port: &Arc<GatewayPort>) -> Option<host::RepostTurn<Self>> {
-        use crate::services::tui_o::repost::{
-            config::RepostSwitch, io::probe::evidence::RunScope, runner,
-        };
+        use crate::services::tui_o::repost::{io::probe::evidence::RunScope, runner};
         let pool = self.shared.pg_pool.clone()?;
         let sidecar = crate::config::runtime_root()?
             .join("tui_o")
             .join("repost")
             .join(format!("{channel}.jsonl"));
-        let switch = RepostSwitch::new(self.boot.as_ref(), crate::config_live_reload::subscribe());
         let holder = self.configured_id.clone();
         let run = RunScope {
             holder: holder.unwrap_or_else(|| "o-writer".into()),
@@ -257,7 +254,7 @@ impl HostIo for GatewayHost {
             evidence_generation: 1,
         };
         let sender = crate::services::tui_o::writer::DiscordPort::bot_id(&**port);
-        let runner = runner::Runner::new(switch, pool, sender, run);
+        let runner = runner::Runner::new(pool, sender, run);
         let (port, mut warned) = (Arc::clone(port), false);
         let open = move || match port.repost_http() {
             Ok(http) => Some(Arc::new(http)),

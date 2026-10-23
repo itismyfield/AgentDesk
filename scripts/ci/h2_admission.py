@@ -72,7 +72,6 @@ R_C_GRANDFATHERED: dict[str, dict[tuple[str, str], int]] = {
     "src/services/codex.rs": {("execute_streaming_local_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1,
         ("execute_streaming_local_tui_tmux", "return Err(format!(\"tmux error: {}\", stderr));"): 1},
     "src/services/codex_tmux_wrapper.rs": {("run", "InputMode::Fifo => \"tmux resume loop\","): 1},
-    "src/services/discord/idle_recap/scrollback.rs": {("capture_tmux_scrollback", "std::process::Command::new(\"tmux\")"): 1},
     "src/services/discord/tmux_reaper.rs": {("build_reapable_fresh_routine_sessions", "\"tmux reaper: failed to list reapable fresh routine sessions (#3877)\""): 1,
         ("reap_fresh_routine_orphan", "\"tmux reaper backstop: completed fresh routine orphan (#3877)\","): 2,
         ("reap_fresh_routine_orphan", "\"tmux reaper backstop: re-read of routine {routine_id} failed — skipping kill of {session_name} (#3877)\""): 1},

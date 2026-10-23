@@ -196,7 +196,6 @@ pub(super) async fn install(
             &ProviderKind::Codex,
             serenity::ChannelId::new(CANARY_CHANNEL),
             "!clear",
-            crate::services::discord::commands::SoftClearNotifyMode::Suppress,
         )
         .await
         .unwrap();

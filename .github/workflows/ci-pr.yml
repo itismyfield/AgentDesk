@@ -203,7 +203,6 @@ jobs:
               # own comment declares itself temporary.
               - 'src/config_live_reload.rs'
               - 'src/services/dispatch_gate.rs'
-              - 'src/services/health_active_session_audit.rs'
               - 'src/services/platform/mod.rs'
               - 'src/services/session_activity.rs'
             pg_db:
@@ -262,7 +261,7 @@ jobs:
               - 'src/db/scheduled_messages/postgres_tests.rs'
               - 'src/db/session_observability/background_ordering_pg_tests.rs'
               - 'src/db/session_transcripts.rs'
-              - 'src/db/session_transcripts_native_clear_tests.rs'
+              - 'src/db/session_transcripts_retired_boundary_pg_tests.rs'
               - 'src/dispatch/dispatch_cancel.rs'
               - 'src/dispatch/dispatch_context.rs'
               - 'src/dispatch/dispatch_status.rs'
@@ -358,9 +357,8 @@ jobs:
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/negative_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_relaunch_tests/absent_launch_tests/source_boundary_tests.rs'
               - 'src/services/discord/commands/control/codex_clear_retirement_tests.rs'
-              - 'src/services/discord/commands/control/native_policy_tests.rs'
-              - 'src/services/discord/commands/control/native_tests.rs'
               - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/text_commands/clear_http_overlap_tests.rs'
               - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
@@ -374,13 +372,18 @@ jobs:
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate/http_force_e08_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_forward_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_hydrate_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_identity_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_purge_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_terminal_tests.rs'
               - 'src/services/discord/herdr_terminate/http_force_tests.rs'
+              - 'src/services/discord/herdr_terminate/http_force_writer_tests.rs'
               - 'src/services/discord/herdr_terminate_exit_tests.rs'
               - 'src/services/discord/herdr_terminate_route_tests.rs'
               - 'src/services/discord/herdr_terminate_tests.rs'
               - 'src/services/discord/host_defer_gate_tests.rs'
               - 'src/services/discord/host_key_derivation_tests.rs'
-              - 'src/services/discord/idle_recap_interaction.rs'
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight/host_recovery_guard_keyed_tests.rs'
               - 'src/services/discord/inflight/rebind_reap/tests.rs'
@@ -419,10 +422,8 @@ jobs:
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
+              - 'src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs'
               - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
-              - 'src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs'
@@ -443,7 +444,6 @@ jobs:
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
@@ -459,6 +459,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs'
               - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
+              - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
               - 'src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs'
@@ -486,6 +487,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_output_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs'
@@ -493,6 +495,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
+              - 'src/services/discord/tui_prompt_relay/synthetic_start/claim/admitted/transition_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
@@ -501,7 +504,6 @@ jobs:
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs'
-              - 'src/services/discord/turn_bridge/intake_settlement/tests.rs'
               - 'src/services/discord/turn_bridge/recovery_text.rs'
               - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
               - 'src/services/discord/turn_bridge/stream_loop/provider_recovery.rs'
@@ -523,6 +525,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owner_e2e_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/cross_runtime_owners_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/effect_read_defer_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/legacy_divergence_entry_tests.rs'
@@ -541,6 +544,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
+              - 'src/services/discord/watchers/lifecycle/activity.rs'
               - 'src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs'
               - 'src/services/discord/watchers/lifecycle/restore.rs'
               - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
@@ -571,7 +575,6 @@ jobs:
               - 'src/services/scheduled_messages/context_snapshot.rs'
               - 'src/services/scheduled_messages/postgres_tests.rs'
               - 'src/services/session_forwarding.rs'
-              - 'src/services/session_host/herdr_clear_adapter_tests.rs'
               - 'src/services/session_host/herdr_gate_tests.rs'
               - 'src/services/session_host/herdr_terminate_real_tests.rs'
               - 'src/services/session_host/session_record.rs'
@@ -585,13 +588,13 @@ jobs:
               - 'src/services/tui_o/repost/admission_tests.rs'
               - 'src/services/tui_o/repost/allowlist_host_tests.rs'
               - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
-              - 'src/services/tui_o/repost/allowlist_writer_tests.rs'
               - 'src/services/tui_o/repost/backlog_tests.rs'
               - 'src/services/tui_o/repost/projection_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
               - 'src/services/tui_o/repost/writer_activation_tests.rs'
+              - 'src/services/tui_o/writer/always_on_repost_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
@@ -683,8 +686,6 @@ jobs:
               - 'src/services/cluster/intake_worker/**'
               - 'src/services/discord/router/message_handler/intake_turn.rs'
               - 'src/services/discord/router/message_handler/intake_turn/**'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
-              - 'src/services/discord/runtime_bootstrap/intake_delivery_capability/**'
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
@@ -695,7 +696,6 @@ jobs:
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
               - 'src/services/discord/turn_bridge/headless_delivery.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/**'
-              - 'src/services/discord/turn_bridge/intake_settlement/**'
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/scheduled_messages.rs'
@@ -837,7 +837,6 @@ jobs:
               - 'src/utils/**'
               - 'src/voice/**'
               - 'src/services/*'
-              - 'src/services/writer_protocol/**'
               - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
@@ -855,6 +854,8 @@ jobs:
               # queue/ and the cancel lookup wire the forced Herdr cancel behind cfg(unix).
               - 'src/services/queue/**'
               - 'src/services/session_forwarding/cancel_lookup.rs'
+              # home_stop_tests opens the trusted target's loopback seam to unix tests only.
+              - 'src/services/session_forwarding/home_stop_tests.rs'
               # qwen/ (like claude/ above) carries cfg(unix) shims, and
               # session_host/'s TmuxHost has a not(unix) stub Windows compiles.
               - 'src/services/qwen/**'
@@ -887,11 +888,10 @@ jobs:
               - 'src/services/discord/health/**'
               - 'src/services/discord/host_defer_gate.rs'
               - 'src/services/discord/host_teardown_gate/**'
-              - 'src/services/discord/idle_recap.rs'
-              - 'src/services/discord/idle_recap_interaction.rs'
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/ingress_shadow.rs'
               - 'src/services/discord/inject_disposition_test_support.rs'
               - 'src/services/discord/inject_disposition_tests.rs'
               - 'src/services/discord/jsonl_watcher.rs'
@@ -906,8 +906,6 @@ jobs:
               - 'src/services/discord/queue_dispatch/**'
               - 'src/services/discord/queue_io.rs'
               - 'src/services/discord/queue_io/**'
-              - 'src/services/discord/queue_park_ledger.rs'
-              - 'src/services/discord/queue_park_ledger/**'
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
               - 'src/services/discord/recovery_paths/**'
@@ -1713,7 +1711,6 @@ jobs:
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1
       # #5003: this production-path E2E previously ran only in main's broad
@@ -2305,7 +2302,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=44938e2d1499cd236b769702e92e19ed972dff761bf0d6a02443a7a0476419dd
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2558,7 +2555,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=b3ace17d44726c168554843c64c9b876ef40b0b95865e9e72a6c5d15ba956a89
+          expected=44938e2d1499cd236b769702e92e19ed972dff761bf0d6a02443a7a0476419dd
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

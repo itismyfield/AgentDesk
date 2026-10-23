@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::tui_o::store::ledger::LocalRetryMark;
 
 struct ReadyPg {
     runner: Runner,
@@ -30,11 +29,7 @@ impl RepostHook<Writer> for ReadyPg {
             self.turns.fetch_add(1, Ordering::SeqCst);
             writer.set_live(true);
             let intent = evidence(&self.pool, &self.key).await;
-            let grant = self
-                .runner
-                .try_next_dispatch(writer, OriginalGate::Admitted, intent)
-                .await
-                .unwrap();
+            let grant = self.runner.try_next_dispatch(writer, intent).await.unwrap();
             let Admission::Granted { permit, lease } = grant else {
                 panic!("ready PG work must dispatch");
             };
@@ -66,7 +61,7 @@ async fn local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_p
         let io = Io::over(&harness.port);
         let turns = Arc::new(AtomicUsize::new(0));
         let hook = ReadyPg {
-            runner: Runner::new(switch(true), pool.clone(), BOT, run_scope()),
+            runner: Runner::new(pool.clone(), BOT, run_scope()),
             pool: pool.clone(),
             key,
             io: io.clone(),
@@ -74,7 +69,6 @@ async fn local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_p
             turns: turns.clone(),
         };
         let mut writer = harness.writer();
-        writer.bind_switch(switch(true).live_for(CHANNEL));
         writer = writer.with_repost(Some(Box::new(hook)));
         let (stop, task) = spawn(writer);
         append(&path, &row("root", "local payload"));
@@ -130,46 +124,6 @@ async fn local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_p
     db.drop().await;
 }
 
-#[tokio::test(start_paused = true)]
-async fn local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads() {
-    for enabled in [false, true] {
-        let harness = Harness::new();
-        harness.gate.acquired();
-        harness.port.say(BOT + 1, "readable");
-        harness
-            .port
-            .replies
-            .lock()
-            .unwrap()
-            .push_back(Reply::Unsent);
-        let boot = TuiOConfig {
-            repost: RepostConfig {
-                enabled,
-                channels: [if enabled { CHANNEL + 1 } else { CHANNEL }]
-                    .into_iter()
-                    .collect(),
-            },
-            ..TuiOConfig::default()
-        };
-        let switch = RepostSwitch::new(Some(&boot), watch::channel(None).1);
-        let io = Io::over(&harness.port);
-        let hook = turn(&harness, unreachable(), switch, &io);
-        let mut writer = harness.writer().with_repost(Some(Box::new(hook)));
-        assert_eq!(writer.deliver(&piece("root", "payload")).await, Step::Done);
-        assert_eq!(
-            writer.store().ledger().piece(0).unwrap().local_retry,
-            Some(LocalRetryMark::Budget)
-        );
-        let when = crate::services::tui_o::writer::local_retry::pending(writer.store().ledger())
-            .unwrap()
-            .due;
-        assert_eq!(writer.retry_local(when).await, Step::Done);
-        assert_eq!(harness.port.posts(), ["payload", "payload"]);
-        assert_eq!((io.reads.load(Ordering::SeqCst), io.wire()), (0, 0));
-        assert!(!sidecar(&harness).exists());
-    }
-}
-
 #[tokio::test]
 async fn local_retry_real_hook_durable_intent_returns_to_repost_owner_pg() {
     let db = TestPostgresDb::create().await;
@@ -178,7 +132,7 @@ async fn local_retry_real_hook_durable_intent_returns_to_repost_owner_pg() {
     let harness = Harness::new();
     harness.gate.acquired();
     let io = Io::over(&harness.port);
-    let hook = turn(&harness, pool.clone(), switch(true), &io);
+    let hook = turn(&harness, pool.clone(), &io);
     let mut writer = harness.writer().with_repost(Some(Box::new(hook)));
     assert_eq!(
         writer.deliver(&piece("scope-owner", "payload")).await,

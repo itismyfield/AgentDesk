@@ -6,14 +6,6 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio::time::{Duration as TokioDuration, timeout};
 
-const READY: SettlementCapabilities = SettlementCapabilities {
-    stamp_dispatched: false,
-    settle_and_sweep: true,
-};
-const LOWERED: SettlementCapabilities = SettlementCapabilities {
-    stamp_dispatched: false,
-    settle_and_sweep: false,
-};
 const D: IntakeOutboxStatus = IntakeOutboxStatus::Dispatched;
 const S: IntakeOutboxStatus = IntakeOutboxStatus::Spawned;
 const U: IntakeOutboxStatus = IntakeOutboxStatus::Unknown;
@@ -164,11 +156,11 @@ impl Write for TestLogWriter {
     }
 }
 
-async fn settlement_case(row_status: IntakeOutboxStatus, key: &str, caps: SettlementCapabilities) {
+async fn settlement_case(row_status: IntakeOutboxStatus, key: &str) {
     let (db, pool) = setup().await;
     let now = Utc::now();
     let id = seed_clocked(&pool, key, row_status, now - Duration::hours(1)).await;
-    let stats = sweep_once(&pool, caps, cutoffs(now), 200).await.unwrap();
+    let stats = sweep_once(&pool, cutoffs(now), 200).await.unwrap();
     assert_eq!(stats.settled, 1);
     assert_eq!(status(&pool, id).await, U);
     finish(db, pool).await;
@@ -176,22 +168,22 @@ async fn settlement_case(row_status: IntakeOutboxStatus, key: &str, caps: Settle
 
 #[tokio::test]
 async fn sweep_settles_stale_dispatched_as_unknown_pg() {
-    settlement_case(D, "stale-dispatched", READY).await;
+    settlement_case(D, "stale-dispatched").await;
 }
 
 #[tokio::test]
 async fn sweep_settles_stale_spawned_as_unknown_pg() {
-    settlement_case(S, "stale-spawned", READY).await;
+    settlement_case(S, "stale-spawned").await;
 }
 
 #[tokio::test]
-async fn sweep_runs_when_stage_lowered_but_open_dispatched_exists_pg() {
-    settlement_case(D, "lowered-d", LOWERED).await;
+async fn sweep_drains_legacy_dispatched_debt_pg() {
+    settlement_case(D, "lowered-d").await;
 }
 
 #[tokio::test]
-async fn sweep_runs_after_restart_with_only_spawned_stamp_debt_pg() {
-    settlement_case(S, "lowered-s", LOWERED).await;
+async fn sweep_drains_legacy_spawned_debt_after_restart_pg() {
+    settlement_case(S, "lowered-s").await;
 }
 
 #[tokio::test]
@@ -201,10 +193,7 @@ async fn sweep_skips_rows_not_strictly_stale_pg() {
     let equal_d = seed_clocked(&pool, "equal-d", D, cutoffs(now).dispatched).await;
     let equal_s = seed_clocked(&pool, "equal-s", S, cutoffs(now).spawned).await;
     assert_eq!(
-        sweep_once(&pool, READY, cutoffs(now), 200)
-            .await
-            .unwrap()
-            .settled,
+        sweep_once(&pool, cutoffs(now), 200).await.unwrap().settled,
         0
     );
     assert_eq!(status(&pool, equal_d).await, D);
@@ -229,7 +218,7 @@ async fn sweep_is_bounded_and_ordered_and_logs_truncation_pg() {
         .finish();
     crate::logging::test_capture::pin_callsite_interest();
     let _guard = tracing::subscriber::set_default(subscriber);
-    let stats = sweep_once(&pool, READY, cutoffs(now), 1).await.unwrap();
+    let stats = sweep_once(&pool, cutoffs(now), 1).await.unwrap();
     drop(_guard);
     let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
     assert_eq!((stats.settled, stats.truncated_spawned), (1, 1));
@@ -305,7 +294,7 @@ async fn null_clock_rows_are_invisible_to_sweep_but_visible_to_operator_pg() {
     let dispatched = seed(&pool, "null-d", D, None).await;
     let spawned = seed(&pool, "null-s", S, None).await;
     assert_eq!(
-        sweep_once(&pool, READY, cutoffs(Utc::now()), 200)
+        sweep_once(&pool, cutoffs(Utc::now()), 200)
             .await
             .unwrap()
             .settled,
@@ -366,7 +355,7 @@ async fn sweep_skips_live_interactive_turn_without_dispatch_binding_pg() {
     let now = Utc::now();
     let id = seed_clocked(&pool, "live", S, now - Duration::hours(1)).await;
     seed_inflight(&pool, "live", Some(now), None).await;
-    let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
+    let stats = sweep_once(&pool, cutoffs(now), 200).await.unwrap();
     assert_eq!((stats.settled, stats.skipped_live), (0, 1));
     assert_eq!(status(&pool, id).await, S);
     finish(db, pool).await;
@@ -386,7 +375,7 @@ async fn sweep_defers_ambiguous_live_signal_pg() {
     )
     .await;
     seed_inflight(&pool, "ambiguous-null", None, None).await;
-    let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
+    let stats = sweep_once(&pool, cutoffs(now), 200).await.unwrap();
     assert_eq!((stats.settled, stats.skipped_ambiguous), (0, 2));
     assert_eq!(status(&pool, stale).await, D);
     assert_eq!(status(&pool, missing).await, S);
@@ -414,11 +403,8 @@ async fn heartbeat_writer_serializes_before_unknown_settlement_pg() {
             .unwrap();
 
         let sweep_pool = pool.clone();
-        let sweeping = tokio::spawn(async move {
-            sweep_once(&sweep_pool, READY, cutoffs(now), 200)
-                .await
-                .unwrap()
-        });
+        let sweeping =
+            tokio::spawn(async move { sweep_once(&sweep_pool, cutoffs(now), 200).await.unwrap() });
         wait_for_blocked_on(&pool, heartbeat_pid, 1).await;
         heartbeat.commit().await.unwrap();
 
@@ -459,7 +445,7 @@ async fn heartbeat_writer_lock_timeout_skips_row_and_continues_tick_pg() {
 
     let stats = timeout(
         TokioDuration::from_secs(crate::config::INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS + 3),
-        sweep_once(&pool, READY, cutoffs(now), 200),
+        sweep_once(&pool, cutoffs(now), 200),
     )
     .await
     .expect("one writer-held session row cannot stall the sweep tick")
@@ -480,16 +466,10 @@ async fn concurrent_sweep_once_calls_have_one_terminal_winner_pg() {
     let holder = lock_intake_row(&pool, id).await;
     let first_pool = pool.clone();
     let second_pool = pool.clone();
-    let first = tokio::spawn(async move {
-        sweep_once(&first_pool, READY, cutoffs(now), 200)
-            .await
-            .unwrap()
-    });
-    let second = tokio::spawn(async move {
-        sweep_once(&second_pool, READY, cutoffs(now), 200)
-            .await
-            .unwrap()
-    });
+    let first =
+        tokio::spawn(async move { sweep_once(&first_pool, cutoffs(now), 200).await.unwrap() });
+    let second =
+        tokio::spawn(async move { sweep_once(&second_pool, cutoffs(now), 200).await.unwrap() });
     wait_for_spawned_settlement_waiters(&pool, 2).await;
     holder.rollback().await.unwrap();
     let (first, second) = tokio::join!(first, second);
@@ -540,7 +520,7 @@ async fn sweep_records_absent_basis_and_drains_fence_pg() {
         .finish();
     tracing::callsite::rebuild_interest_cache();
     let guard = tracing::subscriber::set_default(subscriber);
-    let stats = sweep_once(&pool, READY, cutoffs(now), 200).await.unwrap();
+    let stats = sweep_once(&pool, cutoffs(now), 200).await.unwrap();
     drop(guard);
     let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
     assert_eq!(

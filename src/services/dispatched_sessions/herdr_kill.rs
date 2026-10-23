@@ -10,14 +10,14 @@ use super::force_kill::{FORCE_KILL_RETRY_LIMIT, Prepared};
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
 use crate::services::discord::herdr_terminate::OperatorTerminate;
-use crate::services::discord::herdr_terminate::http_force::terminate_for_http;
+use crate::services::discord::herdr_terminate::http_force::{Expected, terminate_for_http};
 use crate::services::provider::ProviderKind;
 
 mod effects;
 use effects::{HERDR_TERMINATE, HerdrKillEffects, KillInput, herdr_force_kill_effects};
 
 /// The answer when the force-kill's read picked a Claude/Codex Herdr execution its row owns, under
-/// the requested key and no other runtime channel, bound to that read's dispatch; else `None`.
+/// the requested key and no other runtime channel, bound to that read's owner and dispatch.
 pub(super) async fn herdr_force_kill(
     state: &AppState,
     prepared: &Prepared<'_>,
@@ -51,7 +51,11 @@ pub(super) async fn herdr_force_kill(
         session_key: hosted.session_key.clone(),
         execution_nonce: record.execution_nonce,
     };
-    let bound = (request, dispatch.clone());
+    let expected = Expected {
+        owner: record.owner,
+        dispatch: dispatch.clone(),
+    };
+    let bound = (request, expected);
     let pool = prepared.pool.clone();
     let (result, effects) = terminate_for_http(registry, pool, bound, reason, {
         move |exclusion| herdr_force_kill_effects(exclusion, input).boxed()

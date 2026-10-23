@@ -5,7 +5,7 @@
 //! Dual-review r1 (codex#2 = opus#1): only `QueueExitKind::Overflow` — the
 //! genuine capacity drop-oldest evict — is dead-lettered and notified.
 //! `Superseded` also flows through the same sink from BENIGN producers (the
-//! Clear full drain on !clear / idle-recap / teardown, and the active-source
+//! Clear full drain on !clear / teardown, and the active-source
 //! purge where the message already started processing); treating those as
 //! losses produced false DLQ rows and false ⏏ notices.
 //!

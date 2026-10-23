@@ -6,7 +6,7 @@ use chrono::Utc;
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::repost::admission_tests::{BOT, CHANNEL, admit_on, sidecar, switch};
+use crate::services::tui_o::repost::admission_tests::{BOT, CHANNEL, admit_on, sidecar};
 use crate::services::tui_o::repost::identity::{marker, payload_sha256, piece_of};
 use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
 use crate::services::tui_o::repost::io::probe::matcher::ObservedMessage;
@@ -303,7 +303,7 @@ async fn admission_failure_case(failure: Failure, broken: bool) {
     }
     let io = Arc::new(Io::new());
     let opened = Arc::new(AtomicUsize::new(0));
-    let mut runner = Runner::new(switch(true), pool.clone(), BOT, run());
+    let mut runner = Runner::new(pool.clone(), BOT, run());
     runner
         .probes
         .insert(ready.clone(), ready_probe(&pool, &ready, &io).await);
@@ -558,7 +558,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
             };
             let key = piece_of(&record).unwrap();
             let mut turn = ChannelTurn::<Io>::new(
-                Runner::new(switch(true), pool.clone(), BOT, run()),
+                Runner::new(pool.clone(), BOT, run()),
                 Box::new(|| None),
                 CHANNEL,
                 dir.path().join("provenance.jsonl"),
@@ -638,7 +638,7 @@ async fn d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable
     let blocked = dir.path().join("blocked-parent");
     std::fs::write(&blocked, b"file").unwrap();
     let mut turn = ChannelTurn::<Io>::new(
-        Runner::new(switch(true), pool.clone(), BOT, run()),
+        Runner::new(pool.clone(), BOT, run()),
         Box::new(|| None),
         CHANNEL,
         blocked.join("provenance.jsonl"),
@@ -687,13 +687,9 @@ async fn d4act_source_revoked_after_tick_never_grants_pg() {
         let source = Arc::clone(&writer.source_allowed);
         let task_pool = pool.clone();
         let waiting = tokio::spawn(async move {
-            let mut runner = Runner::new(switch(true), task_pool, BOT, run());
+            let mut runner = Runner::new(task_pool, BOT, run());
             let admission = runner
-                .try_next_dispatch(
-                    &mut writer,
-                    OriginalGate::Admitted,
-                    DispatchIntent::Auto(Box::new(evidence)),
-                )
+                .try_next_dispatch(&mut writer, DispatchIntent::Auto(Box::new(evidence)))
                 .await
                 .unwrap();
             (admission, writer)

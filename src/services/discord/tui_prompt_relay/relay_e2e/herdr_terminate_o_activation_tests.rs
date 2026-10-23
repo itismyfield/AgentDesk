@@ -223,3 +223,6 @@ fn applied(source: &SourceId) -> (Option<u64>, Option<(u64, String)>) {
     let cursor = cursor.map(|cursor| (cursor.captured_through, cursor.prefix_hash.clone()));
     (channel.binding_checkpoint().unwrap(), cursor)
 }
+
+#[path = "herdr_terminate_o_output_tests.rs"]
+mod output;

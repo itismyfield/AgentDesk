@@ -819,7 +819,6 @@ async fn clear_and_first_input_at_tick(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -1061,7 +1060,6 @@ async fn clear_and_first_input_at_tick(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -1099,7 +1097,7 @@ pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String
         let content = value["content"].as_str().expect("message content");
         if content.starts_with("-# ") {
             assert!(
-                method == "POST" && content.starts_with("-# ✅ "),
+                method == "POST" && content.starts_with("-# ⏱️ "),
                 "completion summary: {sent:?}"
             );
             summaries.push(index);

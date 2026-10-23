@@ -9,7 +9,6 @@ pub(super) async fn nameless_promote_blocked(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    let park = &shared.queue_park_ledger;
     #[cfg(unix)]
     {
         use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
@@ -17,11 +16,9 @@ pub(super) async fn nameless_promote_blocked(
             && channel_id.get() == CANARY_CHANNEL
             && named_blocked(provider, channel_id, CANARY_TMUX, false)
         {
-            park.note_codex_verified_hold(channel_id, CANARY_TMUX);
             return true;
         }
     }
-    park.clear_promote_hold(channel_id, "codex_verified");
     let nameless = crate::services::discord::host_defer_gate::nameless_channel_deferred;
     let held = nameless(shared, provider, channel_id.get()).await;
     #[cfg(unix)]
@@ -72,7 +69,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    let park = &shared.queue_park_ledger;
     #[cfg(test)]
     if let Some(busy) = *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
         .lock()
@@ -82,7 +78,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     }
     // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
     if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
-        park.clear_promote_hold(channel_id, "codex_verified");
         return false;
     }
 
@@ -118,10 +113,8 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         &tmux_session_name,
         remote_profile_named,
     ) {
-        park.note_codex_verified_hold(channel_id, &tmux_session_name);
         return true;
     }
-    park.clear_promote_hold(channel_id, "codex_verified");
     // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
     #[cfg(test)]
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
@@ -188,6 +181,9 @@ async fn local_legacy_start_ready(
     channel_id: serenity::ChannelId,
     name: Option<&str>,
 ) -> bool {
+    // A start acts on this judgment, so the periodic observer must not supersede it meanwhile.
+    let _effect =
+        crate::services::discord::turn_presence::activity::effect_reads::begin(channel_id.get());
     let reading = crate::services::discord::turn_presence::activity::reading_now(
         shared, provider, channel_id,
     )

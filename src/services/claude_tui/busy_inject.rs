@@ -39,9 +39,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use super::composer_lock::ComposerAdmission;
-use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_input::bounded_tmux::{BoundedTmuxError, run_bounded_tmux};
-use crate::services::tui_o::shadow::ShadowProvider;
 
 /// Larger inputs are refused before any tmux call.
 pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -61,8 +59,7 @@ pub(crate) enum Veto {
     NotBusy,
     TranscriptUnavailable,
     LoadFailed,
-    /// The pane size is unknown or changed, or Claude's rows for the input are not predictable,
-    /// so a paste could not be proven ours and would stay in the composer.
+    /// The pane size is unknown, changed or unusable, or the paste contains rewritten controls.
     UnpredictableRender,
 }
 
@@ -555,7 +552,7 @@ fn judge_before_paste(
     }
     match stash {
         Some(draft) => Ok(Plan::Stash(draft)),
-        None => screen::drawn(text, size)
+        None => screen::direct(text, size)
             .map(Plan::Direct)
             .ok_or(Veto::UnpredictableRender),
     }
@@ -735,7 +732,7 @@ struct Attempt<'a> {
     offset: u64,
     buffer: String,
     timing: &'a Timing,
-    /// The pane size the paste's rows were predicted for.
+    /// The pane size the paste was planned for.
     size: Option<(usize, usize)>,
     stash: bool,
     cursor: std::cell::Cell<Option<(usize, usize)>>,
@@ -878,12 +875,8 @@ fn paste_into_empty(
         }
         Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::PasteFailed),
     }
-    // Exact body, the exact rows Claude wraps it into, or a folded placeholder matching only in
-    // shape and line count; anything else may hold a person's keys.
-    let owns = |after: &str| {
-        own_draft(ShadowProvider::Claude, after, attempt.text, true)
-            || matches!(drawn, screen::Drawn::Rows(rows) if own_wrapped_draft(after, rows))
-    };
+    // Only the whole body or an expected folded placeholder permits Enter.
+    let owns = |after: &str| screen::owns_direct(after, attempt.text, drawn);
     if let Err(detail) = attempt.await_own(owns, last) {
         return Outcome::Unconfirmed(detail);
     }

@@ -38,10 +38,10 @@ def no_status_chrome(window):
                 f"retired status chrome in {snapshot} snapshot {message_id}: {content[:120]!r}")
 
 
-def turn_summary_after_body(window, *, body_marker, header="-# ✅", before_marker=None, tool_label=None):
+def turn_summary_after_body(window, *, body_marker, header="-# ⏱️", before_marker=None, tool_label=None):
     from . import assertions
 
-    if header not in ("-# ✅", "-# ⏹ 중단", "-# ⚠️ 오류"):
+    if header not in ("-# ⏱️", "-# ✅", "-# ⏹ 중단", "-# ⚠️ 오류"):
         raise assertions.AssertionError("turn_summary_after_body requires an exact terminal header")
     if not isinstance(body_marker, str) or not body_marker:
         raise assertions.AssertionError("turn_summary_after_body requires a body marker")

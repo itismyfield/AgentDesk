@@ -1,13 +1,10 @@
-# 채널 소유 ingress 판정 계약 (관측 shadow)
+# 채널 소유 ingress 판정 계약 (과거 관측 shadow 기록)
 
 기준: `itismyfield/AgentDesk@070157faf`. §1–§8의 좌표는 이 SHA 기준이다. §9의 관측 연결은 `b0062777a` 위에 얹었고 좌표 대신 심볼로 적는다.
 
-이 문서는 채널 home 권위를 읽어 "이 노드가 채널 ingress의 실행 후보인가"를 판정하는 계약을 고정한다.
-구현은 `src/services/cluster/channel_ingress.rs`의 순수 판정 함수 `observe`다.
-런타임 호출자는 §9의 ingress shadow 하나다. 기본값은 꺼짐이고, 켜도 판정을 구조화 로그로만 남기며 실행·forwarding·ack를 바꾸지 않는다.
-채널 ingress 전환, 자동 takeover, forwarding 제거는 이 문서의 착지 범위가 아니다.
+이 문서는 R1–R6에서 제거한 채널 home·ingress shadow의 과거 설계와 검증 기록이다. 현재 production에는 이 판정 모듈·shadow worker·설정·admission 배선이 없다(§4.4). 아래의 파일 좌표·수용 기준·활성화 절차는 당시 구현을 설명하며 현재 운영 계약이나 F1의 구현 지시가 아니다. 0133·0134 migration과 잔류 테이블은 데이터 보존을 위해 남긴다.
 
-## 1. 착지 형태
+## 1. 당시 착지 형태 (제거됨)
 
 | 항목 | 내용 |
 |---|---|
@@ -16,8 +13,7 @@
 | 시험 | `src/services/cluster/channel_ingress/tests.rs` |
 | 관측 연결 | §9. 시간(PG `statement_timestamp`)과 로컬 gate 표본(`channel_home::ingress_snapshot`) 공급자를 함께 붙였다 |
 
-운영 호출자가 만들지 않는 `SourceEpoch::Routed`와 그 두 보류 사유(`StaleSourceEpoch`, `RouteWithoutHomeEpoch`)는 `#[cfg(test)]`로 둔다.
-새 `#[allow]`와 baseline 인상은 금지라서, 전달 입력을 관측하는 호출자가 생길 때 그 조각이 이 표시를 푼다.
+당시 운영 호출자가 만들지 않던 `SourceEpoch::Routed`와 그 두 보류 사유(`StaleSourceEpoch`, `RouteWithoutHomeEpoch`)는 `#[cfg(test)]`였다. 이 타입과 시험 전용 분기도 R6에서 제거됐다.
 
 ## 2. 판정 계약
 
@@ -82,7 +78,9 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 이 명제는 서로 다른 시점의 관측을 실행 허가로 써도 된다는 뜻이 아니다. handoff 뒤 예전 `LocalCandidate`는 역사적 관측이며, 실행은 그 시점의 gate admission을 다시 통과해야 한다.
 같은 instance_id를 쓰는 두 프로세스는 row holder로 구분하지 못한다(U5). durable source dedup도 이 분류기의 성과가 아니다. claim·accept SQL의 home 조건 재검사를 이 관측으로 대체하지 않는다.
 
-## 3. 후속 전환이 따를 결정
+## 3. 당시 후속 전환 검토 기록
+
+아래 D1–D5는 제거 전의 설계 선택지다. 현재 failover·세션 인수 계약을 정하지 않으며, 새 세션을 여는 F1은 별도 설계로 검토한다.
 
 | 결정 | 내용 |
 |---|---|
@@ -117,7 +115,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 | 경계 | 좌표 | 부수효과 |
 |---|---|---|
-| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, idle recap, node picker, sidecar |
+| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, node picker, sidecar |
 | slash command | `src/services/discord/runtime_bootstrap/gateway_runtime.rs:56–83` | Poise `command_check`와 event handler가 별개 |
 | live 메시지 | `src/services/discord/router/intake_gate.rs:356–650` | 로컬 message-ID dedup, thread 문맥, raw/effective 채널 |
 | DM·첨부 | `src/services/discord/router/intake_gate.rs:650–930` | pending DM 회신 소비, checkpoint, 첨부 admission |
@@ -144,7 +142,9 @@ R1–R6 제거 뒤 home 권위를 직접 소비하는 production 파일은 없�
 
 코드가 강제하는 조건과 배포 설정(U4·U5)은 따로 확인한다.
 
-## 6. 수용 기준과 시험
+## 6. 당시 수용 기준과 시험 (제거됨)
+
+아래 시험·뮤턴트는 과거 구현의 검증 기록이며 현재 시험 등록이나 GREEN 증거가 아니다. §4.4의 소비자 표와 inventory 시험도 R1–R6에서 함께 제거했다.
 
 | AC | 지키는 계약 | 시험 | 뮤턴트 |
 |---|---|---|---|
@@ -157,12 +157,12 @@ R1–R6 제거 뒤 home 권위를 직접 소비하는 production 파일은 없�
 | AC9 | 두 노드 중 최대 하나 | `two_nodes_never_both_observe_a_candidate_for_one_row` | holder_check_removed |
 | AC10 | 예전 관측으로 현재 admission 통과 불가 | `an_earlier_candidate_admits_nothing_after_a_handoff` | 관측값에서 gate를 여는 API가 없어 행동 뮤턴트를 만들 수 없다(구조 경계) |
 | AC11·AC12·P2-3 | 관측이 기존 home 진입점 결과를 바꾸지 않음, 진입점이 관측을 호출하지 않음 | `observing_leaves_every_existing_home_entry_point_unchanged` | observe_closes_intake, observe_unregisters, entry_point_observes |
-| P2-2 | 4.4 표가 직접 소비자를 빠짐없이 분류 | `home_authority_inventory_lists_every_direct_consumer` | 현재 소비자 행 삭제·비소비자 행 추가 |
+| 당시 P2-2 | 제거 전 §4.4 표가 직접 소비자를 빠짐없이 분류 | `home_authority_inventory_lists_every_direct_consumer` (제거됨) | 당시 소비자 행 삭제·비소비자 행 추가 |
 
-비간섭 시험이 실제로 부르는 진입점: `refusal`, `turn_host::refusal_before_turn`, `intake_hold`(epoch 있음·없음), `HomeGate::{admit, admit_post, ownership, expiry, commands_in_flight}`, `intake_held_channels`, `health`.
-열린 gate, drain 중 gate, 한 번도 잡지 않은 gate, 미등록 채널 네 경우를 모두 부르고, 기대값(열린 gate epoch, claim 보류, 미등록 Legacy)을 먼저 단언해 빈 기록끼리의 비교를 막는다.
+당시 비간섭 시험이 호출했던 진입점: `refusal`, `turn_host::refusal_before_turn`, `intake_hold`(epoch 있음·없음), `HomeGate::{admit, admit_post, ownership, expiry, commands_in_flight}`, `intake_held_channels`, `health`.
+열린 gate, drain 중 gate, 한 번도 잡지 않은 gate, 미등록 채널 네 경우를 모두 호출했고, 기대값(열린 gate epoch, claim 보류, 미등록 Legacy)을 먼저 단언해 빈 기록끼리의 비교를 막았다.
 
-Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 바이트 비교 하네스(`ingress_shadow::compat_tests`)가 증명한다.
+Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 당시 §9.4의 바이트 비교 하네스(`ingress_shadow::compat_tests`)로 검증했다. 이 하네스도 현재는 제거됐다.
 
 ## 7. 미확보 항목 [U]
 
@@ -201,9 +201,11 @@ Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 �
 새 admission 중지 → 진행 중 실행·ack·출력의 종료 또는 불명 상태 보존 → 채널 gate 철회 → 기존 경로가 보존된 source·cursor를 이해하는지 확인 → singleton 경로 재개 순서다.
 이전 바이너리가 새 custody를 이해하지 못하면 자동 롤백하지 않고 보류한다. `intake_outbox` forwarding 제거는 잔여 OPEN 작업의 귀속을 확인한 뒤의 별도 단계다.
 
-## 9. 관측 연결 (ingress shadow)
+## 9. 당시 관측 연결 (ingress shadow, 제거됨)
 
-판정을 실제 gateway 이벤트에 붙이되, 결과는 구조화 로그로만 남긴다. 기존 실행·forwarding·ack의 결정, 효과 순서, payload bytes, 호출 횟수는 바꾸지 않는다.
+아래 설정 키·worker·호출자·비간섭 시험은 모두 제거 전 기록이다. 현재 설정을 켜서 이 경로를 되살릴 수 없다.
+
+당시에는 판정을 실제 gateway 이벤트에 붙이고 결과를 구조화 로그로만 남겼다. 기존 실행·forwarding·ack의 결정, 효과 순서, payload bytes, 호출 횟수는 바꾸지 않는 계약이었다.
 
 ### 9.1 켜는 조건과 수명
 

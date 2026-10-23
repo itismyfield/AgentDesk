@@ -121,6 +121,12 @@ mod tests {
 
     #[test]
     fn detailed_binding_peek_distinguishes_busy_without_mutating_state() {
+        if super::super::tests::run_with_private_registry(concat!(
+            module_path!(),
+            "::detailed_binding_peek_distinguishes_busy_without_mutating_state"
+        )) {
+            return;
+        }
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

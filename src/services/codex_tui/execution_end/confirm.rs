@@ -67,6 +67,12 @@ pub(crate) async fn record_clear(capture: CapturedOldExecution, reset: bool, unc
                     capture.epoch,
                     &confirmed.0.end_id,
                 );
+                if !ticket {
+                    warn(
+                        &capture,
+                        "attempt changed or may still spawn; End has no ticket",
+                    );
+                }
                 tracing::debug!(
                     end_id = confirmed.0.end_id,
                     ticket,
@@ -127,6 +133,50 @@ fn confirm(capture: &CapturedOldExecution) -> Result<ConfirmedOldEnd, String> {
     Ok(ConfirmedOldEnd(record))
 }
 
+/// A successful same-name create replaced the old pane; its captured processes must still be gone.
+pub(super) fn replacement(
+    capture: &CapturedOldExecution,
+    successor_nonce: &str,
+    first_seq: u64,
+) -> Result<Option<CodexEnd>, String> {
+    let old = &capture.record;
+    let vacancy = Vacancy::observe(capture);
+    if vacancy.managed_pid.is_some()
+        || vacancy.pid != ProcessIdentityProbe::GoneOrReused
+        || vacancy.pgid != ProcessGroupProbe::Gone
+    {
+        return Ok(None);
+    }
+    if binding_context::observe_spawn_nonce_marker(&old.tmux_session)
+        != binding_context::SpawnNonceMarker::Known(successor_nonce.to_owned())
+    {
+        return Err("replacement marker changed".into());
+    }
+    let context = binding_context::execution_context("codex", &old.execution_nonce)?;
+    if ContextSnapshot::from(&context) != old.context
+        || binding_context::stable_host_identity().as_deref() != Some(old.host.as_str())
+        || tc::current_tmux_owner_marker() != old.owner_runtime_root
+        || super::identity::verify_source(&context, &old.source)? != old.provider_root
+    {
+        return Err("old replacement context/host/owner/source changed".into());
+    }
+    let events = binding_events::records_strict(old.channel)
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("binding log corrupt: {e:?}"))?;
+    if events.iter().any(|event| {
+        event.channel_id != old.channel
+            || (event.seq > old.binding_seq
+                && event.seq < first_seq
+                && event.tmux_session == old.tmux_session)
+    }) {
+        return Err("old binding changed before replacement".into());
+    }
+    let mut record = old.clone();
+    record.basis = codex_end::EndBasis::DirectReplacement;
+    record.ended_at = chrono::Utc::now();
+    Ok(Some(record))
+}
+
 fn warn(capture: &CapturedOldExecution, reason: &str) {
     if super::mutant("reason_removed") {
         tracing::warn!("Codex clear end not recorded");
@@ -136,5 +186,5 @@ fn warn(capture: &CapturedOldExecution, reason: &str) {
     tracing::warn!(channel = capture.record.channel, pane = capture.record.tmux_session,
         pid = capture.pane_pid, pgid = capture.pgid, reason,
         pane_state = ?vacancy.pane, managed_pid = ?vacancy.managed_pid,
-        pid_state = ?vacancy.pid, pgid_state = ?vacancy.pgid, "Codex clear end not recorded");
+        pid_state = ?vacancy.pid, pgid_state = ?vacancy.pgid, attempt_state = capture.epoch, "Codex clear end not recorded");
 }

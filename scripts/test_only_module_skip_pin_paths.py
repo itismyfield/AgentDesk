@@ -3,8 +3,6 @@
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/db/session_transcripts_native_clear_record.rs",
-        "src/db/session_transcripts_native_clear_seed.rs",
         "src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",

@@ -303,3 +303,6 @@ async fn a_text_clear_that_runs_answers_only_the_cleared_notice_pg() {
     assert_ne!(fence, channel.fence, "the transcript boundary moved");
     rig.finish(&[&channel]).await;
 }
+
+#[path = "clear_http_overlap_tests.rs"]
+mod http_overlap;

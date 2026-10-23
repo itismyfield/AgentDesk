@@ -23,11 +23,19 @@ pub(super) fn superseded(reason: &'static str) {
         _ => return,
     };
     let count = SUPERSEDED[index].fetch_add(1, Ordering::Relaxed) + 1;
-    tracing::info!(
-        reason,
-        superseded_count = count,
-        "[turn_presence] unbound observation superseded"
-    );
+    if count.is_power_of_two() {
+        tracing::info!(
+            reason,
+            superseded_count = count,
+            "[turn_presence] unbound observation superseded"
+        );
+    } else {
+        tracing::debug!(
+            reason,
+            superseded_count = count,
+            "[turn_presence] unbound observation superseded"
+        );
+    }
 }
 
 /// The Hold leaf and the judgment inputs it was decided from.
@@ -133,3 +141,7 @@ pub(in crate::services::discord::turn_presence::activity) fn rearm(channel: u64)
         .unwrap_or_else(|e| e.into_inner())
         .remove(&channel);
 }
+
+#[cfg(test)]
+#[path = "hold_leaf_log_tests.rs"]
+mod log_tests;

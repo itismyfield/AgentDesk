@@ -27,7 +27,6 @@ pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
 pub(in crate::services::discord) mod native;
-pub(in crate::services::discord) use native::native_clear_admits;
 
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,
@@ -38,32 +37,6 @@ use super::config::{
 enum ManagedSessionClearBehavior {
     ResetManagedProcess,
     Noop,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::services::discord) enum SoftClearNotifyMode {
-    Enqueue,
-    Suppress,
-}
-
-impl SoftClearNotifyMode {
-    fn should_enqueue(self) -> bool {
-        matches!(self, Self::Enqueue)
-    }
-}
-
-const SOFT_CLEAR_REASON_CODE: &str = "lifecycle.soft_clear";
-
-fn soft_clear_lifecycle_notify_row(
-    clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
-) -> Option<(&'static str, String)> {
-    notify_mode.should_enqueue().then(|| {
-        (
-            SOFT_CLEAR_REASON_CODE,
-            format!("🧹 세션 클리어 ({clear_source})"),
-        )
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,7 +266,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
 ) -> anyhow::Result<ClearReport> {
     clear_channel_session_state_with_session_key(
         http,
@@ -301,7 +273,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         provider,
         channel_id,
         clear_source,
-        notify_mode,
         None,
     )
     .await
@@ -315,7 +286,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
     let mut report = ClearReport::default();
@@ -348,15 +318,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     )
     .await
     {
-        clear_report::notify(
-            shared,
-            channel_id,
-            clear_source,
-            notify_mode,
-            explicit_session_key,
-            &report,
-        )
-        .await;
         return Ok(report);
     }
 
@@ -413,16 +374,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         session,
         transition,
         &mut report,
-    )
-    .await;
-
-    clear_report::notify(
-        shared,
-        channel_id,
-        clear_source,
-        notify_mode,
-        session_key.as_deref(),
-        &report,
     )
     .await;
 
@@ -583,7 +534,6 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
             &ctx.data().provider,
             ctx.channel_id(),
             "/clear",
-            SoftClearNotifyMode::Suppress,
         )
         .await?;
 
@@ -603,24 +553,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
 mod soft_clear_notify_tests {
     use poise::serenity_prelude::MessageId;
 
-    use super::{
-        SOFT_CLEAR_REASON_CODE, SoftClearNotifyMode, choose_clear_session_key,
-        parse_queued_message_id, soft_clear_lifecycle_notify_row,
-    };
-
-    #[test]
-    fn slash_and_text_clear_suppress_soft_clear_notify_row() {
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("/clear", SoftClearNotifyMode::Suppress),
-            None,
-            "`/clear` and `!clear` already reply with the shared clear response and must not enqueue a duplicate `lifecycle.soft_clear` notify row"
-        );
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("!clear", SoftClearNotifyMode::Suppress),
-            None,
-            "`!clear` should leave the provider reply as the single user-visible completion surface"
-        );
-    }
+    use super::{choose_clear_session_key, parse_queued_message_id};
 
     #[test]
     fn queued_cancel_parser_accepts_exact_nonzero_ids_only() {
@@ -630,19 +563,7 @@ mod soft_clear_notify_tests {
     }
 
     #[test]
-    fn idle_recap_clear_keeps_soft_clear_notify_row() {
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("idle_recap_clear", SoftClearNotifyMode::Enqueue),
-            Some((
-                SOFT_CLEAR_REASON_CODE,
-                "🧹 세션 클리어 (idle_recap_clear)".to_string(),
-            )),
-            "idle recap clear has no provider reply, so it must keep the single user-visible `lifecycle.soft_clear` notify row"
-        );
-    }
-
-    #[test]
-    fn explicit_recap_session_key_wins_over_recomputed_channel_key() {
+    fn explicit_session_key_wins_over_recomputed_channel_key() {
         assert_eq!(
             choose_clear_session_key(
                 Some("claude/token/host:AgentDesk-claude-old-channel"),
@@ -650,7 +571,7 @@ mod soft_clear_notify_tests {
             )
             .as_deref(),
             Some("claude/token/host:AgentDesk-claude-old-channel"),
-            "idle recap clear must drop the exact session row that owns the recap card, even when channel-name drift changes the recomputed key"
+            "an explicit session key must win even when channel-name drift changes the recomputed key"
         );
     }
 

@@ -11,7 +11,7 @@ use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
-pub(crate) use super::transition_cleanup::{Request, Termination};
+pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 
@@ -27,7 +27,22 @@ pub(crate) enum Operation {
     Inspect(Request),
     /// Retires each source the judgment passes, one per actor poll, while the scope is still the
     /// one whose digest the Inspect gave.
+    #[cfg(test)]
     Apply(Request, ScopeDigest),
+    /// The periodic retention policy applies an inspected scope, with a fresh idle check.
+    AutomaticApply(Request, ScopeDigest, Idle),
+}
+
+type IdleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+
+/// A runtime-owned check; a missing or unreachable mailbox never counts as idle.
+#[derive(Clone)]
+pub(crate) struct Idle(pub Arc<dyn Fn() -> IdleFuture + Send + Sync>);
+
+impl std::fmt::Debug for Idle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Idle")
+    }
 }
 
 /// The operation a job runs.
@@ -69,6 +84,14 @@ pub(crate) enum Refused {
     Unread(String),
 }
 
+/// The automatic retention policy that kept a source readable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum PolicyHold {
+    Young,
+    AgeUnknown,
+    NotIdle,
+}
+
 /// Why nothing was written for a source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Hold {
@@ -76,6 +99,8 @@ pub(crate) enum Hold {
     Stale,
     TransitionBusy,
     SourceBusy,
+    /// Age or runtime activity prevented automatic cleanup.
+    Policy(PolicyHold),
     /// A cleanup is recorded for it already, by another job or before it grew back.
     PriorCleanup,
     /// Past the candidate, hashing or time limit of one job.
@@ -283,6 +308,16 @@ impl TransitionPort {
     }
 }
 
+impl Operation {
+    pub(super) fn request_ref(&self) -> &Request {
+        match self {
+            Self::Inspect(request) | Self::AutomaticApply(request, _, _) => request,
+            #[cfg(test)]
+            Self::Apply(request, _) => request,
+        }
+    }
+}
+
 impl Receiver {
     /// The next envelope sent to this run; one sent to another run is answered as foreign.
     pub(super) fn try_next(&mut self) -> Result<Option<Envelope>, mpsc::error::TryRecvError> {
@@ -292,9 +327,7 @@ impl Receiver {
             Err(closed) => return Err(closed),
         };
         if envelope.generation != self.generation || !Arc::ptr_eq(&envelope.run, &self.run) {
-            let job = match &envelope.operation {
-                Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
-            };
+            let job = &envelope.operation.request_ref().job_id;
             let _ = (envelope.reply).send(Reply::refused(job, Refused::ForeignRun));
             return Ok(None);
         }

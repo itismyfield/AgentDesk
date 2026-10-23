@@ -30,6 +30,30 @@ static REGISTERED: LazyLock<Mutex<HashMap<String, BTreeSet<u64>>>> =
 /// What each supervised channel last published, for the turn endpoint.
 static PRESENCE: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Presence>>>>> =
     LazyLock::new(Default::default);
+static STARTED: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+struct Started(String);
+
+impl Started {
+    fn new(provider: &ProviderKind) -> Self {
+        let provider = provider.as_str().to_string();
+        *lock(&STARTED).entry(provider.clone()).or_default() += 1;
+        Self(provider)
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let mut started = lock(&STARTED);
+        if let Some(count) = started.get_mut(&self.0) {
+            *count -= 1;
+            if *count == 0 {
+                started.remove(&self.0);
+            }
+        }
+    }
+}
+
 static PROCESS_STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
 
 #[path = "unknown_notice_store.rs"]
@@ -77,12 +101,21 @@ fn registered(provider: &ProviderKind) -> Vec<u64> {
         .unwrap_or_default()
 }
 
+/// A pending hourglass is safe only while this provider supervises the confirmed channel.
+pub(in crate::services::discord) fn observes(provider: &ProviderKind, channel: u64) -> bool {
+    lock(&STARTED).contains_key(provider.as_str()) && registered(provider).contains(&channel)
+}
+
 /// Spawns the provider's supervisor; call once its bot token is set so no send precedes HTTP.
 pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: ProviderKind) {
     super::activity::initialize_tail();
     LazyLock::force(&PROCESS_STARTED);
+    let started = Started::new(&provider);
     let effects = Arc::new(LiveEffects { shared, provider });
-    tokio::spawn(Supervisor::new(effects).run());
+    tokio::spawn(async move {
+        let _started = started;
+        Supervisor::new(effects).run().await;
+    });
 }
 
 /// The turn endpoint's `turn_presence` block, or `None` outside turn mode.
@@ -194,6 +227,10 @@ enum Action {
 #[async_trait]
 trait Effects: Send + Sync + 'static {
     fn channels(&self) -> Vec<u64>;
+    /// Whether an effect point is reading the channel; a read now would supersede it.
+    fn effect_read_pending(&self, _channel: u64) -> bool {
+        false
+    }
     fn notice_scope(&self, channel: u64) -> notice_store::Scope;
     fn agent_id(&self, _channel: u64) -> Option<String> {
         None
@@ -202,6 +239,7 @@ trait Effects: Send + Sync + 'static {
     /// Whether a mailbox token holds the channel, and its oldest waiting input.
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>);
     async fn typing(&self, channel: u64) -> Result<(), String>;
+    fn idle(&self, channel: u64);
     fn kickoff(&self, channel: u64);
     async fn legacy_gate_blocked(&self, channel: u64) -> bool;
     async fn notice(&self, channel: u64, text: String) -> Result<(), String>;
@@ -305,20 +343,31 @@ impl<E: Effects> Supervisor<E> {
             let Some(presence) = self.channels.get(&channel).cloned() else {
                 continue;
             };
+            if self.effects.effect_read_pending(channel) {
+                tracing::debug!(
+                    channel,
+                    "[turn_presence] observation deferred to an effect read"
+                );
+                continue;
+            }
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
             let published = reading
                 .publish_if_current(|| {
                     let mut presence = lock(&presence);
-                    apply(
+                    let actions = apply(
                         &mut presence,
                         channel,
                         now,
                         &reading,
                         (token, head),
                         self.effects.agent_id(channel),
-                    )
+                    );
+                    if reading.observed.activity == Activity::Idle {
+                        self.effects.idle(channel);
+                    }
+                    actions
                 })
                 .await;
             let Some(actions) = published else {
@@ -682,6 +731,10 @@ impl Effects for LiveEffects {
         registered(&self.provider)
     }
 
+    fn effect_read_pending(&self, channel: u64) -> bool {
+        super::activity::effect_reads::pending(channel)
+    }
+
     async fn read(&self, channel: u64) -> Reading {
         reading_now(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
@@ -704,6 +757,12 @@ impl Effects for LiveEffects {
             ChannelId::new(channel),
             "turn_presence_idle",
         );
+    }
+
+    fn idle(&self, channel: u64) {
+        self.shared
+            .turn_view_reconciler
+            .clear_busy_injected(self.shared.clone(), ChannelId::new(channel));
     }
 
     async fn legacy_gate_blocked(&self, channel: u64) -> bool {

@@ -19,6 +19,7 @@ pub(crate) struct ScopeDigest([u8; 32]);
 
 impl ScopeDigest {
     /// A digest as this version shows it; another version or length is refused, never guessed.
+    #[cfg(test)]
     pub(crate) fn parse(shown: &str) -> Result<Self, String> {
         let hex = shown.strip_prefix(PREFIX).ok_or("not a v1 scope digest")?;
         let bytes = hex::decode(hex)
