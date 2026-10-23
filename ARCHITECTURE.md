@@ -11,7 +11,7 @@ High-signal navigation guide for contributors. The generated inventories under `
 - `docs/generated/route-inventory.md` — generated HTTP/WebSocket route inventory.
 - `docs/generated/worker-inventory.md` — generated supervised worker inventory.
 
-Install `sccache` with `brew install sccache` for local build caching. AgentDesk build helpers default to `SCCACHE_CACHE_SIZE=40G` and `SCCACHE_IDLE_TIMEOUT=0` while preserving nonempty overrides; see the [sccache setup guide](docs/ci/sccache-setup.md#22-shell-env-release-deploy-and-installer-source-builds) for activation rules, manual-wrapper behavior, and existing-daemon limits.
+Install `sccache` with `brew install sccache` for local build caching. AgentDesk build helpers default to `SCCACHE_CACHE_SIZE=15G` and `SCCACHE_IDLE_TIMEOUT=0` while preserving nonempty overrides; see the [sccache setup guide](docs/ci/sccache-setup.md#22-shell-env-release-deploy-and-installer-source-builds) for activation rules, manual-wrapper behavior, and existing-daemon limits.
 
 ## Generated `src/` Tree
 
@@ -1247,6 +1247,8 @@ src/
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   ├── reconcile_gate.rs
 │   │   │   │   └── snapshot.rs
+│   │   │   ├── host_recovery_guard/
+│   │   │   │   └── log_state.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1314,6 +1316,7 @@ src/
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
+│   │   │   ├── host_recovery_guard_log_tests.rs
 │   │   │   ├── invariant_test_capture.rs
 │   │   │   ├── managed_submission.rs
 │   │   │   ├── managed_submission_tests.rs
@@ -2496,6 +2499,7 @@ src/
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
+│   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── legacy_divergence.rs
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
@@ -3168,9 +3172,7 @@ src/
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── allowlist_host_tests.rs
 │   │   │   ├── allowlist_runner_tests.rs
-│   │   │   ├── allowlist_writer_tests.rs
 │   │   │   ├── backlog_tests.rs
-│   │   │   ├── config.rs
 │   │   │   ├── dispatch.rs
 │   │   │   ├── evidence.rs
 │   │   │   ├── identity.rs
@@ -3288,6 +3290,7 @@ src/
 │   │   │   ├── adoption_past_stall_tests.rs
 │   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
+│   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs

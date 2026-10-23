@@ -556,6 +556,15 @@ async fn collect_turn_stream_body(
 
             match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
+                    maybe_refresh_watcher_activity_heartbeat(
+                        shared.pg_pool.as_ref(),
+                        &shared.token_hash,
+                        &watcher_provider,
+                        &tmux_session_name,
+                        watcher_thread_channel_id,
+                        &mut last_activity_heartbeat_at,
+                    )
+                    .await;
                     let (auto_compacted, _chunk_forwarded_to_session_relay) =
                         match stream_chunk::process_stream_chunk(stream_chunk::StreamChunkState {
                             shared: &shared,
@@ -563,7 +572,6 @@ async fn collect_turn_stream_body(
                             tmux_session_name: &tmux_session_name,
                             channel_id,
                             watcher_instance_id: ctx.watcher_instance_id,
-                            watcher_thread_channel_id,
                             source_authority,
                             retained_source: parser.retained_source.is_some(),
                             read_witness,
@@ -571,7 +579,6 @@ async fn collect_turn_stream_body(
                             off,
                             file_identity,
                             current_offset: &mut current_offset,
-                            last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
                             ready_for_input_tracker: &mut ready_for_input_tracker,
                             utf8_decoder,
                             all_data: &mut all_data,

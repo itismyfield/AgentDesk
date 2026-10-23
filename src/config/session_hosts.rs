@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,7 @@ pub(crate) struct BootSessionHosts {
 const GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
 type GuardOverride = std::result::Result<Option<BTreeSet<u64>>, String>;
 static GUARD_INPUT: OnceLock<GuardOverride> = OnceLock::new();
+static LOGGED_SELECTION: Mutex<Option<(&'static str, BTreeSet<u64>)>> = Mutex::new(None);
 
 fn read_guard_input() -> Result<Option<BTreeSet<u64>>> {
     let value = std::env::var_os(GUARD_ENV)
@@ -126,7 +127,16 @@ impl BootSessionHosts {
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
         let (effective, source) = normalized(config)?;
         let channels = validate_effective(&effective)?;
-        tracing::info!(source, channels = ?effective.session_hosts.claude_guard_channels, policy = "idle-only", "Claude submit guard boot selection");
+        let selection = (
+            source,
+            effective.session_hosts.claude_guard_channels.clone(),
+        );
+        let mut logged = LOGGED_SELECTION.lock().unwrap_or_else(|e| e.into_inner());
+        if logged.as_ref() != Some(&selection) {
+            tracing::info!(source, channels = ?effective.session_hosts.claude_guard_channels, policy = "idle-only", "Claude submit guard boot selection");
+            *logged = Some(selection);
+        }
+        drop(logged);
         let local_node = effective.cluster.instance_id.as_deref().map(str::trim);
         Ok(Self {
             config: effective.session_hosts.clone(),

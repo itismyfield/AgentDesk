@@ -812,7 +812,7 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         self.assertIn(1, issues)
 
     def test_stale_snapshot_warns_generator(self) -> None:
-        """Staleness warns and requires a live refresh without blocking generation."""
+        """Staleness warns without requiring bookkeeping to generate docs."""
         refreshed = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         rc, stderr = self._run_generator(
             self._snapshot(
@@ -1561,22 +1561,6 @@ class GiantFileClosedIssueTest(MetadataWarningAssertions, unittest.TestCase):
                 GEN.GIANT_FILE_ISSUE_METADATA = orig_path
                 GEN.now_utc = orig_now
 
-    def test_categorize_closed_issue_problem_allowed(self) -> None:
-        """Verify that entries in the transition list are marked as allowed."""
-        problem = "[[entry]] 'src/a.rs' has a dead deadline: decompose_issue #1001 is closed"
-        transition_list = {"src/a.rs", "src/b.rs"}
-        is_allowed, message = GEN.categorize_closed_issue_problem("src/a.rs", problem, transition_list)
-        self.assertTrue(is_allowed)
-        self.assertIn("transition", message)
-
-    def test_categorize_closed_issue_problem_forbidden(self) -> None:
-        """Verify that entries NOT in the transition list are marked as forbidden."""
-        problem = "[[entry]] 'src/c.rs' has a dead deadline: decompose_issue #1001 is closed"
-        transition_list = {"src/a.rs", "src/b.rs"}
-        is_allowed, message = GEN.categorize_closed_issue_problem("src/c.rs", problem, transition_list)
-        self.assertFalse(is_allowed)
-        self.assertIn("FATAL", message)
-
     def test_load_transition_list(self) -> None:
         """Verify that transition list is loaded correctly."""
         with TemporaryDirectory() as tmp:
@@ -1613,7 +1597,7 @@ src/c.rs
         finally:
             GEN.GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST = orig_path
 
-    def test_ratchets_reject_growth_in_both_counts(self) -> None:
+    def test_planning_counts_describe_growth(self) -> None:
         for key in GEN.GIANT_FILE_ISSUE_RATCHET_KEYS:
             measured = {
                 "closed_deadline_entries": 5,
@@ -1630,9 +1614,9 @@ src/c.rs
                 )
                 self.assertEqual(len(problems), 1)
                 self.assertIn("grew from snapshot baseline 5 to 6", problems[0])
-                self.assertIn("ratchet violation", problems[0])
+                self.assertIn("advisory count", problems[0])
 
-    def test_ratchets_require_writer_after_shrink_in_both_counts(self) -> None:
+    def test_planning_counts_suggest_optional_refresh_after_shrink(self) -> None:
         for key in GEN.GIANT_FILE_ISSUE_RATCHET_KEYS:
             measured = {
                 "closed_deadline_entries": 5,

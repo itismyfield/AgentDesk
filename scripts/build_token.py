@@ -626,7 +626,7 @@ def apply_sccache_env(env: dict[str, str]) -> None:
     env["SCCACHE_DIR"] = cache_dir
     # Adjustable local ceiling to reduce eviction risk; performance gain is unmeasured.
     # Explicit caller limits, including CI-specific values, remain unchanged.
-    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "40G"
+    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "15G"
     # 0 disables the idle exit. Campaign builds queue behind the token for tens of
     # minutes, so the 600s default reaps the daemon between them and its counters
     # restart at zero -- which reads as "sccache is off" and gets it re-enabled.
