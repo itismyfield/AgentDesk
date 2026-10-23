@@ -334,6 +334,13 @@ impl CswapService {
         SERVICE.get_or_init(|| CswapService::new(Arc::new(CswapCliAdapter)))
     }
 
+    pub(crate) fn cached_accounts_for_summary(&self) -> Option<ClaudeAccountsResponse> {
+        let _switch = self.switch_lock.try_lock().ok()?;
+        let _fetch = self.list_fetch_lock.try_lock().ok()?;
+        let cached = self.list_cache.try_read().ok()?;
+        Some(cached.as_ref()?.response.clone())
+    }
+
     pub async fn list_accounts(
         &self,
         hostname: String,
@@ -652,6 +659,53 @@ mod tests {
 
     fn switch_fixture() -> &'static str {
         r#"{"switched":true,"from":"old@example.com","to":"new@example.com","reason":"manual"}"#
+    }
+
+    #[tokio::test]
+    async fn summary_reads_cached_accounts_without_executing_cswap() {
+        let adapter = Arc::new(MockCswapAdapter::new(MockAction::Output(
+            list_fixture().into(),
+        )));
+        let service = CswapService::new(adapter.clone());
+        assert!(service.cached_accounts_for_summary().is_none());
+        assert_eq!(adapter.calls.load(Ordering::Acquire), 0);
+        service
+            .list_accounts("isolated".into(), None)
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                service
+                    .cached_accounts_for_summary()
+                    .unwrap()
+                    .active_account_number,
+                Some(2)
+            );
+        }
+        assert_eq!(adapter.calls.load(Ordering::Acquire), 1);
+        service.invalidate_list_cache().await;
+        assert!(service.cached_accounts_for_summary().is_none());
+    }
+
+    #[tokio::test]
+    async fn summary_cache_miss_during_fetch_switch_or_write_never_waits() {
+        let service = CswapService::new(Arc::new(MockCswapAdapter::new(MockAction::Output(
+            list_fixture().into(),
+        ))));
+        service
+            .list_accounts("isolated".into(), None)
+            .await
+            .unwrap();
+        let switching = service.switch_lock.lock().await;
+        assert!(service.cached_accounts_for_summary().is_none());
+        drop(switching);
+        let fetching = service.list_fetch_lock.lock().await;
+        assert!(service.cached_accounts_for_summary().is_none());
+        drop(fetching);
+        let writing = service.list_cache.write().await;
+        assert!(service.cached_accounts_for_summary().is_none());
+        drop(writing);
+        assert!(service.cached_accounts_for_summary().is_some());
     }
 
     #[tokio::test]

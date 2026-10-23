@@ -65,6 +65,14 @@ impl RetiredExclusion {
         self.dispatch.as_deref()
     }
 
+    /// The row's owner token, which the terminate required to be its runtime's own.
+    pub(crate) fn owner_token(&self) -> Option<&str> {
+        match &self.row.record {
+            HostedRecord::Known(record) => Some(&record.owner.discord_token_hash),
+            _ => None,
+        }
+    }
+
     pub(crate) fn provider(&self) -> &ProviderKind {
         &self.provider
     }

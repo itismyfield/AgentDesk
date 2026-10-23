@@ -750,3 +750,12 @@ pub(super) fn successor_takes_over(node: &Node, flag: Arc<AtomicBool>) -> Settle
         })
     })
 }
+
+#[path = "http_force_identity_tests.rs"]
+pub(super) mod identity;
+
+#[path = "http_force_purge_tests.rs"]
+mod purge;
+
+#[path = "http_force_terminal_tests.rs"]
+mod terminal;

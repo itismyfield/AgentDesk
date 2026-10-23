@@ -16,6 +16,7 @@ pub(super) async fn upsert_rate_limit_cache_entry(
     } else {
         profile_id
     };
+    crate::services::turn_summary_line::quota::publish(provider, profile_id, data, fetched_at);
     if let Err(error) = sqlx::query(
         "INSERT INTO rate_limit_cache (provider, profile_id, data, fetched_at)
          VALUES ($1, $2, $3, $4)

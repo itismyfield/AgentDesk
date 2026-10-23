@@ -91,7 +91,7 @@ fn synthetic_resume_chrome_cannot_capture_the_next_prompt_elapsed_or_summary_key
     work.extend(derive.derive(&prompt("real question", "2026-10-19T03:00:00Z")));
     work.extend(derive.derive(&body("2026-10-19T03:00:30Z")));
     work.extend(derive.derive(&closing("2026-10-19T03:01:00Z")));
-    assert_turn(&work, "-# ✅ 1분");
+    assert_turn(&work, "-# ⏱️ 1분");
 }
 
 #[test]
@@ -113,5 +113,5 @@ fn unitless_local_commands_restart_at_the_real_prompt_but_active_units_keep_thei
     let mut work = derive.derive(&body("2026-10-19T00:10:01Z"));
     work.extend(derive.derive(&prompt("queued question", "2026-10-19T00:10:03Z")));
     work.extend(derive.derive(&closing("2026-10-19T00:10:05Z")));
-    assert_turn(&work, "-# ✅ 5초");
+    assert_turn(&work, "-# ⏱️ 5초");
 }
