@@ -229,7 +229,8 @@ fn health_json_for(
         }),
     };
     if include_node_hostname {
-        health["node_hostname"] = serde_json::json!(crate::services::platform::hostname_short());
+        health["node_hostname"] =
+            serde_json::json!(crate::services::platform::shell::health_hostname_short());
     }
     health
 }
