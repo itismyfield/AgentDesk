@@ -497,7 +497,7 @@ pub(in crate::services::discord) async fn meeting_status(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod cancel_tests {
     use super::*;
     use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
