@@ -1139,7 +1139,6 @@ mod tests {
             "health",
             "machine-compare",
             "activity",
-            "o",
             "herdr",
             "channel-home",
             "help",
