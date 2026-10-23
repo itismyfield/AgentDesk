@@ -7681,6 +7681,8 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_laun
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_restart_before_proof_preserves_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::delegated_tests::delegated_home_actual_worker_launches_fresh_and_writer_posts_fifo_pg
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::discord_mock_tests::discord_mock_duplicate_history_fails_the_restart_assertion
+services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::discord_mock_tests::discord_mock_ignores_foreign_gets_around_history
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::joint_foreign::actual_gateway_mixed_foreign_owners_deliver_fresh_fifo_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::native_output::native_terminal_fixture_has_a_postable_stable_unit_and_idle_boundary
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::b1b_fresh_launch_tests::ordinary_restart_tests::boot_gate_alarm_tests::boot_gate_missing_binding_notifies_only_after_grace_pg

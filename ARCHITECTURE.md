@@ -1815,6 +1815,7 @@ src/
 │   │   │   │       │   │   ├── fresh_process_tests.rs
 │   │   │   │       │   │   └── fresh_scope_restart_tests.rs
 │   │   │   │       │   ├── delegated_tests.rs
+│   │   │   │       │   ├── discord_mock_tests.rs
 │   │   │   │       │   └── ordinary_restart_tests.rs
 │   │   │   │       ├── b1b_fresh_launch_tests.rs
 │   │   │   │       ├── b1b_joint_owner_tests.rs

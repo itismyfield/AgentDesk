@@ -29,6 +29,7 @@ const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
 mod delegated_tests;
+mod discord_mock_tests;
 #[path = "b1b_joint_owner_tests.rs"]
 mod joint_foreign;
 #[path = "b1b_terminal_tests.rs"]
@@ -56,6 +57,7 @@ enum BeforeInput {
 
 struct Discord {
     http: Arc<serenity::Http>,
+    url: String,
     messages: Arc<Mutex<Vec<serde_json::Value>>>,
     server: tokio::task::AbortHandle,
     history_reads: Arc<std::sync::atomic::AtomicUsize>,
@@ -82,6 +84,11 @@ impl Discord {
                             "discriminator":"0001", "avatar":null, "bot":true})).into_response();
                     }
                     if method == Method::GET {
+                        let channel = uri.path().strip_prefix("/api/v10/channels/")
+                            .and_then(|path| path.strip_suffix("/messages"));
+                        if !channel.is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())) {
+                            return axum::http::StatusCode::NOT_FOUND.into_response();
+                        }
                         reads.fetch_add(1, Ordering::SeqCst);
                         return axum::Json(json!(*recorded.lock().unwrap())).into_response();
                     }
@@ -111,10 +118,19 @@ impl Discord {
         let server = tokio::spawn(async move { axum::serve(socket, app).await.unwrap() });
         Self {
             http,
+            url: format!("http://127.0.0.1:{port}"),
             messages,
             server: server.abort_handle(),
             history_reads,
         }
+    }
+
+    fn assert_history_reads(&self, expected: usize) {
+        assert_eq!(
+            self.history_reads.load(Ordering::SeqCst),
+            expected,
+            "only the open Prepared performs one history read-back"
+        );
     }
 
     fn texts(&self) -> Vec<String> {
