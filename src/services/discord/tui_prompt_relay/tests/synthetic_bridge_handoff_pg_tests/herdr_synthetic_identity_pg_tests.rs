@@ -1636,7 +1636,11 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
     let _mode = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let channel = ChannelId::new(7_263_001);
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
-    let fixture = Fixture::new(root.path(), channel).await;
+    let mut fixture = Fixture::new(root.path(), channel).await;
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    Arc::get_mut(&mut fixture.shared)
+        .expect("fresh shared")
+        .health_registry = Arc::downgrade(&registry);
     let source_before = fixture.source.clone();
     let hosted_before = fixture.hosted_json().await;
     assert!(
@@ -1656,6 +1660,12 @@ async fn restored_provider_same_transcript_human_prompt_is_not_relayed_or_synthe
     let (rest, _http) =
         crate::services::discord::shared_state::test_rest::recording_mock(7_263_010, channel.get())
             .await;
+    registry
+        .set_utility_bot_http_for_tests(
+            crate::services::discord::bot_role::UtilityBotRole::Notify,
+            fixture.shared.serenity_http_or_token_fallback(),
+        )
+        .await;
     let observed = ObservedTuiPrompt {
         provider: "claude".into(),
         tmux_session_name: fixture.logical.clone(),
