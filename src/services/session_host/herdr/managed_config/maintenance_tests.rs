@@ -460,8 +460,9 @@ fn a_no_peer_read_is_re_read_and_a_lasting_one_fails() {
 }
 
 fn notified_boot(node: &str, key: &str, home: &Path, channels: &[u64]) -> BootSessionHosts {
-    let mut config: crate::config::Config = serde_yaml::from_str(
-        "agents:\n  - id: notice-fixture\n    name: Notice fixture\n    channels:\n      codex: {id: '7189042', runtime: tui}\n      claude: {id: '7189041', runtime: tui}\n",
+    let mut config = crate::config::Config::default();
+    config.agents = serde_yaml::from_str(
+        "- id: notice-fixture\n  name: Notice fixture\n  channels:\n    codex: {id: '7189042', runtime: tui}\n    claude: {id: '7189041', runtime: tui}\n",
     )
     .unwrap();
     config.cluster.instance_id = Some(node.into());
