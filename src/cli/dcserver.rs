@@ -1208,8 +1208,8 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         };
         crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
+        startup::spawn_skill_manifest_audit(&ad_config, &discord_pg_pool);
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
-
         // Start axum HTTP server (background task) — now serves all API
         // endpoints including /api/discord/send, /api/discord/send-dm, /api/health
         let http_port = ad_config.server.port;

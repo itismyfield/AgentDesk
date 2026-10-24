@@ -59,3 +59,50 @@ pub(super) fn raise_fd_soft_limit(desired: u64) {
 
 #[cfg(not(unix))]
 pub(super) fn raise_fd_soft_limit(_desired: u64) {}
+
+pub(super) fn spawn_skill_manifest_audit(config: &crate::config::Config, pool: &sqlx::PgPool) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    let config = config.clone();
+    let pool = pool.clone();
+    spawn_skill_manifest_audit_once(
+        &STARTED,
+        async move {
+            let request = crate::server::routes::skills_manifest_audit::manifest_audit_request(
+                &config, &pool,
+            )
+            .await;
+            tokio::task::spawn_blocking(move || {
+                crate::server::routes::skills_manifest_audit::audit_skill_manifest_agents(request)
+            })
+            .await
+            .map_or_else(
+                |error| {
+                    Some(format!(
+                        "skill manifest audit inspection_unavailable: {error}"
+                    ))
+                },
+                |report| report.warning(),
+            )
+        },
+        |message| tracing::warn!("{message}"),
+    );
+}
+
+fn spawn_skill_manifest_audit_once(
+    once: &std::sync::Once,
+    inspect: impl std::future::Future<Output = Option<String>> + Send + 'static,
+    emit: impl FnOnce(String) + Send + 'static,
+) {
+    // Scheduling is process-once and never awaits disk or database work on the boot path.
+    once.call_once(|| {
+        tokio::spawn(async move {
+            if let Some(message) = inspect.await {
+                emit(message);
+            }
+        });
+    });
+}
+
+#[cfg(test)]
+#[path = "startup_audit_tests.rs"]
+mod tests;

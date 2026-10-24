@@ -25,7 +25,8 @@ src/
 │   │   ├── runtime_config.rs
 │   │   └── transport.rs
 │   ├── dcserver/
-│   │   └── startup.rs
+│   │   ├── startup.rs
+│   │   └── startup_audit_tests.rs
 │   ├── direct/
 │   │   └── auto_queue_add.rs
 │   ├── doctor/
@@ -36,6 +37,8 @@ src/
 │   │   ├── orchestrator/
 │   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── configuration_audit.rs
+│   │   │   ├── configuration_audit_tests.rs
 │   │   │   ├── dispatch_outbox.rs
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs

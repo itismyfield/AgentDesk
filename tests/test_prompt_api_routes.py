@@ -195,6 +195,14 @@ class PromptRoutes(unittest.TestCase):
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
 
+    def test_no_inspected_prompt_files_is_unavailable(self):
+        for symlink in (False, True):
+            if symlink:
+                self.prompt.symlink_to(self.root / 'missing')
+            with self.subTest(symlink=symlink), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(check(self.root, self.prompts), 2)
+            self.assertIn('inspection_unavailable: no_prompt_files', output.getvalue())
+
     def run_staging(self, *, strict=False, boundary='direct', source='configured', deploy=None):
         deploy = deploy or Path(os.environ.get('AGENTDESK_TEST_DEPLOY_SH', REPO / 'scripts/deploy-release.sh')).read_text()
         parser = deploy.split('# Parse flags non-destructively', 1)[1].split('case "$DEPLOY_FAST"', 1)[0]
