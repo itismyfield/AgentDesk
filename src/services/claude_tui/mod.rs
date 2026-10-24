@@ -20,6 +20,7 @@ pub(crate) mod hosting;
 pub mod input;
 pub(crate) mod memento_feedback;
 pub(crate) mod memento_writer_hook;
+pub(in crate::services::claude_tui) mod paste_placeholder;
 pub(super) mod prompt_readiness;
 pub mod session;
 pub(crate) mod source_verify;

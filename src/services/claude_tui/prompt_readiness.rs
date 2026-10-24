@@ -250,8 +250,8 @@ pub(super) fn previous_turn_still_running(
         }
 }
 
-/// True when the bottom-most composer line still starts `prompt` with no reply or busy chrome
-/// below it: the Enter was swallowed. The generic draft probe reads `[User: …]` as history.
+/// True when the bottom-most composer holds the prompt prefix or its folded paste,
+/// with no reply or busy chrome below it: the Enter was swallowed.
 pub(crate) fn composer_still_holds_prompt(pane: &str, prompt: &str) -> bool {
     let lines = pane.lines().filter(|line| !line.trim().is_empty());
     let lines = lines.collect::<Vec<_>>();
@@ -275,13 +275,106 @@ pub(crate) fn composer_still_holds_prompt(pane: &str, prompt: &str) -> bool {
         ]) || line.to_ascii_lowercase().contains("esc to interrupt")
     });
     let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let shown = collapse(&composer_text(recent[index]).unwrap_or_default());
-    !reply_or_busy && !shown.is_empty() && collapse(prompt).starts_with(&shown)
+    let composer = composer_text(recent[index]).unwrap_or_default();
+    let shown = collapse(&composer);
+    !reply_or_busy
+        && !shown.is_empty()
+        && (collapse(prompt).starts_with(&shown)
+            || super::paste_placeholder::matches_prompt(composer.trim(), prompt))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folded_paste_fixture() -> String {
+        crate::services::codex_tui::input::strip_ansi_escape_sequences(include_str!(
+            "../../../tests/fixtures/tui_input/claude-2.1.309-folded-paste.ansi"
+        ))
+    }
+
+    fn folded_prompt() -> String {
+        (0..15)
+            .map(|line| format!("[User: fresh] prompt line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn folded_paste_fixture_matches_only_its_sent_prompt_line_count() {
+        let pane = folded_paste_fixture();
+        let prompt = folded_prompt();
+        assert!(composer_still_holds_prompt(&pane, &prompt));
+        assert!(!composer_still_holds_prompt(&pane, "short prompt"));
+        assert!(!composer_still_holds_prompt(
+            &pane,
+            &format!("{prompt}\nextra")
+        ));
+        let flat = pane.replace("[Pasted text #1 +14 lines]", "[Pasted text #27]");
+        assert!(composer_still_holds_prompt(&flat, &"x".repeat(901)));
+        assert!(!composer_still_holds_prompt(&flat, &prompt));
+        assert!(composer_still_holds_prompt(
+            "❯ [User: fresh] short\n────────────────",
+            "[User: fresh] short prompt"
+        ));
+    }
+
+    #[test]
+    fn folded_paste_rejects_empty_composer_reply_and_busy_repaints() {
+        let pane = folded_paste_fixture();
+        let prompt = folded_prompt();
+        let empty = pane.replace("[Pasted text #1 +14 lines]", "");
+        assert!(!composer_still_holds_prompt(&empty, &prompt));
+        for suffix in ["⏺ Answer started", "✳ Thinking…", "  esc to interrupt", "❯"] {
+            assert!(!composer_still_holds_prompt(
+                &format!("{pane}\n{suffix}"),
+                &prompt
+            ));
+        }
+    }
+
+    #[test]
+    fn fresh_folded_paste_retries_enter_until_repaint_or_existing_limit() {
+        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let pane = folded_paste_fixture();
+        let empty = pane.replace("[Pasted text #1 +14 lines]", "");
+        let ready = "────────────────────\n❯\n────────────────────\n  ⏵⏵ bypass permissions on";
+        let prompt = folded_prompt();
+        let cancel = crate::services::provider::CancelToken::new();
+        assert!(
+            crate::services::tmux_common::tmux_capture_indicates_claude_tui_ready_for_input(&empty)
+        );
+        let snapshot =
+            super::super::input::prompt_readiness_snapshot_from_capture(Some(&pane), true);
+        assert!(!snapshot.prompt_marker_detected, "{snapshot:?}");
+        assert!(snapshot.prompt_draft_detected, "{snapshot:?}");
+        for (captures, expected_enters) in [
+            (vec![pane.clone(), empty.clone()], 2),
+            (vec![empty.clone()], 1),
+            (vec![pane.clone(); 3], 3),
+            (vec![format!("{pane}\n⏺ Answer started")], 1),
+        ] {
+            let spy = SpyGuard::install(SpyState {
+                captures: std::iter::repeat_n(Some(ready.to_owned()), 8).collect(),
+                captures_after_send: Some(captures.into_iter().map(Some).collect()),
+                ..SpyState::default()
+            });
+            let session = format!("fresh-folded-retry-{}", uuid::Uuid::new_v4());
+            assert_eq!(
+                super::super::input::send_fresh_prompt(&session, &prompt, Some(&cancel)),
+                Ok(())
+            );
+            let calls = spy.calls();
+            assert_eq!(
+                calls.iter().filter(|call| *call == "keys:Enter").count(),
+                expected_enters,
+                "{calls:?}"
+            );
+        }
+    }
 
     const BACKGROUND_WAITING_PANE: &str = "\
 ⏺ Foreground answer complete
