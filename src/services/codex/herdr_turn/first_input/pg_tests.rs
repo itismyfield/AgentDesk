@@ -126,6 +126,13 @@ fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
             }),
         )
         .unwrap();
+    let owner_snapshot = rt
+        .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+        .unwrap();
+    assert_eq!(
+        owner_snapshot["head_injection"]["payload_window"]["kind"], "started",
+        "actual submit must commit payload in owner scope"
+    );
     let submitted = result
         .unwrap()
         .expect("Codex physical submit returns its observer");

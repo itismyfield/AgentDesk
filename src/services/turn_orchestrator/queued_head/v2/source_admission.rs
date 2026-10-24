@@ -169,7 +169,10 @@ impl Owner {
                         resolved_target: None,
                         preparation_hold: None,
                     },
-                    reason: RetainedReason::OpaqueUnsent,
+                    reason: RetainedReason::Rejected {
+                        reason: "opaque_unsent".into(),
+                    },
+                    disposition: Some(RetainedDisposition::OpaqueUnsent),
                     notice: NoticeIntent {
                         kind: "retained_retry_required".into(),
                         enqueued: false,

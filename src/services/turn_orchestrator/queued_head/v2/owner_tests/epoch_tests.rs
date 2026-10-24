@@ -117,3 +117,53 @@ fn physical_supplement_preserves_logical_lease_across_epoch_and_labels() {
     wb.add_physical("same server/pane/pid".into()).unwrap();
     drop(wb);
 }
+
+fn current_writer_compat_golden() -> String {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner(727429);
+    owner.enqueue_fixture(&item(429)).unwrap();
+    let mut opaque = item(429);
+    opaque.source_message_ids = vec![429, 430];
+    opaque.source_text_segments.clear();
+    assert_eq!(
+        source_admission::Custody::new(&opaque).advance(&mut owner),
+        Ok(source_admission::Admitted::RetainedOpaque)
+    );
+    owner.enqueue_fixture(&item(431)).unwrap();
+    let key = owner
+        .reserve(attempt(431, "golden-epoch"), payload())
+        .unwrap();
+    let writer = owner.arm_bootstrap(&key, 1).unwrap().consume(&key).unwrap();
+    owner.payload_started(&key, 50000).unwrap();
+    owner
+        .bind_target(
+            &key,
+            crate::services::tui_input::target_epoch::PaneEpoch {
+                host: "tmux".into(),
+                endpoint: "fixture".into(),
+                owner: "golden-epoch".into(),
+                root: "/test".into(),
+                execution_nonce: "execution".into(),
+                physical: [
+                    "1".into(),
+                    "$1".into(),
+                    "@1".into(),
+                    "%1".into(),
+                    "2".into(),
+                ],
+            },
+        )
+        .unwrap();
+    let bytes = std::fs::read_to_string(&owner.path).unwrap();
+    assert!(matches!(
+        super::super::super::compat::inspect(&bytes).unwrap(),
+        super::super::super::compat::SnapshotRead::ReadOnlyV2(_)
+    ));
+    assert!(super::super::super::compat::require_legacy_write(&owner.path).is_err());
+    assert_eq!(std::fs::read_to_string(&owner.path).unwrap(), bytes);
+    drop(writer);
+    bytes
+}
+
+#[path = "fixtures/previous_v2_reader.rs"]
+mod previous_v2;

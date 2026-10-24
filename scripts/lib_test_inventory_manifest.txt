@@ -15128,6 +15128,7 @@ services::turn_orchestrator::queued_head::v2::tests::conservation_tests::settlem
 services::turn_orchestrator::queued_head::v2::tests::epoch_tests::bootstrap_excludes_preparation_and_payload_commit_is_idempotent
 services::turn_orchestrator::queued_head::v2::tests::epoch_tests::bootstrap_restart_preserves_raw_and_never_rearms_without_a_deadline
 services::turn_orchestrator::queued_head::v2::tests::epoch_tests::physical_supplement_preserves_logical_lease_across_epoch_and_labels
+services::turn_orchestrator::queued_head::v2::tests::epoch_tests::previous_v2::previous_reader_decodes_current_writer_optional_metadata
 services::turn_orchestrator::queued_head::v2::tests::pg_tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 services::turn_orchestrator::queued_head::v2::tests::v2_adoption_reapplies_slots_after_crash_between_commit_and_projection
 services::turn_orchestrator::queued_head::v2::tests::v2_commit_readback_requires_full_candidate_and_sync_before_permit

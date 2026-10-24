@@ -19,6 +19,7 @@ impl Owner {
             next.retained_inputs.push(RetainedInput {
                 input,
                 reason: RetainedReason::Unconfirmed,
+                disposition: None,
                 notice: NoticeIntent {
                     kind: "unconfirmed".into(),
                     enqueued: false,
@@ -96,7 +97,10 @@ impl Owner {
         input.phase = HeadPhase::Reserved;
         next.retained_inputs.push(RetainedInput {
             input,
-            reason: RetainedReason::KnownNotSent { reason },
+            reason: RetainedReason::Rejected {
+                reason: format!("known_not_sent: {reason}"),
+            },
+            disposition: Some(RetainedDisposition::KnownNotSent),
             notice: NoticeIntent {
                 kind: "retained_retry_required".into(),
                 enqueued: false,

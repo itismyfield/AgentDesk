@@ -189,6 +189,21 @@ impl crate::services::turn_orchestrator::ChannelMailboxHandle {
         frame: String,
         channel: u64,
     ) -> Result<(), String> {
+        let trusted = crate::config::runtime_root()
+            .ok_or("runtime root absent")?
+            .join("runtime");
+        let path = if path.starts_with(&trusted) {
+            path
+        } else {
+            trusted
+                .join("discord_pending_queue/cold-matrix")
+                .join(format!(
+                    "{channel}-{}",
+                    path.file_name()
+                        .ok_or("fixture filename absent")?
+                        .to_string_lossy()
+                ))
+        };
         self.v2_adopt(path, format!("cold-scope-{channel}")).await?;
         self.v2_request(move |slot| {
             let owner=slot.as_mut().ok_or("owner absent")?;
@@ -326,12 +341,12 @@ async fn live_payload_refusal_proof_preserves_raw_without_becoming_restart_autho
         })
         .await
         .unwrap();
-    assert!(outcome.result.is_err());
     assert_eq!(
         keys.load(Ordering::SeqCst),
         0,
         "failed payload commit authorizes no content I/O"
     );
+    assert!(outcome.result.is_err());
     let proof = outcome
         .not_sent
         .expect("a live refusing gate proves no content was entered");
@@ -351,10 +366,7 @@ async fn live_payload_refusal_proof_preserves_raw_without_becoming_restart_autho
         .await
         .unwrap();
     assert!(snap["head_injection"].is_null());
-    assert_eq!(
-        snap["retained_inputs"][0]["reason"]["kind"],
-        "known_not_sent"
-    );
+    assert_eq!(snap["retained_inputs"][0]["disposition"], "known_not_sent");
     assert_eq!(
         snap["retained_inputs"][0]["input"]["original"]["text"],
         "original kept after refusal"

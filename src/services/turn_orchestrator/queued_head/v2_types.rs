@@ -85,15 +85,22 @@ pub(crate) struct PreparedPayload {
 pub(crate) struct RetainedInput {
     pub(crate) input: InputAttempt,
     pub(crate) reason: RetainedReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) disposition: Option<RetainedDisposition>,
     pub(crate) notice: NoticeIntent,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetainedDisposition {
+    OpaqueUnsent,
+    KnownNotSent,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RetainedReason {
     Unconfirmed,
-    OpaqueUnsent,
-    KnownNotSent { reason: String },
     Rejected { reason: String },
 }
 

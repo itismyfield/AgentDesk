@@ -28,6 +28,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
+    let _entered = runtime.enter();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727395));
     runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("cold-owner.json"),serde_json::json!({"nonce":"claude-cold-scope","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727395)).unwrap();
@@ -47,6 +48,13 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
             }),
         )
         .unwrap();
+    let owner_snapshot = runtime
+        .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+        .unwrap();
+    assert_eq!(
+        owner_snapshot["head_injection"]["payload_window"]["kind"], "started",
+        "actual submit must commit payload in owner scope"
+    );
     let submitted = outcome
         .unwrap_or_else(|error| panic!("cold physical submit must finish without Source: {error}"));
     assert_eq!(submitted.start_offset, 0);

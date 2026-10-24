@@ -1352,6 +1352,7 @@ fn owner_idle_stash_commits_payload_after_c_s_and_restores_exact_draft() {
         .enable_all()
         .build()
         .unwrap();
+    let _entered = runtime.enter();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727422));
     runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("stash-owner.json"),serde_json::json!({"nonce":"stash-window","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.clone(),727422)).unwrap();

@@ -24,6 +24,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         .enable_all()
         .build()
         .unwrap();
+    let _entered = runtime.enter();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     for failed in [false, true] {
         let name = if failed {
@@ -94,6 +95,13 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                 }),
             )
             .unwrap();
+        let owner_snapshot = runtime
+            .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+            .unwrap();
+        assert_eq!(
+            owner_snapshot["head_injection"]["payload_window"]["kind"], "started",
+            "actual argv create must commit payload in owner scope"
+        );
         if failed {
             assert!(
                 result.is_err(),

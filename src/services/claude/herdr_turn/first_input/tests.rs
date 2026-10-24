@@ -123,6 +123,13 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
             }),
         )
         .unwrap();
+    let owner_snapshot = runtime
+        .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+        .unwrap();
+    assert_eq!(
+        owner_snapshot["head_injection"]["payload_window"]["kind"], "started",
+        "actual submit must commit payload in owner scope"
+    );
     let submitted = result
         .unwrap()
         .expect("physical Herdr submit returns its observer");

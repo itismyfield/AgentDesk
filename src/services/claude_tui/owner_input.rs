@@ -206,6 +206,13 @@ pub(crate) fn capture_scope<R>(
         refused: Mutex::new(None),
     });
     let _restore = Restore(CURRENT.with(|v| v.replace(Some(scope.clone()))));
+    if scope.target["host"] == "tmux"
+        && let Some(session) = scope.target["owner"].as_str()
+        && let Some(pin) =
+            crate::services::tui_input::submission_tmux::guarded::PaneIdentity::observe(session)
+    {
+        let _ = observe_pin(session, &pin);
+    }
     let result = submission_fence::with_scope(Some(scope.clone()), || {
         guarded_outcome::with_owner(Some(scope.clone()), run)
     });

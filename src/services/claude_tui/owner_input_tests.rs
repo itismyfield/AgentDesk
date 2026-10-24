@@ -14,11 +14,13 @@ use std::sync::{
 fn context(name: &str, nonce: &str) -> serde_json::Value {
     let root = crate::services::tmux_common::current_tmux_owner_marker();
     let value = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727420,"owner_runtime_root":root,"host":"epoch-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
-    let _prepared =
-        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
-            serde_json::from_value(value).unwrap(),
-        )
-        .unwrap();
+    match crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+        serde_json::from_value(value).unwrap(),
+    ) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("fixture context: {error}"),
+    }
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
@@ -51,6 +53,10 @@ fn i7314_c_epoch_preserves_old_guard_and_unknown_nonce_never_writes() {
         composer_lock::guard_draft(name, DraftGuard::RecoveryRequired);
         assert!(composer_lock::draft_guarded(name));
     });
+    assert!(
+        composer_lock::draft_guarded(name),
+        "unscoped legacy writers cannot bypass a known epoch guard"
+    );
     scoped(context(name, new), || {
         observe_pin(name, &pin).unwrap();
         assert_eq!(

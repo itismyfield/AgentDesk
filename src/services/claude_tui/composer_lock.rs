@@ -154,6 +154,13 @@ pub(crate) fn composer_admission(
     capture: impl FnOnce() -> Option<String>,
 ) -> ComposerAdmission {
     let key = draft_key(tmux_session_name);
+    if !super::owner_input::active()
+        && draft_guards()
+            .keys()
+            .any(|(name, epoch)| name == tmux_session_name && epoch.is_some())
+    {
+        return ComposerAdmission::Held;
+    }
     if super::owner_input::active()
         && draft_guards().contains_key(&(tmux_session_name.into(), None))
     {
@@ -180,7 +187,13 @@ pub(crate) fn composer_admission(
 
 /// Whether this pane protects a person's draft now; reads no pane.
 pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
-    draft_guards().contains_key(&draft_key(tmux_session_name))
+    if super::owner_input::active() {
+        draft_guards().contains_key(&draft_key(tmux_session_name))
+    } else {
+        draft_guards()
+            .keys()
+            .any(|(name, _)| name == tmux_session_name)
+    }
 }
 
 /// One look, between composer mutations, for whether automatic writes may run again; a pane
