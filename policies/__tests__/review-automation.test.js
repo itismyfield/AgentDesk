@@ -864,8 +864,8 @@ test("00-escalation notifyDeadlockManager reports enqueue failures as undelivere
   assert.equal(withQueueResult({ ok: true, id: 7 }).notifyDeadlockManager("m", "s"), true);
 });
 
-// #7347 L1: the #118 empty-notes guard reads the previous review verdict from
-// task_dispatches.result (kanban_reviews never existed on Postgres).
+// The empty-notes guard reads the previous review verdict from task_dispatches.result
+// (kanban_reviews never existed on Postgres).
 function runEmptyNotesImprove(priorResult) {
   const { policy, state } = loadPolicy("policies/review-automation.js", {
     cards: {

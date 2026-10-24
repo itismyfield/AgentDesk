@@ -814,7 +814,7 @@ test("long turns do not register monitoring or page the deadlock manager", () =>
   assert.equal(state.executions.length, 0);
 });
 
-test("workspace branch guard stays out of the 5min tick (startup guard owns it, #7347)", () => {
+test("workspace branch guard stays out of the 5min tick (startup guard owns it)", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     exec(cmd) {
       assert.fail("5min tick must not shell out to " + cmd);

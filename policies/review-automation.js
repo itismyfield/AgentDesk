@@ -1727,12 +1727,8 @@ function processVerdict(cardId, verdict, result, options) {
       repeatedFindings = findingsSimilar(prevNotes, newNotes);
     }
 
-    // Guard: empty notes on non-pass verdict — similarity check is blind.
-    // If consecutive rounds have no notes, escalate — the review loop cannot
-    // self-correct without feedback data.
-    // #118: Check the previous review verdict's own notes to detect truly
-    // consecutive empty notes (review_notes field persists old values).
-    // The verdict route stores notes/feedback in the review dispatch result.
+    // Empty notes blind the similarity check: escalate when the previous review dispatch's
+    // result also had no notes/feedback (review_notes keeps stale values).
     if (!newNotes && currentRound >= 2 && (verdict === "improve" || verdict === "reject")) {
       var priorReviewRows = agentdesk.db.query(
         "SELECT result FROM task_dispatches " +

@@ -58,8 +58,7 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [B] [G] [O] + TTL cleanup (non-critical reconciliation)
-// [M] workspace branch guard runs once at dcserver startup (src/cli/dcserver.rs, #181).
+// 5min tier: [B] [G] [O] + TTL cleanup (non-critical reconciliation); branch guard runs at dcserver startup
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();

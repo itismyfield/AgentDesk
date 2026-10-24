@@ -1,13 +1,5 @@
-//! Static extraction of policy SQL for the Postgres schema check (#7351).
-//!
-//! Walks `policies/**/*.js` (minus `__tests__`), finds every
-//! `agentdesk.db.query/execute/queryJson(...)` call and expands its first
-//! argument into concrete SQL variants. This is a small JS subset evaluator:
-//! string literals, templates, `+`, ternaries, `[...].join`,
-//! `xs.map(() => "?").join`, local variables (nearest declaration before the
-//! use plus later `=`/`+=`), global literal constants, and helper functions
-//! whose top-level `return`s expand. Anything else becomes a `/*DYN:name*/`
-//! marker; the PG test in `db_ops::tests` prepares only the variants without one.
+//! Expands each policy `agentdesk.db.*` SQL argument into concrete variants for the
+//! PG schema test; fragments it cannot evaluate become `/*DYN:name*/` markers.
 
 use std::collections::HashMap;
 use std::path::Path;

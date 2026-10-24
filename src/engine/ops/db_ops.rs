@@ -1891,9 +1891,8 @@ mod tests {
         test_db.drop().await;
     }
 
-    /// #7351: every policy SQL variant must PREPARE on the migrated schema after
-    /// the runtime translation. The JS harness only substring-matches SQL, so a
-    /// missing table or column used to reach production unnoticed (#7347 L1).
+    /// Every policy SQL variant must PREPARE on the migrated schema after the
+    /// runtime translation; the JS harness only substring-matches SQL.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn policy_sql_prepares_against_migrated_schema_pg() {
         use self::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};

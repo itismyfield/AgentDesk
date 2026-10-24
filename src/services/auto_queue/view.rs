@@ -111,8 +111,8 @@ impl ActivateCardState {
     /// side-paths here makes activate fall through to creating a proper
     /// implementation dispatch.
     ///
-    /// consultation avoided this only because its JS path (the uncalled
-    /// `_createConsultationDispatch`, removed in #7347, →
+    /// consultation already avoided this only because its dedicated JS path
+    /// (the since-removed `_createConsultationDispatch` →
     /// `record_consultation_dispatch_on_pg`) atomically marks the bound entry
     /// `dispatched` at creation, so the entry is never pending when activate runs.
     /// scope-assessment's JS path writes card metadata only and never touches the
