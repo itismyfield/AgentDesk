@@ -317,6 +317,60 @@ async fn codex_sweep_classifies_existing_and_inflight_suspension() {
 }
 
 #[test]
+fn codex_fixture_pins_identity_when_inherited_host_source_is_missing() {
+    let fixture = Fixture::new(false);
+    let _missing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(""),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .expect("fixture must supply explicit identity without the inherited host source");
+    assert_eq!(
+        fixture.observe(&prepared).unwrap().target.host,
+        "bo-test-host"
+    );
+}
+
+#[test]
+fn codex_prepare_without_explicit_identity_refuses_host_identity() {
+    let fixture = Fixture::new(false);
+    let config = fixture.bin.path().join("no-identity.yaml");
+    std::fs::write(&config, "server: {}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
+    let _missing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_INSTANCE_ID",
+        std::ffi::OsStr::new(""),
+    );
+    assert_eq!(context::stable_host_identity(), None);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let unavailable = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .err()
+        .expect("missing explicit identity must remain Unknown");
+    assert_eq!(unavailable.component.as_str(), "host_identity");
+    assert_eq!(unavailable.reason, "local host identity unavailable");
+}
+
+#[test]
 fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
     let fixture = Fixture::new(false);
     let runtime = tokio::runtime::Builder::new_current_thread()
