@@ -1732,6 +1732,9 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── retry_prompt/
+│   │   │   │   │   │   ├── tests.rs
+│   │   │   │   │   │   └── wiring_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1744,6 +1747,7 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_tests.rs
+│   │   │   │   │   ├── retry_prompt.rs
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1799,6 +1803,11 @@ src/
 │   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
+│   │   │   ├── response_format/
+│   │   │   │   ├── retry_prompt_context/
+│   │   │   │   │   ├── store.rs
+│   │   │   │   │   └── tests.rs
+│   │   │   │   └── retry_prompt_context.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── herdr_consent.rs
@@ -2294,11 +2303,16 @@ src/
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
+│   │   │   │   ├── prelude_lifecycle/
+│   │   │   │   │   ├── receipt_fallback_tests.rs
+│   │   │   │   │   ├── settlement_pg_tests.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── legacy_summary.rs
-│   │   │   │   └── legacy_summary_tests.rs
+│   │   │   │   ├── legacy_summary_tests.rs
+│   │   │   │   └── prelude_lifecycle.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
