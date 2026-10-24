@@ -15112,6 +15112,8 @@ services::turn_orchestrator::queued_head::v2::source_admission::tests::not_commi
 services::turn_orchestrator::queued_head::v2::source_admission::tests::pending_a_and_fresh_b_keep_separate_originals_and_finish_once
 services::turn_orchestrator::queued_head::v2::source_admission::tests::pending_synthetic_admission_recovers_the_same_candidate_without_reenqueue
 services::turn_orchestrator::queued_head::v2::source_admission::tests::pg_tests::admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg
+services::turn_orchestrator::queued_head::v2::source_admission::tests::s3d_regression_admission_receipt_survives_later_owner_commits
+services::turn_orchestrator::queued_head::v2::source_admission::tests::s3d_regression_opaque_custody_is_unsent_with_retry_notice
 services::turn_orchestrator::queued_head::v2::source_admission::tests::two_mailbox_requests_share_custody_and_ack_once
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::directory_sync_failure_issues_no_permit_and_recovery_requires_sync
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::expiry_removes_only_the_selected_head_and_preserves_duplicate_identity_raw

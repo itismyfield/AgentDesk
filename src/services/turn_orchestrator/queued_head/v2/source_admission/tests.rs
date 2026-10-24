@@ -224,3 +224,58 @@ async fn pending_a_and_fresh_b_keep_separate_originals_and_finish_once() {
         "one uncertain input cannot acknowledge or discard the next original"
     );
 }
+
+#[test]
+fn s3d_regression_admission_receipt_survives_later_owner_commits() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner();
+    let mut custody = Custody::new(&original(8_000_000_000_000_001_310, "synthetic original"));
+    let watch = Watch::new(
+        &owner.path,
+        Plan {
+            fail: vec![Step::ParentSync],
+            ..Default::default()
+        },
+    );
+    assert_eq!(custody.advance(&mut owner), Err(AdmitError::Pending));
+    drop(watch);
+    owner.recover().unwrap();
+    owner
+        .enqueue_fixture(&original(8_000_000_000_000_001_311, "later original"))
+        .unwrap();
+    assert_eq!(
+        custody.advance(&mut owner),
+        Ok(Admitted::Queued),
+        "committed admission must survive later snapshot changes"
+    );
+    assert_eq!(
+        owner.snapshot.items.len(),
+        2,
+        "pending custody cannot reenqueue its synthetic original"
+    );
+    assert_eq!(custody.advance(&mut owner), Ok(Admitted::Duplicate));
+}
+
+#[test]
+fn s3d_regression_opaque_custody_is_unsent_with_retry_notice() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner();
+    owner.enqueue_fixture(&original(100, "known A")).unwrap();
+    let mut opaque = original(100, "inseparable A and fresh B");
+    opaque.source_message_ids = vec![100, 200];
+    assert_eq!(
+        Custody::new(&opaque).advance(&mut owner),
+        Ok(Admitted::RetainedOpaque)
+    );
+    let entry = &owner.snapshot.retained_inputs[0];
+    assert_eq!(
+        entry.input.phase,
+        HeadPhase::Reserved,
+        "opaque original was never attempted"
+    );
+    assert_eq!(
+        entry.notice.kind, "retained_retry_required",
+        "unsent retention must not claim delivery uncertainty"
+    );
+    assert!(entry.input.attempt.is_none());
+}
