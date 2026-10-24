@@ -1396,6 +1396,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "context dropped": (judge.replace("          - Library test sweep (ubuntu-latest)\n", "", 1), None),
             "context added by include": (judge.replace("          - Lint\n", "          - Lint\n        include:\n          - context: Lint\n", 1), None),
             "backstop scoped away": (judge.replace("matrix.context == 'Script checks' || ", "", 1), None),
+            "stale judge pin": (re.sub(r"(pin scripts/ci/nextest_required\.py )[0-9a-f]{64}", r"\g<1>" + "0" * 64, judge), "required_contexts must retain its exact judge, pins and needs"),
         }
         for field, value in {
             "defaults": "defaults:\n      run:\n        shell: bash -n {0}",

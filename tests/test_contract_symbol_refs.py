@@ -566,8 +566,10 @@ class WiringTest(unittest.TestCase):
                 f"{name} still grants a branch-name CI escape hatch",
             )
 
-        # The required-context mirror gates the forced run.
-        self.assertIn("Relay-contract fast check mirror (always, #4268)", workflow)
+        # The required-context judge reads the forced lint run for Lint and Fast check.
+        judge = yaml.safe_load(workflow)["jobs"]["required_contexts"]
+        self.assertIn("lint", judge["needs"])
+        self.assertLessEqual({"Lint", "Fast check (ubuntu-latest)"}, set(judge["strategy"]["matrix"]["context"]))
 
 
 class RelayContractPathFilterTest(unittest.TestCase):
