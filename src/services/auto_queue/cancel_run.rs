@@ -295,7 +295,7 @@ async fn self_heal_orphan_dispatched_entries_without_slot_pg(
             continue;
         }
         // A failed statement aborts the PG transaction and COMMIT then rolls back
-        // silently, so the audit row's error must fail the repair (#7347 L2).
+        // silently, so the audit row's error must fail the repair.
         sqlx::query(
             "INSERT INTO auto_queue_entry_transitions (
                 entry_id,

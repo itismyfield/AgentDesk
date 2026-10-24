@@ -376,7 +376,7 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     .map_err(|error| format!("clear postgres session dispatch link {dispatch_id}: {error}"))?;
 
     // A failed statement aborts the PG transaction, so these must not be
-    // discarded: the next query would fail with a misleading "aborted" error (#7347 L2).
+    // discarded: the next query would fail with a misleading "aborted" error.
     sqlx::query(
         "INSERT INTO dispatch_events (
             dispatch_id,

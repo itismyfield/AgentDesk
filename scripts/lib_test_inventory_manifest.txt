@@ -11417,6 +11417,7 @@ services::dispatches::outbox_claiming::tests::increment_active_dispatch_count_up
 services::dispatches::outbox_claiming::tests::non_empty_required_capabilities_handles_null_and_empty_object
 services::dispatches::outbox_claiming::tests::offline_claim_owner_reason_names_status_and_heartbeat_lease
 services::dispatches::outbox_claiming::tests::online_and_unregistered_claim_owners_keep_their_reasons
+services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::a_failed_statement_in_the_claim_batch_hands_out_no_claims
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_claim_verdicts_are_unchanged_by_skip_reason_diagnostics
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::outbox_skip_reason_reports_offline_claim_owner_beside_route_preference
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests::reassign_stale_claim_owner_clears_owner_when_no_live_candidate_matches

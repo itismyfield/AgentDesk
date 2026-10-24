@@ -1,7 +1,5 @@
-//! Source scan (#7347 L2): production code must not discard a sqlx result inside a
-//! transaction. One failed statement aborts the whole PG transaction, and COMMIT then
-//! ends with ROLLBACK while sqlx still returns `Ok`, so the caller reports success for
-//! writes that were never stored.
+//! Production code must not discard a sqlx result inside a transaction: a failed statement
+//! aborts it, and COMMIT then rolls back while sqlx still returns `Ok`.
 
 use regex::Regex;
 use std::path::{Path, PathBuf};

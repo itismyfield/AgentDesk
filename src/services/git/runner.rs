@@ -382,7 +382,7 @@ mod tests {
     use super::{GitCommand, STDERR_PREVIEW_BYTES, preview_text};
     use std::time::Duration;
 
-    // #7347 L5: a multi-byte char straddling the cap used to panic in `String::truncate`.
+    // A multi-byte char straddling the cap used to panic in `String::truncate`.
     #[test]
     fn preview_text_truncates_multibyte_stderr_on_a_char_boundary() {
         let stderr = "한".repeat(STDERR_PREVIEW_BYTES);
