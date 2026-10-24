@@ -112,7 +112,7 @@ impl ActivateCardState {
     /// implementation dispatch.
     ///
     /// consultation already avoided this only because its dedicated JS path
-    /// (auto-queue-error-recovery `_createConsultationDispatch` →
+    /// (the since-removed `_createConsultationDispatch` →
     /// `record_consultation_dispatch_on_pg`) atomically marks the bound entry
     /// `dispatched` at creation, so the entry is never pending when activate runs.
     /// scope-assessment's JS path writes card metadata only and never touches the

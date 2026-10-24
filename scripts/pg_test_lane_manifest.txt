@@ -1314,6 +1314,7 @@ engine::ops::config_ops::tests::policy_engine_config_get_preserves_types_precede
 engine::ops::config_ops::tests::policy_engine_config_get_query_error_fails_closed_with_live_postgres
 engine::ops::db_ops::tests::policy_db_pg_exec_and_query_support_sqlite_compat_functions
 engine::ops::db_ops::tests::policy_db_query_json_returns_typed_json_columns_and_query_keeps_strings
+engine::ops::db_ops::tests::policy_sql_prepares_against_migrated_schema_pg
 engine::ops::kanban_ops::tests::reopen_accepts_entry_concurrently_attached_to_target_state_pg
 engine::ops::kanban_ops::tests::reopen_completed_run_reacquires_unowned_slot_pg
 engine::ops::kanban_ops::tests::reopen_completed_run_rejects_slot_owned_by_another_run_pg
