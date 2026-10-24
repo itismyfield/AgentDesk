@@ -896,6 +896,7 @@ jobs:
               - 'src/services/discord/jsonl_watcher.rs'
               - 'src/services/discord/live_bridge.rs'
               - 'src/services/discord/mailbox_probe.rs'
+              - 'src/services/discord/meeting_orchestrator/**'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/model_catalog/**'
               - 'src/services/discord/outbound/**'
