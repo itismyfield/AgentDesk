@@ -254,15 +254,14 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
         1
     );
 
-    for (index, text, deliver) in [
-        (1u64, "same body", false),
-        (2, "same body", true),
-        (3, "fresh C", true),
-    ] {
+    for index in 1..=11u64 {
+        let text = if index == 11 { "fresh C" } else { "same body" };
+        let emit_receipt = index >= 10;
+        let deliver = index == 11;
         let target = super::super::resolve(&fixture.shared, &request, true)
             .await
             .unwrap();
-        let nonce = format!("feed038{index}");
+        let nonce = format!("feed{index:04x}");
         let frame = busy_inject::frame("source", "1", "history user", &nonce, text);
         let meta = std::fs::metadata(&target.transcript).unwrap();
         let native = QueuedProvider::Codex
@@ -297,7 +296,7 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
             .await
             .unwrap();
         let marker = fixture.pane.path("defer.receipt");
-        if deliver {
+        if emit_receipt {
             let _ = std::fs::remove_file(&marker);
         } else {
             std::fs::write(&marker, "defer").unwrap();
@@ -365,8 +364,8 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
     assert!(snapshot["head_injection"].is_null());
     assert_eq!(
         snapshot["retained_inputs"].as_array().unwrap().len(),
-        1,
-        "A raw custody survives successful same-body B and fresh C"
+        10,
+        "nine Unknown originals and ambiguous same-body B survive fresh C"
     );
     assert_eq!(
         snapshot["retained_inputs"][0]["input"]["original"]["text"],
