@@ -34,9 +34,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
         let context = Context {
             tmux: "test-pane".into(),
             nonce: "old-execution".into(),
-            home_epoch: None,
             lock: Arc::new(tokio::sync::Mutex::new(())),
-            permit: None,
         };
         // Leave the port's selection empty: only Actor.poll_transition may reject this envelope.
         let request = port.request(operation, context);
@@ -138,9 +136,7 @@ where
     let context = Context {
         tmux: tmux.into(),
         nonce: initial_nonce.into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     };
     let gate = Arc::new(OwnershipGate::default());
     gate.acquired();

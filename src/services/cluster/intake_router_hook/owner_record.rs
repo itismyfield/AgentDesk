@@ -1034,7 +1034,6 @@ mod tests {
             wait_for_completion: false,
             preserve_on_cancel: false,
             agent_id: "agent-x".to_string(),
-            home_epoch: None,
         }
     }
 

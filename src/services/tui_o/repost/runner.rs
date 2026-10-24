@@ -31,12 +31,6 @@ use crate::services::tui_o::store::ledger::{LedgerState, PieceOutcome, PieceReco
 /// How long a granted slot stays open before another holder may settle it as abandoned.
 pub(crate) const GRANT_TTL: Duration = Duration::from_secs(180);
 
-/// Re-post uses the gateway gate; delegated or unavailable homes need their own admission path.
-pub(crate) fn scope_allowed(channel: u64) -> bool {
-    crate::services::cluster::channel_home::registered_channel(channel).is_none()
-        && crate::services::cluster::home_availability::refusal(channel).is_none()
-}
-
 /// The O side's proof that an approval is current: the key's latest disposition is this
 /// rejection's Authorized, the id matches and is unconsumed, and key and payload are the same.
 pub(crate) trait ApprovalCheck {
@@ -90,7 +84,6 @@ pub(crate) struct TickReport {
 
 #[derive(Debug)]
 pub(crate) enum Tick {
-    Off,
     Ran(TickReport),
 }
 
@@ -154,9 +147,6 @@ impl Runner {
         proof_ids: &[u64],
         settled_at: Instant,
     ) -> Result<Tick, LedgerError> {
-        if !scope_allowed(channel) {
-            return Ok(Tick::Off);
-        }
         let mut report = TickReport::default();
         let keys = o_piece_delivery::admitted_keys(&self.pool, channel).await?;
         let mut rows = Vec::new();
@@ -387,7 +377,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
 
     async fn run<W: TurnWriter>(&mut self, writer: &mut W) {
         writer.set_live(true);
-        if !scope_allowed(self.channel) || writer.guard().is_err() || !self.admit(writer).await {
+        if writer.guard().is_err() || !self.admit(writer).await {
             writer.set_live(false);
             return;
         }
@@ -522,7 +512,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         if gate != OriginalGate::SendLocal {
             return gate;
         }
-        if !scope_allowed(channel) || ProvenanceEntry::intent(serial, &record, 0).is_none() {
+        if ProvenanceEntry::intent(serial, &record, 0).is_none() {
             return gate;
         }
         // Supported on originals wait until the intent is durable; failures are not opt-outs.

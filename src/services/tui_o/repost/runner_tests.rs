@@ -735,10 +735,7 @@ async fn f5_present_is_not_automatically_a_receipt_pg() {
     let Tick::Ran(report) = runner
         .tick(CHANNEL, &reader, &[900], settled)
         .await
-        .unwrap()
-    else {
-        panic!("on");
-    };
+        .unwrap();
     assert_eq!(
         report
             .recorded

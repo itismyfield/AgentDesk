@@ -11,9 +11,7 @@ fn context() -> Context {
     Context {
         tmux: PANE.into(),
         nonce: "nonce".into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     }
 }
 
@@ -47,7 +45,7 @@ type Change = (&'static str, fn(&mut Fixture, &mut Context));
 #[test]
 fn transition_scope_digest_follows_the_request_execution_and_hops_only() {
     let base = digest(&Fixture::synthetic(), &context());
-    let moved: [Change; 18] = [
+    let moved: [Change; 17] = [
         ("cutoff", |f, _| f.request.cutoff -= 1),
         ("job_id", |f, _| f.request.job_id.push('2')),
         ("operator", |f, _| f.request.operator.push('2')),
@@ -59,7 +57,6 @@ fn transition_scope_digest_follows_the_request_execution_and_hops_only() {
         ("end_basis", |f, _| end(f).basis.push('2')),
         ("pane", |_, c| c.tmux.push('2')),
         ("nonce", |_, c| c.nonce.push('2')),
-        ("home_epoch", |_, c| c.home_epoch = Some(1)),
         ("hop_removed", |f, _| {
             drop(f.snapshot.rotation.successors.remove(&key(5)))
         }),
@@ -202,19 +199,19 @@ fn small(n: u64) -> SourceId {
 
 /// The bytes the encoding names for the snapshot `golden_snapshot` builds, computed apart from it.
 const GOLDEN: &str = concat!(
-    "6167656e746465736b2f68726f742f7472616e736974696f6e2d73636f706500010000000000000007ffffff",
-    "ffffffffff00000000000000056a6f627c310000000000000009ec9ab4ec9881ec9e90000000000000000a6c",
-    "696e650a627265616b0100000000000000086d61632d6d696e69000000000000000170000000000000000200",
-    "000000000000030000000000000004676f6e650100000000000000017000000000000000026e300100000000",
-    "0000000500000000000000020000000000000002010000000000000001700000000000000002733000000000",
-    "0000000b2f742f73302e6a736f6e6c0000000000000001000000000000000a00000000000000027331000000",
-    "000000000b2f742f73312e6a736f6e6c0000000000000001000000000000000b000000000000000301000000",
-    "00000000017000000000000000027331000000000000000b2f742f73312e6a736f6e6c000000000000000100",
-    "0000000000000b00000000000000027332000000000000000b2f742f73322e6a736f6e6c0000000000000001",
-    "000000000000000c",
+    "6167656e746465736b2f68726f742f7472616e736974696f6e2d73636f706500010000000000000007",
+    "ffffffffffffffff00000000000000056a6f627c310000000000000009ec9ab4ec9881ec9e90000000",
+    "000000000a6c696e650a627265616b0100000000000000086d61632d6d696e69000000000000000170",
+    "000000000000000200000000000000030000000000000004676f6e6501000000000000000170000000",
+    "00000000026e3000000000000000000200000000000000020100000000000000017000000000000000",
+    "027330000000000000000b2f742f73302e6a736f6e6c0000000000000001000000000000000a000000",
+    "00000000027331000000000000000b2f742f73312e6a736f6e6c000000000000000100000000000000",
+    "0b00000000000000030100000000000000017000000000000000027331000000000000000b2f742f73",
+    "312e6a736f6e6c0000000000000001000000000000000b00000000000000027332000000000000000b",
+    "2f742f73322e6a736f6e6c0000000000000001000000000000000c",
 );
 const GOLDEN_DIGEST: &str =
-    "hrot-scope-v1:2e5afe264363de265f64c5aab09ea48e46564b3c82a3bdb0da35578f9ce02db6";
+    "hrot-scope-v1:d71faafd6b818456beff805819f0308894e6903916ba7026c4d28b20c8b373cf";
 
 // One stored and one legacy hop, a separator, a newline, Korean and the widest cutoff encode to
 // the bytes and digest the format fixes, and only that version and length parse back.
@@ -259,7 +256,6 @@ fn transition_scope_encodes_to_its_golden_bytes_and_digest() {
     let context = Context {
         tmux: "p".into(),
         nonce: "n0".into(),
-        home_epoch: Some(5),
         ..context()
     };
     let scope = approve(&snapshot, &request, &context).unwrap();

@@ -1,6 +1,6 @@
 //! The real managed host follows committed binding notices and a frozen first source.
 
-use super::late_delegated::{Legacy, closed, seed};
+use super::late_host::{Legacy, closed, seed};
 use super::*;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send};
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
@@ -552,7 +552,7 @@ async fn late_adopt_binding_unsafe_channel_does_not_block_other_channels_new_bod
         return;
     }
     let mut f = Fixture::new(false);
-    let mut value = serde_json::to_value(super::late_delegated::config(false)).unwrap();
+    let mut value = serde_json::to_value(super::late_host::config(false)).unwrap();
     value["tui_o"]["writer"]["channels"] = serde_json::json!([CHANNEL, OTHER]);
     value["agents"].as_array_mut().unwrap().push(serde_json::json!({"id":"late-other", "name":"Late other", "channels":{"claude":{"id":OTHER.to_string(),"runtime":"tui"}}}));
     let config: crate::config::Config = serde_json::from_value(value).unwrap();
@@ -659,7 +659,7 @@ async fn late_adopt_binding_two_simultaneous_sources_each_commit_and_post_new_on
         }
     }
     let mut f = Fixture::new(false);
-    let mut value = serde_json::to_value(super::late_delegated::config(false)).unwrap();
+    let mut value = serde_json::to_value(super::late_host::config(false)).unwrap();
     value["tui_o"]["writer"]["channels"] = serde_json::json!([CHANNEL, OTHER]);
     value["agents"].as_array_mut().unwrap().push(serde_json::json!({"id":"late-other", "name":"Late other", "channels":{"claude":{"id":OTHER.to_string(),"runtime":"tui"}}}));
     let config: crate::config::Config = serde_json::from_value(value).unwrap();

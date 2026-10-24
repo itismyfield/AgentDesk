@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::services::claude_tui::source_verify::SourceHistory;
-use crate::services::cluster::channel_home::{self, HomeIntake, HomeOwnership};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::Fingerprint;
@@ -186,7 +185,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let snapshot = Snapshot {
             channel,
             provider: self.sources.transition_provider(),
-            home: home_now(channel, gate, context.home_epoch),
+            home: home_now(gate),
             rotation: rotation.clone(),
             cursors,
             pinned: execution.clone().map(|(pin, _)| pin),
@@ -235,22 +234,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 }
 
-/// Settled only while the request's home holds the channel open here, or, for a channel without
-/// a registered home, while the writer's gate owns it.
-fn home_now(channel: u64, gate: &OwnershipGate, expected: Option<i64>) -> Home {
-    match (channel_home::registered_channel(channel), expected) {
-        (Some(home), Some(expected)) => match home.ownership() {
-            HomeOwnership::Owned {
-                home_epoch,
-                intake: HomeIntake::Open,
-                ..
-            } if home_epoch == expected => Home::Settled,
-            _ => Home::Moving,
-        },
-        (Some(_), None) => Home::Unread("the request names no home for a homed channel".into()),
-        (None, Some(_)) => Home::Unread("the request's home is not registered here".into()),
-        (None, None) if matches!(gate.current(), GatewayOwnership::Owned { .. }) => Home::Settled,
-        (None, None) => Home::Moving,
+/// Settled only while the writer's gateway gate owns the channel.
+fn home_now(gate: &OwnershipGate) -> Home {
+    if matches!(gate.current(), GatewayOwnership::Owned { .. }) {
+        Home::Settled
+    } else {
+        Home::Moving
     }
 }
 

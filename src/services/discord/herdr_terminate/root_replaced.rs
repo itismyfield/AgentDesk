@@ -3,7 +3,6 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
-use crate::services::cluster::channel_home::{CommandPermit, admit_command, command_worker_scope};
 use crate::services::discord::recovery_engine::host_reconcile::HostReconcile;
 use crate::services::discord::session_transition::SessionTransitionLease;
 use crate::services::discord::tmux::execution_identity::herdr_observation::{
@@ -347,10 +346,6 @@ async fn recover_inner(
         Ok(v) => v,
         Err(e) => return held(e),
     };
-    let permit = match admit_command(&channel.to_string(), provider.as_str()) {
-        Ok(permit) => permit,
-        Err(e) => return held(format!("home: {e:?}")),
-    };
     if let Err(e) = current(pool, row).await {
         return held(e);
     }
@@ -365,7 +360,7 @@ async fn recover_inner(
         if let Err(e) = quiet(shared, &provider, channel, &record.owner.logical_key).await {
             return held(e);
         }
-        return cleanup(shared, &provider, row, record, permit).await;
+        return cleanup(shared, &provider, row, record).await;
     }
     if record.state != HostedState::Bound {
         return held("execution is not Bound".into());
@@ -375,9 +370,7 @@ async fn recover_inner(
     };
     let proof_target = target.clone();
     let proof_record = record.clone();
-    let proof_permit = permit.clone();
     let first = match tokio::task::spawn_blocking(move || {
-        let _scope = command_worker_scope(proof_permit);
         proof_target.replaced_root_end(&proof_record, None)
     })
     .await
@@ -401,9 +394,7 @@ async fn recover_inner(
         quiet(shared, &provider, channel, &record.owner.logical_key).await?;
         let proof_target = target.clone();
         let proof_record = record.clone();
-        let proof_permit = permit.clone();
         tokio::task::spawn_blocking(move || {
-            let _scope = command_worker_scope(proof_permit);
             proof_target.replaced_root_end(&proof_record, Some(&first))
         })
         .await
@@ -451,23 +442,18 @@ async fn recover_inner(
     if let Err(e) = quiet(shared, &provider, channel, &record.owner.logical_key).await {
         return Recovery::RetiredCleanupPending(e);
     }
-    cleanup(shared, &provider, &retired, &expected, permit).await
+    cleanup(shared, &provider, &retired, &expected).await
 }
 async fn cleanup(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     row: &HostedObservation,
     record: &HostedExecution,
-    permit: Option<CommandPermit>,
 ) -> Recovery {
     #[cfg(test)]
     CLEANUPS.with(|n| n.set(n.get() + 1));
     let nonce = record.execution_nonce.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let _scope = command_worker_scope(permit);
-        retired_hold::release(&nonce)
-    })
-    .await;
+    let outcome = tokio::task::spawn_blocking(move || retired_hold::release(&nonce)).await;
     let result = match outcome {
         Ok(RetiredHoldOutcome::Durable) => match settle_captured(shared, provider, None).await {
             TerminationResult::Retired => Recovery::Retired,

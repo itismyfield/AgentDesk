@@ -156,9 +156,7 @@ fn context() -> transition_port::Context {
     transition_port::Context {
         tmux: "unit-no-live-target".into(),
         nonce: "unit-no-native-proof".into(),
-        home_epoch: None,
         lock: Arc::new(tokio::sync::Mutex::new(())),
-        permit: None,
     }
 }
 

@@ -19,7 +19,6 @@ mod clear_teardown;
 #[cfg(unix)]
 mod herdr_recovery;
 pub(in crate::services::discord) use clear_report::ClearReport;
-pub(in crate::services::discord) mod home_fence;
 mod managed_reset;
 #[cfg(all(test, unix))]
 use managed_reset::VERIFIED_CODEX_RESET_REFUSAL;
@@ -178,9 +177,7 @@ mod codex_verified_clear_tests;
 
 #[allow(clippy::too_many_arguments)]
 mod provider_reset;
-pub(in crate::services::discord) use provider_reset::{
-    reset_channel_provider_state, reset_channel_provider_state_for_home_drain,
-};
+pub(in crate::services::discord) use provider_reset::reset_channel_provider_state;
 
 /// The reset a pending flag asked for, if any. A refused one keeps its flags and is reported;
 /// the caller's turn runs on the session as it is, as with any turn the host guard admits.
@@ -281,6 +278,8 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     .await
 }
 
+/// Discards the channel's queue, stops its turn, forgets its provider session and ends the
+/// session's process; anything it could not confirm is one warning line, never a refusal.
 pub(in crate::services::discord) async fn clear_channel_session_state_with_session_key(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -289,59 +288,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     clear_source: &str,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
-    clear_channel_session_state_fenced(
-        http,
-        shared,
-        provider,
-        channel_id,
-        clear_source,
-        explicit_session_key,
-    )
-    .await
-}
-
-/// Only a channel another node holds is refused; past that the clear always commits.
-async fn clear_channel_session_state_fenced(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    clear_source: &str,
-    explicit_session_key: Option<&str>,
-) -> anyhow::Result<ClearReport> {
-    let permit = home_fence::admit(channel_id, provider.as_str())?;
-    #[cfg(test)]
-    let permit = if home_fence::mutant("control_permit_removed") {
-        drop(permit);
-        None
-    } else {
-        permit
-    };
-    crate::services::cluster::channel_home::command_scope(
-        permit,
-        clear_channel_session_state_body(
-            http,
-            shared,
-            provider,
-            channel_id,
-            clear_source,
-            explicit_session_key,
-        ),
-    )
-    .await
-}
-
-/// Discards the channel's queue, stops its turn, forgets its provider session and ends the
-/// session's process; anything it could not confirm is one warning line, never a refusal.
-async fn clear_channel_session_state_body(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    clear_source: &str,
-    explicit_session_key: Option<&str>,
-) -> anyhow::Result<ClearReport> {
-    home_fence::pause("clear").await;
     let mut report = ClearReport::default();
     // A pane effect holding the transition is waited out for the usual window, then overtaken.
     let transition = shared.session_transition_lock(channel_id);
@@ -460,14 +406,6 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
         crate::services::session_forwarding::ForwardCallerContext::from_live_globals(
             ctx.data().shared.pg_pool.clone(),
         );
-    // A channel delegated away goes to its holder, never to the legacy owner forward below.
-    let provider = &ctx.data().provider;
-    if let Some(reply) =
-        super::stop::gateway_stop_reply(&forward_context, provider, channel_id).await
-    {
-        ctx.say(reply).await?;
-        return Ok(());
-    }
     match crate::services::session_forwarding::forward_remote_cancel_if_needed(
         &forward_context,
         &axum::http::HeaderMap::new(),
@@ -497,9 +435,6 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
                 .await?;
             return Ok(());
         }
-    }
-    if home_fence::refused(&ctx).await? {
-        return Ok(());
     }
 
     if let Err(error) = crate::services::session_forwarding::revalidate_local_cancel_owner(
@@ -553,19 +488,15 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
         ctx.say("유효한 큐 메시지 ID를 입력해 주세요.").await?;
         return Ok(());
     };
-    if home_fence::refused(&ctx).await? {
-        return Ok(());
-    }
 
-    let permit = home_fence::admit(ctx.channel_id(), ctx.data().provider.as_str())?;
-    crate::services::cluster::channel_home::command_scope(permit, async {
-        let removed = cancel_queued_with_home_permit(
+    {
+        let removed = mailbox_cancel_queued_primary_message(
             &ctx.data().shared,
             &ctx.data().provider,
             ctx.channel_id(),
             message_id,
         )
-        .await?;
+        .await;
         if removed.is_some() {
             ctx.say(format!("큐 메시지 `{}`를 취소했어요.", message_id.get()))
                 .await?;
@@ -577,22 +508,7 @@ pub(in crate::services::discord) async fn cmd_cancel_queued(
             .await?;
         }
         Ok(())
-    })
-    .await
-}
-
-async fn cancel_queued_with_home_permit(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: serenity::ChannelId,
-    message: MessageId,
-) -> Result<Option<crate::services::turn_orchestrator::Intervention>, home_fence::CommandRefused> {
-    let permit = home_fence::admit(channel, provider.as_str())?;
-    crate::services::cluster::channel_home::command_scope(permit, async {
-        home_fence::pause("queued").await;
-        Ok(mailbox_cancel_queued_primary_message(shared, provider, channel, message).await)
-    })
-    .await
+    }
 }
 
 /// /clear — Clear AI conversation history
@@ -608,8 +524,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    let permit = home_fence::admit(ctx.channel_id(), ctx.data().provider.as_str())?;
-    clear_with_reply_scope(permit, async {
+    {
         log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
         let http = ctx.serenity_context().http.clone();
@@ -631,22 +546,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
             status = "cleared",
         );
         Ok(())
-    })
-    .await
-}
-
-async fn clear_with_reply_scope<F: std::future::Future>(
-    permit: Option<crate::services::cluster::channel_home::CommandPermit>,
-    work: F,
-) -> F::Output {
-    #[cfg(test)]
-    let permit = if home_fence::mutant("clear_reply_outside_scope") {
-        drop(permit);
-        None
-    } else {
-        permit
-    };
-    crate::services::cluster::channel_home::command_scope(permit, work).await
+    }
 }
 
 #[cfg(test)]

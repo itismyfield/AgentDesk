@@ -12,9 +12,7 @@ fn context(pane: &ProducerPane, nonce: &str) -> Context {
     Context {
         tmux: pane.tmux.into(),
         nonce: nonce.into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     }
 }
 

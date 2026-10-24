@@ -101,6 +101,24 @@ async fn consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg(
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let (row, _temp, store, consent, intent) = setup(&pool, "891202").await;
+    let prior_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_array(id, target_instance_id, forwarded_by_instance_id,
+         required_labels, execution_requirements, attachment_refs, channel_id, user_msg_id,
+         replay_source_message_ids, request_owner_id, request_owner_name, user_text,
+         reply_context, has_reply_boundary, dm_hint, turn_kind, merge_consecutive,
+         reply_to_user_message, defer_watcher_resume, wait_for_completion, preserve_on_cancel,
+         agent_id, provider, attempt_no, parent_outbox_id, admission_kind, home_epoch)
+         FROM intake_outbox WHERE id=$1",
+    )
+    .bind(row.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload(&row).unwrap(),
+        hex::encode(Sha256::digest(serde_json::to_vec(&prior_payload).unwrap())),
+        "prior null-stamped consent custody digest must stay compatible"
+    );
     hold_before_effects(&pool, &row, &store, &consent, &intent)
         .await
         .unwrap();

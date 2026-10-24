@@ -10,87 +10,6 @@ pub(in crate::services::discord) async fn reset_channel_provider_state(
     clear_history: bool,
     recreate_tmux: bool,
 ) -> ManagedReset {
-    #[cfg(test)]
-    if home_fence::mutant("sink_admission_removed") {
-        return reset_body(
-            http,
-            shared,
-            provider,
-            channel_id,
-            reset_source,
-            reset_provider_state,
-            clear_history,
-            recreate_tmux,
-        )
-        .await;
-    }
-    let permit = match home_fence::admit(channel_id, provider.as_str()) {
-        Ok(permit) => permit,
-        Err(reason) => return ManagedReset::Refused(reason.0.to_string()),
-    };
-    crate::services::cluster::channel_home::command_scope(
-        permit,
-        reset_body(
-            http,
-            shared,
-            provider,
-            channel_id,
-            reset_source,
-            reset_provider_state,
-            clear_history,
-            recreate_tmux,
-        ),
-    )
-    .await
-}
-
-pub(in crate::services::discord) async fn reset_channel_provider_state_for_home_drain(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    reset_source: &str,
-    reset_provider_state: bool,
-    clear_history: bool,
-    recreate_tmux: bool,
-) -> ManagedReset {
-    #[cfg(test)]
-    if home_fence::mutant("drain_reset_uses_admitted_sink") {
-        return reset_channel_provider_state(
-            http,
-            shared,
-            provider,
-            channel_id,
-            reset_source,
-            reset_provider_state,
-            clear_history,
-            recreate_tmux,
-        )
-        .await;
-    }
-    reset_body(
-        http,
-        shared,
-        provider,
-        channel_id,
-        reset_source,
-        reset_provider_state,
-        clear_history,
-        recreate_tmux,
-    )
-    .await
-}
-
-async fn reset_body(
-    http: &Arc<serenity::Http>,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    reset_source: &str,
-    reset_provider_state: bool,
-    clear_history: bool,
-    recreate_tmux: bool,
-) -> ManagedReset {
     if let Some(reason) = verified_codex_reset_refusal(shared, provider, channel_id).await {
         return ManagedReset::Refused(reason.to_owned());
     }
@@ -99,8 +18,6 @@ async fn reset_body(
     if let Some(reason) = refusal(shared, provider, channel_id, reset, recreate, None).await {
         return ManagedReset::Refused(reason);
     }
-    #[cfg(test)]
-    home_fence::pause("reset").await;
     let tmux_name = {
         let mut data = shared.core.lock().await;
         data.sessions.get_mut(&channel_id).and_then(|session| {

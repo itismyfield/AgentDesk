@@ -860,12 +860,9 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
     );
 }
 
-// A late-reserved channel delegated here is not O's for a Herdr turn whatever its home and writer:
-// its output stays Legacy's, so its first input is refused before any launch.
+// A late reservation keeps Legacy output ownership even when its writer is ready.
 #[test]
-fn a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn() {
-    use crate::db::o_channel_homes::HomeState;
-    use crate::services::cluster::channel_home;
+fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
     use crate::services::tui_o::channel_policy::{self, BootChannels};
     use crate::services::tui_o::cutover::{self, test_override};
     const LATE: u64 = 9_300_000_000_000_201;
@@ -895,8 +892,6 @@ fn a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn() {
         candidate.late_adopt_origin(),
         "the boot reserved it for late adoption"
     );
-    let home = channel_home::register_for_test(LATE, Some(HomeState::Worker));
-    assert!(home.intake_open(), "its home is held here with intake open");
     let _accepts = force_writer_accepts(Some(true));
     let (store, era) = o_store_for_test(root.path(), &[LATE]);
     let mut opened = store.open_channel(&era, LATE).unwrap().unwrap();
@@ -911,7 +906,6 @@ fn a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn() {
         LATE,
         RuntimeHandoffKind::ClaudeTui
     ));
-    channel_home::unregister(&LATE.to_string());
 }
 
 #[cfg(unix)]

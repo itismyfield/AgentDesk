@@ -28,7 +28,6 @@ const FIRST_REPLY: &str = "B1b fresh O first reply";
 const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
-mod delegated_tests;
 mod discord_mock_tests;
 #[path = "b1b_joint_owner_tests.rs"]
 mod joint_foreign;
@@ -384,7 +383,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
             &fixture.old_source.path,
         )
     });
-    let prepared = parts(
+    let prepared = parts_with_rest(
         &fixture.shared,
         &ProviderKind::Codex,
         None,
@@ -423,7 +422,7 @@ async fn scenario(retained: bool, before: BeforeInput) {
                 .expect("the pre-proof host must stop")
                 .unwrap();
                 assert!(!readiness.is_hosted(CANARY_CHANNEL));
-                let restarted = parts(
+                let restarted = parts_with_rest(
                     &fixture.shared,
                     &ProviderKind::Codex,
                     None,
@@ -948,12 +947,13 @@ async fn run_fifo(
         new_io.stats().read_bytes > 0,
         "actual fresh consumer must exercise the IO oracle"
     );
-    let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
-        &ProviderKind::Codex,
-        &fixture.shared.token_hash,
-        serenity::ChannelId::new(CANARY_CHANNEL),
-    )
-    .unwrap();
+    let (disk, _) =
+        crate::services::turn_orchestrator::test_support::load_channel_pending_queue_checked(
+            &ProviderKind::Codex,
+            &fixture.shared.token_hash,
+            serenity::ChannelId::new(CANARY_CHANNEL),
+        )
+        .unwrap();
     assert!(disk.is_empty());
     fresh
 }

@@ -310,7 +310,6 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     });
     let ctx = transport.ctx.clone();
     let event = serenity::FullEvent::Message {
@@ -494,7 +493,6 @@ async fn text_skill_aliases_keep_lookup_and_control_dispatch() {
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     for command in ["!skill", "!cc"] {
         for (skill, expected) in [

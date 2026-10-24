@@ -16,6 +16,8 @@ except ModuleNotFoundError:
     from rust_lex import CODE, SPACE, LITERAL, StripState, lex_segments
 
 ROOT = "__ROOT_LITERAL__"
+SUPPORT_SOURCE = Path("src/services/turn_orchestrator/test_support_tests.rs")
+SUPPORT_PATH = "__SUPPORT_PATH_LITERAL__"
 CONFIG = "crate::config"
 SUPPORT = "crate::services::turn_orchestrator::test_support"
 OBS = "crate::services::observability"
@@ -29,6 +31,8 @@ def rust_text(source: str) -> str:
         for kind, text in lex_segments(line, state):
             if kind in (CODE, SPACE):
                 out.append(text)
+            elif kind == LITERAL and text == '"turn_orchestrator/test_support_tests.rs"':
+                out.append(SUPPORT_PATH)
             elif kind == LITERAL:
                 out.append(ROOT if re.fullmatch(r'(?:r(#+)?)?"AGENTDESK_ROOT_DIR"\1?', text) else "__LITERAL__")
             else:
@@ -178,7 +182,10 @@ def canonical_owners(sources: dict[Path, str]) -> set[str]:
         (function(env, "set_agentdesk_root_for_test"), f"TestEnvVarGuard::set_path({ROOT},path)"),
         (compact(config), "usetest_env::{TestEnvVarGuard,TestRuntimeRootGuard,set_agentdesk_root_for_test}"),
     ]
-    support = block(sources[Path("src/services/turn_orchestrator.rs")], r"\bmod\s+test_support\b")
+    declaration = f"#[cfg(test)]#[path={SUPPORT_PATH}]pub(crate)modtest_support;"
+    if declaration not in compact(sources[Path("src/services/turn_orchestrator.rs")]):
+        raise ValueError("test_support must use the reviewed test-only module source")
+    support = sources[SUPPORT_SOURCE]
     wrapper = block(support, r"\bimpl\s+SharedEnvLock\b")
     checks += [
         (function(wrapper, "lock"), "crate::config::shared_test_env_lock().lock()"),
@@ -215,7 +222,7 @@ def audit(root: Path) -> tuple[list[str], int, list[str]]:
     for tree in ("src", "tests"):
         for path in sorted((root / tree).rglob("*.rs")):
             source = path.read_text()
-            if any(word in source for word in ("AGENTDESK_ROOT_DIR", "shared_test_env_lock", "set_agentdesk_root_for_test", "set_var", "remove_var", "lock_env_then_runtime", "TestEnvVarGuard", "TestRuntimeRootGuard")):
+            if path.relative_to(root) == Path("src/services/turn_orchestrator.rs") or any(word in source for word in ("AGENTDESK_ROOT_DIR", "shared_test_env_lock", "set_agentdesk_root_for_test", "set_var", "remove_var", "lock_env_then_runtime", "TestEnvVarGuard", "TestRuntimeRootGuard")):
                 sources[path.relative_to(root)] = rust_text(source)
     try:
         owners = canonical_owners(sources)
