@@ -278,9 +278,10 @@ fn audit_skill_directories(
         if name == "_shared" || name.starts_with('.') {
             continue;
         }
-        match dir.join("SKILL.md").try_exists() {
-            Ok(true)
-                if !manifest.skills.contains_key(name)
+        match std::fs::metadata(dir.join("SKILL.md")) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !manifest.skills.contains_key(name)
                     && !manifest.legacy.contains_key(name)
                     && !manifest
                         .global_core_skills
@@ -292,7 +293,12 @@ fn audit_skill_directories(
                     "skill": name, "path": dir.display().to_string()}),
                 );
             }
-            Err(error) if error.kind() != std::io::ErrorKind::NotADirectory => {
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
                 report.unavailable(UNREADABLE_SKILL_DIRECTORY, &dir)
             }
             _ => {}

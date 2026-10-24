@@ -289,6 +289,7 @@ fn agent_globs_and_uninstalled_skills_are_clean_but_real_unlisted_skills_are_fin
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), "skill").unwrap();
     }
+    std::fs::create_dir_all(temp.path().join("not-a-skill/SKILL.md")).unwrap();
     let report = audit(
         &["cfg-only"],
         Some(&["ch-db-only"]),
