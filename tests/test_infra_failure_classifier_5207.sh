@@ -396,7 +396,7 @@ if [ "${1-}" = "api" ]; then
   exit 0
 fi
 if [[ "${1-} ${2-} ${4-} ${6-} ${8-}" == "run download --repo --name --dir" ]]; then
-  [ -z "${GH_FAIL_DOWNLOAD-}" ] && [ -d "$GH_FIXTURE_DIR/artifacts/$7" ] || exit 1
+  [ "${GH_FAIL_DOWNLOAD-}" != "$7" ] && [ -d "$GH_FIXTURE_DIR/artifacts/$7" ] || exit 1
   mkdir -p "$9" && cp -R "$GH_FIXTURE_DIR/artifacts/$7/." "$9/"
   exit 0
 fi
@@ -579,7 +579,7 @@ GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a recorded test failure vetoes an
 
 new_shard_case
 e2e_failed_worker_artifact 1
-GH_FAIL_DOWNLOAD=1 assert_e2e "a listed artifact that fails to download vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
+GH_FAIL_DOWNLOAD=nextest-worker-1-attempt-1 assert_e2e "a listed worker artifact that fails to download vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
 
 new_shard_case
 printf '%s\n' '{"total_count":0,"artifacts":[]}' >"$E2E_CASE/artifacts.json"

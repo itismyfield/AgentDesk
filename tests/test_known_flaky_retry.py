@@ -297,6 +297,8 @@ sys.stdout.write((p / file).read_text())
             original.replace("expected to run: true\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts",
                              "expected to run: false\n2026-10-22T08:57:43.9533985Z ##[error]Script checks: scripts_contracts"),
             original.replace("'failure' but", "'cancelled' but"),
+            original.replace("scripts_contracts: success (expected to run: true)",
+                             "scripts_contracts: 'skipped' but expected to run: true"),
             original.replace("Script checks: rust_tests: success", "Lint: rust_tests: success"),
             original.replace("##[error]Script checks: test_evidence: success (expected to run: true)\n", ""),
             original + "##[error]content hash mismatch: expected trusted, found changed\n",
