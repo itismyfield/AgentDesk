@@ -36,11 +36,7 @@ pub(crate) struct Pane {
     pub state: PaneState,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Coverage {
-    Complete,
-    Unknown(String),
-}
+pub(crate) type Coverage = Result<(), String>;
 
 /// The observer verifies canonical context, native descriptor and runtime pin under authority.
 /// The census covers log panes, current contexts and live host/owner discovery, without TTL filtering.

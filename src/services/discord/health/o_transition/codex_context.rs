@@ -203,7 +203,7 @@ impl Observer for Read {
             log_digest: log.digest,
             census_digest: digest,
             panes,
-            coverage: model::Coverage::Complete,
+            coverage: Ok(()),
         })
     }
 }

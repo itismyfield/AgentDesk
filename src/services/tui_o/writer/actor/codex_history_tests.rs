@@ -78,7 +78,7 @@ fn inputs(mode: &str) -> Inputs {
             name: PANE.into(),
             state: PaneState::Live,
         }],
-        coverage: Coverage::Complete,
+        coverage: Coverage::Ok(()),
     }
 }
 
@@ -224,7 +224,7 @@ fn codex_observation_incomplete_or_additional_live_census_is_unknown() {
         "TTL miss",
     ] {
         let mut input = inputs("fresh");
-        input.coverage = Coverage::Unknown(reason.into());
+        input.coverage = Coverage::Err(reason.into());
         unknown(input);
     }
     for state in [PaneState::Live, PaneState::Unknown] {

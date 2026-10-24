@@ -23,14 +23,16 @@ fn clean(path: &Path) -> bool {
             .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
 }
 
-fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
-    let complete = matches!(inputs.coverage, Coverage::Complete);
+fn checked(inputs: Inputs) -> Result<Snapshot, String> {
+    #[cfg(test)]
+    let mut inputs = inputs;
+    let complete = matches!(inputs.coverage, Coverage::Ok(()));
     #[cfg(test)]
     let complete = complete || mutant("coverage");
     if !complete {
         return Err(match inputs.coverage {
-            Coverage::Unknown(reason) => format!("coverage unknown: {reason}"),
-            Coverage::Complete => "coverage unknown".into(),
+            Coverage::Err(reason) => format!("coverage unknown: {reason}"),
+            Coverage::Ok(()) => "coverage unknown".into(),
         });
     }
     let target = &inputs.target;

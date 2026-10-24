@@ -21,7 +21,7 @@ fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
 }
 
 mod observation;
-pub(crate) use observation::{ChannelObservation, observe_channel};
+pub(crate) use observation::observe_channel;
 mod commit;
 #[cfg(unix)]
 pub(crate) mod settled;

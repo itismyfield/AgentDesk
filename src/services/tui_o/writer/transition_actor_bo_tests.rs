@@ -185,7 +185,7 @@ impl Observer for Observed {
             .into(),
             census_digest: if delta.census { "census-2" } else { "census-1" }.into(),
             panes,
-            coverage: Coverage::Complete,
+            coverage: Coverage::Ok(()),
         })
     }
 }
