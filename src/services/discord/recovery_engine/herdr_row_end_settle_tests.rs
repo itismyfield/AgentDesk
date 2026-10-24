@@ -56,9 +56,8 @@ async fn assert_card_deleted(run: &Run) {
 
 const HOLD: u64 = 1_479_671_399_000_121;
 
-/// An idle restarted turn with input queued behind it: the presence edge's kick takes nothing while
-/// the row stands and asks for the row's end, which clears it silently within 5 s of the edge; the
-/// immediate kickoff then takes the input once, within 1 s of the clear.
+/// An idle restarted turn with input queued: the edge's kick takes nothing and asks for the row's
+/// end, which clears it silently; the immediate kickoff takes the input once, within 1 s.
 #[test]
 fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
     let path = concat!(
