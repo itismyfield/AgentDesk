@@ -35,15 +35,24 @@ pub(super) enum Stash {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Footer {
+    Normal,
+    PasteExpand,
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Screen {
     pub(super) composer: Composer,
     pub(super) stash: Stash,
+    pub(super) footer: Footer,
 }
 
 const UNKNOWN: Screen = Screen {
     composer: Composer::Unknown,
     stash: Stash::Unknown,
+    footer: Footer::Unknown,
 };
 
 /// One captured row: all visible text, the part not drawn faint, and the row as captured.
@@ -157,7 +166,46 @@ pub(super) fn read(capture: &str) -> Screen {
         } else {
             stash(&rows[status].plain, width)
         },
+        footer: if paste_footer::recognized(rows[foot].plain.trim_end()) {
+            Footer::PasteExpand
+        } else {
+            Footer::Normal
+        },
     }
+}
+
+pub(super) fn modal(capture: &str) -> bool {
+    use crate::services::tui_input::actor::gate::{PaneVerdict, judge_pane};
+    use crate::services::tui_o::shadow::ShadowProvider;
+    if judge_pane(ShadowProvider::Claude, capture) == PaneVerdict::Modal {
+        return true;
+    }
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
+    let rows: Vec<&str> = plain.lines().collect();
+    let chrome = if read(capture).composer != Composer::Unknown {
+        rows.iter()
+            .rposition(|row| row.starts_with('❯'))
+            .and_then(|prompt| {
+                let bottom = (prompt + 1..rows.len()).find(|&index| {
+                    let row = rows[index].trim_end();
+                    row.chars().count() >= MIN_BORDER && row.chars().all(|c| c == '─')
+                })?;
+                Some(
+                    rows[..prompt]
+                        .iter()
+                        .chain(rows[bottom..].iter())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            })
+    } else {
+        None
+    };
+    // Retain the older permission-card veto outside a proven composer, including above blanks.
+    crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(
+        chrome.as_deref().unwrap_or(&plain),
+    )
 }
 
 /// A row of the user's status line, drawn two columns in like the footer; never a box edge, a
@@ -267,8 +315,10 @@ fn stash(status: &str, width: usize) -> Stash {
     }
     // A right-aligned row drawn whole: padding on the left, its last cell two columns from the edge.
     let drawn = status.trim_end();
+    // Measured on Claude Code 2.1.309: this effort row uses a one-cell `◉`.
+    let measured_effort = drawn.trim() == "◉ xhigh · /effort";
     let whole = drawn.starts_with(' ')
-        && drawn.chars().all(|c| c.is_ascii() || c == '\u{b7}')
+        && (measured_effort || drawn.chars().all(|c| c.is_ascii() || c == '\u{b7}'))
         && drawn.chars().count() + 2 == width;
     if whole {
         Stash::AbsentInRecognizedLayout
@@ -277,36 +327,19 @@ fn stash(status: &str, width: usize) -> Stash {
     }
 }
 
-/// The person's draft rows when the composer holds plain text, Claude shows no stash and the
-/// frame will render flat; anything else leaves the draft untouched.
+/// The person's visible draft rows when Claude shows no stash and can render the outgoing frame.
 pub(in crate::services::claude_tui) fn stashable(
     capture: &str,
     frame: &str,
     size: Option<(usize, usize)>,
 ) -> Option<Vec<String>> {
-    let (width, height) = size?;
-    if !renders_flat(frame, width, height) {
-        return None;
-    }
+    direct(frame, size)?;
     let screen = read(capture);
     let Composer::Text(rows) = screen.composer else {
         return None;
     };
-    (screen.stash == Stash::AbsentInRecognizedLayout).then_some(rows)
-}
-
-/// Claude folds a paste over 800 UTF-16 units or with more newlines than clamp(rows-10, 0, 2),
-/// and wraps rows wider than width-4. Wide characters count two columns; tabs and CR get rewritten.
-fn renders_flat(frame: &str, width: usize, height: usize) -> bool {
-    let newlines = frame.matches('\n').count();
-    frame.encode_utf16().count() <= 800
-        && newlines <= height.saturating_sub(10).min(2)
-        && frame.split('\n').all(|line| {
-            let columns: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-            line.trim_end() == line
-                && !line.chars().any(char::is_control)
-                && columns < width.saturating_sub(4)
-        })
+    (screen.footer == Footer::Normal && screen.stash == Stash::AbsentInRecognizedLayout)
+        .then_some(rows)
 }
 
 /// How Claude shows a paste in an empty composer.
@@ -363,15 +396,17 @@ pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn>
 
 /// Proves the complete body or an exact placeholder; multiline pastes may fold before predicted.
 pub(super) fn owns_direct(capture: &str, frame: &str, drawn: &Drawn) -> bool {
-    let Composer::Text(rows) = read(capture).composer else {
+    let screen = read(capture);
+    let Composer::Text(rows) = screen.composer else {
         return false;
     };
-    if matches!(drawn, Drawn::Rows(expected) if own_wrapped_draft(capture, expected))
-        || rows
-            .iter()
-            .flat_map(|row| row.chars())
-            .filter(|c| !c.is_whitespace())
-            .eq(frame.chars().filter(|c| !c.is_whitespace()))
+    if screen.footer == Footer::Normal
+        && (matches!(drawn, Drawn::Rows(expected) if own_wrapped_draft(capture, expected))
+            || rows
+                .iter()
+                .flat_map(|row| row.chars())
+                .filter(|c| !c.is_whitespace())
+                .eq(frame.chars().filter(|c| !c.is_whitespace())))
     {
         return true;
     }
@@ -386,16 +421,20 @@ pub(super) fn owns_direct(capture: &str, frame: &str, drawn: &Drawn) -> bool {
         return false;
     };
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    digits > 0
+    let owned = digits > 0
         && if lines == 0 {
             &rest[digits..] == "]"
         } else {
             rest[digits..] == format!(" +{lines} lines]")
-        }
+        };
+    if owned {
+        super::ownership::observe_owned_chip(frame, row);
+    }
+    owned
 }
 
-/// Measured on Claude Code 2.1.293: a paste folds as in [`renders_flat`]; otherwise each line
-/// wraps at width-4 and the composer shows at most (rows-10)/2 rows. `None` when not predictable.
+/// Measured on Claude Code 2.1.293: pastes over 800 UTF-16 units or over min(rows-10,2) LFs fold.
+/// Other lines wrap at width-4, with at most (rows-10)/2 visible rows; unknown layouts return `None`.
 pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
     let (width, height) = size?;
     // Claude may rewrite a tab or CR, changing even a folded paste's line count.
@@ -528,22 +567,28 @@ pub(super) fn typed(capture: &str) -> Option<bool> {
     Some(text.chars().any(|c| !c.is_whitespace()))
 }
 
-/// The composer shows exactly the frame, row for row, with the draft still stashed.
+/// A current stash transaction owns the full body or its folded chip, with the draft still stashed.
 pub(in crate::services::claude_tui) fn owns(capture: &str, frame: &str) -> bool {
-    let screen = read(capture);
-    screen.stash == Stash::Present
-        && matches!(&screen.composer, Composer::Text(rows) if rows.iter().map(String::as_str).eq(frame.split('\n')))
+    let drawn = if frame.encode_utf16().count() > 800 {
+        Drawn::Folded
+    } else {
+        Drawn::Body
+    };
+    read(capture).stash == Stash::Present && owns_direct(capture, frame, &drawn)
 }
 
 /// The C-s took: an empty composer under the stash marker.
 pub(in crate::services::claude_tui) fn stashed(capture: &str) -> bool {
     let screen = read(capture);
-    screen.stash == Stash::Present && screen.composer == Composer::Empty
+    screen.footer == Footer::Normal
+        && screen.stash == Stash::Present
+        && screen.composer == Composer::Empty
 }
 
 /// Claude handed the draft back: the same rows and no stash.
 pub(super) fn restored(capture: &str, draft: &[String]) -> bool {
     let screen = read(capture);
-    screen.stash == Stash::AbsentInRecognizedLayout
+    screen.footer == Footer::Normal
+        && screen.stash == Stash::AbsentInRecognizedLayout
         && matches!(&screen.composer, Composer::Text(rows) if rows == draft)
 }

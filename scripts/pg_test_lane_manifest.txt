@@ -225,6 +225,7 @@ src/services/discord/router/message_handler/codex_resume_companion_queue_tests.r
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
+src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs
@@ -314,10 +315,12 @@ src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/he
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests/herdr_synthetic_identity_pg_tests/hosted_classification_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs
+src/services/discord/turn_bridge/completion_postlude/prelude_lifecycle/settlement_pg_tests.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/resume_pin_tests.rs
 src/services/discord/turn_bridge/stream_loop/provider_recovery.rs
+src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/preparation_hold_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs
 src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/background_child_ordering_tests.rs
@@ -655,6 +658,7 @@ services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_
 services::discord::router::message_handler::intake_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests
+services::discord::router::message_handler::intake_turn::retry_prompt::tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation
@@ -752,10 +756,12 @@ services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::h
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::herdr_synthetic_identity_pg_tests::hosted_classification_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests
 services::discord::turn_bridge::headless_delivery::production_seam_tests
 services::discord::turn_bridge::recovery_text::tests
 services::discord::turn_bridge::resume_pin_tests
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests
@@ -1985,6 +1991,7 @@ services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placehol
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::queue_dispatch::canary_workspace::tests::canary_without_core_session_and_unresolved_workspace_parks_original_pg
 services::discord::queue_dispatch::canary_workspace::tests::workspace_hold_stays_on_the_sessionless_codex_canary_pg
+services::discord::queue_io::queued_head_inject::tests::a2_queued_hold_blocks_idle_fallthrough_without_retry_charge_pg
 services::discord::queue_io::queued_head_inject::tests::a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg
 services::discord::queue_io::queued_head_inject::tests::a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg
@@ -2163,6 +2170,10 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::wor
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_begin_ack_loss_keeps_original_delivery_without_success_or_retry_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_lookup_failure_keeps_original_delivery_without_input_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_malformed_sql_sources_hold_claimed_custody_without_failure_or_child_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_save_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::identical_legacy_and_raw_bytes_keep_distinct_semantics_through_real_queue_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::queued_none_is_raw_and_selects_recovery_after_real_queue_roundtrip_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_codex_launch_that_never_sent_its_create_is_followed_by_one_fresh_launch_pg
@@ -2592,6 +2603,9 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests::replay_hold_dormant_and_classified_generic_failure_preserve_retry_policy_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests::replay_hold_generic_failure_preserves_request_entry_links_slots_and_delivery_owner_pg
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::indeterminate_settlement_consumes_but_negative_receipt_retains_wip_pg
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::production_started_at_receipt_settles_borrowed_wip_pg
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::snapshotless_tui_normal_completion_allows_next_reminder_generation_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_active_statuses_return_existing_id_and_terminal_statuses_retry_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_concurrent_duplicates_converge_on_one_active_row_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_identity_is_content_free_and_owner_sensitive_pg
@@ -2606,6 +2620,8 @@ services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_ca
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
 services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_checkpoint_wakeup_positive_stop_off_and_absent_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_uncertain_payload_keeps_the_binding_and_notice_without_resubmission_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::kept_resume_failure_keeps_the_session_id_and_inflight_through_completion_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_hold_session_died_recovery_preserves_body_and_session_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests::replay_turn_tests::held_request_leaves_its_dispatch_unsettled_pg

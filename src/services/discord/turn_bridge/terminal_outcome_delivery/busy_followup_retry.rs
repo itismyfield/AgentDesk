@@ -90,6 +90,9 @@ pub(super) async fn apply_busy_requeue_if_pending(
     .await;
     let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);
     *delivery_response = response.to_string();
+    if outcome.preparation_held {
+        delivery_response.clear();
+    }
     if preserve_inflight {
         *preserve_inflight_for_cleanup_retry = true;
         tracing::warn!(
@@ -124,6 +127,7 @@ mod tests {
     #[test]
     fn capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888() {
         let outcome = followup_requeue::FollowupRequeueOutcome {
+            preparation_held: false,
             requeued: false,
             retry_capped: true,
             notice_message_id: MessageId::new(100_000_004_888_301),

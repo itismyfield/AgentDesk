@@ -229,7 +229,10 @@ mod source_forwarding_tests {
                 "delivery rows cannot occupy the canonical receipt's unique key"
             );
             assert_eq!(stored.2, format!("merged source body {representative}"));
-            assert_eq!(stored.3.as_deref(), Some("original reply reference"));
+            let context = crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext::decode(stored.3.as_deref()).unwrap();
+            assert_eq!(context.raw.as_deref(), Some("original reply reference"));
+            assert_eq!(context.selected, Default::default());
+            assert!(context.may_select());
             assert_eq!((stored.4, stored.5), (1, false));
 
             let held_source = sources[held_index];

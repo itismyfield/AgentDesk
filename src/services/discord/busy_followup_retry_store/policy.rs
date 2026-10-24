@@ -85,11 +85,13 @@ impl RetryBudget {
             notice_bound: true,
             draft_session: None,
         });
-        if budget.first_busy_retry_at_ms == 0 {
+        if draft_session.is_none() && budget.first_busy_retry_at_ms == 0 {
             budget.first_busy_retry_at_ms = now_ms;
         }
-        budget.busy_retry_count = budget.busy_retry_count.saturating_add(1);
-        budget.active_retry_ms = budget.active_retry_ms.saturating_add(attempt_ms);
+        if draft_session.is_none() {
+            budget.busy_retry_count = budget.busy_retry_count.saturating_add(1);
+            budget.active_retry_ms = budget.active_retry_ms.saturating_add(attempt_ms);
+        }
         budget.draft_hold = draft_session.is_some();
         budget.draft_session = draft_session.map(str::to_string);
         budget.capped = budget.exhausted();
@@ -121,7 +123,7 @@ pub(crate) enum UnavailableReason {
     InvalidNotice,
     /// The reads do not cover exactly the input's identity.
     IncompleteView,
-    /// A watched idle draft awaits the existing hold-release pass before FIFO selection.
+    /// Preparation is held until the existing observer confirms input readiness.
     IdleDraftRelease,
 }
 
@@ -205,11 +207,17 @@ pub(crate) enum RetryClass {
 
 /// Unavailable over Parked over Ready, decided only after every read; the first refusal names
 /// the reason.
-fn classify_reads<'a>(reads: impl IntoIterator<Item = &'a SourceRead>) -> RetryClass {
+fn classify_reads<'a>(
+    reads: impl IntoIterator<Item = &'a SourceRead>,
+    hold_preparation: bool,
+) -> RetryClass {
     let mut class = RetryClass::Ready;
     for read in reads {
         match read {
             SourceRead::Unreadable(refusal) => return RetryClass::Unavailable(refusal.reason),
+            SourceRead::Budget(budget) if hold_preparation && budget.draft_hold => {
+                return RetryClass::Unavailable(UnavailableReason::IdleDraftRelease);
+            }
             SourceRead::Budget(budget) if budget.exhausted() => class = RetryClass::Parked,
             SourceRead::Budget(_) | SourceRead::Absent => {}
         }
@@ -327,10 +335,15 @@ impl CheckedInputView {
         if !self.covers_identity() {
             return RetryClass::Unavailable(UnavailableReason::IncompleteView);
         }
-        let class = classify_reads(self.reads.iter().map(|(_, read)| read));
+        let class = classify_reads(
+            self.reads.iter().map(|(_, read)| read),
+            self.provider == ProviderKind::Claude,
+        );
         #[cfg(unix)]
-        if class == RetryClass::Parked
-            && self.provider == ProviderKind::Claude
+        if matches!(
+            class,
+            RetryClass::Parked | RetryClass::Unavailable(UnavailableReason::IdleDraftRelease)
+        ) && self.provider == ProviderKind::Claude
             && crate::services::claude_tui::busy_inject::stash_enabled(Some(self.channel_id))
         {
             let mut observed = false;
@@ -338,7 +351,7 @@ impl CheckedInputView {
                 let SourceRead::Budget(budget) = read else {
                     continue;
                 };
-                if !budget.exhausted() || !budget.draft_hold {
+                if !budget.draft_hold {
                     continue;
                 }
                 let Some(session) = budget.draft_session.as_deref() else {
@@ -355,7 +368,10 @@ impl CheckedInputView {
                 // snapshot must not skip a head whose fresh budget is now runnable.
                 let fresh =
                     Self::read(&self.provider, self.channel_id, self.primary, &self.sources);
-                return classify_reads(fresh.reads.iter().map(|(_, read)| read));
+                return classify_reads(
+                    fresh.reads.iter().map(|(_, read)| read),
+                    self.provider == ProviderKind::Claude,
+                );
             }
         }
         class
