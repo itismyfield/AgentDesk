@@ -11024,6 +11024,8 @@ services::discord::turn_presence::activity::unbound::tests::u_local_row_identity
 services::discord::turn_presence::activity::unbound::tests::u_outside_or_elsewhere_sessions_never_hide_own_evidence
 services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
 services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
+services::discord::turn_presence::supervisor::notices::operator::tests::one_operator_notice_per_cause_episode_across_ticks_restarts_and_retries
+services::discord::turn_presence::supervisor::notices::operator::tests::operator_notices_never_appear_as_turn_unknowns
 services::discord::turn_presence::supervisor::notices::tests::actual_reason_or_hold_leaf_change_rearms_after_its_own_grace
 services::discord::turn_presence::supervisor::notices::tests::cleared_receipt_reload_does_not_suppress_the_next_unknown_spell
 services::discord::turn_presence::supervisor::notices::tests::heartbeat_keeps_canonical_periodic_evidence_while_discord_succeeds_only_once
@@ -12482,14 +12484,18 @@ services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown
 services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
 services::session_host::herdr::launch_host::tests::socket_launch_types_the_command_into_the_server_that_created_the_pane
 services::session_host::herdr::managed_config::maintenance::tests::a_busy_home_is_retried_without_a_new_health_reason
+services::session_host::herdr::managed_config::maintenance::tests::a_home_with_no_mapped_channel_keeps_its_notice_pending
+services::session_host::herdr::managed_config::maintenance::tests::a_no_peer_read_is_re_read_and_a_lasting_one_fails
 services::session_host::herdr::managed_config::maintenance::tests::a_personal_xdg_inside_a_managed_home_refuses_every_dedicated_home
 services::session_host::herdr::managed_config::maintenance::tests::a_refused_home_never_blocks_another_dedicated_home
 services::session_host::herdr::managed_config::maintenance::tests::a_running_server_on_the_old_config_stays_refused_and_is_never_restarted
+services::session_host::herdr::managed_config::maintenance::tests::an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fresh_off
 services::session_host::herdr::managed_config::maintenance::tests::drift_after_a_repair_is_repaired_again_on_the_next_tick
 services::session_host::herdr::managed_config::maintenance::tests::only_local_dedicated_endpoints_reach_the_writer_alongside_user_default
 services::session_host::herdr::managed_config::maintenance::tests::the_process_starts_one_upkeep_task
 services::session_host::herdr::managed_config::maintenance::tests::unreadable_records_and_unsafe_homes_get_their_own_stable_reasons
 services::session_host::herdr::managed_config::maintenance::tests::upkeep_repairs_missing_and_drifted_homes_and_leaves_canonical_bytes_untouched
+services::session_host::herdr::managed_config::tests::a_personal_herdr_link_to_the_managed_home_refuses_it
 services::session_host::herdr::managed_config::tests::canonical_with_committed_record_preserves_config_and_barrier
 services::session_host::herdr::managed_config::tests::canonical_without_record_is_a_complete_noop_and_stays_off
 services::session_host::herdr::managed_config::tests::committed_is_not_published_before_config_sync_and_backup
