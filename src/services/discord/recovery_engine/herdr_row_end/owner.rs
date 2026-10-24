@@ -38,6 +38,35 @@ pub(in crate::services::discord) fn restarted_herdr_hold(
     }
 }
 
+/// The automatic dequeue's hold: logs it, asks for the row's end, and arms the slow backstop so a
+/// clear another owner makes is still read.
+pub(in crate::services::discord) async fn hold_queue(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> bool {
+    let current = shared.restart.current_generation;
+    let Some(hold) = restarted_herdr_hold(provider, channel.get(), current) else {
+        return false;
+    };
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = channel.get(),
+        reason = hold.reason(),
+        "dequeue_held"
+    );
+    request_row_end(shared, provider, channel);
+    let arm = crate::services::discord::arm_slow_idle_queue_backstop_if_queue_nonempty;
+    arm(shared, provider, channel, "restarted herdr row hold").await;
+    true
+}
+
+/// REST's hold, read against this process's generation.
+pub(in crate::services::discord) fn holds_rest(provider: &ProviderKind, channel: u64) -> bool {
+    let current = crate::services::discord::runtime_store::process_generation();
+    restarted_herdr_hold(provider, channel, current).is_some()
+}
+
 /// A prior process's row on a Herdr host: its recorded execution, else its session's host marker.
 fn restarted_owner(
     provider: &ProviderKind,

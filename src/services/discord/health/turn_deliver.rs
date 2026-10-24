@@ -138,14 +138,16 @@ pub const TURN_ACTIVITY_UNKNOWN: &str = "turn_activity_unknown";
 /// headless start there could not create its own row and would lose the input.
 /// A prior process's Herdr row holds the channel the same way, whatever source started it.
 pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> bool {
-    let restarted =
-        crate::services::discord::recovery_engine::herdr_row_end::owner::restarted_herdr_hold;
-    let generation = crate::services::discord::runtime_store::process_generation();
+    #[cfg(unix)]
+    if crate::services::discord::recovery_engine::herdr_row_end::owner::holds_rest(
+        provider, channel_id,
+    ) {
+        return true;
+    }
     crate::services::discord::inflight::load_inflight_state_read_only(provider, channel_id)
         .is_some_and(|row| {
             row.turn_source != crate::services::discord::inflight::TurnSource::Managed
         })
-        || restarted(provider, channel_id, generation).is_some()
 }
 
 /// What keeps a start off a channel whose mailbox may be free.

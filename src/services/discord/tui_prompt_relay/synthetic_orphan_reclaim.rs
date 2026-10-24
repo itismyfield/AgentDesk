@@ -68,13 +68,16 @@ fn reclaim_orphan_inflight_owner(
     let Some(state) = load_inflight_state(provider, channel_id) else {
         return false;
     };
-    let owner =
-        crate::services::discord::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner;
-    let generation = crate::services::discord::runtime_store::process_generation();
     // A restarted Herdr row's end belongs to its dedicated owner, not to this fallback.
-    if owner(provider, &state, generation)
-        || !orphan_row_is_reclaimable(&state, require_tmux_session)
-    {
+    #[cfg(unix)]
+    if crate::services::discord::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner(
+        provider,
+        &state,
+        crate::services::discord::runtime_store::process_generation(),
+    ) {
+        return false;
+    }
+    if !orphan_row_is_reclaimable(&state, require_tmux_session) {
         return false;
     }
     let identity = InflightTurnIdentity::from_state(&state);
@@ -284,6 +287,43 @@ mod tests {
             !orphan_row_is_reclaimable(&orphan, "AgentDesk-claude-OTHER"),
             "an orphan on a foreign session must not be reclaimed by this worker (#3982)"
         );
+    }
+
+    /// A prior process's Herdr row the end pass owns is no orphan to downgrade here.
+    #[cfg(unix)]
+    #[test]
+    fn pending_start_reclaim_leaves_a_restarted_herdr_row_to_its_end_pass() {
+        let (root, _env) = isolated_runtime_root();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel_id = 7_289_401;
+            let tmux = "AgentDesk-claude-7289-restarted-orphan";
+            let marker = crate::services::tmux_common::session_temp_path(tmux, "host_kind");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(&marker, "herdr").unwrap();
+            let mut state = session_bound_row(channel_id, tmux, true);
+            state.turn_nonce = Some("restarted-turn".to_string());
+            state.born_generation = shared.restart.current_generation + 7;
+            state.runtime_kind =
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+            write_inflight_fixture(root.path(), &ProviderKind::Claude, &state);
+            assert!(orphan_row_is_reclaimable(&state, tmux), "orphan-shaped");
+
+            let reclaim = super::pending_start_reclaim_orphan_fn();
+            let outcome = reclaim(&shared, &pending_record(channel_id, tmux)).await;
+
+            assert_eq!(outcome, ReclaimStaleForeignOutcome::None);
+            let reloaded = load_inflight_state(&ProviderKind::Claude, channel_id)
+                .expect("the row stays for its end pass");
+            assert_eq!(
+                reloaded.effective_relay_owner_kind(),
+                RelayOwnerKind::SessionBoundRelay
+            );
+        });
     }
 
     #[test]

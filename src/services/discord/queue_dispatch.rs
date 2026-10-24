@@ -220,6 +220,12 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    // A prior process's Herdr row would refuse the start: keep the queue and ask for the row's end.
+    #[cfg(unix)]
+    if super::recovery_engine::herdr_row_end::owner::hold_queue(shared, provider, channel_id).await
+    {
+        return MailboxTakeNextSoftOutcome::default();
+    }
     // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         use super::turn_presence::activity::{Activity, activity_now};
@@ -246,25 +252,6 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
             .await;
             return MailboxTakeNextSoftOutcome::default();
         }
-    }
-    // A prior process's Herdr row would refuse the start: keep the queue and ask for the row's end.
-    let restarted = super::recovery_engine::herdr_row_end::owner::restarted_herdr_hold;
-    if let Some(hold) = restarted(
-        provider,
-        channel_id.get(),
-        shared.restart.current_generation,
-    ) {
-        tracing::info!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            reason = hold.reason(),
-            "dequeue_held"
-        );
-        super::recovery_engine::herdr_row_end::request_row_end(shared, provider, channel_id);
-        let reason = "restarted herdr row hold";
-        super::arm_slow_idle_queue_backstop_if_queue_nonempty(shared, provider, channel_id, reason)
-            .await;
-        return MailboxTakeNextSoftOutcome::default();
     }
     let mut excluded_stale_primary_message_ids = std::collections::HashSet::new();
     let mut previous_observed_head = None;

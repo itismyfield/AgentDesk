@@ -779,6 +779,7 @@ impl Effects for LiveEffects {
         blocked(&self.shared, &self.provider, ChannelId::new(channel)).await
     }
 
+    #[cfg(unix)]
     async fn row_hold(&self, channel: u64) -> Option<&'static str> {
         let hold =
             crate::services::discord::recovery_engine::herdr_row_end::owner::restarted_herdr_hold;

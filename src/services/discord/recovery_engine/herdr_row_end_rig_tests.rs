@@ -18,8 +18,12 @@ use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_O
 use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal, record_verified};
 
+#[path = "herdr_row_end_gate_tests.rs"]
+mod gate;
 #[path = "herdr_row_end_guard_tests.rs"]
 mod guards;
+#[path = "herdr_row_end_settle_tests.rs"]
+mod settle;
 
 const NONCE: &str = "turn-row-end";
 const PARTIAL: &str = "Reading the files.";
@@ -708,7 +712,8 @@ async fn r1(rig: herdr::P11TerminationRig, phase: String) {
 
 const R2: u64 = 1_479_671_399_000_102;
 
-/// A Codex Herdr turn the same way: the interrupt notice, its rollout untouched.
+/// A Codex Herdr turn the same way, but its rollout cannot bound the input's own turn: the neutral
+/// notice, its rollout untouched.
 #[test]
 fn r2_restarted_codex_turn_ends_with_the_recovery_notice_pg() {
     let path = concat!(
@@ -735,8 +740,13 @@ fn r2_restarted_codex_turn_ends_with_the_recovery_notice_pg() {
             run.relay.set(|pane| pane.screen = Some(CODEX_READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.boot().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            let notice = "이전 요청의 완료 여부는 확인하지 못했습니다";
+            assert_ended(&run, notice, &taken).await;
+            let texts = run.texts();
+            assert!(
+                !texts.iter().any(|t| t.contains(&run.interrupted())),
+                "{texts:?}"
+            );
             assert_eq!(
                 std::fs::read(&run.source).unwrap(),
                 rollout,
@@ -826,7 +836,7 @@ fn r4_an_ended_execution_retires_and_ends_its_row_pg() {
 const R5: u64 = 1_479_671_399_000_115;
 
 /// A Herdr restart left another shell alone in the pane and both recorded processes are gone: E
-/// retires the execution with the interrupt notice, never I's answer from the transcript.
+/// retires the execution, then the source read after the end shows the turn's own answer once.
 #[test]
 fn restarted_root_replaced_e_retires_pg() {
     let path = concat!(module_path!(), "::restarted_root_replaced_e_retires_pg");
@@ -851,10 +861,14 @@ fn restarted_root_replaced_e_retires_pg() {
             run.relay.set(|pane| pane.screen = Some(READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.boot().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            assert_ended(&run, ANSWER, &taken).await;
             let texts = run.texts();
-            assert!(!texts.iter().any(|t| t.contains(ANSWER)), "{texts:?}");
+            let shown: usize = texts.iter().map(|t| t.matches(ANSWER).count()).sum();
+            assert_eq!(shown, 1, "the answer once: {texts:?}");
+            assert!(
+                !texts.iter().any(|t| t.contains(&run.interrupted())),
+                "{texts:?}"
+            );
             let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
             assert_eq!(run.hosted().await, Some(retired));
             run.close().await;

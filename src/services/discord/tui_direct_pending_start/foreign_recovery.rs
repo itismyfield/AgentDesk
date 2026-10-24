@@ -297,8 +297,12 @@ async fn demote_stale_foreign_inflight(
         return false;
     };
     // A restarted Herdr row's end belongs to its dedicated owner, never to this sweep.
-    let owner = super::super::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner;
-    if owner(&provider, &state, shared.restart.current_generation) {
+    #[cfg(unix)]
+    if super::super::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner(
+        &provider,
+        &state,
+        shared.restart.current_generation,
+    ) {
         tracing::info!(
             provider = %record.provider,
             channel_id = record.channel_id,

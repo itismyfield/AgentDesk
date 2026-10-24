@@ -235,12 +235,6 @@ async fn settle_row(
     if silent {
         diagnostics::phase(provider, channel.get(), "commit");
         commit(pool, &seen).await?;
-        // A silent clear stands on O owning the output; it never falls back to a notice.
-        match o_owns_output(&row) {
-            Some(true) => {}
-            Some(false) => return Err("o_owner_changed"),
-            None => return Err("o_owner_unreadable"),
-        }
     } else {
         let http = shared
             .serenity_http_or_token_fallback()
@@ -263,9 +257,8 @@ async fn settle_row(
     tests::hook("before_clear").await;
     diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
-    let cleared =
-        tokio::task::spawn_blocking(move || snapshot.clear_restarted_herdr_row(&owner, current))
-            .await;
+    let clear = move || snapshot.clear_restarted_herdr_row(&owner, current, silent);
+    let cleared = tokio::task::spawn_blocking(clear).await;
     if !matches!(cleared, Ok(inflight::GuardedClearOutcome::Cleared)) {
         kept(&row, "the fresh row is not this turn");
         return Err("clear_rejected");
@@ -317,16 +310,18 @@ async fn notice(
     };
     let channel = ChannelId::new(row.channel_id);
     let card = inflight::opt_message_id(row.current_msg_id);
-    let relay = relay_recovered_terminal_text_to_placeholder;
-    match relay(http, shared, channel, card, &text, None).await {
+    match relay_recovered_terminal_text_to_placeholder(http, shared, channel, card, &text, None)
+        .await
+    {
         RecoveryRelayOutcome::PermanentFailure if card.is_some() => {
-            relay(http, shared, channel, None, &text, None).await
+            relay_recovered_terminal_text_to_placeholder(http, shared, channel, None, &text, None)
+                .await
         }
         outcome => outcome,
     }
 }
 
-/// The channel's mailbox holds a turn, or a live Herdr turn holds this row's nonce.
+/// Neither the channel's mailbox holds a turn nor a live Herdr turn holds this row's nonce.
 async fn actor_absent(
     shared: &SharedData,
     provider: &ProviderKind,

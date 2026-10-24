@@ -290,7 +290,7 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     channel_id: serenity::ChannelId,
 ) -> bool {
     if !mailbox_has_active_turn(shared, channel_id).await {
-        return false;
+        return restarted_row_holds(shared, provider, channel_id);
     }
     if release_queue_blocked_stale_active_turn(
         shared,
@@ -300,9 +300,32 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
     )
     .await
     {
-        return mailbox_has_active_turn(shared, channel_id).await;
+        return mailbox_has_active_turn(shared, channel_id).await
+            || restarted_row_holds(shared, provider, channel_id);
     }
     true
+}
+
+/// A prior process's Herdr row would refuse a start, so intake queues behind it as behind a turn.
+fn restarted_row_holds(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    #[cfg(unix)]
+    let held =
+        crate::services::discord::recovery_engine::herdr_row_end::owner::restarted_herdr_hold(
+            provider,
+            channel_id.get(),
+            shared.restart.current_generation,
+        )
+        .is_some();
+    #[cfg(not(unix))]
+    let held = {
+        let _ = (shared, provider, channel_id);
+        false
+    };
+    held
 }
 
 #[cfg(all(test, unix))]

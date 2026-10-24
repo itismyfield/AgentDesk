@@ -1539,6 +1539,11 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── herdr_row_end/
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   ├── owner.rs
+│   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
