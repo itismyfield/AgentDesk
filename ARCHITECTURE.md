@@ -249,6 +249,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── discarded_tx_result_scan_tests.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
