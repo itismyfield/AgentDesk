@@ -125,14 +125,25 @@ case "$1" in
         lead = "\033[1m›\033[0m "; while ((getline row < draft) > 0) { print lead row; lead = "  " }; next } { print }' "ROOT/composer"; exit 0; }
     [ -f "ROOT/composer" ] && { /bin/cat "ROOT/composer"; exit 0; }
     [ "$state" = busy ] && printf '%s\n' '⏺ Running a fixture command'; exit 0 ;;
-  send-keys|paste-buffer|delete-buffer) [ -f "ROOT/composer" ] || { printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97; }
+  send-keys|paste-buffer|delete-buffer|load-buffer)
+    [ -f "ROOT/composer" ] || { printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97; }
     printf '%s\n' "$*" >> "ROOT/tmux-input"
-    for arg; do last=$arg; done
-    case "$1 $*" in paste-buffer*) /bin/cat "ROOT/buffer" >> "ROOT/draft" ;;
+    buffer=; target=; prev=
+    for arg; do case "$prev" in -b) buffer=$arg ;; -t) target=$arg ;; esac; prev=$arg; last=$arg; done
+    refuse() { printf '%s\n' "refused $*" >> "ROOT/tmux-errors"; exit 97; }
+    [ "$1" = load-buffer ] || [ "$1" = delete-buffer ] || [ "$target" = "$(/bin/cat "ROOT/composer-target")" ] || refuse "$@"
+    /bin/mkdir -p "ROOT/buffers"
+    case "$1 $*" in
+      load-buffer*) [ -n "$buffer" ] || refuse "$@"; /bin/cat "$last" > "ROOT/buffers/$buffer" ;;
+      delete-buffer*) /bin/rm -f "ROOT/buffers/$buffer" ;;
+      paste-buffer*) [ -f "ROOT/buffers/$buffer" ] || refuse "$@"; /bin/cat "ROOT/buffers/$buffer" >> "ROOT/draft"
+        case " $* " in *" -d "*) /bin/rm -f "ROOT/buffers/$buffer" ;; esac ;;
       *" -l "*) printf '%s' "$last" >> "ROOT/draft" ;;
-      send-keys*) case "$last" in Enter|C-m) /bin/rm -f "ROOT/draft" ;; esac ;; esac; exit 0 ;;
-  load-buffer) [ -f "ROOT/composer" ] || { printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97; }
-    for arg; do last=$arg; done; /bin/cat "$last" > "ROOT/buffer"; { printf '%s\n' "$*"; /bin/cat "ROOT/buffer"; printf '\n'; } >> "ROOT/tmux-input"; exit 0 ;;
+      *) for key; do case "$key" in
+           C-u) /bin/rm -f "ROOT/draft" ;;
+           Enter|C-m) [ -s "ROOT/draft" ] && { /bin/cat "ROOT/draft"; printf '\n%s\n' "--8<--"; } >> "ROOT/tmux-submits"
+             /bin/rm -f "ROOT/draft" ;; esac; done ;;
+    esac; exit 0 ;;
   show-options|show-option) exit 0 ;;
   display-message) [ -f "ROOT/composer" ] && case "$*" in *pane_dead*) echo 0; exit 0 ;;
       *pane_width*) echo '120 40'; exit 0 ;; esac
@@ -205,9 +216,10 @@ pub(in crate::services::discord) fn list_sessions(sessions: &[&str]) {
     std::fs::write(root().join("tmux-sessions"), sessions.join("\n")).unwrap();
 }
 
-/// A ready Codex composer on `capture-pane`. Pane input is recorded in `tmux-input`, and typed or
-/// pasted text shows as the composer draft until Enter.
-pub(in crate::services::discord) fn ready_codex_composer() {
+/// A ready Codex composer for `session` on `capture-pane`. Writes must name its pane and a loaded
+/// buffer; typed or pasted text shows as the draft, and Enter on a non-empty draft submits it.
+pub(in crate::services::discord) fn ready_codex_composer(session: &str) {
+    std::fs::write(root().join("composer-target"), format!("={session}:")).unwrap();
     std::fs::write(
         root().join("composer"),
         include_str!("../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi"),
@@ -215,9 +227,18 @@ pub(in crate::services::discord) fn ready_codex_composer() {
     .unwrap();
 }
 
-/// Every pane write a ready composer received, one command per line with buffer text inline.
+/// Every pane write the composer received, one command per line.
 pub(in crate::services::discord) fn pane_input() -> String {
     std::fs::read_to_string(root().join("tmux-input")).unwrap_or_default()
+}
+
+/// Each whole draft Enter submitted to the composer's pane, in order.
+pub(in crate::services::discord) fn pane_submits() -> Vec<String> {
+    let submits = std::fs::read_to_string(root().join("tmux-submits")).unwrap_or_default();
+    submits
+        .split_terminator("\n--8<--\n")
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(in crate::services::discord) fn pane(state: &str) {

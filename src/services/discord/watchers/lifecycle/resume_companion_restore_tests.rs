@@ -629,6 +629,13 @@ struct LegacyQueued {
 
 impl LegacyQueued {
     async fn new(channel: u64) -> Self {
+        let fixture = Self::booted(channel).await;
+        fixture.enqueue().await;
+        fixture
+    }
+
+    /// The restarted channel before any ingress: nothing is queued yet.
+    async fn booted(channel: u64) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
         let hosts = crate::config::session_hosts::force_for_test(None, &[]);
@@ -707,7 +714,6 @@ impl LegacyQueued {
             _hosts: hosts,
             _live: live,
         };
-        fixture.enqueue().await;
         // Boot forgets every in-memory binding; only the pass may publish it again.
         dedupe::reset_state_for_tests();
         assert_eq!(
@@ -771,6 +777,15 @@ impl LegacyQueued {
         (memory.intervention_queue.len(), durable.len())
     }
 
+    /// Codex's rollout rows for the submitted head and its one answer.
+    fn answer(&self) {
+        let mut native = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.native)
+            .unwrap();
+        std::io::Write::write_all(&mut native, queued_turn_rows().as_bytes()).unwrap();
+    }
+
     async fn activity(&self) -> (Activity, String) {
         let observed =
             crate::services::discord::turn_presence::activity::tests::companion_settled_activity(
@@ -803,6 +818,14 @@ fn queued_turn_rows() -> String {
     .concat()
 }
 
+/// Exactly one Enter submitted the whole queued input, Korean line included.
+fn assert_submitted_once(trace: &str) {
+    let submits = install::pane_submits();
+    assert_eq!(submits.len(), 1, "{trace}");
+    assert_eq!(submits[0].matches(QUEUED_HEAD).count(), 1, "{trace}");
+    assert!(submits[0].contains(QUEUED_PROMPT), "{trace}");
+}
+
 /// Boot order of an idle legacy Codex turn-mode channel whose input was queued before boot: the
 /// restored watcher lets the boot kickoff submit the queued head once, relay one answer and drain.
 #[test]
@@ -817,7 +840,7 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
         let fixture = LegacyQueued::new(7_061_941).await;
         let channel = fixture.install.channel;
         let shared = fixture.install.shared.clone();
-        install::ready_codex_composer();
+        install::ready_codex_composer(&fixture.install.session);
         let discord = channel_discord(channel.get()).await;
         let submitted = Scope::new(&shared);
         restore_tmux_watchers(&fixture.install.http, &shared).await;
@@ -846,16 +869,9 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
                 discord.requests_for(channel.get()),
             )
         };
-        let entered = || {
-            let input = install::pane_input();
-            input.contains(QUEUED_HEAD) && input.contains("Enter")
-        };
-        wait_for("the queued head reaches the pane", entered, &trace).await;
-        let mut native = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&fixture.native)
-            .unwrap();
-        std::io::Write::write_all(&mut native, queued_turn_rows().as_bytes()).unwrap();
+        let submitted_once = || !install::pane_submits().is_empty();
+        wait_for("the queued head is submitted", submitted_once, &trace).await;
+        fixture.answer();
         let answered = |requests: Vec<String>| {
             requests
                 .iter()
@@ -877,12 +893,7 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
         );
         // A duplicate submission or relay would land within the same watcher poll window.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        assert_eq!(
-            install::pane_input().matches(QUEUED_HEAD).count(),
-            1,
-            "{}",
-            trace()
-        );
+        assert_submitted_once(&trace());
         assert_eq!(
             answered(discord.requests_for(channel.get())),
             1,
@@ -893,4 +904,228 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
         assert_eq!(settled, (Activity::Idle, "closed".to_owned()));
         let _ = submitted.cancel_and_join_all().await;
     });
+}
+
+/// Which production ingress sees the restart-gap message first.
+#[derive(Clone, Copy, Debug)]
+enum Ingress {
+    CatchUpFirst,
+    GatewayFirst,
+}
+
+/// A snowflake minted 30s ago, inside the catch-up age window.
+fn recent_message_id() -> u64 {
+    const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+    let at = chrono::Utc::now().timestamp_millis() - 30_000 - DISCORD_EPOCH_MS;
+    (u64::try_from(at).unwrap() << 22) | 1
+}
+
+/// Discord as the restarted bot sees it: the channel, the bot user, and a history whose only
+/// message is `message`, paged by its `after`/`before` cursor.
+async fn ingress_discord(
+    channel: u64,
+    message: u64,
+) -> crate::services::discord::health::test_support::MockDiscord {
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let mut history = discord_mock::history_message_json(message, QUEUED_PROMPT, false);
+    history["channel_id"] = json!(channel.to_string());
+    history["guild_id"] = json!("42000");
+    let page = move |query: &str| {
+        let cursor = |name: &str| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix(name))
+                .and_then(|id| id.parse::<u64>().ok())
+        };
+        let hidden = cursor("after=").is_some_and(|after| after >= message)
+            || cursor("before=").is_some_and(|before| before <= message);
+        if hidden {
+            json!([])
+        } else {
+            json!([history.clone()])
+        }
+    };
+    crate::services::discord::health::test_support::MockDiscord::start_with_query(
+        std::sync::Arc::new(move |method: &axum::http::Method, target: &str| {
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            if method != axum::http::Method::GET {
+                return None;
+            }
+            if path.ends_with("/users/@me") {
+                return Some((
+                    200,
+                    discord_mock::discord_user_json(discord_mock::BOT_ID, "queue-bot", true),
+                ));
+            }
+            if path.ends_with(&format!("/channels/{channel}/messages")) {
+                return Some((200, page(query)));
+            }
+            path.ends_with(&format!("/channels/{channel}")).then(|| {
+                (
+                    200,
+                    json!({"id": channel.to_string(), "type": 0,
+                    "name": format!("wfx-{channel}-cdx"), "guild_id": "42000", "position": 0,
+                    "permission_overwrites": [], "nsfw": false, "parent_id": null}),
+                )
+            })
+        }),
+    )
+    .await
+}
+
+/// Production gateway intake of `message` on its own task, as the shard delivers it.
+async fn gateway_intake(
+    ctx: &poise::serenity_prelude::Context,
+    data: &crate::services::discord::Data,
+    channel: u64,
+    message: u64,
+) {
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    let mut new_message = discord_mock::user_message(message, QUEUED_PROMPT);
+    new_message.channel_id = ChannelId::new(channel);
+    new_message.guild_id = Some(poise::serenity_prelude::GuildId::new(42_000));
+    let event = poise::serenity_prelude::FullEvent::Message { new_message };
+    let ctx = ctx.clone();
+    let data = crate::services::discord::Data {
+        shared: data.shared.clone(),
+        token: data.token.clone(),
+        provider: data.provider.clone(),
+        voice_config: data.voice_config.clone(),
+        voice_receiver: data.voice_receiver.clone(),
+    };
+    tokio::spawn(async move {
+        Box::pin(crate::services::discord::router::handle_event(
+            &ctx, &event, &data,
+        ))
+        .await
+    })
+    .await
+    .unwrap()
+    .unwrap();
+}
+
+/// One restart-gap message reaches both production ingresses in `order`, then the startup
+/// recovery runs in its real order; the message is submitted once, answered once and drained.
+fn restart_gap_message_is_submitted_once(order: Ingress, channel: u64) {
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    runtime().block_on(async {
+        let fixture = LegacyQueued::booted(channel).await;
+        let shared = fixture.install.shared.clone();
+        let session = fixture.install.session.clone();
+        install::ready_codex_composer(&session);
+        let message = recent_message_id();
+        let discord = ingress_discord(channel, message).await;
+        let (_, gateway_url, gateway) =
+            discord_mock::start(discord_mock::DiscordMockState::new()).await;
+        let ctx = discord_mock::serenity_context_over(discord.http.clone(), gateway_url).await;
+        let _routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "ADK_INTAKE_ROUTING_MODE",
+            std::ffi::OsStr::new("disabled"),
+        );
+        {
+            let mut settings = shared.settings.write().await;
+            settings.owner_user_id = Some(discord_mock::USER_ID);
+            settings.allow_all_users = true;
+        }
+        shared
+            .restart
+            .reconcile_done
+            .store(false, std::sync::atomic::Ordering::Release);
+        let voice_config = crate::voice::VoiceConfig::default();
+        let data = crate::services::discord::Data {
+            shared: shared.clone(),
+            token: "i7327-boot".to_owned(),
+            provider: ProviderKind::Codex,
+            voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+            voice_config,
+        };
+        let http = ctx.http.clone();
+        let catch_up = || {
+            crate::services::discord::catch_up::catch_up_missed_messages(
+                &http,
+                &shared,
+                &ProviderKind::Codex,
+            )
+        };
+        match order {
+            Ingress::CatchUpFirst => {
+                catch_up().await;
+                gateway_intake(&ctx, &data, channel, message).await;
+            }
+            Ingress::GatewayFirst => {
+                gateway_intake(&ctx, &data, channel, message).await;
+                catch_up().await;
+            }
+        }
+        // The rest of the startup recovery in `recovery_flush.rs` order; kickoff awaits its turn.
+        let boot = tokio::spawn({
+            let (ctx, shared) = (ctx.clone(), shared.clone());
+            async move {
+                let codex = ProviderKind::Codex;
+                crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests(
+                    &ctx.http, &shared, &codex,
+                )
+                .await;
+                restore_tmux_watchers(&ctx.http, &shared).await;
+                let kickoff =
+                    crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queues;
+                let first = kickoff(&ctx, &shared, "i7327-boot", &codex).await;
+                crate::services::discord::mark_reconcile_complete(&shared);
+                (first, kickoff(&ctx, &shared, "i7327-boot", &codex).await)
+            }
+        });
+        let trace = || {
+            format!(
+                "{order:?}: pane input {:?}; submits {:?}; discord {:?}",
+                install::pane_input(),
+                install::pane_submits(),
+                discord.requests_for(channel),
+            )
+        };
+        wait_for(
+            "the restart-gap message is submitted",
+            || !install::pane_submits().is_empty(),
+            &trace,
+        )
+        .await;
+        fixture.answer();
+        let answered = || {
+            discord
+                .requests_for(channel)
+                .iter()
+                .filter(|request| request.contains(QUEUED_ANSWER))
+                .count()
+        };
+        wait_for("the answer reaches Discord", || answered() > 0, &trace).await;
+        let kicks = tokio::time::timeout(std::time::Duration::from_secs(40), boot)
+            .await
+            .unwrap()
+            .unwrap();
+        // A duplicate submission or relay would land within the same watcher poll window.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_submitted_once(&format!("kicks {kicks:?}; {}", trace()));
+        assert_eq!(answered(), 1, "{}", trace());
+        assert_eq!(fixture.queue_depths().await, (0, 0), "{}", trace());
+        gateway.abort();
+    });
+}
+
+#[test]
+fn restart_gap_message_catch_up_first_is_submitted_once_and_drains() {
+    if install::isolated(
+        module_path!(),
+        "restart_gap_message_catch_up_first_is_submitted_once_and_drains",
+    ) {
+        restart_gap_message_is_submitted_once(Ingress::CatchUpFirst, 7_061_951);
+    }
+}
+
+#[test]
+fn restart_gap_message_gateway_first_is_submitted_once_and_drains() {
+    if install::isolated(
+        module_path!(),
+        "restart_gap_message_gateway_first_is_submitted_once_and_drains",
+    ) {
+        restart_gap_message_is_submitted_once(Ingress::GatewayFirst, 7_061_961);
+    }
 }

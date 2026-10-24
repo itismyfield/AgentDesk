@@ -18,8 +18,8 @@ use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::Notify;
 
 pub(in crate::services::discord) const CHANNEL_ID: u64 = 940_487_400_000_001;
-pub(super) const USER_ID: u64 = 940_487_400_000_002;
-pub(super) const BOT_ID: u64 = 940_487_400_000_003;
+pub(in crate::services::discord) const USER_ID: u64 = 940_487_400_000_002;
+pub(in crate::services::discord) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
 /// Minted message id to `(reply_to, latest content)`.
@@ -157,7 +157,7 @@ pub(in crate::services::discord::tui_prompt_relay) struct HistoryQuery {
     pub(in crate::services::discord::tui_prompt_relay) after: Option<u64>,
 }
 
-fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
+pub(in crate::services::discord) fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
     json!({
         "id": id.to_string(),
         "username": name,
@@ -244,7 +244,11 @@ pub(super) fn discord_message_json(id: u64, content: &str) -> Value {
 
 /// A history entry as `catch_up` phase 2 sees it: bot posts anchor the "last
 /// answered" boundary, user posts are the unanswered candidates ahead of it.
-pub(super) fn history_message_json(id: u64, content: &str, bot: bool) -> Value {
+pub(in crate::services::discord) fn history_message_json(
+    id: u64,
+    content: &str,
+    bot: bool,
+) -> Value {
     let mut message = discord_message_json(id, content);
     if !bot {
         message["author"] = discord_user_json(USER_ID, "queue-user", false);
@@ -647,6 +651,14 @@ pub(in crate::services::discord) async fn serenity_context(
             .ratelimiter_disabled(true)
             .build(),
     );
+    serenity_context_over(http, gateway_url).await
+}
+
+/// A real context whose REST calls go through `http` and whose shard dials `gateway_url`.
+pub(in crate::services::discord) async fn serenity_context_over(
+    http: Arc<serenity::Http>,
+    gateway_url: String,
+) -> serenity::Context {
     let cache = Arc::new(Cache::new());
     let mut ready: serenity::ReadyEvent = serde_json::from_value(json!({
         "v": 10,
