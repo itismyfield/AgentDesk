@@ -344,3 +344,178 @@ fn resume_companion_scoped_rebind_refuses_synthetic_turn_for_confirmed_cold_chan
         fixture.assert_automatic_held().await;
     });
 }
+
+/// Restart state of an idle fresh pane: no wrapper output, no inflight row, no
+/// `codex resume` argv, and only boot rehydration's binding and owner left.
+async fn rehydrated_idle(channel: u64) -> Fixture {
+    let fixture = Fixture::new(channel, true).await;
+    std::fs::remove_file(&fixture.install.output).unwrap();
+    fixture.cold_memory();
+    fixture.recover();
+    assert_eq!(
+        crate::services::discord::tui_prompt_relay::run_codex_rehydrate_pass_for_tests(
+            fixture.shared(),
+            &fixture.install.session,
+        ),
+        Some(channel)
+    );
+    fixture
+}
+
+async fn assert_restore_skips(fixture: &Fixture) {
+    let runtime = dedupe::peek_tmux_runtime_binding(&fixture.install.session);
+    let before = fixture.queue_identity().await;
+    let submitted = Scope::new(fixture.shared());
+    restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
+    assert_eq!(submitted.submissions(), 0);
+    assert_eq!(install::reader_start(fixture.channel().get()), None);
+    assert!(
+        fixture
+            .shared()
+            .tmux_watchers
+            .channel_binding(&fixture.channel())
+            .is_none()
+    );
+    assert_eq!(
+        dedupe::peek_tmux_runtime_binding(&fixture.install.session),
+        runtime
+    );
+    assert_eq!(fixture.queue_identity().await, before);
+    fixture
+        .assert_activity(Activity::Unknown, "watcher_unbound")
+        .await;
+    assert!(submitted.cancel_and_join_all().await.is_empty());
+}
+
+#[test]
+fn rehydrated_idle_codex_restore_binds_watcher_and_settles_idle() {
+    if !install::isolated(
+        module_path!(),
+        "rehydrated_idle_codex_restore_binds_watcher_and_settles_idle",
+    ) {
+        return;
+    }
+    runtime().block_on(async {
+        let fixture = rehydrated_idle(7_061_881).await;
+        let checkpoint = crate::services::codex_tui::session::checkpoint::at(
+            &fixture.native,
+            std::fs::metadata(&fixture.native).unwrap().len(),
+        )
+        .unwrap();
+        let submitted = Scope::new(fixture.shared());
+        restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
+        assert_attached(&fixture, &submitted, checkpoint).await;
+        fixture.assert_activity(Activity::Idle, "closed").await;
+        assert_eq!(submitted.cancel_and_join_all().await.len(), 1);
+    });
+}
+
+/// A legacy pane carries no ownership proof, so only its rollout marker ties the published
+/// binding to this pane.
+#[test]
+fn rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout() {
+    if !install::isolated(
+        module_path!(),
+        "rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout",
+    ) {
+        return;
+    }
+    runtime().block_on(async {
+        let (fixture, _discord) = install::fixture(ProviderKind::Codex, 7_061_891).await;
+        let rollout = |id: &str| {
+            let path = install::root()
+                .join("codex/sessions")
+                .join(format!("rollout-{id}.jsonl"));
+            let at = chrono::Utc::now().to_rfc3339();
+            let rows = [
+                json!({"type":"session_meta","timestamp":at,"payload":{"id":id,"timestamp":at,
+                    "cwd":install::root(),"source":"cli","originator":"codex-tui"}}),
+                json!({"type":"event_msg","timestamp":at,
+                    "payload":{"type":"task_started","turn_id":"legacy-idle"}}),
+                json!({"type":"event_msg","timestamp":at,
+                    "payload":{"type":"task_complete","turn_id":"legacy-idle"}}),
+            ];
+            std::fs::write(&path, rows.map(|row| format!("{row}\n")).concat()).unwrap();
+            path
+        };
+        let native = rollout(ID);
+        let other = rollout("019e660d-4859-7522-9cee-000000000001");
+        std::fs::remove_file(&fixture.output).unwrap();
+        dedupe::register_tmux_runtime_binding(
+            &fixture.session,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                output_path: native.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(ID.into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        fixture
+            .shared
+            .tmux_watchers
+            .restore_owner_channel_for_tmux_session(&fixture.session, fixture.channel);
+        let submitted = Scope::new(&fixture.shared);
+        let write_marker = |path: &std::path::Path| {
+            crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+                &fixture.session,
+                path,
+                Some(ID),
+            )
+            .unwrap()
+        };
+        for marker in [None, Some(&other)] {
+            if let Some(path) = marker {
+                write_marker(path);
+            }
+            restore_tmux_watchers(&fixture.http, &fixture.shared).await;
+            assert_eq!(submitted.submissions(), 0, "marker {marker:?} is no proof");
+            assert!(
+                fixture
+                    .shared
+                    .tmux_watchers
+                    .channel_binding(&fixture.channel)
+                    .is_none()
+            );
+        }
+        write_marker(&native);
+        restore_tmux_watchers(&fixture.http, &fixture.shared).await;
+        assert_eq!(submitted.submissions(), 1);
+        let bound = fixture
+            .shared
+            .tmux_watchers
+            .channel_binding(&fixture.channel)
+            .expect("the marked rollout restores the watcher");
+        assert_eq!(bound.tmux_session_name, fixture.session);
+        assert_eq!(
+            std::path::Path::new(bound.output_path.as_ref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            native.canonicalize().unwrap()
+        );
+        assert_eq!(submitted.cancel_and_join_all().await.len(), 1);
+    });
+}
+
+#[test]
+fn rehydrated_idle_codex_restore_refuses_other_owner_channel() {
+    if !install::isolated(
+        module_path!(),
+        "rehydrated_idle_codex_restore_refuses_other_owner_channel",
+    ) {
+        return;
+    }
+    runtime().block_on(async {
+        let fixture = rehydrated_idle(7_061_901).await;
+        fixture
+            .shared()
+            .tmux_watchers
+            .restore_owner_channel_for_tmux_session(
+                &fixture.install.session,
+                ChannelId::new(7_061_909),
+            );
+        assert_restore_skips(&fixture).await;
+    });
+}
