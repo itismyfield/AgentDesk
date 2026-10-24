@@ -1,5 +1,16 @@
 //! The observed native source's execution, carried unchanged while its claim waits.
 
+use crate::db::dispatched_session_canonical_identity::{
+    CanonicalSessionIdentity, SessionIdentityKind,
+};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+};
+use crate::services::discord::SharedData;
+use crate::services::session_host::herdr_endpoints;
+use poise::serenity_prelude::ChannelId;
+use std::sync::Arc;
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -300,3 +311,76 @@ pub(crate) fn capture_hook(
 #[cfg(all(test, unix))]
 #[path = "hosted_source/source_tests.rs"]
 pub(crate) mod tests;
+
+pub(crate) async fn adoption_channel(
+    shared: &Arc<SharedData>,
+    prompt: &super::ObservedTuiPrompt,
+    candidate: Option<ChannelId>,
+) -> Option<ChannelId> {
+    let Some(channel_id) = candidate else {
+        tracing::debug!(
+            provider = %prompt.provider,
+            tmux_session_name = %prompt.tmux_session_name,
+            "skipping SSH-direct TUI prompt notify; no Discord channel mapping"
+        );
+        return None;
+    };
+    if !current_execution_for_adoption(
+        shared,
+        &prompt.provider,
+        channel_id,
+        &prompt.tmux_session_name,
+    )
+    .await
+    {
+        return None;
+    }
+    Some(channel_id)
+}
+
+// New prompt adoption needs a live execution; admitted readers keep their tail.
+pub(crate) async fn current_execution_for_adoption(
+    shared: &Arc<SharedData>,
+    provider: &str,
+    channel: ChannelId,
+    logical: &str,
+) -> bool {
+    match herdr_evidence(channel.get(), logical, None) {
+        Ok(false) => return true,
+        Err(_) => return false,
+        Ok(true) => {}
+    }
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return false;
+    };
+    let channel_text = channel.to_string();
+    let key = HostedLookupKey::Canonical {
+        provider,
+        identity: CanonicalSessionIdentity {
+            kind: SessionIdentityKind::DiscordChannel,
+            discord_token_hash: &shared.token_hash,
+            channel_id: &channel_text,
+        },
+    };
+    let HostedLookup::Found(observed) = load_hosted_execution_pg(pool, key).await else {
+        return false;
+    };
+    let HostedRecord::Known(record) = &observed.record else {
+        return false;
+    };
+    if record.state != HostedState::Bound || record.owner.logical_key != logical {
+        return false;
+    }
+    execution_current(record).await
+}
+
+pub(crate) async fn execution_current(
+    record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+) -> bool {
+    let Some(target) = herdr_endpoints().target(record) else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || target.execution_alive())
+        .await
+        .unwrap_or(false)
+}

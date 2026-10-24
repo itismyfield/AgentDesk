@@ -36,6 +36,10 @@ impl Drop for LiveOn {
 struct FirstLaunch;
 
 impl HerdrLaunchHost for FirstLaunch {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        crate::config::session_hosts::EndpointMode::LegacyDedicated
+    }
+
     fn restore_resume(&self, _: &HerdrLaunchEndpoint) -> RestoreResume {
         RestoreResume::Off {
             witness: ServerWitness::for_test(1),

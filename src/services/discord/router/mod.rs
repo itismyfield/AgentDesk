@@ -1,5 +1,7 @@
 mod authorization;
 mod dispatch_trigger;
+#[cfg(unix)]
+pub(in crate::services::discord) mod herdr_consent;
 mod intake_dispatch;
 mod intake_gate;
 mod intake_queue_transaction;

@@ -11,36 +11,53 @@ pub(super) fn attach_runtime_profile(json: &mut serde_json::Value, config: &crat
 
 /// The boot `session_hosts` view and the admission switch. No E7 runs here; `last_e7` is `never`
 /// until a launch records one. Admission is read only once a channel is configured.
-fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
-    use crate::config::session_hosts::{BootSessionHosts, with_boot};
-    let view = |boot: &BootSessionHosts| {
-        let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
-        let admission = match channels.is_empty() {
-            true => "not_evaluated".to_string(),
-            false => match crate::services::herdr_admission::check() {
-                Ok(()) => "open".to_string(),
-                Err(cause) => format!("stopped({})", cause.as_str()),
-            },
+pub(crate) fn herdr_health(config: &crate::config::Config) -> serde_json::Value {
+    use crate::config::session_hosts::{BootSessionHosts, with_boot, with_boot_migration};
+    with_boot_migration(|metadata| {
+        let view = |boot: &BootSessionHosts| {
+            let channels: Vec<String> = boot.channels().keys().map(u64::to_string).collect();
+            let admission = match channels.is_empty() {
+                true => "not_evaluated".to_string(),
+                false => match crate::services::herdr_admission::check() {
+                    Ok(()) => "open".to_string(),
+                    Err(cause) => format!("stopped({})", cause.as_str()),
+                },
+            };
+            let mut endpoints = serde_json::Map::new();
+            for (key, endpoint) in &boot.config().herdr.endpoints {
+                let node = endpoint.execution_node.trim();
+                let local = boot.local_node() == Some(node);
+                let mut entry =
+                    serde_json::json!({"node": node, "local": local, "last_e7": "never"});
+                if endpoint.mode == crate::config::session_hosts::EndpointMode::UserDefault {
+                    entry["mode"] = "user_default".into();
+                    entry["socket"] = endpoint.socket_path.to_string_lossy().into_owned().into();
+                    entry["policy"] = crate::services::session_host::policy::diagnostics::snapshot(
+                        &endpoint.socket_path,
+                    );
+                }
+                endpoints.insert(key.clone(), entry);
+            }
+            let mut view = serde_json::json!({
+                "configured_channels": channels,
+                "admission": admission,
+                "endpoints": endpoints,
+                "restart_required": metadata.map_or(boot.config() != &config.session_hosts, |m| m.restart_required(config)),
+            });
+            if let Some(migration) = metadata.and_then(|m| m.migration()) {
+                view["migration_refused"] =
+                    (migration.reason == "session_hosts_migration_refused").into();
+                view["migration"] = serde_json::json!(migration);
+                view["candidate"] = serde_json::json!(metadata.map(|m| m.candidate()));
+                view["applied"] = serde_json::json!(boot.config());
+            }
+            attach_local_herdr(&mut view);
+            view
         };
-        let mut endpoints = serde_json::Map::new();
-        for (key, endpoint) in &boot.config().herdr.endpoints {
-            let node = endpoint.execution_node.trim();
-            let local = boot.local_node() == Some(node);
-            let entry = serde_json::json!({"node": node, "local": local, "last_e7": "never"});
-            endpoints.insert(key.clone(), entry);
-        }
-        let mut view = serde_json::json!({
-            "configured_channels": channels,
-            "admission": admission,
-            "endpoints": endpoints,
-            "restart_required": *boot.config() != config.session_hosts,
-        });
-        attach_local_herdr(&mut view);
-        view
-    };
-    with_boot(|boot| match boot {
-        Some(boot) => view(boot),
-        None => view(&BootSessionHosts::default()),
+        with_boot(|boot| match boot {
+            Some(boot) => view(boot),
+            None => view(&BootSessionHosts::default()),
+        })
     })
 }
 
@@ -106,6 +123,34 @@ mod tests {
         let mut health = json!({});
         super::attach_runtime_profile(&mut health, config);
         health["herdr"].take()
+    }
+
+    #[test]
+    fn health_exposes_user_default_proof_refusal_without_server_or_file_io() {
+        use crate::services::session_host::policy::{ProofCache, Unverified, diagnostics};
+        let _hosts = force_for_test(Some("worker"), &[(41, "worker")])
+            .with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+        diagnostics::record(
+            std::path::Path::new("/adk/herdr/agentdesk.sock"),
+            &ProofCache::default(),
+            &Err(Unverified::Identity),
+        );
+        let mut live = crate::config::Config::default();
+        live.session_hosts = with_boot(|b| b.unwrap().config().clone());
+        let view = herdr(&live);
+        let endpoint = &view["endpoints"]["worker-endpoint"];
+        assert_eq!(endpoint["mode"], "user_default");
+        assert_eq!(
+            endpoint["policy"]["next_restart_ready"], false,
+            "health_user_default_refusal_is_not_readiness_contract"
+        );
+        assert_eq!(endpoint["policy"]["startup_proof"], "unknown");
+        assert!(
+            endpoint["policy"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Identity")
+        );
     }
 
     // The health body shows the boot section as booted: nothing configured reads no admission,

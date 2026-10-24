@@ -185,6 +185,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
     "recovery_paths/controller_cutover.rs": {"deliver_turn_output*": 1},
     "recovery_paths/restart.rs": {"relay_recovered_body_to_placeholder": 1},
+    "router/herdr_consent/transport.rs": {"edit_channel_message*": 2, "send_channel_message*": 1},
     "router/intake_dispatch/notice.rs": {"send_channel_message*": 1},
     "router/intake_gate.rs": {".say": 3},
     "router/intake_gate/busy_inject.rs": {".say": 1},
@@ -306,6 +307,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "recovery_engine/two_message_panel.rs": ("1-D-panel", "KEEP_NONBODY"),
     "recovery_paths/controller_cutover.rs": ("W30a", "COV:W30"),
     "recovery_paths/restart.rs": ("W35", "CUT_D", "recovery_engine/terminal_text_idempotency.rs"),
+    "router/herdr_consent/transport.rs": ("HERDR-CONSENT", "KEEP_NONBODY"),
     "router/intake_dispatch/notice.rs": ("INTAKE", "KEEP_NONBODY"),
     "router/intake_gate.rs": ("INTAKE", "KEEP_NONBODY"),
     # Injection notices (unconfirmed paste, unknown handback); no body text.

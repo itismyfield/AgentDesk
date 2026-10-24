@@ -14,11 +14,14 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/ci/known-flaky-rerun.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("flaky_retry", SCRIPT)
 retry = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(retry)
+sys.path.pop(0)
 KNOWN = "suite::known_failure"
 UNKNOWN = "suite::new_regression"
+HEAD_SHA = "a" * 40
 
 
 def rust_log(*names):
@@ -36,13 +39,16 @@ class Retry(unittest.TestCase):
         self.path = Path(self.tmp.name)
         self.script = self.path / SCRIPT.name
         self.script.write_bytes(SCRIPT.read_bytes())
+        (self.path / "pr_head_current.py").write_bytes((SCRIPT.parent / "pr_head_current.py").read_bytes())
         self.write("known-flaky-tests.json", [{
             "test": KNOWN, "run": "https://github.com/itismyfield/AgentDesk/actions/runs/39703194502",
             "reason": "Reproduced scheduler-dependent fixture race.",
         }])
-        self.attempt = dict(name="CI PR", event="pull_request", status="completed", conclusion="failure", run_attempt=1)
+        self.attempt = dict(name="CI PR", event="pull_request", status="completed", conclusion="failure", run_attempt=1,
+                            head_sha=HEAD_SHA, pull_requests=[dict(number=42)])
         self.write("attempt.json", self.attempt)
         self.write("latest.json", self.attempt)
+        self.write("pull.json", dict(state="open", head=dict(sha=HEAD_SHA)))
         self.jobs(self.job(901))
         (self.path / "901.log").write_text(rust_log(KNOWN))
         stub = self.path / "gh"
@@ -54,7 +60,8 @@ with (p / 'calls.jsonl').open('a') as f: f.write(json.dumps(args) + '\\n')
 if args[:2] == ['run', 'rerun']: sys.exit(int(os.environ.get('FAIL_RERUN', '0')))
 if args[0] != 'api': sys.exit(99)
 url = args[1]
-if '/jobs?' in url: file = 'jobs.json'
+if '/pulls/' in url: file = 'pull.json'
+elif '/jobs?' in url: file = 'jobs.json'
 elif '/attempts/' in url: file = 'attempt.json'
 elif url.endswith('/logs'): file = url.split('/')[-2] + '.log'
 else: file = 'latest.json'
@@ -83,10 +90,10 @@ sys.stdout.write((p / file).read_text())
             "library_sweep to succeed; result was 'failure'\n"
             "2026-10-22T08:57:43.9544388Z ##[error]Process completed with exit code 1.\n")
 
-    def run_retry(self, attempt=1, **extra):
+    def run_retry(self, attempt=1, command=None, **extra):
         for name in ("calls.jsonl", "output", "summary"):
             (self.path / name).unlink(missing_ok=True)
-        result = subprocess.run([sys.executable, str(self.script)], text=True, capture_output=True, check=True, env={
+        result = subprocess.run(command or [sys.executable, str(self.script)], text=True, capture_output=True, check=True, env={
             **os.environ, "PATH": f"{self.path}{os.pathsep}{os.environ['PATH']}",
             "FIXTURES": str(self.path), "GITHUB_REPOSITORY": "itismyfield/AgentDesk",
             "RUN_ID": "123", "RUN_ATTEMPT": str(attempt), "GITHUB_OUTPUT": str(self.path / "output"),
@@ -94,6 +101,53 @@ sys.stdout.write((p / file).read_text())
         })
         calls = self.path / "calls.jsonl"
         return result.stdout, [json.loads(row) for row in calls.read_text().splitlines()] if calls.exists() else []
+
+    def infra_command(self):
+        scripts = self.path / "repo/scripts"
+        (scripts / "ci").mkdir(parents=True, exist_ok=True)
+        for name in ("ci/infra-failure-rerun.sh", "ci/real-failure-predicate.sh",
+                     "ci/pr_head_current.py", "check_pg_test_lane_membership.py"):
+            (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+        self.jobs({**self.job(901), "name": "PostgreSQL tests (shard 0)"})
+        (self.path / "901.log").write_text("Failed to resolve action download info. Error: Service Unavailable\n")
+        return ["bash", str(scripts / "ci/infra-failure-rerun.sh")]
+
+    def test_infra_advanced_head_makes_zero_rerun_requests(self):
+        command = self.infra_command()
+        self.write("pull.json", dict(state="open", head=dict(sha="b" * 40)))
+        out, calls = self.run_retry(command=command)
+        self.assertIn("no-op:stale-head", out)
+        self.assertFalse(any(c[:2] == ["run", "rerun"] for c in calls), calls)
+
+    def test_infra_current_head_retries_once_and_second_attempt_cannot_retry(self):
+        command = self.infra_command()
+        out, calls = self.run_retry(command=command)
+        self.assertIn("rerun-requested:infra", out)
+        self.assertEqual([c for c in calls if c[:2] == ["run", "rerun"]], [
+            ["run", "rerun", "123", "--repo", "itismyfield/AgentDesk", "--job", "901"],
+        ])
+        out, calls = self.run_retry(command=command, attempt=2)
+        self.assertIn("attempt-cap", out)
+        self.assertEqual(calls, [])
+
+    def test_flaky_exception_still_runs_workflow_infra_fallback_once(self):
+        command = self.infra_command()
+        self.script.write_text("raise RuntimeError('classifier fixture failure')\n")
+        flaky = subprocess.run([sys.executable, str(self.script)], capture_output=True)
+        self.assertNotEqual(flaky.returncode, 0)
+        workflow = yaml.safe_load((ROOT / ".github/workflows/ci-pr-infra-retry.yml").read_text())
+        step = next(s for s in workflow["jobs"]["retry"]["steps"]
+                    if s.get("run") == "./scripts/ci/infra-failure-rerun.sh")
+        condition = step["if"].removeprefix("${{").removesuffix("}}").strip()
+        # GitHub adds success() unless the condition explicitly checks status.
+        has_status = any(f"{name}(" in condition for name in ("cancelled", "always", "failure", "success"))
+        for cancelled, handled, expected in ((False, "", 1), (False, "true", 0), (True, "", 0)):
+            with self.subTest(cancelled=cancelled, handled=handled):
+                expression = condition.replace("!cancelled()", str(not cancelled)).replace("&&", "and")
+                expression = expression.replace("steps.flaky.outputs.handled", repr(handled))
+                should_run = has_status and eval(expression, {"__builtins__": {}})
+                calls = self.run_retry(command=command)[1] if should_run else []
+                self.assertEqual(sum(c[:2] == ["run", "rerun"] for c in calls), expected)
 
     def assert_no_retry(self, **extra):
         out, calls = self.run_retry(**extra)
@@ -136,6 +190,22 @@ sys.stdout.write((p / file).read_text())
     def test_stale_attempt_is_not_retried(self):
         self.write("latest.json", {**self.attempt, "run_attempt": 2})
         self.assertIn("stale-attempt", self.assert_no_retry())
+
+    def test_advanced_pr_head_is_not_retried(self):
+        self.write("pull.json", dict(state="open", head=dict(sha="b" * 40)))
+        self.assertIn("stale-head", self.assert_no_retry())
+
+    def test_missing_closed_or_unavailable_pr_head_cannot_retry(self):
+        for pull in ({}, dict(state="closed", head=dict(sha=HEAD_SHA)), dict(state="open", head=None)):
+            with self.subTest(pull=pull):
+                self.write("pull.json", pull)
+                self.assert_no_retry()
+        (self.path / "pull.json").unlink()
+        self.assert_no_retry()
+
+    def test_run_without_associated_pr_cannot_retry(self):
+        self.write("attempt.json", {**self.attempt, "pull_requests": []})
+        self.assert_no_retry()
 
     def test_truncated_log_is_not_retried(self):
         (self.path / "901.log").write_text(f"test {KNOWN} ... FAILED\n")
@@ -300,13 +370,14 @@ class Parser(unittest.TestCase):
                          "CI PR retry ${{ github.event.workflow_run.id }} "
                          "${{ github.event.workflow_run.head_sha }} attempt ${{ github.event.workflow_run.run_attempt }}")
         job = workflow["jobs"]["retry"]
+        self.assertEqual(workflow["permissions"]["pull-requests"], "read")
         self.assertIn("run_attempt == 1", job["if"])
         steps = job["steps"]
         self.assertEqual(steps[0]["with"]["ref"], "${{ github.event.repository.default_branch }}")
         flaky = next(step for step in steps if step.get("id") == "flaky")
         self.assertEqual(flaky["run"], "python3 scripts/ci/known-flaky-rerun.py")
         infra = next(step for step in steps if step.get("run") == "./scripts/ci/infra-failure-rerun.sh")
-        self.assertEqual(infra["if"], "steps.flaky.outputs.handled != 'true'")
+        self.assertEqual(infra["if"], "${{ !cancelled() && steps.flaky.outputs.handled != 'true' }}")
         self.assertIn("tests.test_known_flaky_retry", (ROOT / "scripts/ci-script-checks.sh").read_text())
 
 

@@ -11,6 +11,7 @@ on:
 permissions:
   actions: write
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-pr-infra-retry-${{ github.event.workflow_run.id }}
@@ -38,7 +39,7 @@ jobs:
         run: python3 scripts/ci/known-flaky-rerun.py
 
       - name: Classify failure and rerun PostgreSQL job
-        if: steps.flaky.outputs.handled != 'true'
+        if: ${{ !cancelled() && steps.flaky.outputs.handled != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}

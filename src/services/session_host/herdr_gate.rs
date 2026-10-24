@@ -1,6 +1,5 @@
-//! Herdr input gate for one recorded pane: admission (cancel keys exempt), E7 and the stored
-//! execution are checked on one server before every input, which goes only to that server.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Mutation gate for one recorded pane: admission, endpoint policy, exact execution.
+//! Every write stays pinned to the server that the policy permitted.
 
 #[cfg(unix)]
 #[path = "herdr_gate/root_replaced.rs"]
@@ -20,6 +19,8 @@ use super::herdr::contract::{
 use super::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
 use super::herdr::observe::{self, RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::{self, EvidenceGap, HostOs, PaneProcesses, ProbeRequest, ProcessOs};
+use super::herdr::policy::Unverified;
+use super::herdr::policy::permit::{ExistingMutationEvidence, ExistingMutationPermit};
 use super::model::{HostError, HostKey, HostKind, HostMutation, HostPresence, HostRefusal};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedExecution, HostedLocation, HostedState, ProcessStamp,
@@ -34,13 +35,14 @@ pub(crate) enum HerdrGateRefusal {
     /// The server resumes agents when it restores.
     RestoreOn,
     RestoreUnverified(RestoreUnverified),
+    PolicyUnverified(Unverified),
     /// The row holds no Pending or Bound execution with a location and launch evidence.
     NoStoredExecution,
     /// The logical key's `.host_kind` marker names another host.
     MarkerOtherHost,
     /// The marker is absent, unrecognized or unreadable.
     MarkerUnverified,
-    /// A pane reading came from another server than the one E7 named.
+    /// A pane reading came from another server than the permitted witness.
     ServerChanged,
     /// The pane did not read as one root shell running one provider.
     PaneUnverified,
@@ -183,6 +185,7 @@ struct PaneGate {
     logical_key: String,
     expected: ExpectedExecution,
     read_restore: fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume,
+    evidence: Result<ExistingMutationEvidence, Unverified>,
     os: Arc<dyn ProcessOs>,
     next_id: AtomicU64,
     /// The latest judgment, waiting for the send it admits.
@@ -234,6 +237,30 @@ impl HerdrTarget {
         transport: Arc<dyn HerdrTransport>,
         stored: &HostedExecution,
     ) -> Option<Self> {
+        Self::new_with_evidence(
+            endpoint,
+            transport,
+            stored,
+            ExistingMutationEvidence::default(),
+        )
+    }
+
+    /// Evidence is loaded by the async owner; judging never queries its store.
+    pub(crate) fn new_with_evidence(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+        evidence: ExistingMutationEvidence,
+    ) -> Option<Self> {
+        Self::new_with_evidence_result(endpoint, transport, stored, Ok(evidence))
+    }
+
+    pub(crate) fn new_with_evidence_result(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+        evidence: Result<ExistingMutationEvidence, Unverified>,
+    ) -> Option<Self> {
         let live = matches!(stored.state, HostedState::Pending | HostedState::Bound);
         let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
             return None;
@@ -253,6 +280,7 @@ impl HerdrTarget {
             logical_key: stored.owner.logical_key.clone(),
             expected: expected.clone(),
             read_restore: read_restore_off,
+            evidence,
             os: Arc::new(HostOs),
             next_id: AtomicU64::new(1),
             pinned: Mutex::new(None),
@@ -367,6 +395,10 @@ impl HerdrTarget {
             .is_some_and(|config| config.runtime.herdr_terminate_enabled == Some(true))
         {
             return CloseEffect::NotSent("herdr_terminate_disabled".into());
+        }
+        #[cfg(test)]
+        if self.0.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
+            super::herdr::policy::permit::EVENTS.with(|events| events.borrow_mut().push("Close"));
         }
         let outcome = self.0.transport.call_with_witness(&call, &judged.witness);
         let result = contract::close_result(&call, outcome);
@@ -672,8 +704,8 @@ impl PaneGate {
         next_call(&self.next_id, request)
     }
 
-    /// Admission first (no I/O), the `.host_kind` marker, then E7, then the pane on the server
-    /// E7 named.
+    /// Admission first (no I/O), the `.host_kind` marker, then endpoint policy and the exact
+    /// pane execution on its permitted server.
     fn judge(&self, mutation: Mutation) -> Result<Judged, HerdrGateRefusal> {
         if mutation == Mutation::Input {
             herdr_admission::check().map_err(HerdrGateRefusal::AdmissionStopped)?;
@@ -687,12 +719,31 @@ impl PaneGate {
         })
     }
 
-    /// The `.host_kind` marker, then E7: the server every later read and write must reach.
+    /// The host marker and endpoint policy select the server every later read and write must reach.
     fn restore_witness(&self, mutation: Mutation) -> Result<ServerWitness, HerdrGateRefusal> {
         match read_host_kind_marker(&self.logical_key) {
             HostKindMarker::Known(HostKind::Herdr) => {}
             HostKindMarker::Known(_) => return Err(HerdrGateRefusal::MarkerOtherHost),
             _ => return Err(HerdrGateRefusal::MarkerUnverified),
+        }
+        if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
+            let evidence = self
+                .evidence
+                .as_ref()
+                .map_err(|why| HerdrGateRefusal::PolicyUnverified(*why))?;
+            let witness = self
+                .transport
+                .server_witness()
+                .map_err(|_| HerdrGateRefusal::PolicyUnverified(Unverified::Peer))?;
+            let endpoint = crate::services::herdr_launch::HerdrLaunchEndpoint {
+                execution_node: self.endpoint.execution_node().into(),
+                config_key: self.endpoint.config_key().into(),
+                socket_addr: self.endpoint.socket_path().to_string_lossy().into_owned(),
+                herdr_session: self.endpoint.herdr_session().into(),
+            };
+            return ExistingMutationPermit::issue(&endpoint, &self.nonce, witness, evidence)
+                .map(|permit| permit.witness().clone())
+                .map_err(HerdrGateRefusal::PolicyUnverified);
         }
         let witness = match (self.read_restore)(self.transport.as_ref(), &self.endpoint) {
             RestoreResume::Off { witness } => witness,
@@ -725,6 +776,11 @@ impl PaneGate {
     /// The provenance rule on `witness`'s server must name the recorded root shell and provider
     /// processes.
     fn verify_pane(&self, witness: &ServerWitness) -> Result<(), HerdrGateRefusal> {
+        #[cfg(test)]
+        if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
+            super::herdr::policy::permit::EVENTS
+                .with(|events| events.borrow_mut().push("exact_identity_probe"));
+        }
         let now = self.provider_on(witness).map_err(|gap| {
             tracing::debug!(pane = %self.pane, ?gap, "herdr input gate: pane unverified");
             match gap {
@@ -753,6 +809,16 @@ impl PaneGate {
             return Ok(refused("herdr_judgment_request_mismatch"));
         }
         let call = self.call(request);
+        #[cfg(test)]
+        if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
+            super::herdr::policy::permit::EVENTS.with(|events| {
+                events.borrow_mut().push(match judged.mutation {
+                    Mutation::Input => "Input",
+                    Mutation::Cancel => "Cancel",
+                    Mutation::Terminate => "Close",
+                })
+            });
+        }
         let outcome = self.transport.call_with_witness(&call, &judged.witness);
         contract::mutation_result(&call, outcome, &self.pane)
     }

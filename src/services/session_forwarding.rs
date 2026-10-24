@@ -16,7 +16,7 @@ use cancel_lookup::legacy_session_key_matches_channel;
 #[cfg(unix)]
 pub(crate) use cancel_lookup::load_cancel_turn_hosted;
 pub(crate) use cancel_lookup::load_cancel_turn_session;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use trusted_target::loopback_seam;
 use trusted_target::{TrustedForwardTarget, TrustedTargetError, build_trusted_target};
 

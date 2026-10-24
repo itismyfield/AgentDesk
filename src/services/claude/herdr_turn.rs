@@ -21,7 +21,7 @@ use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
-use crate::services::claude_tui::host_input::{InputRun, run_herdr};
+use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
@@ -53,20 +53,51 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
 
+struct Boot<'a>(&'a SocketHerdrLaunchHost);
+impl HerdrLaunchHost for Boot<'_> {
+    fn mode(&self, endpoint: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        self.0.mode(endpoint)
+    }
+    fn create_permit<'a>(
+        &'a self,
+        endpoint: &'a HerdrLaunchEndpoint,
+    ) -> crate::services::herdr_launch::policy::PermitFuture<'a> {
+        self.0.create_permit(endpoint)
+    }
+    fn remember_grant(
+        &self,
+        grant: crate::services::session_host::policy::permit::LaunchAdmissionGrant,
+    ) {
+        self.0.remember_grant(grant);
+    }
+    fn grants(&self) -> &dyn crate::services::herdr_launch::policy::LaunchGrantStore {
+        self.0.grants()
+    }
+    fn current_witness(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+    ) -> Result<crate::services::session_host::ServerWitness, String> {
+        self.0.current_witness(endpoint)
+    }
+    fn create_user_default(
+        &self,
+        request: &crate::services::herdr_launch::policy::UserDefaultCreateRequest,
+    ) -> HerdrCreateOutcome {
+        self.0.create_user_default(request)
+    }
+    fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
+        self.0.restore_resume(endpoint)
+    }
+    fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        self.0.create(request)
+    }
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
+        self.0.launch_evidence(probe)
+    }
+}
+
 /// The boot registry's launch host, on its endpoints only.
 pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
-    struct Boot(&'static SocketHerdrLaunchHost);
-    impl HerdrLaunchHost for Boot {
-        fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
-            self.0.restore_resume(endpoint)
-        }
-        fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
-            self.0.create(request)
-        }
-        fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-            self.0.launch_evidence(probe)
-        }
-    }
     let host = herdr_endpoints().launch_host()?;
     Some(Arc::new(Boot(host)))
 }
@@ -618,8 +649,9 @@ fn prompt_and_read(
         start.offset = before;
         start
     };
-    let HerdrInputRun::Ran(run) =
-        observed_input(cancel, start, || run_herdr(&attached.target, &plan, cancel))?
+    let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
+        composer::run(&attached.target, &plan, cancel)
+    })?
     else {
         if !before_start::mutant("closed_release_callsite_removed_claude") {
             before_start::release_claude_hold(&turn.owner.logical_key, &held);
@@ -889,3 +921,8 @@ mod provider_terminal_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod coldstop_input_tests;
+
+#[cfg(all(test, unix))]
+mod boot_host_tests;
+
+mod composer;

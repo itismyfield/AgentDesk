@@ -307,7 +307,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
             .and_then(|s| s.channel_name.as_ref())
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
-
     #[cfg(unix)]
     if herdr_recovery::clear(
         shared,
@@ -320,18 +319,19 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     {
         return Ok(report);
     }
-
     // The clear commits here, in memory: no write below can restore what it discarded.
     let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }
     report.absorb(&cleared);
+    #[cfg(unix)]
+    report
+        .settle_consents(shared, provider, channel_id, &cleared)
+        .await;
     clear_teardown::write_boundary(shared, channel_id, &mut report).await;
-
     native::clear_session_memory(shared, channel_id).await;
     native::clear_process_reset_pending(shared, channel_id).await;
-
     if !stop_released_turn(provider, cleared.removed_token, clear_source).await {
         report.stop_unconfirmed = true;
     }

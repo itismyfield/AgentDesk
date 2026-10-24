@@ -29,6 +29,21 @@ pub(super) async fn restore_queued_and_inflight_work(
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
+    #[cfg(unix)]
+    {
+        let result = if held.is_empty() {
+            super::super::router::herdr_consent::startup::restore(http, shared, provider).await
+        } else {
+            let blocked = held.iter().map(|restore| restore.channel.get()).collect();
+            super::super::router::herdr_consent::startup::restore_excluding(
+                http, shared, provider, &blocked,
+            )
+            .await
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "herdr consent recovery kept inputs held; server boot continues");
+        }
+    }
     held::spawn_retries(http, shared, provider, held);
     stale_cards
 }
@@ -301,3 +316,7 @@ async fn restore_and_hold(
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_draft_tests.rs"]
 mod draft_tests;
+
+#[cfg(all(test, unix))]
+#[path = "queued_recovery_consent_tests.rs"]
+mod consent_tests;

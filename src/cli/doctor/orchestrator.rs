@@ -845,32 +845,8 @@ fn provider_check_id(provider: &ProviderKind) -> &'static str {
     provider.doctor_check_id()
 }
 
-fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
-    let mut checks = vec![
-        check_server_running(snapshot),
-        check_discord_bot(snapshot),
-        check_degraded_reasons(snapshot),
-        check_health_db_dashboard(snapshot),
-        check_dispatch_outbox(snapshot),
-        check_config_audit(snapshot),
-        api_exposure::check_server_api_exposure(cfg),
-        check_runtime_root(),
-        config_dir_checks::check_data_dir(cfg),
-        config_dir_checks::check_policies_dir(cfg),
-        config_dir_checks::check_routine_script_registration(cfg),
-        check_tmux(),
-        check_service_manager(),
-        check_postgres_connection(cfg),
-        check_db_integrity(cfg),
-        check_stale_zero_byte_db_files(cfg),
-        check_github_repo_registry(cfg),
-        check_disk_usage(),
-    ];
-    #[cfg(target_os = "macos")]
-    checks.push(check_file_descriptor_headroom());
-    checks.extend(check_mailbox_consistency(snapshot));
-    checks
-}
+mod herdr_policy;
+use herdr_policy::build_core_checks;
 
 fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let configured = configured_provider_names(cfg, snapshot);

@@ -166,6 +166,51 @@ async fn command(ctx: &serenity::Context, data: &Data, channel: ChannelId) {
 mod high_risk_recovery {
     use super::*;
 
+    async fn reader_probe_after_wait_starts(
+        mut calls: impl FnMut() -> Vec<String>,
+        mut finished: impl FnMut() -> bool,
+    ) -> Result<(), tokio::time::error::Elapsed> {
+        let probes = |calls: Vec<String>| {
+            calls
+                .iter()
+                .filter(|call| call.starts_with("list-panes"))
+                .count()
+        };
+        let baseline = probes(calls());
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if probes(calls()) > baseline {
+                    break;
+                }
+                assert!(
+                    !finished(),
+                    "native reader exited before terminal records: {:?}",
+                    calls()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn reader_liveness_wait_rejects_accumulated_probes() {
+        let mut observations = 0;
+        reader_probe_after_wait_starts(
+            || {
+                observations += 1;
+                vec!["list-panes".to_owned(); if observations < 3 { 3 } else { 4 }]
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            observations, 3,
+            "accumulated probes must not satisfy a new wait"
+        );
+    }
+
     #[test]
     fn preserve_stop_native_reader_and_finalizer_wait_for_same_turn_exit_pg() {
         let fx = Fixture::new();
@@ -212,28 +257,10 @@ mod high_risk_recovery {
                             })
                         })
                         .await;
-                        // A second EOF liveness probe proves the reader survived the first.
+                        // Require a new EOF probe after the stop command was observed.
                         let reader_live =
-                            tokio::time::timeout(std::time::Duration::from_secs(60), async {
-                                loop {
-                                    if fx
-                                        .calls()
-                                        .iter()
-                                        .filter(|call| call.starts_with("list-panes"))
-                                        .count()
-                                        >= 2
-                                    {
-                                        break;
-                                    }
-                                    assert!(
-                                        !reader.is_finished(),
-                                        "native reader exited before terminal records: {:?}",
-                                        fx.calls()
-                                    );
-                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                                }
-                            })
-                            .await;
+                            reader_probe_after_wait_starts(|| fx.calls(), || reader.is_finished())
+                                .await;
                         assert!(
                             reader_live.is_ok(),
                             "native reader must keep polling its live pane: {:?}",

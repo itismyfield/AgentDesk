@@ -16,6 +16,7 @@ pub(crate) enum StopCause {
     File,
     /// The stop file could not be checked (no runtime root, permission error).
     ProbeError,
+    ApprovalSnapshot,
 }
 
 impl StopCause {
@@ -24,6 +25,7 @@ impl StopCause {
             Self::Env => "env",
             Self::File => "file",
             Self::ProbeError => "probe_error",
+            Self::ApprovalSnapshot => "approval_snapshot_unavailable",
         }
     }
 }
@@ -77,6 +79,11 @@ static PROCESS: OnceLock<Admission> = OnceLock::new();
 
 /// The process switch, built on first use: only a configured channel's judgement reaches it.
 pub(crate) fn check() -> Result<(), StopCause> {
+    if crate::config::session_hosts::with_boot_migration(|metadata| {
+        metadata.is_some_and(|metadata| metadata.admission_stopped())
+    }) {
+        return Err(StopCause::ApprovalSnapshot);
+    }
     #[cfg(test)]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return forced.check();

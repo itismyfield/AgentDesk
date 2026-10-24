@@ -44,6 +44,9 @@ impl LaunchObservation {
             {
                 return None;
             }
+            if super::mutant("replacement_capture_off") {
+                return None;
+            }
             capture::capture(id.channel(), pane)
                 .map(|capture| OldEnd::Replacement(Box::new(capture)))
                 .inspect_err(|reason| {
