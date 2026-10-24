@@ -18,6 +18,7 @@ pub(super) fn prepare(
     prepared_session_files: &mut Option<
         crate::services::claude_tui::session::ClaudeTuiSessionFiles,
     >,
+    mark_host: impl FnOnce(),
 ) -> Result<(PreparedIncarnation, String), String> {
     let Prepare {
         tmux_session_name,
@@ -37,7 +38,7 @@ pub(super) fn prepare(
         Some(resolved_session_id),
         resume,
     )?;
-    crate::services::tmux_common::host_marker::record_tmux_host_marker(tmux_session_name);
+    mark_host();
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
     let (claude_bin, _resolution) = resolve_claude_binary()?;

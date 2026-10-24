@@ -84,6 +84,11 @@ pub(super) fn prepare_and_create_claude_tui_session(
                 channel_id,
             },
             &mut prepared_session_files,
+            || {
+                crate::services::tmux_common::host_marker::record_tmux_host_marker(
+                    tmux_session_name,
+                )
+            },
         )?;
         let result = if guarded {
             let (cols, rows) = CLAUDE_GUARDED_SIZE;
