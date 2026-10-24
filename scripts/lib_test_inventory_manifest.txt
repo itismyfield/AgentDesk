@@ -140,6 +140,8 @@ cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests:
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
+cli::doctor::orchestrator::health_snapshot::tests::legacy_doctor_fetches_no_checker_evidence_and_user_default_uses_only_doctor_response
+cli::doctor::orchestrator::herdr_policy::tests::doctor_keeps_checker_raw_only_in_evidence_and_health_excerpt_only_in_detail
 cli::doctor::orchestrator::herdr_policy::tests::doctor_separates_fresh_ready_from_startup_restart_and_does_not_fix_servers
 cli::doctor::orchestrator::observation_tests::doctor_session_lookup_timeout_never_posts_repair
 cli::doctor::orchestrator::observation_tests::doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair
@@ -157,6 +159,8 @@ cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_deta
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
 cli::doctor::orchestrator::profile_filter_tests::report_group_round_trip_keeps_portable_groups
+cli::doctor::startup::herdr_checker_tests::protected_doctor_response_includes_current_checker_evidence_when_no_artifact_exists
+cli::doctor::startup::herdr_checker_tests::startup_health_strips_raw_checker_evidence_without_changing_the_doctor_artifact
 cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
 cli::herdr::terminate_tests::act_cli_terminate_never_follows_redirect
@@ -662,12 +666,14 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
+db::intake_outbox::consent_handoff::tests::consent_before_record_rearm_is_once_across_concurrency_and_reclaim_pg
 db::intake_outbox::consent_handoff::tests::consent_before_record_rollback_consumes_exact_authority_and_preserves_bookkeeping_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_first_release_after_regeneration_uses_stable_consent_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_refuses_unmarked_post_accept_rows_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_requires_exact_payload_source_and_live_owner_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_stale_before_effects_proof_never_changes_row_pg
+db::intake_outbox::consent_handoff::tests::consent_rearm_custody_rejects_unknown_or_changed_marker_pg
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
@@ -1987,6 +1993,7 @@ services::claude::guarded_owner_tests::cg_b2c_fresh_finalize_preserves_the_typed
 services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cleanup_with_valid_clearance
 services::claude::herdr_turn::boot_host_tests::boot_launch_host_forwards_endpoint_mode
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
+services::claude::herdr_turn::composer::composer_tests::herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit
 services::claude::herdr_turn::composer::composer_tests::herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or_enter
 services::claude::herdr_turn::provider_terminal_tests::a_compact_summary_neither_starts_nor_splits_a_herdr_claude_turn
 services::claude::herdr_turn::provider_terminal_tests::a_herdr_claude_turn_ends_only_on_its_own_transcript_terminal
@@ -6969,6 +6976,7 @@ services::discord::router::dispatch_trigger::tests::dispatch_should_recover_sess
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_persistent_consent_error_rearms_once_then_preserves_spawned_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg
 services::discord::router::herdr_consent::admission::tests::already_held_requires_every_original_source_and_exact_generation
@@ -12788,6 +12796,7 @@ services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_
 services::session_host::herdr::policy::consent::workflow::tests::workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads
 services::session_host::herdr::policy::consent::workflow::tests::workflow_unsent_card_ttl_starts_at_reservation
 services::session_host::herdr::policy::diagnostics::tests::diagnosis_reports_refusal_and_bounded_checker_output_without_reading_files
+services::session_host::herdr::policy::diagnostics::tests::health_checker_bounds_unicode_and_preserves_error_after_the_retained_prefix
 services::session_host::herdr::policy::durable::tests::durable_directory_is_lazy_and_missing_is_distinct_from_failure
 services::session_host::herdr::policy::durable::tests::durable_existing_snapshot_permissions_and_nonregular_paths_are_not_missing
 services::session_host::herdr::policy::durable::tests::durable_failed_update_and_equal_cas_never_publish_another_generation

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "caaf7d57cc81999ba86c66fe0e152a14bbb22c20",
+  "measured_at_sha": "ee80b7baf6d7548700997e7a5c3e722b208dbc93",
   "records": [
     {
       "root": "migrations/postgres",
@@ -10521,6 +10521,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:37fc2171baefc4e586fae8b9f3c9248d34356615fb22a3b105444fd434098dc3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:4055a0013b6c53ab059fe9e05c572b8827a6e2e7d935365aec968427ab5554f2"
     },
     {
@@ -10539,16 +10548,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d190a670abdabf7512ef40fc8bc20afdf8c5a9efc5cff4b8818f6870c4700162"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox/consent_handoff.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e4dc41ae4b790333065f8a53aa7d1c9fd2f098b772cb79b8d63576fa19a41bd0"
+      "fingerprint": "sha256:c41b41cd6a590a623ab8c7aeaca8f93f608e014f7012ab465eaf58909fb86959"
     },
     {
       "root": "src",
@@ -10647,6 +10647,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:bb79854b93e7d51dc05a199599b7722bd1b6cf69c2d667685764286fa9455632"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:ea67ec44bc11a8d282861d77ef806dd63d723748f604093e8fd8c862376c7fda"
     },
     {
@@ -10666,6 +10675,15 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:fdc42d6a22ba10130eefadd318bd399755b0513d4b997081a25e8644afb46784"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:395b8bf70aea2b8403ce16d4f540d81fda97fac1ae79ac85f4385fed098c916f"
     },
     {
       "root": "src",
@@ -32770,6 +32788,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:6a17f0f772c63ec2cbb007900a955801f9ec1631b5597816f625a115d6fb25f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:82510a56b7562c84d61cef3673dd6adb0f93c38599258b7b1996b51508515caa"
     },
     {
       "root": "src",

@@ -40,6 +40,7 @@ src/
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
+│   │   │   ├── health_snapshot_tests.rs
 │   │   │   ├── herdr_policy.rs
 │   │   │   ├── herdr_policy_tests.rs
 │   │   │   ├── observation_checks.rs
@@ -48,6 +49,8 @@ src/
 │   │   │   ├── repair_response.rs
 │   │   │   ├── report_display.rs
 │   │   │   └── stale_mailbox_repair.rs
+│   │   ├── startup/
+│   │   │   └── herdr_checker_tests.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs

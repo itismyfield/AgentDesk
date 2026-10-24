@@ -1135,12 +1135,14 @@ db::imsg_reply::tests::pg_s0_c6_lifetime_one_shots_survive_not_sent
 db::imsg_reply::tests::pg_s1b_handback_requires_the_bound_episode_and_nonce
 db::imsg_reply::tests::progress_episode_binding_evidence
 db::imsg_reply::tests::s1b_multiple_origins_share_one_episode
+db::intake_outbox::consent_handoff::tests::consent_before_record_rearm_is_once_across_concurrency_and_reclaim_pg
 db::intake_outbox::consent_handoff::tests::consent_before_record_rollback_consumes_exact_authority_and_preserves_bookkeeping_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_first_release_after_regeneration_uses_stable_consent_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_refuses_unmarked_post_accept_rows_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_releases_original_row_once_across_nonce_and_reclaim_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_requires_exact_payload_source_and_live_owner_pg
 db::intake_outbox::consent_handoff::tests::consent_handoff_stale_before_effects_proof_never_changes_row_pg
+db::intake_outbox::consent_handoff::tests::consent_rearm_custody_rejects_unknown_or_changed_marker_pg
 db::intake_outbox::home_tests::a_delegated_row_is_claimed_only_by_its_holder_at_its_home_epoch_pg
 db::intake_outbox::migration_pg_tests::agents_preferred_intake_node_labels_defaults_to_empty_array
 db::intake_outbox::migration_pg_tests::e1_channel_open_row_probe_sees_only_open_statuses_of_that_channel
@@ -2179,6 +2181,7 @@ services::discord::replay_policy::policy_tests::stale_decision_failures_hold_wit
 services::discord::router::herdr_consent::admission::tests::actual_fifo_receipt_release_readmits_once_then_uses_one_start_and_followup_pg
 services::discord::router::herdr_consent::admission::tests::actual_live_checkpoint_waits_for_second_check_failed_custody_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg
+services::discord::router::herdr_consent::admission::tests::actual_worker_persistent_consent_error_rearms_once_then_preserves_spawned_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_policy_flip_after_preaccept_keeps_exact_before_effects_row_pg
 services::discord::router::herdr_consent::admission::tests::actual_worker_record_error_keeps_spawned_and_emits_original_row_notice_pg
 services::discord::router::herdr_consent::custody::tests::live_outbox_custody_sink_passes_shared_durable_conformance_pg
