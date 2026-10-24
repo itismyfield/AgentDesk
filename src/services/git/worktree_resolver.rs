@@ -257,6 +257,29 @@ pub fn ensure_worktree_for_issue(
 // ── Automation-candidate worktree helpers ────────────────────────────────────
 
 /// Canonical branch name for an automation candidate iteration.
+/// [`find_worktree_for_issue`] on the blocking pool for async callers: it shells out to
+/// `git worktree list` (#7348 P2). A failed task reads as no worktree.
+pub async fn find_worktree_for_issue_async(
+    repo_dir: String,
+    issue_number: i64,
+) -> Option<WorktreeInfo> {
+    tokio::task::spawn_blocking(move || find_worktree_for_issue(&repo_dir, issue_number))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`ensure_worktree_for_issue`] on the blocking pool for async callers: `git worktree add`
+/// can block until the git runner times out (#7348 P2).
+pub async fn ensure_worktree_for_issue_async(
+    repo_dir: String,
+    issue_number: i64,
+) -> Result<EnsuredWorktreeInfo, String> {
+    tokio::task::spawn_blocking(move || ensure_worktree_for_issue(&repo_dir, issue_number))
+        .await
+        .map_err(|error| format!("worktree task failed: {error}"))?
+}
+
 pub fn automation_branch_name(card_id: &str, iteration: i32) -> String {
     format!("automation/{card_id}/iter-{iteration}")
 }

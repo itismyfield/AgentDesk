@@ -606,9 +606,18 @@ pub(super) async fn bootstrap_thread_session(
     // Always create a worktree for thread sessions to isolate concurrent work.
     let effective_path = {
         let provider_str = shared.settings.read().await.provider.as_str().to_string();
-        match create_git_worktree(parent_path, &ch, &provider_str) {
-            Ok((wt_path, branch)) => {
-                let base_commit = crate::services::platform::git_head_commit(parent_path);
+        // `git worktree add` can block up to the git runner timeout; a burst of thread
+        // bootstraps must not stall the runtime workers (#7348 P2).
+        let (repo, channel) = (parent_path.to_string(), ch.clone());
+        let created = tokio::task::spawn_blocking(move || {
+            let (wt_path, branch) = create_git_worktree(&repo, &channel, &provider_str)?;
+            let base_commit = crate::services::platform::git_head_commit(&repo);
+            Ok::<_, String>((wt_path, branch, base_commit))
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("worktree task failed: {error}")));
+        match created {
+            Ok((wt_path, branch, base_commit)) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] 🌿 Thread worktree created: {} (branch: {})",

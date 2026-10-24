@@ -268,7 +268,11 @@ async fn rebind_inflight_for_channel_inner(
     };
 
     // Only a pane tmux confirms alive may be rebound; a failed probe or another host is refused.
-    let observed = observe_liveness_with_retry(&tmux_session_name);
+    // The retry sleeps up to 2s around tmux calls; keep it off the runtime workers (#7348 P2).
+    let probe_name = tmux_session_name.clone();
+    let observed = tokio::task::spawn_blocking(move || observe_liveness_with_retry(&probe_name))
+        .await
+        .unwrap_or(crate::services::provider::session_probe::SessionLiveness::ProbeFailed);
     if observed != crate::services::provider::session_probe::SessionLiveness::Alive {
         return Err(RebindError::TmuxNotAlive {
             tmux_session: tmux_session_name,
