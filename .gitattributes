@@ -4,7 +4,8 @@
 scripts/** text eol=lf
 .githooks/** text eol=lf
 .github/workflows/*.yml text eol=lf
-# SQL inventory hashes migration bytes; keep checkouts identical across platforms.
+# Migration checksums (sqlx, check_postgres_migration_checksums.py) hash migration bytes;
+# keep checkouts identical across platforms.
 migrations/postgres/** text eol=lf
 
 # Custom merge driver for tracked generated inventory docs (#4724 slice B).
@@ -31,6 +32,3 @@ docs/generated/worker-inventory.md merge=regen-inventory
 # and crash on them. `-text` additionally keeps EOL conversion away from files
 # whose exact bytes are the assertion.
 tests/fixtures/relay_obligation/*.jsonl -diff -text
-
-# Preserve the original-byte coordinate canary's BOM and CRLF.
-tools/modmap-driver/canary/src/items_crlf.rs -text
