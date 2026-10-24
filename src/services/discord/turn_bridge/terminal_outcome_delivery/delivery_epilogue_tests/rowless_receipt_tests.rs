@@ -41,18 +41,16 @@ fn receipt_parts(
         Some(0),
     )
     .unwrap();
-    tui_prompt_dedupe::register_tmux_runtime_binding(
-        tmux,
-        TuiRuntimeBinding {
-            runtime_kind,
-            output_path: rollout.display().to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: Some("receipt-session".into()),
-            last_offset: 64,
-            relay_last_offset: None,
-        },
-    );
+    let binding = TuiRuntimeBinding {
+        runtime_kind,
+        output_path: rollout.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: Some("receipt-session".into()),
+        last_offset: 64,
+        relay_last_offset: None,
+    };
+    tui_prompt_dedupe::register_tmux_runtime_binding(tmux, binding.clone());
     let generation = crate::services::tmux_common::session_temp_path(tmux, "generation");
     std::fs::write(&generation, "g").unwrap();
     filetime::set_file_mtime(
@@ -71,16 +69,24 @@ fn receipt_parts(
     if provider == ProviderKind::Claude {
         prove_claude_input(driver._temp.path(), local);
     }
+    let handoff_end = std::fs::metadata(&rollout).unwrap().len();
+    local.last_offset = handoff_end;
+    if provider == ProviderKind::Claude {
+        // The rowless source contract observes the later relay rehydration; input proof was sealed first.
+        let mut rehydrated = binding;
+        rehydrated.last_offset = handoff_end;
+        tui_prompt_dedupe::register_tmux_runtime_binding(tmux, rehydrated);
+    }
     let source = dr::ExactJsonlSourceIdentity {
         provider: provider.as_str().into(),
         tmux_session_name: tmux.into(),
         turn_nonce: local.turn_nonce.clone().unwrap(),
-        range: (0, 64),
+        range: (0, handoff_end),
         generation_mtime_ns: dr::current_generation_mtime_ns(tmux),
         offset_authority_channel_id: DRIVER_CHANNEL_ID,
         delivery_channel_id: DRIVER_CHANNEL_ID,
     };
-    ctx.tmux_last_offset = Some(64);
+    ctx.tmux_last_offset = Some(handoff_end);
     if provider == ProviderKind::Codex {
         ctx.codex_tui_terminal_range = Some(CodexRange::new(
             InflightTurnIdentity::from_state(local),

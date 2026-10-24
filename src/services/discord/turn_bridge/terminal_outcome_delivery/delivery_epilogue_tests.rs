@@ -122,7 +122,16 @@ fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
             std::path::Path::new(row.output_path.as_ref().unwrap()),
         );
     }
+    assert!(
+        tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
+            .is_some_and(|binding| binding.session_id.is_none()),
+        "actual handoff clears the cache SID before input proof"
+    );
     capability.observer().receipt_finished(&session);
+    assert!(
+        capability.exact_user_receipt(),
+        "input proof is confirmed before any SID rehydration"
+    );
 }
 
 #[derive(Clone)]

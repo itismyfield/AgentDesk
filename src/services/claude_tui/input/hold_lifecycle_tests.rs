@@ -9,43 +9,69 @@ fn empty() -> String {
 #[test]
 fn a2_legacy_confirmation_rechecks_person_ownership_before_enter() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let session = format!("a2-confirm-{}", uuid::Uuid::new_v4());
-    let prompt = "[User: test]\n원문 보존";
     let view = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view;
-    let ours = view(prompt, false);
-    let person = view("사람이 바꾼 초안", false);
-    assert_eq!(
-        crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &ours),
-        crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
-    );
-    let spy = SpyGuard::install(SpyState {
-        captures: std::iter::repeat_n(Some(empty()), 30).collect(),
-        captures_after_send: Some([Some(ours), Some(person)].into()),
-        ..SpyState::default()
-    });
-    let result = guarded_outcome::capture_preparation(|| {
-        send_prompt_with_readiness(
-            &session,
-            prompt,
-            PromptReadinessKind::FreshTurn,
-            Some(&CancelToken::new()),
-        )
-    });
-    let calls = spy.calls();
-    assert_eq!(
-        calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
-        1,
-        "an ambiguous submit gets no second Enter: {calls:?}"
-    );
-    assert!(
-        matches!(result, Err(SubmissionError::Held(ref hold)) if !hold.may_requeue()),
-        "ownership loss after payload must be uncertain: {result:?}"
-    );
-    assert!(
-        !calls
-            .iter()
-            .any(|c| c.contains("C-u") || c.contains("Escape") || c.contains("BSpace"))
-    );
+    for (prompt, changed) in [
+        ("[User: test]\n원문 보존", true),
+        ("첫째 줄\n원문 보존", false),
+    ] {
+        let session = format!("a2-confirm-{}", uuid::Uuid::new_v4());
+        let initial = view(prompt, false);
+        let person = view(
+            if changed {
+                "사람이 바꾼 초안"
+            } else {
+                prompt
+            },
+            false,
+        );
+        assert_eq!(
+            crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &person),
+            crate::services::claude_tui::busy_inject::ComposerOwner::Person
+        );
+        if changed {
+            assert_eq!(
+                crate::services::claude_tui::busy_inject::composer_owner_in_session(
+                    &session, &initial
+                ),
+                crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
+            );
+        } else {
+            assert!(
+                crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
+                    &person, prompt
+                ),
+                "the ownership-only control keeps exactly the submitted text"
+            );
+        }
+        let spy = SpyGuard::install(SpyState {
+            captures: std::iter::repeat_n(Some(empty()), 30).collect(),
+            captures_after_send: Some([Some(initial), Some(person), Some(empty())].into()),
+            ..SpyState::default()
+        });
+        let result = guarded_outcome::capture_preparation(|| {
+            send_prompt_with_readiness(
+                &session,
+                prompt,
+                PromptReadinessKind::FreshTurn,
+                Some(&CancelToken::new()),
+            )
+        });
+        let calls = spy.calls();
+        assert_eq!(
+            calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
+            1,
+            "same text is not retry permission without ownership: changed={changed} {calls:?}"
+        );
+        assert!(
+            matches!(result, Err(SubmissionError::Held(ref hold)) if !hold.may_requeue()),
+            "ownership loss after payload must be uncertain: {result:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("C-u") || c.contains("Escape") || c.contains("BSpace"))
+        );
+    }
 }
 
 #[test]
