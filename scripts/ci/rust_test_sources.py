@@ -114,16 +114,21 @@ def attribute_span(tokens, index):
     return bracket, end
 
 
+def _paren(token):
+    """+1/-1 for a real parenthesis token; a string such as "(" is not one."""
+    return token.kind == "punct" and (token.value == "(") - (token.value == ")")
+
+
 def cfg_attr_payload(tokens):
     """Attribute names after the predicate of `(PRED, attr, ...)`, nested cfg_attr included; commas are not tokens."""
     values = [t.value for t in tokens]
-    if len(values) < 3 or values[0] != "(":
+    if len(values) < 3 or _paren(tokens[0]) != 1:
         return {"cfg"}
     i = 2
-    if values[2:3] == ["("]:
+    if _paren(tokens[2]) == 1:
         depth, i = 1, 3
         while i < len(values) and depth:
-            depth += (values[i] == "(") - (values[i] == ")")
+            depth += _paren(tokens[i])
             i += 1
     elif values[2:3] == ["="]:
         i = 4
@@ -133,7 +138,7 @@ def cfg_attr_payload(tokens):
             names.add(values[n])
             if values[n] == "cfg_attr":
                 nested = n + 1
-        depth += (values[n] == "(") - (values[n] == ")")
+        depth += _paren(tokens[n])
         if nested is not None and depth == 0 and n >= nested:
             names |= cfg_attr_payload(tokens[nested:n + 1])
             nested = None
@@ -246,8 +251,8 @@ def walk(root, repo_root, inventory=None):
                 elif not target.is_file():
                     inv.errors.append(f"{site} include! names missing file {target}")
                 else:
-                    # Included text is spliced into this module, so it keeps this module's names and directory.
-                    queue.append((target, names, directory, redirect_dir, cfgs + pending_cfgs))
+                    # Included text keeps this module's names, but rustc resolves its mod and #[path] beside the included file.
+                    queue.append((target, names, target.parent, target.parent, cfgs + pending_cfgs))
             if token.kind == "punct" and token.value == "{":
                 depth += 1
                 if pending_cfgs:

@@ -572,12 +572,14 @@ class RustSources(unittest.TestCase):
         self.tree({"src/lib.rs": "mod used;\n", "src/used.rs": "#[test]\nfn ok() {}\n",
                    "src/forgotten.rs": "#[test]\nfn never_compiled() {}\n",
                    "src/forgotten_attr.rs": "#[cfg_attr(test, test)]\nfn lost() {}\n",
+                   "src/forgotten_paren.rs": "#[cfg_attr(test, doc = \"(\", test)]\nfn lost() {}\n",
                    "src/plain.rs": "fn helper() {}\n",
                    "src/main.rs": "mod bin_only;\n", "src/bin_only.rs": "#[test]\nfn bin_test() {}\n"})
         rc, err = self.cli("check")
         self.assertEqual(rc, 1)
         self.assertIn("orphan test file: src/forgotten.rs", err)
         self.assertIn("orphan test file: src/forgotten_attr.rs", err)
+        self.assertIn("orphan test file: src/forgotten_paren.rs", err)
         self.assertNotIn("plain.rs", err)
         self.assertNotIn("bin_only.rs", err)
 
@@ -593,7 +595,8 @@ class RustSources(unittest.TestCase):
                                  "#[cfg_attr(unix, path = \"u.rs\")]\nmod u;\n"
                                  "#[cfg_attr(not(test), allow(dead_code))]\nfn quiet() {}\n"
                                  "#[cfg_attr(test, derive(Default))]\nstruct Probe;\n"
-                                 "#[cfg_attr(test, cfg_attr(unix, test))]\nfn nested() {}\n",
+                                 "#[cfg_attr(test, cfg_attr(unix, test))]\nfn nested() {}\n"
+                                 "#[cfg_attr(test, doc = \"(\", test)]\nfn paren() {}\n",
                    "src/u.rs": ""})
         rc, err = self.cli("check")
         self.assertEqual(rc, 1)
@@ -602,6 +605,7 @@ class RustSources(unittest.TestCase):
         self.assertNotIn("src/lib.rs:6", err)
         self.assertNotIn("src/lib.rs:8", err)
         self.assertIn("src/lib.rs:10 cfg_attr can change compilation", err)
+        self.assertIn("src/lib.rs:12 cfg_attr can change compilation", err)
 
     def test_unreadable_source_under_main_or_bin_fails_the_check(self):
         self.tree({"src/lib.rs": "#[test]\nfn ok() {}\n",
@@ -619,6 +623,15 @@ class RustSources(unittest.TestCase):
                    "src/other/leaf.rs": "#[test]\nfn right() {}\n", "src/leaf.rs": "#[test]\nfn decoy() {}\n"})
         inv = rts.lib_inventory(self.root)
         self.assertEqual(sorted(inv.tests), ["other::leaf::right", "outer::inner::right"])
+        self.assertEqual((inv.errors, inv.unreadable), ([], []))
+
+    def test_mod_inside_included_text_resolves_beside_the_included_file(self):
+        self.tree({"src/lib.rs": "include!(\"generated/items.rs\");\n",
+                   "src/generated/items.rs": "#[path = \"leaf.rs\"]\nmod leaf;\nmod plain;\n",
+                   "src/generated/leaf.rs": "#[test]\nfn right() {}\n", "src/leaf.rs": "#[test]\nfn decoy() {}\n",
+                   "src/generated/plain.rs": "#[test]\nfn right() {}\n", "src/plain.rs": "#[test]\nfn decoy() {}\n"})
+        inv = rts.lib_inventory(self.root)
+        self.assertEqual(sorted(inv.tests), ["leaf::right", "plain::right"])
         self.assertEqual((inv.errors, inv.unreadable), ([], []))
 
     def test_cfg_chain_decides_the_platform(self):
@@ -786,6 +799,16 @@ mod tests {
         self.assertEqual(rc, 1)
         self.assertIn("test-not-in-inventory: attrs::tests::pg", err)
         self.assertNotIn("bin_only", err)
+
+    def test_unlinked_file_does_not_lend_a_helper_to_the_call_graph(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\n#[path = \"other.rs\"]\nmod unused;\n",
+                   "src/other.rs": "#[cfg(test)]\nmod tests {\n    fn real_db() { TestPostgresDb::new(); }\n"
+                                   "    fn helper() { real_db(); }\n    #[test]\n    fn t() { helper(); }\n}\n",
+                   "src/unused.rs": "#[cfg(test)]\n#[path = \"zombie.rs\"]\nmod tests;\n",
+                   "src/zombie.rs": "fn helper() {}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(pg.get("unused::tests::t"), "src/other.rs")
 
     def test_child_of_a_path_loaded_file_keeps_its_real_module_name(self):
         self.tree({"src/lib.rs": "mod db;\nmod support;\n#[path = \"w/outer.rs\"]\nmod outer;\n",

@@ -127,137 +127,6 @@ def strip_rust(source: str) -> str:
     return "".join(out)
 
 
-def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
-    """Return a source file's conventional physical module path."""
-    rel = path.relative_to(src_root)
-    if rel.name == "lib.rs":
-        return ()
-    if rel.name == "mod.rs":
-        return rel.parent.parts
-    return (*rel.parent.parts, rel.stem)
-
-
-def _module_records(
-    source: str, base: tuple[str, ...]
-) -> tuple[
-    set[str],
-    dict[str, set[str]],
-    list[tuple[tuple[str, ...], str, tuple[str, ...]]],
-]:
-    """Return test modules/functions and path aliases from one source file.
-
-    Alias records carry the declaration's inline-parent stack separately. Rust
-    resolves a ``#[path]`` inside ``mod outer { ... }`` relative to a physical
-    ``outer/`` directory even though the source file itself is the parent file.
-    """
-    clean = strip_rust(source)
-    attributes: dict[int, str] = {}
-    for match in _ATTR_MOD.finditer(clean):
-        attributes[match.start("name")] = source[
-            match.start("attrs") : match.end("attrs")
-        ]
-
-    declarations: list[tuple[int, int, str, str, str]] = []
-    for match in _MOD.finditer(clean):
-        attrs = attributes.get(match.start("name"), "")
-        declarations.append(
-            (match.start(), match.end(), match.group("name"), match.group("term"), attrs)
-        )
-
-    test_functions = {
-        match.start("name"): match.group("name")
-        for match in _ATTR_FN.finditer(clean)
-        if _TEST_ATTR.search(source[match.start("attrs") : match.end("attrs")])
-    }
-    events = sorted(
-        [(start, "mod", (end, name, term, attrs)) for start, end, name, term, attrs in declarations]
-        + [(start, "test_fn", name) for start, name in test_functions.items()],
-        key=lambda event: event[0],
-    )
-
-    modules: set[str] = set()
-    tests_by_module: dict[str, set[str]] = {}
-    aliases: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = []
-    inline_stack: list[tuple[int, str, bool]] = []
-    depth = 0
-    cursor = 0
-    for offset, kind, payload in events:
-        between = clean[cursor:offset]
-        for brace in re.finditer(r"[{}]", between):
-            if brace.group() == "{":
-                depth += 1
-            else:
-                depth -= 1
-                while inline_stack and inline_stack[-1][0] > depth:
-                    inline_stack.pop()
-
-        if kind == "test_fn":
-            test_module = next(
-                (
-                    index
-                    for index in range(len(inline_stack) - 1, -1, -1)
-                    if inline_stack[index][2]
-                ),
-                None,
-            )
-            if test_module is not None:
-                module = "::".join(
-                    (*base, *(item[1] for item in inline_stack[: test_module + 1]))
-                )
-                full_name = "::".join(
-                    (*base, *(item[1] for item in inline_stack), str(payload))
-                )
-                tests_by_module.setdefault(module, set()).add(full_name)
-            cursor = offset
-            continue
-
-        end, name, term, attrs = payload
-        parent_names = tuple(item[1] for item in inline_stack)
-        logical = (*base, *parent_names, name)
-        is_test_module = bool(_CFG_TEST.search(attrs))
-        if is_test_module:
-            modules.add("::".join(logical))
-            tests_by_module.setdefault("::".join(logical), set())
-        path_attr = _PATH_ATTR.search(attrs)
-        if path_attr and term == ";":
-            aliases.append((logical, path_attr.group("path"), parent_names))
-
-        if term == "{":
-            depth += 1
-            inline_stack.append((depth, name, is_test_module))
-        cursor = end
-    return modules, tests_by_module, aliases
-
-
-def _normalize_alias_path(
-    path: tuple[str, ...], aliases: dict[tuple[str, ...], tuple[str, ...]]
-) -> tuple[str, ...]:
-    """Replace the longest physical prefix until the logical path is stable."""
-    seen: set[tuple[str, ...]] = set()
-    current = path
-    while current not in seen:
-        seen.add(current)
-        replacement = next(
-            (
-                (physical, logical)
-                for physical, logical in sorted(
-                    aliases.items(), key=lambda item: len(item[0]), reverse=True
-                )
-                if current[: len(physical)] == physical
-                and (*logical, *current[len(physical) :]) != current
-            ),
-            None,
-        )
-        if replacement is None:
-            break
-        physical, logical = replacement
-        updated = (*logical, *current[len(physical) :])
-        if updated == current:
-            break
-        current = updated
-    return current
-
-
 SEEDS = (
     "TestPostgresDb", "DispatchPostgresTestDb", "PgRecoveryTestDatabase",
     "PgPool", "connect_and_migrate", "create_test_database",
@@ -558,33 +427,6 @@ def _external_test_files(repo_root: Path, counter: list[int] | None = None, find
     return targets
 
 
-def _aliases(repo_root: Path) -> dict[tuple[str, ...], tuple[str, ...]]:
-    """Build aliases, delegating every normalization step to the coverage gate."""
-    src_root = (repo_root / "src").resolve()
-    raw: dict[tuple[str, ...], tuple[str, ...]] = {}
-    for path in sorted(src_root.rglob("*.rs")):
-        source = path.read_text("utf-8")
-        _, _, records = _module_records(
-            source, file_module_path(src_root, path)
-        )
-        for logical, relative, parents in records:
-            target = path.parent.joinpath(*parents, relative).resolve()
-            physical = file_module_path(src_root, target)
-            if physical in raw and raw[physical] != logical:
-                raise ValueError(f"conflicting #[path] aliases for {target}")
-            raw[physical] = logical
-    aliases = dict(raw)
-    for _ in range(len(aliases) + 1):
-        updated = {
-            physical: _normalize_alias_path(logical, aliases)
-            for physical, logical in aliases.items()
-        }
-        if updated == aliases:
-            break
-        aliases = updated
-    return aliases
-
-
 def discover_pg_inventory(
     repo_root: Path, findings: list[Finding] | None = None
 ) -> PgInventory:
@@ -599,14 +441,13 @@ def discover_pg_inventory(
     impl (an impl is conservatively treated as one type-level item), and UFCS
     receivers containing generic, tuple, reference, or ``dyn`` type syntax. A
     real Rust parser would be required to cover those forms without broad false
-    positives. It skips ``src/main.rs``, ``src/bin/**`` (the current tree has
-    no such directory), sources injected by ``include!``. ``#[ignore]`` tests
+    positives. Only files the lib root reaches (mod, ``#[path]``, ``include!``)
+    take part, under the module path that walk gives them. ``#[ignore]`` tests
     remain selection/debt because their execution belongs to the ignore ledger.
     """
     repo_root = repo_root.resolve()
     _matching_brace_cached.cache_clear()
     src_root = (repo_root / "src").resolve()
-    aliases = _aliases(repo_root)
     brace_counter = [0]
     external_tests = _external_test_files(repo_root, brace_counter, findings)
     inventory = rust_test_sources.lib_inventory(repo_root)
@@ -652,21 +493,17 @@ def discover_pg_inventory(
         )
 
     for path in sorted(src_root.rglob("*.rs")):
-        rel = path.relative_to(src_root)
-        if rel.name == "main.rs" or (rel.parts and rel.parts[0] == "bin"):
+        reached_base = inventory.modules.get(path.resolve())
+        if reached_base is None:
+            # Files the lib does not compile must not lend items to the call graph.
             continue
         source = path.read_text("utf-8")
         clean = strip_rust(source)
         ranges = _module_ranges(source, clean, brace_counter)
         external = path.resolve() in external_tests
-        physical_base = file_module_path(src_root, path)
-        reached_base = inventory.modules.get(path.resolve())
 
-        def logical_at(*tail: str, physical_base=physical_base, reached_base=reached_base) -> tuple[str, ...]:
-            # The root walk knows a reached file's real module; #[path] aliasing is the fallback.
-            if reached_base is not None:
-                return (*reached_base, *tail)
-            return _normalize_alias_path((*physical_base, *tail), aliases)
+        def logical_at(*tail: str, reached_base=reached_base) -> tuple[str, ...]:
+            return (*reached_base, *tail)
 
         fn_ranges: list[tuple[int, int, re.Match[str], int]] = []
         for match in _FN.finditer(clean):
@@ -758,7 +595,7 @@ def discover_pg_inventory(
             # proves that its direct tests are part of the library test target.
             if name in declared_tests or external:
                 records.append((name, path.relative_to(repo_root).as_posix(), logical[:-1], body))
-            elif findings is not None and reached_base is not None:
+            elif findings is not None:
                 # A recognised test in a file the lib walk reached must be listed, else it would run as non-PG.
                 findings.append(Finding(
                     "test-not-in-inventory", name,
