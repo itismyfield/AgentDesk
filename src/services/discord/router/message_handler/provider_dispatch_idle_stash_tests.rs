@@ -238,11 +238,8 @@ async fn ambiguous_effects_and_restore_failure_cross_owner_and_requeue_without_r
         let mut requeued = None;
         requeue_if_needed(
             &mut requeued,
-            true,
-            false,
-            &shared,
-            &ProviderKind::Claude,
-            ChannelId::new(id),
+            (true, false),
+            (&shared, &ProviderKind::Claude, ChannelId::new(id)),
             &row,
             None,
             None,
@@ -575,16 +572,24 @@ async fn held_fifo(capped: bool, capture_failure: bool) {
         &shared,&ProviderKind::Claude,channel,&held,None,None,
         crate::services::discord::turn_bridge::followup_requeue::BusyAttempt {turn_id:"held original",cost:Duration::ZERO}).await;
     if capped {
-        for _ in 1..crate::services::discord::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+        for _ in 0..crate::services::discord::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
             crate::services::discord::busy_followup_retry_store::record_attempt(
                 &ProviderKind::Claude,
                 (id, id + 10, id + 11),
                 &[],
                 Duration::ZERO,
-                Some(name),
+                None,
             )
             .unwrap();
         }
+        crate::services::discord::busy_followup_retry_store::record_attempt(
+            &ProviderKind::Claude,
+            (id, id + 10, id + 11),
+            &[],
+            Duration::ZERO,
+            Some(name),
+        )
+        .unwrap();
         assert!(
             crate::services::discord::busy_followup_retry_store::load(
                 &ProviderKind::Claude,
@@ -935,17 +940,15 @@ async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
                 })
                 .unwrap_err();
                 assert!(
-                    matches!(error, guarded_outcome::SubmissionError::Legacy(ref reason) if reason.contains("draft_recovery_hold"))
+                    matches!(error, guarded_outcome::SubmissionError::Held(ref hold) if hold.reason == "draft_recovery_hold"),
+                    "{error:?}"
                 );
                 assert!(!cap.idle_stash_entered());
                 let mut outcome = None;
                 requeue_if_needed(
                     &mut outcome,
-                    true,
-                    false,
-                    &shared,
-                    &provider,
-                    ch,
+                    (true, false),
+                    (&shared, &provider, ch),
                     &row,
                     None,
                     None,
@@ -999,7 +1002,7 @@ async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
     )
     .unwrap();
     assert!(budget.draft_hold);
-    assert_eq!(budget.busy_retry_count, 1);
+    assert_eq!(budget.busy_retry_count, 0);
     assert!(crate::services::claude_tui::composer_lock::draft_guarded(
         name
     ));

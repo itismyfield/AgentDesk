@@ -762,6 +762,8 @@ src/
 │   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
+│   │   │   ├── fresh_hold_tests.rs
+│   │   │   ├── fresh_lifecycle.rs
 │   │   │   ├── host_draft.rs
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
@@ -772,9 +774,13 @@ src/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── hold_lifecycle_tests.rs
+│   │   │   ├── legacy_submission.rs
 │   │   │   ├── literal_chunks.rs
+│   │   │   ├── preparation_hold.rs
 │   │   │   ├── submission.rs
-│   │   │   └── timeout_draft_tests.rs
+│   │   │   ├── timeout_draft_tests.rs
+│   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -978,6 +984,7 @@ src/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
 │   │   ├── busy_followup_retry_store/
+│   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
@@ -1270,6 +1277,8 @@ src/
 │   │   │   │   └── snapshot.rs
 │   │   │   ├── host_recovery_guard/
 │   │   │   │   └── log_state.rs
+│   │   │   ├── managed_submission/
+│   │   │   │   └── evidence.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -2320,7 +2329,9 @@ src/
 │   │   │   ├── followup_requeue/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── person_draft_tests.rs
-│   │   │   │   └── draft_release.rs
+│   │   │   │   ├── attempt.rs
+│   │   │   │   ├── draft_release.rs
+│   │   │   │   └── preparation_notice.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2388,6 +2399,7 @@ src/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs
+│   │   │   │   │   ├── preparation_hold_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
@@ -2398,6 +2410,7 @@ src/
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── cancelled_body_retirement_tests.rs
+│   │   │   │   ├── completion_proof.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs

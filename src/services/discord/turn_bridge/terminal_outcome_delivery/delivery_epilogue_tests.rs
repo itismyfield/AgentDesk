@@ -2,6 +2,8 @@
 
 use super::delivery_epilogue::*;
 use super::*;
+#[cfg(unix)]
+mod preparation_hold_tests;
 
 use std::{
     future::Future,
@@ -49,6 +51,87 @@ async fn scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery() {
             );
         }
     }
+}
+
+/// Positive terminal fixtures include the input receipt that the provider emitted in this attempt.
+fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    assert_eq!(row.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
+    let session = row.tmux_session_name.clone().unwrap();
+    let path = row
+        .output_path
+        .clone()
+        .unwrap_or_else(|| root.join("driver.jsonl").display().to_string());
+    let sid = row
+        .session_id
+        .clone()
+        .unwrap_or_else(|| "driver-input-sid".into());
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap();
+    row.output_path = Some(path.clone());
+    row.session_id = Some(sid.clone());
+    let mut binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&session).unwrap_or(
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.clone(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    binding.runtime_kind = RuntimeHandoffKind::ClaudeTui;
+    binding.output_path = path.clone();
+    tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+    let capability = inflight::install_managed_submission_boundary(
+        row,
+        &crate::services::turn_host::TurnHost::Tmux,
+    )
+    .unwrap();
+    inflight::clear_inflight_state(&ProviderKind::Claude, row.channel_id);
+    inflight::save_inflight_state_create_new(row).unwrap();
+    capability.observer().receipt(
+        crate::services::claude_tui::input::UserReceipt::before(
+            &session,
+            &row.user_text,
+            Some(&sid),
+        )
+        .unwrap(),
+    );
+    capability.fence().before_first_payload().unwrap();
+    tui_prompt_dedupe::record_discord_originated_prompt("claude", &session, &row.user_text);
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"type":"user", "sessionId":sid, "message":{"content":row.user_text}})
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        let (sender, _rx) = std::sync::mpsc::channel();
+        crate::services::claude::emit_claude_tui_watcher_handoff(
+            &sender,
+            &row.output_path.clone().unwrap(),
+            &session,
+            std::path::Path::new(row.output_path.as_ref().unwrap()),
+        );
+    }
+    assert!(
+        tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
+            .is_some_and(|binding| binding.session_id.is_none()),
+        "actual handoff clears the cache SID before input proof"
+    );
+    capability.observer().receipt_finished(&session);
+    assert!(
+        capability.exact_user_receipt(),
+        "input proof is confirmed before any SID rehydration"
+    );
 }
 
 #[derive(Clone)]
@@ -147,14 +230,7 @@ impl TurnGateway for NoopGateway {
 
 #[tokio::test]
 async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
-    let _lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let temp = tempfile::TempDir::new().expect("runtime root");
-    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        temp.path(),
-    );
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let channel_id = ChannelId::new(5_025);
     let current_msg_id = MessageId::new(5_026);
     let provider = ProviderKind::Claude;
@@ -564,9 +640,18 @@ struct TerminalDeliveryDriver {
     _temp: tempfile::TempDir,
     _env_reset: crate::config::TestEnvVarGuard,
     _env_lock: std::sync::MutexGuard<'static, ()>,
+    posted_restart_serialization: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 impl TerminalDeliveryDriver {
+    #[cfg(unix)]
+    fn input_fixture(
+        &self,
+    ) -> crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture {
+        let _guard = &self._env_lock;
+        crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture::after_shared_test_env_lock()
+    }
+
     /// Seeds a runtime root, an inflight row, and a watcher-registry slot whose
     /// `turn_delivered` marker is the coordinate under test. `yields_per_call`
     /// controls how many times each production gateway call suspends, which is
@@ -647,6 +732,7 @@ impl TerminalDeliveryDriver {
             _temp: temp,
             _env_reset: env_reset,
             _env_lock: env_lock,
+            posted_restart_serialization: None,
         }
     }
 
@@ -1676,4 +1762,27 @@ async fn a_watcher_owned_turn_end_deletes_the_o_panel_only_on_o_channels() {
             "o_owned={o_owned}: {calls:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a2_claude_completion_requires_this_attempts_exact_user_receipt() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (mut ctx, mut state) = driver.parts();
+    state.inflight_state.runtime_kind =
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    #[cfg(unix)]
+    {
+        ctx.bridge_tui_gate_outcome_early =
+            Some(crate::services::discord::tmux::TuiCompletionGateOutcome::NotGated);
+    }
+    let output = run_terminal_outcome_delivery(ctx, state).await;
+    assert!(
+        !output.bridge_should_emit_completion,
+        "an answer-like body is not a submission receipt"
+    );
+    assert!(
+        !output.status_panel_terminal_committed,
+        "no completion footer or Response sent without exact input proof"
+    );
 }

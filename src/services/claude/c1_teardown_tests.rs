@@ -43,9 +43,10 @@ fn relaunching(cli_env: &'static str) -> (tempfile::TempDir, Vec<crate::config::
 }
 
 /// The audit, kill and launch calls in the order they ran.
-fn teardown_then_launch(calls: &[String]) -> Vec<&'static str> {
+fn teardown_then_launch(calls: &[String], session: &str) -> Vec<&'static str> {
     calls
         .iter()
+        .filter(|call| call.contains(session))
         .filter_map(|call| {
             ["capture-pane", "kill-session", "new-session"]
                 .into_iter()
@@ -102,10 +103,9 @@ fn a_failed_fresh_turn_tears_down_only_under_its_clearance() {
     }
 }
 
-// A fresh prompt held before submit keeps its session and owner marker even under an
-// admitting clearance, while a failure after the fence still tears down as above.
+// Pre-submit refusals and uncertain payloads keep the current pane and owner marker.
 #[test]
-fn a_fresh_prompt_held_before_submit_keeps_its_session_and_owner_marker() {
+fn a_fresh_refusal_or_uncertain_payload_keeps_its_session_and_owner_marker() {
     use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
     use crate::services::claude_tui::submission_fence::{
         self, SubmissionFence, test_support::RefusingFence,
@@ -131,7 +131,7 @@ fn a_fresh_prompt_held_before_submit_keeps_its_session_and_owner_marker() {
     ] {
         std::fs::write(&owner, "owner").unwrap();
         let spy = SpyGuard::install(SpyState {
-            captures: std::iter::repeat_n(Some(ready.clone()), 8).collect(),
+            captures: std::iter::repeat_n(Some(ready.clone()), 30).collect(),
             fail_send: Some((0, Err("send-keys failed".to_string()))),
             ..SpyState::default()
         });
@@ -159,9 +159,9 @@ fn a_fresh_prompt_held_before_submit_keeps_its_session_and_owner_marker() {
         let sent = spy.calls().iter().any(|call| call.starts_with("literal:"));
         assert_eq!(sent, !held, "{label}: {:?}", spy.calls());
         let calls = tmux.take_calls();
-        assert_eq!(called(&calls, "kill-session"), !held, "{label}: {calls:?}");
-        assert_eq!(take_exit_reason(NAME), !held, "{label}");
-        assert_eq!(owner.exists(), held, "{label}: owner marker");
+        assert!(!called(&calls, "kill-session"), "{label}: {calls:?}");
+        assert!(!take_exit_reason(NAME), "{label}");
+        assert!(owner.exists(), "{label}: owner marker");
     }
 }
 
@@ -248,7 +248,7 @@ fn a_cleared_stale_session_is_relaunched_exactly_once() {
     );
     assert_eq!(result, Ok(()));
     let calls = tmux.take_calls();
-    let order = teardown_then_launch(&calls);
+    let order = teardown_then_launch(&calls, NAME);
     assert_eq!(
         order,
         ["capture-pane", "kill-session", "new-session"],

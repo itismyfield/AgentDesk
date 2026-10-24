@@ -209,6 +209,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::recovery_text::tests
   --skip services::discord::turn_bridge::resume_pin_tests
   --skip services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests
+  --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::recovery_retry_guard_tests
   --skip services::discord::turn_bridge::terminal_outcome_delivery::foreign_terminal_handoff::custody_test_adapter
   --skip services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
@@ -786,6 +787,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_on_error_blocks_profile_and_takeover_before_any_recovery
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_cleanup_refusal_then_success_delivers_once_without_requeue
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_dispatch_settles_without_tui_receipt_but_completion_stays_gated
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_may_have_submitted_and_old_or_contaminated_records_never_confirm_completion
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_owner_cannot_restart_a_finished_receipt_window
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::source_guard_tests::slash_stop_guards_reject_commented_steps_and_count_coded_calls
   services::discord::turn_bridge::tmux_runtime::judged_stop::tests::native_contract::high_risk_recovery::reader_liveness_wait_rejects_accumulated_probes

@@ -1931,6 +1931,10 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/session_host/tmux_host.rs", 0),
         ("src/services/session_host/process_host.rs", 0),
         ("src/services/discord/inflight/host_locator.rs", 1),
+        (
+            "src/services/discord/inflight/managed_submission/evidence.rs",
+            1,
+        ),
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
         (UNBOUND_OBSERVER, 1),
@@ -1998,7 +2002,13 @@ fn herdr_items_have_no_production_caller() {
     const READERS: &[(&str, &[&str])] = &[
         (
             "PersistedHostLocator",
-            &[LOCATOR, INFLIGHT_MODEL, GUARD_ADAPTER, BINDING_CAS],
+            &[
+                LOCATOR,
+                INFLIGHT_MODEL,
+                GUARD_ADAPTER,
+                BINDING_CAS,
+                "src/services/discord/inflight/managed_submission/evidence.rs",
+            ],
         ),
         (
             "HostedRuntimeLocator",
@@ -2070,11 +2080,25 @@ fn herdr_items_have_no_production_caller() {
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
-        (".host_locator", &[GUARD_ADAPTER, BINDING_CAS, LIVENESS]),
+        (
+            ".host_locator",
+            &[
+                GUARD_ADAPTER,
+                BINDING_CAS,
+                LIVENESS,
+                "src/services/discord/inflight/managed_submission/evidence.rs",
+            ],
+        ),
         ("host_locator: Some", &[]),
         (
             "host_locator:",
-            &[INFLIGHT_MODEL, GUARD_ADAPTER, IDENTITY_GATE, BINDING_CAS],
+            &[
+                INFLIGHT_MODEL,
+                GUARD_ADAPTER,
+                IDENTITY_GATE,
+                BINDING_CAS,
+                "src/services/discord/inflight/managed_submission/evidence.rs",
+            ],
         ),
     ];
     let sources = production_sources();

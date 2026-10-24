@@ -102,6 +102,7 @@ async fn bind_turn(
         watcher.output_path = path.display().to_string();
         driver.shared.tmux_watchers.insert(channel, watcher);
     }
+    prove_claude_input(driver._temp.path(), &mut driver.inflight);
     (parent, tmux, path)
 }
 

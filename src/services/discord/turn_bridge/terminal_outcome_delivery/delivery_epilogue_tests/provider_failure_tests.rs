@@ -80,6 +80,7 @@ struct Seen {
 async fn deliver(case: &Case) -> Seen {
     let mut driver = TerminalDeliveryDriver::new(case.replace, 0).with_body(case.body.clone());
     driver.inflight.runtime_kind = Some(ClaudeTui);
+    prove_claude_input(driver._temp.path(), &mut driver.inflight);
     inflight::save_inflight_state(&driver.inflight).expect("seed the Claude TUI row");
     let selected = [(DRIVER_CHANNEL_ID, ClaudeTui)];
     let _o = test_override::force_channels(if case.o { &selected[..] } else { &[] });
