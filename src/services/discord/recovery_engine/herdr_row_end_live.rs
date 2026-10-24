@@ -109,7 +109,7 @@ async fn execution_gone(
     row: &InflightTurnState,
     nonce: &str,
 ) -> Option<Option<(HostedObservation, HostedExecution)>> {
-    let (found, record) = hosted_record(pool, token_hash, provider, row).await?;
+    let (found, record) = hosted_record(pool, token_hash, provider, row).await.ok()?;
     if record.execution_nonce != nonce && !mutant("prb-successor-reread") {
         return None;
     }

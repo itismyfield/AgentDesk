@@ -75,6 +75,10 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
+    /// Every message id a `DELETE` named, in order.
+    deleted: Arc<Mutex<Vec<u64>>>,
+    /// Messages a single-message `GET` answers until deleted; any other id stays unhandled.
+    seeded: Arc<Mutex<std::collections::HashMap<u64, String>>>,
     extra_channels: Arc<Mutex<std::collections::HashSet<u64>>>,
     /// Guild threads the mock answers for, by thread id, with their parent channel.
     threads: Arc<Mutex<std::collections::HashMap<u64, u64>>>,
@@ -106,6 +110,8 @@ impl DiscordMockState {
             release_held_history: Arc::new(Notify::new()),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
+            deleted: Arc::new(Mutex::new(Vec::new())),
+            seeded: Arc::new(Mutex::new(std::collections::HashMap::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
             threads: Arc::new(Mutex::new(std::collections::HashMap::new())),
             next_response_id: Arc::new(AtomicU64::new(FIRST_RESPONSE_MESSAGE_ID)),
@@ -122,6 +128,17 @@ impl DiscordMockState {
             .map(|(_, text)| text)
             .chain(minted.into_values().map(|(_, text)| text))
             .collect()
+    }
+
+    /// A message the bot posted before, as a single-message `GET` answers it.
+    pub(in crate::services::discord) fn seed_message(&self, id: u64, content: &str) {
+        let mut seeded = self.seeded.lock().expect("seeded");
+        seeded.insert(id, content.to_string());
+    }
+
+    /// Every message id a `DELETE` named, in order.
+    pub(in crate::services::discord) fn deleted(&self) -> Vec<u64> {
+        self.deleted.lock().expect("deleted").clone()
     }
 
     pub(in crate::services::discord) fn allow_channel(&self, channel_id: u64) {
@@ -531,8 +548,28 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
     {
         return StatusCode::NO_CONTENT.into_response();
     }
+    let message_id = path
+        .rsplit('/')
+        .next()
+        .and_then(|id| id.parse::<u64>().ok());
     if method == Method::DELETE && channel_allowed && path.contains("/messages/") {
+        state.deleted.lock().expect("deleted").extend(message_id);
         return StatusCode::NO_CONTENT.into_response();
+    }
+    // A seeded message reads back until it is deleted.
+    let seeded = message_id.and_then(|id| state.seeded.lock().expect("seeded").get(&id).cloned());
+    if method == Method::GET
+        && channel_allowed
+        && path.contains("/messages/")
+        && let (Some(id), Some(content)) = (message_id, seeded)
+    {
+        if !state.deleted.lock().expect("deleted").contains(&id) {
+            let mut message = discord_message_json(id, &content);
+            message["channel_id"] = json!(route_channel.unwrap_or(CHANNEL_ID).to_string());
+            return Json(message).into_response();
+        }
+        let missing = json!({"message": "Unknown Message", "code": 10008});
+        return (StatusCode::NOT_FOUND, Json(missing)).into_response();
     }
     // `catch_up` resolves the bot identity here and skips every candidate whose
     // author matches it, so `/users/@me` must not answer with the human.

@@ -18,8 +18,12 @@ use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_O
 use crate::services::session_host::herdr_termination_rig as herdr;
 use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal, record_verified};
 
+#[path = "herdr_row_end_gate_tests.rs"]
+mod gate;
 #[path = "herdr_row_end_guard_tests.rs"]
 mod guards;
+#[path = "herdr_row_end_settle_tests.rs"]
+mod settle;
 
 const NONCE: &str = "turn-row-end";
 const PARTIAL: &str = "Reading the files.";
@@ -65,9 +69,11 @@ impl Relay {
         let thread = std::thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
+                    // Each connection on its own thread, as Herdr answers: a dial that sends
+                    // nothing must not hold the next request behind the read timeout.
                     Ok((client, _)) => {
-                        let pane = seen.lock().unwrap().clone();
-                        serve(client, &target, &pane);
+                        let (pane, target) = (seen.lock().unwrap().clone(), target.clone());
+                        std::thread::spawn(move || serve(client, &target, &pane));
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(2)),
                 }
@@ -310,11 +316,11 @@ impl Run {
         shared.http.cached_serenity_ctx.set(ctx).unwrap();
         let provider = setup.provider;
         let logical = provider.build_tmux_session_name("row-end");
-        let key = format!(
-            "{}/{}/{}:{logical}",
-            provider.as_str(),
-            shared.token_hash,
-            herdr::NODE
+        // This host's namespaced key, the one the intake derives for the channel's next input.
+        let key = crate::services::discord::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &provider,
+            &logical,
         );
         let token = shared.token_hash.clone();
         let restarted = std::env::var(PHASE).as_deref() == Ok("after");
@@ -451,6 +457,57 @@ impl Run {
             self.shared.clone(),
             self.provider.clone(),
         );
+    }
+
+    /// What the real queued start needs here: the channel's session and workspace, O's seeded
+    /// store, the pane's attached source and local routing.
+    async fn real_start(&self) -> crate::config::TestEnvVarGuard {
+        let routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "ADK_INTAKE_ROUTING_MODE",
+            "disabled".as_ref(),
+        );
+        self.mock
+            .park_first_placeholder
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.shared.http.cached_bot_token.set("rig-token".into());
+        let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+        crate::services::discord::host_defer_gate::tests::map_channel(
+            &self.shared,
+            self.channel,
+            "row-end",
+        )
+        .await;
+        if let Some(session) = self
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&self.channel)
+        {
+            session.current_path = Some(root.display().to_string());
+        }
+        let (store, era) =
+            crate::services::herdr_launch::o_store_for_test(&root, &[self.channel.get()]);
+        let mut seeded = store
+            .open_channel(&era, self.channel.get())
+            .unwrap()
+            .unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+        let offset = std::fs::metadata(&self.source).unwrap().len();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &self.logical,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: self.source.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("session-row-end".into()),
+                last_offset: offset,
+                relay_last_offset: Some(offset),
+            },
+        );
+        routing
     }
 
     /// One end pass, returning once every task it started has finished.
@@ -708,7 +765,8 @@ async fn r1(rig: herdr::P11TerminationRig, phase: String) {
 
 const R2: u64 = 1_479_671_399_000_102;
 
-/// A Codex Herdr turn the same way: the interrupt notice, its rollout untouched.
+/// A Codex Herdr turn the same way, but its rollout cannot bound the input's own turn: the neutral
+/// notice, its rollout untouched.
 #[test]
 fn r2_restarted_codex_turn_ends_with_the_recovery_notice_pg() {
     let path = concat!(
@@ -735,8 +793,13 @@ fn r2_restarted_codex_turn_ends_with_the_recovery_notice_pg() {
             run.relay.set(|pane| pane.screen = Some(CODEX_READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.boot().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            let notice = "이전 요청의 완료 여부는 확인하지 못했습니다";
+            assert_ended(&run, notice, &taken).await;
+            let texts = run.texts();
+            assert!(
+                !texts.iter().any(|t| t.contains(&run.interrupted())),
+                "{texts:?}"
+            );
             assert_eq!(
                 std::fs::read(&run.source).unwrap(),
                 rollout,
@@ -826,7 +889,7 @@ fn r4_an_ended_execution_retires_and_ends_its_row_pg() {
 const R5: u64 = 1_479_671_399_000_115;
 
 /// A Herdr restart left another shell alone in the pane and both recorded processes are gone: E
-/// retires the execution with the interrupt notice, never I's answer from the transcript.
+/// retires the execution, then the source read after the end shows the turn's own answer once.
 #[test]
 fn restarted_root_replaced_e_retires_pg() {
     let path = concat!(module_path!(), "::restarted_root_replaced_e_retires_pg");
@@ -851,10 +914,14 @@ fn restarted_root_replaced_e_retires_pg() {
             run.relay.set(|pane| pane.screen = Some(READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.boot().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            assert_ended(&run, ANSWER, &taken).await;
             let texts = run.texts();
-            assert!(!texts.iter().any(|t| t.contains(ANSWER)), "{texts:?}");
+            let shown: usize = texts.iter().map(|t| t.matches(ANSWER).count()).sum();
+            assert_eq!(shown, 1, "the answer once: {texts:?}");
+            assert!(
+                !texts.iter().any(|t| t.contains(&run.interrupted())),
+                "{texts:?}"
+            );
             let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
             assert_eq!(run.hosted().await, Some(retired));
             run.close().await;
