@@ -12,6 +12,81 @@ use crate::services::tui_prompt_dedupe::binding_events as p5;
 
 const NONCE: &str = "11111111111111111111111111111111";
 
+/// Runs the production binding-log actor behind a ready port while the callback sends its sweep.
+pub(crate) async fn with_ready_codex<T, F, Fut>(source: SourceId, channel: u64, run: F) -> T
+where
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use crate::services::tui_o::writer::binding::ChannelBindingLog;
+    use crate::services::tui_o::writer::host::Readiness;
+    use sha2::{Digest, Sha256};
+
+    let harness = Harness::build_channel(channel, |_| {
+        vec![InitSource {
+            source_id: source.clone(),
+            delivery_start: 0,
+            prefix_hash: hex::encode(Sha256::digest([])),
+        }]
+    });
+    harness.gate.acquired();
+    let (host, stopping) = watch::channel(false);
+    let (stop, stopped) = watch::channel(false);
+    let (resumed, ready_state) = watch::channel(false);
+    let (port, receiver) = TransitionPort::new(
+        1,
+        Arc::clone(&harness.gate),
+        Arc::new(SystemTime::now),
+        stopping.clone(),
+    );
+    let port = port.with_provider(ShadowProvider::Codex);
+    let projections = (stopped, resumed, watch::channel(None).0, Owing::default());
+    let config = WriterConfig { enabled: true };
+    let task = transition_port::spawning(receiver, || {
+        spawn_projecting(
+            &config,
+            None,
+            harness.writer(),
+            ShadowProvider::Codex,
+            Arc::new(ChannelBindingLog::new(channel, ShadowProvider::Codex)),
+            projections,
+        )
+    })
+    .expect("the actual Codex actor started");
+    for _ in 0..20 {
+        if *ready_state.borrow() {
+            break;
+        }
+        polls(1).await;
+    }
+    assert!(
+        *ready_state.borrow(),
+        "the actor restored from the actual P5 log"
+    );
+    polls(3).await;
+    let ready = Arc::new(Readiness::default());
+    let _hosted = ready.host_port_for_test(channel, &harness.gate, port, (ready_state, stopping));
+    let directory = harness
+        ._runtime
+        .path()
+        .join("o_store")
+        .join(channel.to_string());
+    let before = files(&directory);
+    let result = run(ready).await;
+    assert_eq!(
+        files(&directory),
+        before,
+        "observation did not write the O store"
+    );
+    assert!(
+        harness.port.posts().is_empty(),
+        "the native fixture had no output"
+    );
+    halt(stop, task).await;
+    drop(host);
+    result
+}
+
 #[derive(Default)]
 struct Delta {
     tail: bool,
