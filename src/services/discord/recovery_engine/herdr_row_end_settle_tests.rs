@@ -56,8 +56,68 @@ async fn assert_card_deleted(run: &Run) {
 
 const HOLD: u64 = 1_479_671_399_000_121;
 
-/// An idle restarted turn with input queued: the edge's kick takes nothing and asks for the row's
-/// end, which clears it silently; the immediate kickoff takes the input once, within 1 s.
+/// What the real start of the queued input needs on this fixture: the intake's own session key
+/// (this host's name, where the fixture bound the execution under its fixed node), the channel's
+/// session and workspace, O's seeded store, the source attached to the pane, and local routing.
+async fn real_start(run: &Run) -> crate::config::TestEnvVarGuard {
+    let routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        "disabled".as_ref(),
+    );
+    run.mock
+        .park_first_placeholder
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let _ = run.shared.http.cached_bot_token.set("rig-token".into());
+    let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    crate::services::discord::host_defer_gate::tests::map_channel(
+        &run.shared,
+        run.channel,
+        "row-end",
+    )
+    .await;
+    if let Some(session) = run.shared.core.lock().await.sessions.get_mut(&run.channel) {
+        session.current_path = Some(root.display().to_string());
+    }
+    let key = crate::services::discord::adk_session::build_adk_session_key(
+        &run.shared,
+        run.channel,
+        &run.provider,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE sessions SET session_key = $1 WHERE session_key = $2")
+        .bind(&key)
+        .bind(&run.key)
+        .execute(&run.pool)
+        .await
+        .unwrap();
+    let (store, era) = crate::services::herdr_launch::o_store_for_test(&root, &[run.channel.get()]);
+    let mut seeded = store
+        .open_channel(&era, run.channel.get())
+        .unwrap()
+        .unwrap();
+    seeded.set_binding_checkpoint(3).unwrap();
+    let offset = std::fs::metadata(&run.source).unwrap().len();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &run.logical,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: run.source.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("session-row-end".into()),
+            last_offset: offset,
+            relay_last_offset: Some(offset),
+        },
+    );
+    routing
+}
+
+/// A restarted O turn that goes idle right after a pass held it, with input queued: from that
+/// moment (t0, the provider idle and its footer written) the presence edge's kick asks for the
+/// end, the row clears silently within 5 s, the kickoff for the input is requested within 1 s of
+/// the clear, and the real queued start begins the input's own turn within 15 s of the clear.
 #[test]
 fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
     let path = concat!(
@@ -79,82 +139,80 @@ fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
                 },
             )
             .await;
+            let _routing = real_start(&run).await;
             run.mock.seed_message(run.row.current_msg_id, SPINNER);
-            append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
-            run.relay.set(|pane| pane.screen = Some(READY.into()));
-            let (taken, _reset) = run.sentinel().await;
+            run.relay.set(|pane| pane.screen = Some(BUSY.into()));
+            // The queued input stays for the real kickoff: the sentinel's own taking hook is dropped.
+            drop(run.sentinel().await);
             let kicks = Arc::new(Mutex::new(Vec::new()));
             let seen = kicks.clone();
             let channel = run.channel;
-            let _timed = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests({
-                let taken = taken.clone();
-                Arc::new(move |shared, provider, kicked, _reason| {
-                    let (seen, taken) = (seen.clone(), taken.clone());
-                    Box::pin(async move {
-                        if kicked != channel {
-                            return None;
-                        }
-                        let present =
-                            inflight::load_inflight_state_read_only(&provider, kicked.get())
-                                .is_some();
-                        let next =
-                            crate::services::discord::mailbox_take_next_automatic_intervention(
-                                &shared, &provider, kicked,
-                            )
-                            .await;
-                        seen.lock().unwrap().push(Instant::now());
-                        if let Some(item) = next.intervention.as_ref() {
-                            taken.lock().unwrap().push(present);
-                            crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
-                            &shared,
-                            &provider,
-                            kicked,
-                            item.message_id,
-                            next.dispatch_lease.as_ref().expect("dequeue lease").clone(),
-                        )
-                        .await;
-                        }
-                        Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
-                            started: next.intervention.is_some(),
-                        })
-                    })
-                })
-            });
-            // Boot restore only: no source tick runs, so nothing but the hold asks for the end.
+            let first = run.row.user_msg_id;
+            let _kicks = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
+                Arc::new(move |_, provider, kicked, _| {
+                    if kicked == channel {
+                        let row = inflight::load_inflight_state_read_only(&provider, kicked.get());
+                        let present = row.is_some_and(|row| row.user_msg_id == first);
+                        seen.lock().unwrap().push((Instant::now(), present));
+                    }
+                    Box::pin(async { None })
+                }),
+            );
+            // Boot restore's pass holds the busy turn; no source tick runs after it.
             let http = run.shared.serenity_http_or_token_fallback().unwrap();
             restore_inflight_turns(&http, &run.shared, &run.provider).await;
-            assert!(run.durable().is_some(), "boot restore leaves the row");
-            let edge = Instant::now();
+            settled_tasks().await;
+            assert!(run.durable().is_some(), "the busy pass keeps the row");
+            let t0 = Instant::now();
+            append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
+            run.relay.set(|pane| pane.screen = Some(READY.into()));
             crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
                 run.shared.clone(),
                 run.provider.clone(),
                 run.channel,
                 "turn_presence_idle",
             );
-            let mut cleared_at = None;
-            while edge.elapsed() < Duration::from_secs(30) {
-                if run.durable().is_none() {
-                    cleared_at = Some(Instant::now());
+            let input = |run: &Run| run.durable().filter(|row| row.user_msg_id == SENTINEL);
+            let mut t_clear = None;
+            while t0.elapsed() <= Duration::from_secs(5) {
+                if run.durable().is_none_or(|row| row.user_msg_id == SENTINEL) {
+                    t_clear = Some(Instant::now());
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            let cleared_at =
-                cleared_at.unwrap_or_else(|| panic!("not cleared after the edge: {:?}", taken));
-            let took = wait(Duration::from_secs(5), || !taken.lock().unwrap().is_empty()).await;
-            assert!(took, "the next input was taken");
-            assert_eq!(
-                *taken.lock().unwrap(),
-                vec![false],
-                "taken once, after the clear"
-            );
-            let kick = kicks.lock().unwrap().last().copied().unwrap();
+            let t_clear =
+                t_clear.unwrap_or_else(|| panic!("no clear by t0 + 5 s: {:?}", run.texts()));
+            let mut t_input = None;
+            while t_clear.elapsed() <= Duration::from_secs(15) {
+                if input(&run).is_some() {
+                    t_input = Some(Instant::now());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let t_input = t_input.expect("the queued input's turn starts by t_clear + 15 s");
+            let after = kicks
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, present)| !present)
+                .copied();
+            let (t_kick, _) = after.expect("a kickoff after the clear");
             assert!(
-                kick <= cleared_at + Duration::from_secs(1),
+                t_kick.saturating_duration_since(t_clear) <= Duration::from_secs(1),
                 "the kickoff came {:?} after the clear",
-                kick.saturating_duration_since(cleared_at)
+                t_kick.saturating_duration_since(t_clear)
             );
-            assert_silent(&run).await;
+            assert!(t_input <= t_clear + Duration::from_secs(15));
+            let texts = run.texts();
+            let marker = interrupted_recovery_message(&run.row, "");
+            assert!(
+                !texts
+                    .iter()
+                    .any(|t| t.contains(&marker) || t.contains(NEUTRAL)),
+                "no notice: {texts:?}"
+            );
             assert_card_deleted(&run).await;
             run.close().await;
         },
@@ -357,6 +415,65 @@ fn a_restarted_herdr_row_holds_gateway_and_rest_starts_pg() {
                 Some(crate::services::discord::health::ExternalHold::Row),
                 "REST queues"
             );
+            run.close().await;
+        },
+    );
+}
+
+const SWEPT: u64 = 1_479_671_399_000_127;
+
+/// An end pass that held and stopped, with no source tick left to wake it: the leaked-row sweep
+/// leaves the row alone but asks its end once more, and that pass ends it.
+#[test]
+fn the_sweep_wakes_a_stalled_end_pass_pg() {
+    let path = concat!(module_path!(), "::the_sweep_wakes_a_stalled_end_pass_pg");
+    in_child(
+        path,
+        SWEPT,
+        ProviderKind::Claude,
+        Owner::Legacy,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: SWEPT,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.screen = Some(BUSY.into()));
+            let http = run.shared.serenity_http_or_token_fallback().unwrap();
+            restore_inflight_turns(&http, &run.shared, &run.provider).await;
+            run.pass().await;
+            assert_kept(&run, &run.row, "busy").await;
+            // The turn ends with no relay running, so nothing but the sweep asks for another pass.
+            append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
+            run.relay.set(|pane| pane.screen = Some(READY.into()));
+            let record =
+                crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
+                    provider: run.provider.as_str().to_string(),
+                    channel_id: SWEPT,
+                    tmux_session_name: run.logical.clone(),
+                    anchor_message_id: u64::MAX,
+                    generation: run.shared.restart.current_generation,
+                    ..Default::default()
+                };
+            let sweep = crate::services::discord::tui_direct_pending_start::demote_leaked_foreign_inflight_if_current;
+            assert!(
+                !sweep(&run.shared, &record).await,
+                "the sweep never ends the row itself"
+            );
+            let ended = wait(Duration::from_secs(30), || run.durable().is_none()).await;
+            assert!(ended, "the woken pass ends the row: {:?}", run.texts());
+            settled_tasks().await;
+            let texts = run.texts();
+            assert_eq!(
+                texts.iter().filter(|t| t.contains(ANSWER)).count(),
+                1,
+                "{texts:?}"
+            );
+            assert!(!herdr::held(), "the execution's input hold is released");
             run.close().await;
         },
     );

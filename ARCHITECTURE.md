@@ -1527,6 +1527,7 @@ src/
 │   │   ├── recovery_engine/
 │   │   │   ├── herdr_row_end/
 │   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   ├── owner.rs
 │   │   │   │   └── placeholder.rs

@@ -69,9 +69,11 @@ impl Relay {
         let thread = std::thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
+                    // Each connection on its own thread, as Herdr answers: a dial that sends
+                    // nothing must not hold the next request behind the read timeout.
                     Ok((client, _)) => {
-                        let pane = seen.lock().unwrap().clone();
-                        serve(client, &target, &pane);
+                        let (pane, target) = (seen.lock().unwrap().clone(), target.clone());
+                        std::thread::spawn(move || serve(client, &target, &pane));
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(2)),
                 }

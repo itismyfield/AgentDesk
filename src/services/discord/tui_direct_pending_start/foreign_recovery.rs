@@ -296,7 +296,8 @@ async fn demote_stale_foreign_inflight(
     else {
         return false;
     };
-    // A restarted Herdr row's end belongs to its dedicated owner, never to this sweep.
+    // A restarted Herdr row's end belongs to its dedicated owner, never to this sweep; the sweep
+    // only asks that owner to look again, so a stalled end pass cannot hold the channel.
     #[cfg(unix)]
     if super::super::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner(
         &provider,
@@ -308,6 +309,7 @@ async fn demote_stale_foreign_inflight(
             channel_id = record.channel_id,
             "tui_direct_pending_start: left a restarted Herdr row to its dedicated owner"
         );
+        super::super::recovery_engine::herdr_row_end::request_row_end(shared, &provider, channel);
         return false;
     }
     let capture_offset = output_capture_offset(&state);

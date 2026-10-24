@@ -6241,6 +6241,8 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::the_resta
 services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
 services::discord::recovery_engine::herdr_reader::tests::the_restart_pass_reads_nothing_without_a_local_endpoint
 services::discord::recovery_engine::herdr_reader::tests::the_socket_reader_reports_one_servers_reading_of_the_stored_pane
+services::discord::recovery_engine::herdr_row_end::diagnostics::tests::a_change_logs_at_five_seconds_and_not_before
+services::discord::recovery_engine::herdr_row_end::diagnostics::tests::each_reason_keeps_its_time_through_compressed_changes
 services::discord::recovery_engine::herdr_row_end::tests::an_ended_sources_torn_tail_counts_only_when_it_parses_whole
 services::discord::recovery_engine::herdr_row_end::tests::boot_restore_leaves_only_a_restarted_herdr_row_to_the_end_pass
 services::discord::recovery_engine::herdr_row_end::tests::rig::gate::a_pass_during_a_running_end_names_the_task_pg
@@ -6266,6 +6268,7 @@ services::discord::recovery_engine::herdr_row_end::tests::rig::settle::a_row_wit
 services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_aborted_turn_clears_its_spinner_silently_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_turn_ended_after_its_terminal_ends_silently_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_turn_with_a_later_prompt_ends_silently_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::settle::the_sweep_wakes_a_stalled_end_pass_pg
 services::discord::recovery_engine::herdr_row_end::tests::the_exact_clear_removes_only_the_turn_the_pass_read
 services::discord::recovery_engine::herdr_row_end::tests::the_turn_body_is_its_result_or_its_streamed_text
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
