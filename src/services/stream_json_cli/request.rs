@@ -30,10 +30,6 @@ pub struct ProviderTurnRequest {
 }
 
 impl ProviderTurnRequest {
-    pub fn is_fresh(&self) -> bool {
-        self.session.is_none()
-    }
-
     pub fn for_discord_turn(
         provider: ProviderKind,
         prompt: String,

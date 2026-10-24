@@ -43,6 +43,7 @@ pub(super) enum SessionBoundRelayAckOutcome {
 /// `DeliveryOutcome` for the resend DECISION — §3.2 reconciliation treats
 /// `NotDelivered` and `Unknown` identically, so this fold guarantees neither
 /// gets a blind fast-path.
+#[cfg(test)]
 pub(super) fn session_bound_ack_delivery_outcome(
     ack_outcome: SessionBoundRelayAckOutcome,
 ) -> crate::services::cluster::stream_relay::DeliveryOutcome {

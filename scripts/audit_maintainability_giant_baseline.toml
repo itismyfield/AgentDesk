@@ -35,8 +35,8 @@
 # `adk_session::backfill_completed_panel_usage_and_maybe_inject_compact` (−16
 # prod lines), so the frozen true production LoC settles at 9583. KEPT surfaces.
 # #3296: the aborted-anchor reconcile chokepoint — one guarded block recording
-# the `tui_direct_abort_marker::record_commit_tombstone` commit evidence and
-# calling `drain_on_terminal_commit`, sited BEFORE `clear_inflight_state`
+# the `tui_direct_abort_marker::record_commit_tombstone_with_offsets` commit evidence
+# and calling `drain_on_terminal_commit_with_offsets`, sited BEFORE `clear_inflight_state`
 # (codex r2: tombstone → drain → clear, so a racing sweep that observes "no
 # live row" always sees the commit evidence) and passing the committed turn's
 # identity (codex r1 positive correlation; the marker logic lives in the

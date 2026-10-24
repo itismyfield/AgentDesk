@@ -14,7 +14,7 @@
 //! input) and records a durable [`AbortedAnchorMarker`] here. Two reconcilers
 //! own the marker afterwards:
 //!
-//! 1. **Terminal-commit drain** ([`drain_on_terminal_commit`]) — the tmux
+//! 1. **Terminal-commit drain** ([`drain::drain_on_terminal_commit_with_offsets`]) — the tmux
 //!    watcher's terminal chokepoint calls this on every body-visible normal
 //!    commit. A marker is covered ONLY by a commit whose identity MATCHES the
 //!    foreign prior inflight the ABORT recorded (codex r1: positive

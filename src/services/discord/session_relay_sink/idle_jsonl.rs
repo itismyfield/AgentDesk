@@ -40,6 +40,7 @@ pub(super) enum IdleJsonlInflightGateDecision {
     DeferUntilCommitted,
 }
 
+#[cfg(test)]
 pub(super) fn idle_jsonl_should_retry_without_dedup_shared<T>(
     shared_for_dedup: Option<&T>,
 ) -> bool {

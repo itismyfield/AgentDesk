@@ -140,6 +140,7 @@ impl SharedData {
     /// older turn's commit (that newer turn is live). A no-op when no entry exists —
     /// the common non-re-adopted terminal commit — so the watcher terminal-commit
     /// path can call it unconditionally.
+    #[cfg(test)]
     pub(in crate::services::discord) fn mark_readopted_mailbox_owner_finished(
         &self,
         provider: &ProviderKind,

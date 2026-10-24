@@ -3,6 +3,7 @@
 //! This module is intentionally pure and has no production caller. It cannot
 //! perform Discord I/O, persist state, mutate legacy stores, or replace legacy
 //! authority. A later slice must provide separately reviewed adapter wiring.
+#![cfg(test)]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Candidate {
