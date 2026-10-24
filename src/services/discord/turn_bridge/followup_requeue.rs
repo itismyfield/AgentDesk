@@ -27,6 +27,7 @@ pub(in crate::services::discord) struct FollowupRequeueOutcome {
     pub(super) requeued: bool,
     pub(super) retry_capped: bool,
     pub(super) notice_message_id: MessageId,
+    pub(super) preparation_held: bool,
 }
 
 /// Proof produced only after the bounded terminal projection future settles.
@@ -53,8 +54,9 @@ impl TerminalProjectionSettled {
         channel_id: ChannelId,
         reason: &'static str,
     ) -> bool {
-        let queue_eligible =
-            outcome.is_none_or(|outcome| outcome.requeued && !outcome.retry_capped);
+        let queue_eligible = outcome.is_none_or(|outcome| {
+            outcome.requeued && !outcome.retry_capped && !outcome.preparation_held
+        });
         completion_guard.note_terminal_projection_settled(true);
         completion_guard.note_terminal_disposition_settled(queue_eligible);
         schedule_retry_if_eligible(outcome, shared, provider, channel_id, reason)
@@ -71,7 +73,7 @@ fn schedule_retry_if_eligible(
     let Some(outcome) = outcome else {
         return false;
     };
-    if !outcome.requeued || outcome.retry_capped {
+    if !outcome.requeued || outcome.retry_capped || outcome.preparation_held {
         return false;
     }
     super::super::schedule_deferred_idle_queue_kickoff(
@@ -93,16 +95,15 @@ pub(in crate::services::discord) struct BusyAttempt<'a> {
 
 pub(in crate::services::discord) async fn requeue_if_needed(
     outcome: &mut Option<FollowupRequeueOutcome>,
-    requeue_candidate: bool,
-    already_pending: bool,
-    shared_owned: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
+    flags: (bool, bool),
+    context: (&Arc<SharedData>, &ProviderKind, ChannelId),
     inflight_state: &InflightTurnState,
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
     attempt: BusyAttempt<'_>,
 ) {
+    let (requeue_candidate, already_pending) = flags;
+    let (shared_owned, provider, channel_id) = context;
     if !requeue_candidate
         || already_pending
         || inflight_state
@@ -129,183 +130,9 @@ pub(in crate::services::discord) async fn requeue_if_needed(
     );
 }
 
-pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit_timeout(
-    shared_owned: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
-    dispatch_id: Option<&str>,
-    adk_session_key: Option<&str>,
-    attempt: BusyAttempt<'_>,
-) -> FollowupRequeueOutcome {
-    let notice_message_id = super::super::busy_followup_retry_store::bind_notice_if_absent(
-        provider,
-        channel_id.get(),
-        inflight_state.effective_busy_followup_retry_user_msg_id(),
-        inflight_state.current_msg_id,
-    )
-    .map(|state| MessageId::new(state.notice_message_id))
-    .unwrap_or_else(|error| {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
-            error = %error,
-            "failed to bind busy follow-up notice; using current placeholder"
-        );
-        MessageId::new(inflight_state.current_msg_id)
-    });
-    // A pane protecting a person's draft refused this input, not a busy turn.
-    let held = inflight_state
-        .tmux_session_name
-        .as_deref()
-        .filter(|session| crate::services::claude_tui::composer_lock::draft_guarded(session));
-    let mut sources = inflight_state.source_message_ids.clone();
-    sources.push(inflight_state.user_msg_id);
-    let retry_decision = match super::super::busy_followup_retry_store::record_attempt(
-        provider,
-        (
-            channel_id.get(),
-            inflight_state.effective_busy_followup_retry_user_msg_id(),
-            notice_message_id.get(),
-        ),
-        &sources,
-        attempt.cost,
-        held,
-    ) {
-        Ok(decision) => decision,
-        // An unrecorded failure must not become a free retry: keep the inflight turn instead.
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                error = %error,
-                "busy follow-up retry budget not recorded; preserving inflight without requeue"
-            );
-            return FollowupRequeueOutcome {
-                requeued: false,
-                retry_capped: false,
-                notice_message_id,
-            };
-        }
-    };
-    if retry_decision.capped {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
-            "Claude TUI busy follow-up aggregate retry cap reached; preserving entry without kickoff"
-        );
-    }
-    let requeue_outcome = super::super::mailbox_requeue_inflight_for_followup_retry(
-        shared_owned,
-        provider,
-        channel_id,
-        inflight_state,
-    )
-    .await;
-    let requeue_refusal_reason = requeue_outcome.refusal_reason.map(|reason| reason.as_str());
-    tracing::info!(
-        provider = %provider.as_str(),
-        channel_id = channel_id.get(),
-        user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
-        requeue_enqueued = requeue_outcome.enqueued,
-        requeue_merged = requeue_outcome.merged,
-        requeue_refusal_reason = requeue_refusal_reason.unwrap_or("none"),
-        requeue_persistence_error = requeue_outcome.persistence_error.as_deref().unwrap_or("none"),
-        "claude_tui follow-up pre-submit timeout: requeue attempt completed"
-    );
-    crate::services::observability::emit_inflight_lifecycle_event(
-        provider.as_str(),
-        channel_id.get(),
-        dispatch_id,
-        adk_session_key,
-        Some(attempt.turn_id),
-        "claude_tui_followup_pre_submit_requeue",
-        serde_json::json!({
-            "user_msg_id": inflight_state.effective_busy_followup_retry_user_msg_id(),
-            "requeue_enqueued": requeue_outcome.enqueued,
-            "requeue_merged": requeue_outcome.merged,
-            "requeue_refusal_reason": requeue_refusal_reason,
-            "requeue_persistence_error": requeue_outcome.persistence_error,
-        }),
-    );
-
-    let retry_present_or_accepted = retry_present_or_accepted(&requeue_outcome);
-    if retry_present_or_accepted {
-        if should_publish_queue_marker(&requeue_outcome)
-            && let Some(http) = shared_owned.serenity_http_or_token_fallback()
-        {
-            let message_id =
-                MessageId::new(inflight_state.effective_busy_followup_retry_user_msg_id());
-            let queued_generation = super::super::mailbox_snapshot(shared_owned, channel_id)
-                .await
-                .intervention_queue
-                .iter()
-                .find_map(|intervention| {
-                    intervention
-                        .source_message_queued_generations()
-                        .into_iter()
-                        .find(|source| source.message_id == message_id)
-                        .map(|source| source.queued_generation)
-                })
-                .unwrap_or(shared_owned.restart.current_generation);
-            let queue_marker = if requeue_outcome.merged {
-                super::super::queue_reactions::QUEUE_MERGED_PENDING_REACTION
-            } else {
-                super::super::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION
-            };
-            let delivered = super::super::queue_marker::note_added_queued_generation(
-                shared_owned,
-                &http,
-                channel_id,
-                message_id,
-                queue_marker,
-                queued_generation,
-                "claude_tui_followup_requeue_inflight",
-            )
-            .await;
-            super::super::outbound::reaction_control::ensure_queue_reaction_or_fallback_http(
-                &http,
-                channel_id,
-                shared_owned,
-                message_id,
-                delivered,
-            )
-            .await;
-            let still_queued = super::super::mailbox_snapshot(shared_owned, channel_id)
-                .await
-                .intervention_queue
-                .iter()
-                .any(|intervention| {
-                    intervention.message_id == message_id
-                        || intervention.source_message_ids.contains(&message_id)
-                });
-            if !still_queued {
-                super::super::queue_marker::note_removed_queued_generation(
-                    shared_owned,
-                    &http,
-                    channel_id,
-                    message_id,
-                    queue_marker,
-                    queued_generation,
-                    "claude_tui_followup_requeue_self_heal",
-                )
-                .await;
-            }
-        }
-    }
-    // Watched before any cap: one that comes later by elapsed time alone has no requeue to start it.
-    if let Some(session) = held.filter(|_| retry_present_or_accepted) {
-        let (shared, provider) = (shared_owned.clone(), provider.clone());
-        watch_draft_release(shared, provider, channel_id, session.to_string());
-    }
-    FollowupRequeueOutcome {
-        requeued: retry_present_or_accepted,
-        retry_capped: retry_decision.capped,
-        notice_message_id,
-    }
-}
+mod attempt;
+pub(in crate::services::discord) mod preparation_notice;
+pub(in crate::services::discord) use attempt::requeue_claude_tui_followup_pre_submit_timeout;
 
 pub(in crate::services::discord) mod draft_release;
 use draft_release::watch_draft_release;
@@ -351,6 +178,7 @@ fn rewatch_matching_draft_holds(
             .is_some_and(|ids| ids.contains(&input))
         {
             let _binding_guard = super::super::tmux_watcher_registry::lock_tmux_watcher_registry();
+            let legacy = session.is_none();
             let Some(session) = session.or_else(|| {
                 shared
                     .tmux_watchers
@@ -360,6 +188,14 @@ fn rewatch_matching_draft_holds(
             }) else {
                 continue;
             };
+            if legacy
+                && super::super::busy_followup_retry_store::bind_legacy_draft_session(
+                    provider, channel, input, &session,
+                )
+                .is_err()
+            {
+                continue;
+            }
             guard_draft(&session, DraftGuard::RecoveryRequired);
             watch_draft_release(shared.clone(), provider.clone(), channel_id, session);
         }
@@ -407,6 +243,28 @@ mod tests {
             _temp: temp,
             previous,
         }
+    }
+
+    fn bind_watch_session(session: &str, path: &std::path::Path) {
+        if !path.exists() {
+            std::fs::write(
+                path,
+                "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"sessionId\":\"s\"}\n",
+            )
+            .unwrap();
+        }
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            session,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("s".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
     }
 
     fn inflight(channel_id: ChannelId, message_id: MessageId) -> InflightTurnState {
@@ -679,6 +537,7 @@ mod tests {
             message_id.get(),
         );
         let capped = FollowupRequeueOutcome {
+            preparation_held: false,
             requeued: true,
             retry_capped: true,
             notice_message_id: message_id,
@@ -857,6 +716,7 @@ mod tests {
         let idle = dir.path().join("idle.jsonl");
         let turn = r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#;
         std::fs::write(&idle, format!("{turn}\n")).expect("idle transcript");
+        bind_watch_session(&session, &idle);
         guard_draft(&session, DraftGuard::RecoveryRequired);
         let stashed = idle_pane(&format!("{:>58}", "\u{203a} stashed"));
         let (refused, writes) = submit_follow_up(&session, &stashed, &idle, "queued follow-up");
@@ -894,11 +754,8 @@ mod tests {
         let mut outcome = None;
         requeue_if_needed(
             &mut outcome,
-            candidate,
-            false,
-            &shared,
-            &provider,
-            channel_id,
+            (candidate, false),
+            (&shared, &provider, channel_id),
             &state,
             None,
             None,
@@ -906,7 +763,7 @@ mod tests {
         )
         .await;
         let outcome = outcome.expect("requeued");
-        assert!(outcome.requeued && outcome.retry_capped);
+        assert!(outcome.requeued && outcome.preparation_held && !outcome.retry_capped);
         let (boundary, ()) = TerminalProjectionSettled::after(async {}).await;
         let completion_guard = super::guards::CompletionGuard::for_completion_test(
             shared.clone(),
@@ -950,7 +807,7 @@ mod tests {
             vec![message_id.get() - 7, message_id.get()],
         )];
         assert_eq!(queued().await, preserved);
-        assert!(retries::is_capped(
+        assert!(!retries::is_capped(
             &provider,
             channel_id.get(),
             message_id.get()
@@ -1061,6 +918,7 @@ mod tests {
         let idle = dir.path().join("idle.jsonl");
         let turn = r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#;
         std::fs::write(&idle, format!("{turn}\n")).expect("idle transcript");
+        bind_watch_session(&session, &idle);
         let t0 = 1_800_000_000_000;
         retries::set_clock_for_tests(Some(t0));
         // Rows Claude Code 2.1.292 draws: the draft stashed, back in the composer, then the idle
@@ -1116,12 +974,15 @@ mod tests {
             )
             .await;
             assert!(outcome.requeued, "{turn_id}");
-            assert_eq!(outcome.retry_capped, secs > 0, "{turn_id}");
+            assert!(
+                !outcome.retry_capped && outcome.preparation_held,
+                "{turn_id}"
+            );
         }
         let watch = (channel_id.get(), session.clone());
         assert!(draft_release_watches().contains(&watch));
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-        let blocked = AutomaticQueueProgression::BlockedByCappedRetries;
+        let blocked = AutomaticQueueProgression::BlockedByUnreadableRetryState;
         let progression = automatic_progression(&shared, &provider, channel_id, &snapshot);
         assert_eq!(progression, blocked);
 
@@ -1272,6 +1133,74 @@ mod tests {
             b"{"
         );
     }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a2_release_survives_sid_rehydration_between_polls() {
+        use crate::services::discord::busy_followup_retry_store as retries;
+        use crate::services::tui_prompt_dedupe;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(100_000_007_314_281);
+        let input = channel.get() + 1;
+        let session = format!("a2-release-sid-{}", uuid::Uuid::new_v4());
+        bind_watch_session(&session, &_root._temp.path().join("watch.jsonl"));
+        let mut binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&session).unwrap();
+        binding.session_id = None;
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding.clone());
+        retries::record_attempt(
+            &provider,
+            (channel.get(), input, input + 100),
+            &[],
+            std::time::Duration::ZERO,
+            Some(&session),
+        )
+        .unwrap();
+        let row = inflight(channel, MessageId::new(input));
+        assert!(
+            retries::requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
+                .await
+                .enqueued
+        );
+        let kicks = Arc::new(std::sync::Mutex::new(0));
+        let record = kicks.clone();
+        let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
+            Arc::new(move |_, _, _, _| {
+                let record = record.clone();
+                Box::pin(async move {
+                    *record.lock().unwrap() += 1;
+                    Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
+                        started: false,
+                    })
+                })
+            }),
+        );
+        crate::services::claude_tui::composer_lock::guard_draft(
+            &session,
+            crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
+        );
+        watch_draft_release(shared, provider.clone(), channel, session.clone());
+        tokio::task::yield_now().await;
+        binding.session_id = Some("rehydrated-sid".into());
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+        assert_eq!(
+            crate::services::claude_tui::composer_lock::composer_admission(&session, || {
+                Some(crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view("", false))
+            }),
+            crate::services::claude_tui::composer_lock::ComposerAdmission::Any
+        );
+        tokio::time::sleep(DRAFT_RELEASE_POLL + std::time::Duration::from_millis(1)).await;
+        assert!(
+            !retries::load(&provider, channel.get(), input)
+                .unwrap()
+                .draft_hold,
+            "same pane SID rehydration must release exactly one held input"
+        );
+        assert!(!draft_release_watches().contains(&(channel.get(), session.clone())));
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert_eq!(*kicks.lock().unwrap(), 1, "one release gives one kickoff");
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    }
 
     /// A release pass that fails a step keeps the watch, and the next clean pass resets every held
     /// input with its notice kept and kicks the queue once.
@@ -1306,12 +1235,25 @@ mod tests {
             let channel = ChannelId::new(100_000_005_845_201 + 10 * index as u64);
             // Never protected: each poll reads the pane as recovered at once.
             let session = format!("release-retry-{index}-{}", uuid::Uuid::new_v4().simple());
+            bind_watch_session(
+                &session,
+                &_root._temp.path().join(format!("{session}.jsonl")),
+            );
             let inputs = [channel.get() + 1, channel.get() + 2];
             for input in inputs {
                 let ids = (channel.get(), input, input + 100);
                 let held = Some(session.as_str());
                 retries::record_attempt(&provider, ids, &[], std::time::Duration::ZERO, held)
                     .expect("held retry");
+            }
+            for input in inputs {
+                let mut row = inflight(channel, MessageId::new(input));
+                row.user_text = format!("held source {input}");
+                assert!(
+                    retries::requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
+                        .await
+                        .enqueued
+                );
             }
             retries::fail_release_steps_for_tests(faults);
             watch_draft_release(shared.clone(), provider.clone(), channel, session.clone());

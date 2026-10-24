@@ -300,6 +300,7 @@ pub(super) async fn finish_admitted_local(
         (queued_drain, queued),
         preloaded_uploads,
         voice_announcement,
+        false,
     )
     .await
 }
