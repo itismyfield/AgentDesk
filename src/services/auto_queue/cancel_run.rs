@@ -294,7 +294,9 @@ async fn self_heal_orphan_dispatched_entries_without_slot_pg(
             })?;
             continue;
         }
-        let _ = sqlx::query(
+        // A failed statement aborts the PG transaction and COMMIT then rolls back
+        // silently, so the audit row's error must fail the repair (#7347 L2).
+        sqlx::query(
             "INSERT INTO auto_queue_entry_transitions (
                 entry_id,
                 from_status,
@@ -305,7 +307,10 @@ async fn self_heal_orphan_dispatched_entries_without_slot_pg(
         .bind(&entry_id)
         .bind(trigger_source)
         .execute(&mut *tx)
-        .await;
+        .await
+        .map_err(|error| {
+            format!("record postgres orphan dispatched repair transition {entry_id}: {error}")
+        })?;
         tx.commit().await.map_err(|error| {
             format!("commit postgres orphan dispatched repair {entry_id}: {error}")
         })?;
@@ -403,7 +408,7 @@ async fn transition_entry_to_skipped_pg(
     // without inserting here makes the cancelled entry's dispatch lineage
     // unrecoverable post-cancel.
     if let Some(previous_dispatch_id) = previous_dispatch_id.as_deref() {
-        let _ = sqlx::query(
+        sqlx::query(
             "INSERT INTO auto_queue_entry_dispatch_history (
                  entry_id, dispatch_id, trigger_source
              )
@@ -415,7 +420,10 @@ async fn transition_entry_to_skipped_pg(
         .bind(previous_dispatch_id)
         .bind(trigger_source)
         .execute(&mut *tx)
-        .await;
+        .await
+        .map_err(|error| {
+            format!("record postgres dispatch history for skipped entry {entry_id}: {error}")
+        })?;
     }
 
     let changed = sqlx::query(
@@ -440,7 +448,7 @@ async fn transition_entry_to_skipped_pg(
         return Ok(false);
     }
 
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO auto_queue_entry_transitions (
             entry_id,
             from_status,
@@ -452,7 +460,8 @@ async fn transition_entry_to_skipped_pg(
     .bind(&current_status)
     .bind(trigger_source)
     .execute(&mut *tx)
-    .await;
+    .await
+    .map_err(|error| format!("record postgres entry skip transition {entry_id}: {error}"))?;
 
     tx.commit()
         .await

@@ -535,6 +535,7 @@ db::campaigns::tests::postgres_campaign_revision_prune_keeps_newest_by_rank_acro
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_completed_sidecar_pg
 db::campaigns::tests::postgres_live_status_keeps_older_worker_with_latest_pending_sidecar_pg
 db::campaigns::tests::postgres_live_status_reads_the_issue_card_without_touching_the_ledger_pg
+db::discarded_tx_result_scan_tests::transaction_statements_never_discard_their_result
 db::dispatch_semaphores::tests::required_semaphore_names_accepts_object_and_singular_forms
 db::dispatch_semaphores::tests::required_semaphore_names_reads_required_namespace
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_actor_pin_missing_insert_and_retry_pg
@@ -11467,6 +11468,7 @@ services::gemini::path_expansion_tests::expand_gemini_working_dir_reuses_runtime
 services::git::commit_resolver::fail_closed_tests::git_tracked_change_paths_strict_fails_closed_on_non_repo_dir
 services::git::repo_resolver::no_repo_mapping_classification_tests::classifies_the_no_mapping_error_as_suppressible
 services::git::repo_resolver::no_repo_mapping_classification_tests::keeps_persistent_misconfiguration_errors_as_real_warns
+services::git::runner::tests::preview_text_truncates_multibyte_stderr_on_a_char_boundary
 services::git::runner::tests::run_text_captures_stdout
 services::git::runner::tests::status_error_preserves_stderr
 services::git::worktree_resolver::automation_worktree_tests::branch_name_format
