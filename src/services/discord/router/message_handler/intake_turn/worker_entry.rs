@@ -71,6 +71,7 @@ pub(crate) async fn execute_intake_turn_core(
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).
         None,
+        true,
     )
     .await
 }

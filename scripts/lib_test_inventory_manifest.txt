@@ -7212,6 +7212,10 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::wor
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_begin_ack_loss_keeps_original_delivery_without_success_or_retry_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_lookup_failure_keeps_original_delivery_without_input_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_malformed_sql_sources_hold_claimed_custody_without_failure_or_child_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_save_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::durable_worker_and_exact_retry_preserve_legacy_rendered_bytes
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::identical_legacy_and_raw_bytes_keep_distinct_semantics_through_real_queue_pg
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::handoff_ownership_guard_ignores_comments
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
@@ -7449,6 +7453,10 @@ services::discord::router::message_handler::watchdog::host_tests::a_scheduled_pa
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
 services::discord::router::queue_status_presentation::tests::queued_user_messages_never_render_status_cards
+services::discord::router::response_format::retry_prompt_context::tests::empty_raw_wire_keeps_plain_text_eligibility_but_actual_context_does_not
+services::discord::router::response_format::retry_prompt_context::tests::fresh_user_wire_like_bytes_are_preserved_inside_raw_envelope
+services::discord::router::response_format::retry_prompt_context::tests::same_bytes_keep_raw_and_legacy_provenance_across_restart
+services::discord::router::response_format::retry_prompt_context::tests::six_requeues_and_restarts_render_one_wip_with_exact_raw_bytes
 services::discord::router::response_format::tests::absent_voluntary_feedback_reminder_leaves_reply_context_unchanged
 services::discord::router::response_format::tests::absent_wip_warning_leaves_reply_context_unchanged_when_worktree_clean
 services::discord::router::response_format::tests::issue_4310_sak_layer_is_independent_of_memory_backend_state
@@ -10110,6 +10118,9 @@ services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_flags_and_outcomes
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_suppresses_o_owned_and_unresolved_identity_summaries
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::suspended_panel_projection_rechecks_summary_authority_without_consuming_the_latch
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::native_receipt_requires_current_offset_complete_line_and_exact_folded_bytes
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::no_submit_notice_and_foreign_user_record_do_not_generate_next_wip
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::process_completion_keeps_reminders_without_a_tui_receipt_snapshot
 services::discord::turn_bridge::context::tests::completion_waiter_guard_follows_code_not_comments_or_quoted_copies
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded

@@ -160,6 +160,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
   --skip services::discord::router::message_handler::intake_turn::replay_start_tests
+  --skip services::discord::router::message_handler::intake_turn::retry_prompt::tests
   --skip services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::tests
@@ -635,6 +636,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_gate::busy_inject::payload_tests::failed_download_existing_error_never_reaches_injection
   services::discord::router::intake_gate::busy_inject::payload_tests::incomplete_uploads_and_unresolved_voice_never_attempt_pane_input
   services::discord::router::intake_gate::busy_inject::payload_tests::normal_busy_voice_spec_keeps_readable_ref_uploads_and_no_accepted_payload
+  services::discord::router::message_handler::intake_turn::retry_prompt::tests::durable_worker_and_exact_retry_preserve_legacy_rendered_bytes
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read

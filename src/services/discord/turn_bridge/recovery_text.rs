@@ -330,6 +330,7 @@ pub(in crate::services::discord) fn store_voluntary_feedback_reminder(
 /// exactly one turn (no duplicate injection on turn N+2 unless a fresh reminder
 /// is stashed). Mirrors `take_session_retry_context_for_turn_with_audit`'s
 /// KV-then-PG-fallback take, minus the audit stamping.
+#[cfg(test)]
 pub(in crate::services::discord) fn take_voluntary_feedback_reminder(
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,
@@ -405,6 +406,7 @@ pub(in crate::services::discord) fn store_turn_end_wip_warning(
 /// One-shot take: reads and deletes the stashed WIP warning so it is injected
 /// into exactly one turn. If the worktree is still dirty at that turn's end a
 /// fresh warning is re-stashed, so the nudge self-refreshes while WIP persists.
+#[cfg(test)]
 pub(in crate::services::discord) fn take_turn_end_wip_warning(
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,

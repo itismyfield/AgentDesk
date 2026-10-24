@@ -73,7 +73,7 @@ pub(crate) struct IntakeSubmission {
     pub(crate) origin: IntakeOrigin,
     pub(crate) preserve_on_cancel: bool,
     pub(crate) has_nonportable_uploads: bool,
-    pub(crate) attachments: Vec<message_handler::AttachmentDescriptor>,
+    pub(super) attachments: Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
@@ -393,6 +393,11 @@ pub(crate) async fn admit_text_intake(
         )
         .sources
     });
+    let routed_reply_context =
+        super::response_format::retry_prompt_context::RetryPromptContext::for_routing(
+            request.reply_context.clone(),
+            matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
+        );
     let ctx = IntakeRouterContext {
         mode,
         leader_instance_id: &self_instance_id,
@@ -404,7 +409,7 @@ pub(crate) async fn admit_text_intake(
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&request.request_owner_name),
         user_text: &request.user_text,
-        reply_context: request.reply_context.as_deref(),
+        reply_context: routed_reply_context.as_deref(),
         has_reply_boundary: request.has_reply_boundary,
         dm_hint: request.dm_hint,
         turn_kind,

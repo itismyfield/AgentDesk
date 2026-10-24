@@ -230,6 +230,7 @@ src/services/discord/router/message_handler/codex_resume_companion_queue_tests.r
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
+src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs
@@ -661,6 +662,7 @@ services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_
 services::discord::router::message_handler::intake_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests
+services::discord::router::message_handler::intake_turn::retry_prompt::tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation
@@ -2233,6 +2235,9 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::wor
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_begin_ack_loss_keeps_original_delivery_without_success_or_retry_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_late_lookup_failure_keeps_original_delivery_without_input_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::worker_entry_tests::b_worker_malformed_sql_sources_hold_claimed_custody_without_failure_or_child_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::borrowed_preludes_survive_six_requeues_disk_restart_and_first_inflight_save_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::identical_legacy_and_raw_bytes_keep_distinct_semantics_through_real_queue_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_codex_launch_that_never_sent_its_create_is_followed_by_one_fresh_launch_pg
