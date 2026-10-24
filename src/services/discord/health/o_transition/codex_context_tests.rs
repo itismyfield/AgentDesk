@@ -193,6 +193,15 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
         &fixture.context.execution_nonce,
     )
     .unwrap();
+    let mut pending = fixture.context.clone();
+    pending.execution_nonce = "b".repeat(32);
+    pending.created_at = chrono::Utc::now();
+    let pending = PreparedIncarnation::create(pending).unwrap();
+    assert!(
+        fixture.observe(&prepared).is_err(),
+        "new prepared context changes census"
+    );
+    std::fs::remove_file(pending.path).unwrap();
     std::fs::write(
         fixture.bin.path().join("tmux"),
         format!(

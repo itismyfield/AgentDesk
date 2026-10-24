@@ -63,6 +63,9 @@ pub(super) fn read(
     host: &HostInventory,
 ) -> Result<(Vec<Pane>, String), String> {
     let contexts = binding_context::inventory("codex", LIMIT)?;
+    if !contexts.contains(context) {
+        return Err("current canonical context absent from census".into());
+    }
     let owners: Vec<_> = shared
         .tmux_watchers
         .authoritative_session_bindings(ChannelId::new(target.channel))
