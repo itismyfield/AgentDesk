@@ -501,15 +501,7 @@ pub(crate) struct PaneState {
 }
 
 fn modal(capture: &str) -> bool {
-    use crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog;
-    use crate::services::tmux_common::{
-        tmux_capture_indicates_claude_tui_interactive_modal,
-        tmux_capture_indicates_claude_tui_mcp_auth_required,
-    };
-    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
-    detect_claude_startup_dialog(&plain).is_some()
-        || tmux_capture_indicates_claude_tui_interactive_modal(&plain)
-        || tmux_capture_indicates_claude_tui_mcp_auth_required(&plain)
+    screen::modal(capture)
 }
 
 enum Plan {

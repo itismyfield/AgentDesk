@@ -1,7 +1,7 @@
 //! The stash path: park a person's draft in Claude's single stash slot, submit the frame, and
 //! watch Claude hand the draft back on the submit. No key is ever retried.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::super::composer_lock::DraftGuard;
 use super::screen::{self, Composer, Stash};
@@ -156,10 +156,20 @@ fn await_restore(
     draft: &[String],
     last: &mut Option<String>,
 ) -> DraftState {
-    let deadline = Instant::now() + attempt.timing().restore_window;
+    let started = Instant::now();
+    let mut deadline = started + attempt.timing().restore_window;
+    // Measured on Claude Code 2.1.309: the folded-paste hint can last 8.09 seconds.
+    let hint_deadline = started + attempt.timing().restore_window.max(Duration::from_secs(9));
     loop {
         if let Some(capture) = attempt.capture() {
             let back = screen::restored(&capture, draft);
+            let observed = screen::read(&capture);
+            let pending_hint = observed.footer == screen::Footer::PasteExpand
+                && observed.stash == Stash::AbsentInRecognizedLayout
+                && matches!(&observed.composer, Composer::Text(rows) if rows == draft);
+            if pending_hint {
+                deadline = hint_deadline;
+            }
             *last = Some(capture);
             if back {
                 return DraftState::RestoredObserved;

@@ -718,6 +718,7 @@ src/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
+│   │   │   │   ├── a1_stash_tests.rs
 │   │   │   │   ├── hold_tests.rs
 │   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
@@ -769,6 +770,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
+│   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
 │   │   │   ├── literal_chunks.rs
 │   │   │   ├── submission.rs

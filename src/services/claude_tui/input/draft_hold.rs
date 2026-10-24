@@ -82,7 +82,10 @@ pub(crate) fn stranded_draft_is_ours(
     super::guarded_outcome::held_result(session_name)
         .map_err(super::SubmissionError::into_legacy)?;
     let capture = host_input::observe_draft(session_name);
-    match capture.as_deref().map(composer_owner) {
+    match capture
+        .as_deref()
+        .map(|capture| super::super::busy_inject::composer_owner_in_session(session_name, capture))
+    {
         Some(ComposerOwner::Empty) => Ok(false),
         Some(ComposerOwner::AgentDesk) => Ok(true),
         _ => Err(held(session_name, readiness, capture.as_deref())),
@@ -108,3 +111,7 @@ pub(super) fn dismiss_startup_dialog(
         run_actions(session_name, &[TuiInputAction::Enter], cancel_token)
     })
 }
+
+#[cfg(test)]
+#[path = "draft_hold_session_tests.rs"]
+mod draft_hold_session_tests;
