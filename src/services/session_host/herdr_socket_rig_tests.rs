@@ -78,7 +78,7 @@ impl ProcessOs for LateOs {
 }
 
 /// Results a test put in place of the default reply, by method.
-type Answers = Arc<Mutex<HashMap<String, Value>>>;
+type Answers = Arc<Mutex<HashMap<String, VecDeque<Value>>>>;
 
 /// What a pane write's params do to the pane before the server answers it.
 type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
@@ -132,7 +132,12 @@ fn start(seconds: u64) -> ProcessStart {
 
 fn reply(request: &Value, answers: &Answers) -> Value {
     let method = request["method"].as_str().unwrap_or("");
-    if let Some(result) = answers.lock().unwrap().get(method) {
+    if let Some(results) = answers.lock().unwrap().get_mut(method) {
+        let result = if results.len() > 1 {
+            results.pop_front().unwrap()
+        } else {
+            results.front().unwrap().clone()
+        };
         return json!({"id": request["id"], "result": result});
     }
     let result = match method {
@@ -359,7 +364,14 @@ impl HerdrRig {
 
     /// Replies with `result` to every later `method` request.
     pub(crate) fn answer(&self, method: &str, result: Value) {
-        self.answers.lock().unwrap().insert(method.into(), result);
+        self.answer_sequence(method, [result]);
+    }
+
+    /// Replies in order, then repeats the last response for every later request.
+    pub(crate) fn answer_sequence(&self, method: &str, results: impl IntoIterator<Item = Value>) {
+        let results: VecDeque<_> = results.into_iter().collect();
+        assert!(!results.is_empty(), "a scripted response must not be empty");
+        self.answers.lock().unwrap().insert(method.into(), results);
     }
 
     /// Replies with `result` to every `method` request after the next pane write.

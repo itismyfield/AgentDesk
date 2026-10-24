@@ -492,7 +492,7 @@ pub async fn startup_doctor_latest_handler(
         .into_response();
     }
 
-    Json(crate::cli::doctor::startup::latest_startup_doctor_response_json()).into_response()
+    Json(crate::cli::doctor::startup::doctor_json(&state.config)).into_response()
 }
 
 /// POST /api/doctor/stale-mailbox/repair — protected/local stale mailbox cleanup.
