@@ -31,6 +31,15 @@ impl MockDiscord {
     }
 
     pub(in crate::services::discord) async fn start_with(answer: Answer) -> Self {
+        Self::start_answering(answer, false).await
+    }
+
+    /// [`Self::start_with`], but `answer` sees the query string after the path.
+    pub(in crate::services::discord) async fn start_with_query(answer: Answer) -> Self {
+        Self::start_answering(answer, true).await
+    }
+
+    async fn start_answering(answer: Answer, with_query: bool) -> Self {
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
         let requests: Arc<Mutex<Vec<String>>> = Arc::default();
         let successful_requests: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -52,7 +61,11 @@ impl MockDiscord {
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner())
                         .push(request.clone());
-                    let (status, body) = match answer(&method, uri.path()) {
+                    let target = match uri.path_and_query() {
+                        Some(target) if with_query => target.as_str(),
+                        _ => uri.path(),
+                    };
+                    let (status, body) = match answer(&method, target) {
                         Some(answer) => answer,
                         None if method == Method::DELETE => {
                             recorded_successes

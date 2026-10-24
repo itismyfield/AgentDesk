@@ -2145,18 +2145,17 @@ pub fn loopback() -> String {
     ServerConfig::loopback()
 }
 
-/// Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release
+mod runtime_root_guard;
+
+/// Canonical runtime root; tests default to a process-local temporary directory.
 /// All code that needs the AgentDesk root directory MUST call this function
 /// instead of reimplementing the resolution logic.
 pub fn runtime_root() -> Option<std::path::PathBuf> {
-    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(std::path::PathBuf::from(trimmed));
-        }
-    }
-    dirs::home_dir().map(|h| h.join(".adk").join("release"))
+    runtime_root_guard::resolve(dirs::home_dir)
 }
+
+#[cfg(test)]
+mod runtime_root_tests;
 
 impl Default for PoliciesConfig {
     fn default() -> Self {

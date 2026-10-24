@@ -3115,7 +3115,7 @@ mod local_tmux_lifecycle_tests {
         std::fs::write(temp.path(), b"{\"type\":\"assistant\"}\n").unwrap();
         let transcript_path = temp.path().display().to_string();
         let (sender, receiver) = std::sync::mpsc::channel();
-
+        let _root = crate::config::TestRuntimeRootGuard::new();
         emit_claude_tui_watcher_handoff(&sender, &transcript_path, "claude-tui-test", temp.path());
 
         let message = receiver.recv().unwrap();

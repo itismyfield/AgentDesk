@@ -60,6 +60,8 @@ struct DiscoveredSkill {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SkillRootKind {
+    ManagedDirectory,
+    CachedDirectory,
     Directory,
     MarkdownFile,
 }
@@ -92,7 +94,7 @@ pub(super) fn skill_roots(
             &mut roots,
             &mut seen_roots,
             crate::runtime_layout::managed_skills_root(&runtime_root),
-            SkillRootKind::Directory,
+            SkillRootKind::CachedDirectory,
         );
     }
     if let Some(home) = home {
@@ -102,13 +104,13 @@ pub(super) fn skill_roots(
             home.join("ObsidianVault")
                 .join("RemoteVault")
                 .join("99_Skills"),
-            SkillRootKind::Directory,
+            SkillRootKind::ManagedDirectory,
         );
         push_skill_root(
             &mut roots,
             &mut seen_roots,
             home.join(".adk").join("release").join("skills"),
-            SkillRootKind::Directory,
+            SkillRootKind::CachedDirectory,
         );
         push_skill_root(
             &mut roots,
@@ -161,7 +163,9 @@ fn discover_skills_from_disk() -> DiscoveryResult {
                         None
                     }
                 }
-                SkillRootKind::Directory => codex_skill_file(&path),
+                SkillRootKind::Directory
+                | SkillRootKind::ManagedDirectory
+                | SkillRootKind::CachedDirectory => codex_skill_file(&path),
             };
             let Some(skill_path) = skill_path else {
                 continue;
@@ -171,7 +175,9 @@ fn discover_skills_from_disk() -> DiscoveryResult {
                 SkillRootKind::MarkdownFile => {
                     skill_path.file_stem().and_then(|stem| stem.to_str())
                 }
-                SkillRootKind::Directory => skill_path
+                SkillRootKind::Directory
+                | SkillRootKind::ManagedDirectory
+                | SkillRootKind::CachedDirectory => skill_path
                     .parent()
                     .and_then(|parent| parent.file_name())
                     .and_then(|stem| stem.to_str()),
@@ -636,10 +642,8 @@ pub async fn prune(
                 .with_code(ErrorCode::Database)
         })?;
 
-    // Stale rows are only half the drift: a manifest also pins skills to agent
-    // ids, and an id no agent answers to leaves an assignment that reaches
-    // nobody (#5720). Fail closed - `audited` is false whenever any premise
-    // went unconfirmed, so `findings: []` is never a clean verdict.
+    // The same read-only audit serves doctor, startup warnings and this response.
+    // Unavailable sources remain explicit even when there are no findings.
     let manifest_audit =
         audit_skill_manifest_agents(manifest_audit_request(&state.config, pool).await);
 

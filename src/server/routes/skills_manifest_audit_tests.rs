@@ -22,7 +22,10 @@ fn audit(
         ids(config),
         db.map(ids),
         workspaces.map(ids),
-        manifests,
+        manifests
+            .into_iter()
+            .map(|path| (path, DirectoryScope::OwnManifest))
+            .collect(),
     ))
 }
 
@@ -47,10 +50,7 @@ fn only_the_bare_wildcard_is_reserved() {
 #[test]
 fn union_covers_db_only_ids_and_a_failed_source_stops_grading() {
     let temp = tempfile::tempdir().unwrap();
-    let manifest = manifest_at(
-        temp.path(),
-        r#"{"skills":{"s":{"workspaces":["db-only"]}}}"#,
-    );
+    let manifest = manifest_at(temp.path(), r#"{"skills":{"s":{"agents":["db-only"]}}}"#);
     let walked = Some(&["db-only"][..]);
 
     // Config alone does not know `db-only`; the db half of the union does.
@@ -63,18 +63,14 @@ fn union_covers_db_only_ids_and_a_failed_source_stops_grading() {
     assert!(united.skipped.is_empty(), "{:?}", skips(&united));
     assert!(united.findings.is_empty(), "{:?}", united.findings);
 
-    // Dropping either half of the union has to be visible, or the wiring
-    // could quietly narrow the roster. The narrowed roster no longer answers
-    // for `db-only`, which unconfirms the workspace namespace rather than
-    // manufacturing the finding this assertion used to demand.
     let db_dropped = audit(
         &["cfg-only"],
         Some(&[] as &[&str]),
         walked,
         vec![manifest.clone()],
     );
-    assert!(db_dropped.findings.is_empty(), "{:?}", db_dropped.findings);
-    assert_eq!(skips(&db_dropped), vec![WORKSPACE_NAMESPACE_UNCONFIRMED]);
+    assert_eq!(db_dropped.findings[0]["agent_id"], "db-only");
+    assert!(skips(&db_dropped).is_empty());
 
     let db_failed = audit(&["cfg-only"], None, walked, vec![manifest]);
     assert!(db_failed.findings.is_empty(), "{:?}", db_failed.findings);
@@ -102,7 +98,7 @@ fn an_empty_roster_skips_instead_of_reporting_a_clean_manifest() {
 }
 
 #[test]
-fn a_flat_skip_does_not_swallow_the_nested_entries_beside_it() {
+fn flat_agent_findings_keep_workspace_directory_names_separate() {
     let temp = tempfile::tempdir().unwrap();
     let manifest = manifest_at(
         temp.path(),
@@ -121,22 +117,8 @@ fn a_flat_skip_does_not_swallow_the_nested_entries_beside_it() {
         Some(&["agentdesk"][..]),
         vec![manifest],
     );
-    // `core-skill` pins only the wildcard, so it needs no roster and adds no
-    // skip; `flat-skill` names an agent whose roster lives in Python; and the
-    // nested entry beside them is still reached, which is what this test is
-    // for - a swallowed nested axis would leave the flat skip alone here.
-    //
-    // That nested verdict used to be `findings.len() == 1` on the reading that
-    // a walked directory no agent answers to is a dead id. `workspaces/` is
-    // shared: `repo_resolver` keeps the AgentDesk checkout at
-    // `workspaces/agentdesk` while `agents_setup` creates `workspaces/<id>`,
-    // so this exact shape is also a live checkout under a roster of one other
-    // agent. The premise cannot be confirmed, so it is named instead of graded.
-    assert_eq!(
-        skips(&report),
-        vec![FLAT_ROSTER_UNAVAILABLE, WORKSPACE_NAMESPACE_UNCONFIRMED]
-    );
-    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(skips(&report).is_empty());
+    assert_eq!(report.findings[0]["agent_id"], "ch-td");
 }
 
 #[test]
@@ -208,7 +190,13 @@ fn skill_manifest_paths_takes_directory_roots_only() {
         Some(runtime.path().to_path_buf()),
         Some(home.path().to_path_buf()),
     );
-    assert_eq!(selected, vec![managed, codex]);
+    assert_eq!(
+        selected,
+        vec![
+            (managed, DirectoryScope::AnyManifest),
+            (codex, DirectoryScope::OwnManifest)
+        ]
+    );
 }
 
 #[test]
@@ -223,7 +211,12 @@ fn a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip() {
     let staged = std::fs::read_to_string(&manifest).is_err();
     let selected = skill_manifest_paths(Some(runtime.path().to_path_buf()), None);
     let roster = Some(&["agentdesk"][..]);
-    let report = audit(&["agentdesk"], roster, roster, selected.clone());
+    let report = audit_skill_manifest_agents(build_manifest_audit_request(
+        ids(&["agentdesk"]),
+        roster.map(ids),
+        roster.map(ids),
+        selected.clone(),
+    ));
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
     // A euid the mode bits do not bind cannot stage an unreadable file at all.
     if !staged {
@@ -233,7 +226,7 @@ fn a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip() {
     // `is_file()` answered `false` to the `PermissionDenied` stat and dropped
     // the path, so an existing manifest read as `no_manifest` - the one state
     // that means the file is not there. It reaches its own skip now.
-    assert_eq!(selected, vec![manifest]);
+    assert_eq!(selected, vec![(manifest, DirectoryScope::AnyManifest)]);
     assert_eq!(skips(&report), vec![UNREADABLE_MANIFEST]);
     assert_eq!(report.to_json()["audited"], serde_json::json!(false));
 }
@@ -248,7 +241,8 @@ fn a_padded_wildcard_is_not_the_wildcard_the_distributor_reserves() {
     // that comparison folded it into the one token that needs no roster.
     let padded = manifest_at(&temp.path().join("padded"), r#"{"s":{"agents":[" * "]}}"#);
     let report = audit(&["agentdesk"], roster, roster, vec![padded]);
-    assert_eq!(skips(&report), vec![FLAT_ROSTER_UNAVAILABLE]);
+    assert!(skips(&report).is_empty());
+    assert_eq!(report.findings[0]["agent_id"], " * ");
 
     // The exact `*` keeps its reserved meaning: no roster, no skip.
     let bare = manifest_at(&temp.path().join("bare"), r#"{"s":{"agents":["*"]}}"#);
@@ -261,16 +255,14 @@ fn both_keys_are_answered_in_both_manifest_locations() {
     let temp = tempfile::tempdir().unwrap();
     let roster = Some(&["agentdesk"][..]);
 
-    // `skills[*].agents` is the flat key inside the named map. It parsed and
-    // then reached neither a grade nor a skip, so this manifest serialized as
-    // audited-clean with an agent id nothing had looked for.
     let named_flat = manifest_at(
         &temp.path().join("named-flat"),
         r#"{"version":1,"skills":{"s":{"agents":["ghost-agent"]}}}"#,
     );
     let report = audit(&["agentdesk"], roster, roster, vec![named_flat]);
-    assert_eq!(skips(&report), vec![FLAT_ROSTER_UNAVAILABLE]);
-    assert_eq!(report.to_json()["audited"], serde_json::json!(false));
+    assert!(skips(&report).is_empty());
+    assert_eq!(report.findings[0]["agent_id"], "ghost-agent");
+    assert_eq!(report.to_json()["audited"], serde_json::json!(true));
 
     // `legacy[*].workspaces` is the nested key inside the flattened map and is
     // graded on the same axis as `skills[*].workspaces`.
@@ -297,4 +289,77 @@ fn manifest_paths_read_the_runtime_root_and_the_process_home() {
         default_manifest_paths(),
         skill_manifest_paths(root, Some(home))
     );
+}
+
+#[test]
+fn agent_globs_and_uninstalled_skills_are_clean_but_real_unlisted_skills_are_findings() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = manifest_at(
+        temp.path(),
+        r#"{"global_core_skills":["core"],"skills":{"future":{"agents":["ch-*","*"]}},"legacy":{"agents":["cfg-only"]}}"#,
+    );
+    for name in ["_shared", ".system", "core"] {
+        let dir = temp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "skill").unwrap();
+    }
+    std::fs::create_dir_all(temp.path().join("not-a-skill/SKILL.md")).unwrap();
+    let report = audit(
+        &["cfg-only"],
+        Some(&["ch-db-only"]),
+        Some(&[]),
+        vec![manifest.clone()],
+    );
+    assert_eq!(report.to_json()["findings"], json!([]));
+    assert_eq!(report.warning(), None);
+    let dir = temp.path().join("real-skill");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "skill").unwrap();
+    let report = audit(
+        &["cfg-only"],
+        Some(&["ch-db-only"]),
+        Some(&[]),
+        vec![manifest],
+    );
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0]["kind"], "unlisted_skill");
+    assert_eq!(report.findings[0]["path"], dir.display().to_string());
+}
+
+#[test]
+fn missing_required_or_installed_source_manifest_is_unavailable_and_never_passes() {
+    let runtime = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let vault = home.path().join("ObsidianVault/RemoteVault/99_Skills");
+    std::fs::create_dir_all(&vault).unwrap();
+    let selected = skill_manifest_paths(
+        Some(runtime.path().to_path_buf()),
+        Some(home.path().to_path_buf()),
+    );
+    assert_eq!(
+        selected,
+        vec![
+            (
+                crate::runtime_layout::managed_skills_manifest_path(runtime.path()),
+                DirectoryScope::AnyManifest
+            ),
+            (vault.join("manifest.json"), DirectoryScope::OwnManifest)
+        ]
+    );
+    let report = audit_skill_manifest_agents(build_manifest_audit_request(
+        ids(&["live"]),
+        Some(ids(&["live"])),
+        Some(ids(&[])),
+        selected,
+    ));
+    assert_eq!(skips(&report), vec![NO_MANIFEST]);
+    assert_eq!(report.to_json()["audited"], false);
+    assert_eq!(
+        report.to_json()["inspection_errors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(report.warning().is_some());
 }
