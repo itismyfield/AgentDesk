@@ -75,10 +75,18 @@ fn capped_draft(channel: u64, session: &str) -> CheckedInputView {
             (channel, 101, 700),
             &[],
             std::time::Duration::ZERO,
-            Some(session),
+            None,
         )
         .unwrap();
     }
+    store::record_attempt(
+        &ProviderKind::Claude,
+        (channel, 101, 700),
+        &[],
+        std::time::Duration::ZERO,
+        Some(session),
+    )
+    .unwrap();
     CheckedInputView::read(&ProviderKind::Claude, channel, 101, &[])
 }
 
@@ -100,18 +108,48 @@ fn bind_idle(session: &str, path: &Path) {
 }
 
 #[cfg(unix)]
-fn rewatch(channel: u64, session: &str) {
+async fn rewatch(
+    channel: u64,
+    session: &str,
+) -> std::sync::Arc<crate::services::discord::SharedData> {
     use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
     guard_draft(session, DraftGuard::DraftRestored);
     let live = std::collections::HashMap::from([(
         serenity::all::ChannelId::new(channel),
         std::collections::HashSet::from([101]),
     )]);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mut state = crate::services::discord::InflightTurnState::new(
+        ProviderKind::Claude,
+        channel,
+        None,
+        1,
+        101,
+        700,
+        "held source".into(),
+        None,
+        Some(session.into()),
+        None,
+        None,
+        0,
+    );
+    state.followup_merge_consecutive = false;
+    assert!(
+        store::requeue_inflight_for_followup_retry(
+            &shared,
+            &ProviderKind::Claude,
+            serenity::all::ChannelId::new(channel),
+            &state
+        )
+        .await
+        .enqueued
+    );
     crate::services::discord::turn_bridge::followup_requeue::rewatch_draft_holds(
-        &crate::services::discord::make_shared_data_for_tests(),
+        &shared,
         &ProviderKind::Claude,
         &live,
     );
+    shared
 }
 
 #[cfg(unix)]
@@ -133,10 +171,10 @@ async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_
     let stale = capped_draft(channel, session);
     assert_eq!(
         stale.classify(),
-        Parked,
-        "no active release path preserves ordinary cap selection"
+        Unavailable(UnavailableReason::IdleDraftRelease),
+        "a preparation hold is unavailable even before observer registration"
     );
-    rewatch(channel, session);
+    let _shared = rewatch(channel, session).await;
     let held = Unavailable(UnavailableReason::IdleDraftRelease);
     assert_eq!(stale.classify(), held);
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session, || {
@@ -166,10 +204,10 @@ async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_
     let reheld = capped_draft(channel, session);
     assert_eq!(
         reheld.classify(),
-        Parked,
-        "same unsupported state cannot block the channel indefinitely"
+        Unavailable(UnavailableReason::IdleDraftRelease),
+        "an unchanged unsupported composer grants no new kickoff"
     );
-    assert_eq!(auto_pick(&[reheld.classify(), Ready]), Some(1));
+    assert_eq!(auto_pick(&[reheld.classify(), Ready]), None);
     assert!(
         events(&pane).is_empty(),
         "classification and the watcher grant no submission authority"
@@ -205,7 +243,7 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
     let pane = renderer(&f, session, "normal");
     bind_idle(session, &pane.join("transcript"));
     let saved = capped_draft(channel, session);
-    rewatch(channel, session);
+    let _shared = rewatch(channel, session).await;
     assert_eq!(
         saved.classify(),
         Unavailable(UnavailableReason::IdleDraftRelease)
@@ -221,7 +259,7 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
         .classify()
     };
     let held = store::load(&ProviderKind::Claude, channel, 101).unwrap();
-    for (name, provider, id, budget) in [
+    for (name, provider, id, budget, expected) in [
         (
             "ordinary cap",
             ProviderKind::Claude,
@@ -230,6 +268,7 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
                 draft_hold: false,
                 ..held.clone()
             },
+            Parked,
         ),
         (
             "legacy without pane",
@@ -239,18 +278,30 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
                 draft_session: None,
                 ..held.clone()
             },
+            Unavailable(UnavailableReason::IdleDraftRelease),
         ),
-        ("other provider", ProviderKind::Codex, channel, held.clone()),
+        (
+            "other provider",
+            ProviderKind::Codex,
+            channel,
+            held.clone(),
+            Parked,
+        ),
         (
             "unlisted channel",
             ProviderKind::Claude,
             channel + 1,
             held.clone(),
+            Unavailable(UnavailableReason::IdleDraftRelease),
         ),
     ] {
         let class = classify(&provider, id, budget);
-        assert_eq!(class, Parked, "{name}");
-        assert_eq!(auto_pick(&[class, Ready]), Some(1), "{name}");
+        assert_eq!(class, expected, "{name}");
+        assert_eq!(
+            auto_pick(&[class, Ready]),
+            (class == Parked).then_some(1),
+            "{name}"
+        );
     }
     assert_eq!(
         classify(
@@ -262,7 +313,7 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
                 ..held.clone()
             }
         ),
-        Ready
+        Unavailable(UnavailableReason::IdleDraftRelease)
     );
     std::fs::write(
         pane.join("transcript"),
@@ -271,17 +322,17 @@ async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps()
     .unwrap();
     assert_eq!(
         saved.classify(),
-        Parked,
-        "a busy pane keeps its existing bypass meaning"
+        Unavailable(UnavailableReason::IdleDraftRelease),
+        "a busy pane does not release a protected source"
     );
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session, || {
         assert_eq!(
             saved.classify(),
-            Parked,
-            "busy lock contention must not change cap selection"
+            Unavailable(UnavailableReason::IdleDraftRelease),
+            "lock contention does not release a protected source"
         );
     });
-    assert_eq!(auto_pick(&[saved.classify(), Ready]), Some(1));
+    assert_eq!(auto_pick(&[saved.classify(), Ready]), None);
     assert!(events(&pane).is_empty());
 }
 
@@ -692,13 +743,13 @@ fn writer_stores_the_latch_and_a_rolled_back_reader_still_reads_it() {
         assert_eq!(stored, held.state);
         assert_eq!(
             (stored.busy_retry_count, stored.first_busy_retry_at_ms),
-            (2, 5_000)
+            (1, 5_000)
         );
         assert_eq!(stored.draft_session.as_deref(), Some("pane"));
         let rolled_back: RolledBack = serde_json::from_slice(&bytes).unwrap();
         let expected = RolledBack {
             notice_message_id: 700,
-            busy_retry_count: 2,
+            busy_retry_count: 1,
             first_busy_retry_at_ms: 5_000,
             draft_hold: true,
         };
@@ -805,5 +856,30 @@ fn classification_refuses_views_and_layers_it_cannot_vouch_for() {
     assert!(
         layers(layer(&[]), layer(&[])),
         "both queues confirmed empty"
+    );
+}
+
+#[test]
+fn a2_preparation_wait_never_spends_busy_retry_budget() {
+    let mut held = None;
+    for _ in 0..12 {
+        held = Some(RetryBudget::charge(
+            held,
+            700,
+            90_000,
+            1_000,
+            Some("held-pane"),
+        ));
+    }
+    let held = held.unwrap();
+    assert_eq!(
+        (held.busy_retry_count, held.active_retry_ms, held.capped),
+        (0, 0, false),
+        "preparation waiting is not a busy attempt"
+    );
+    assert_ne!(
+        classify_reads([&SourceRead::Budget(held)], true),
+        Ready,
+        "a held source must not start an AI turn"
     );
 }

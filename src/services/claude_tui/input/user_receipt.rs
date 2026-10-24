@@ -1,0 +1,404 @@
+//! One submission's open transcript and byte boundary; pane idleness is never its receipt.
+use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
+use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+
+#[derive(Debug)]
+pub(crate) struct UserReceipt {
+    session: String,
+    binding: TuiRuntimeBinding,
+    file: Option<File>,
+    nonce: SpawnNonceMarker,
+    offset: u64,
+    end: Option<u64>,
+    ended: bool,
+    frame: String,
+}
+
+impl UserReceipt {
+    pub(crate) fn before(session: &str, prompt: &str) -> Option<Self> {
+        crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
+            let binding =
+                tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                    authority,
+                )?;
+            if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
+                || binding.session_id.as_deref().is_none_or(str::is_empty)
+            {
+                return None;
+            }
+            Self::snapshot(session, prompt, binding, false)
+        })
+    }
+
+    /// The launch already names its native session and transcript, which may not exist yet.
+    #[cfg(unix)]
+    pub(crate) fn before_fresh(session: &str, prompt: &str, path: &str, sid: &str) -> Option<Self> {
+        crate::services::tmux_common::with_tmux_source_authority(session, |_| {
+            Self::snapshot(
+                session,
+                prompt,
+                TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: path.into(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some(sid.into()),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+                true,
+            )
+        })
+    }
+
+    fn snapshot(
+        session: &str,
+        prompt: &str,
+        binding: TuiRuntimeBinding,
+        allow_missing: bool,
+    ) -> Option<Self> {
+        let nonce = binding_context::observe_spawn_nonce_marker(session);
+        if nonce == SpawnNonceMarker::Unreadable {
+            return None;
+        }
+        let (file, offset) = match open(&binding.output_path) {
+            Ok(mut file) => {
+                let offset = file.seek(SeekFrom::End(0)).ok()?;
+                (Some(file), offset)
+            }
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                (None, 0)
+            }
+            Err(_) => return None,
+        };
+        Some(Self {
+            session: session.into(),
+            binding,
+            file,
+            nonce,
+            offset,
+            end: None,
+            ended: false,
+            frame: prompt.replace("\r\n", "\n").replace('\r', "\n"),
+        })
+    }
+
+    pub(crate) fn seal(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        crate::services::tmux_common::with_tmux_source_authority(&self.session, |authority| {
+            let Some(current) =
+                tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                    authority,
+                )
+            else {
+                return;
+            };
+            if !same_binding(&self.binding, &current)
+                || binding_context::observe_spawn_nonce_marker(&self.session) != self.nonce
+            {
+                return;
+            }
+            if self.file.is_none() {
+                self.file = open(&current.output_path).ok();
+            }
+            let Some(file) = self.file.as_ref() else {
+                return;
+            };
+            if same_file(file, &current.output_path) {
+                self.end = file
+                    .metadata()
+                    .ok()
+                    .map(|m| m.len())
+                    .filter(|end| *end >= self.offset);
+            }
+        });
+    }
+
+    pub(crate) fn confirmed(&mut self) -> bool {
+        let Some(end) = self.end else {
+            return false;
+        };
+        crate::services::tmux_common::with_tmux_source_authority(&self.session, |authority| {
+            let Some(current) =
+                tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                    authority,
+                )
+            else {
+                return false;
+            };
+            if !same_binding(&self.binding, &current)
+                || binding_context::observe_spawn_nonce_marker(&self.session) != self.nonce
+            {
+                return false;
+            }
+            let Some(file) = self.file.as_mut() else {
+                return false;
+            };
+            if !same_file(file, &current.output_path)
+                || !file.metadata().is_ok_and(|m| m.len() >= end)
+                || file.seek(SeekFrom::Start(self.offset)).is_err()
+            {
+                return false;
+            }
+            let mut reader = BufReader::new((&mut *file).take(end - self.offset));
+            let mut line = Vec::new();
+            let mut read = 0;
+            let mut matches = 0;
+            loop {
+                let Ok(n) = reader.read_until(b'\n', &mut line) else {
+                    return false;
+                };
+                if n == 0 {
+                    break;
+                }
+                read += n;
+                if read > 16 * 1024 * 1024 || !line.ends_with(b"\n") {
+                    return false;
+                }
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                    return false;
+                };
+                if record["sessionId"].as_str() == current.session_id.as_deref()
+                    && let Some(text) = user_text(&record)
+                    && super::super::busy_inject::exact_receipt(&text, &self.frame)
+                {
+                    matches += 1;
+                }
+                line.clear();
+            }
+            matches == 1 && same_file(file, &current.output_path)
+        })
+    }
+}
+
+fn open(path: &str) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("transcript is not a regular file"));
+    }
+    Ok(file)
+}
+
+fn same_binding(a: &TuiRuntimeBinding, b: &TuiRuntimeBinding) -> bool {
+    (a.runtime_kind, &a.output_path, &a.session_id)
+        == (b.runtime_kind, &b.output_path, &b.session_id)
+}
+
+fn same_file(file: &File, path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (file.metadata(), std::fs::symlink_metadata(path)) {
+            (Ok(a), Ok(b)) => b.is_file() && a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        false
+    }
+}
+
+fn user_text(record: &serde_json::Value) -> Option<String> {
+    if record["type"] != "user" || record["isMeta"] == true || record["isSidechain"] == true {
+        return None;
+    }
+    let content = &record["message"]["content"];
+    if let Some(text) = content.as_str() {
+        return Some(text.into());
+    }
+    let blocks = content.as_array()?;
+    blocks
+        .iter()
+        .map(|b| (b["type"] == "text").then(|| b["text"].as_str()).flatten())
+        .collect::<Option<Vec<_>>>()
+        .map(|v| v.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+
+    #[test]
+    #[cfg(unix)]
+    fn a2_fresh_receipt_keeps_the_boundary_before_transcript_creation() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.jsonl");
+        let session = format!("a2-fresh-receipt-{}", uuid::Uuid::new_v4());
+        let mut receipt =
+            UserReceipt::before_fresh(&session, "fresh input", path.to_str().unwrap(), "sid")
+                .unwrap();
+        assert!(!receipt.confirmed());
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user", "sessionId":"sid", "message":{"content":"fresh input"}})
+            ),
+        )
+        .unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("sid".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        receipt.seal();
+        assert!(receipt.confirmed());
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    }
+
+    #[test]
+    fn a2_receipt_requires_one_new_exact_user_on_the_same_binding_and_file() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let frame = "원문\n첫째 줄 · 7314abcd";
+        let user =
+            |body: &str| json!({"type":"user", "sessionId":"sid", "message":{"content":body}});
+        for (case, before, after, expected) in [
+            ("exact", String::new(), format!("{}\n", user(frame)), true),
+            ("old", format!("{}\n", user(frame)), String::new(), false),
+            (
+                "suffix",
+                String::new(),
+                format!("{}\n", user(&format!("{frame} extra"))),
+                false,
+            ),
+            (
+                "duplicate",
+                String::new(),
+                format!("{}\n{}\n", user(frame), user(frame)),
+                false,
+            ),
+            ("partial", String::new(), user(frame).to_string(), false),
+            (
+                "assistant",
+                String::new(),
+                format!(
+                    "{}\n",
+                    json!({"type":"assistant","sessionId":"sid","message":{"content":frame}})
+                ),
+                false,
+            ),
+            (
+                "other session",
+                String::new(),
+                format!(
+                    "{}\n",
+                    json!({"type":"user","sessionId":"other","message":{"content":frame}})
+                ),
+                false,
+            ),
+            (
+                "nontext",
+                String::new(),
+                format!(
+                    "{}\n",
+                    json!({"type":"user","sessionId":"sid","message":{"content":[{"type":"text","text":frame},{"type":"image"}]}})
+                ),
+                false,
+            ),
+        ] {
+            let session = format!("a2-receipt-{}", uuid::Uuid::new_v4());
+            let path = dir.path().join(format!("{session}.jsonl"));
+            std::fs::write(&path, before).unwrap();
+            let binding = TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("sid".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            };
+            tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding.clone());
+            let mut receipt = UserReceipt::before(&session, frame).expect("bound transcript");
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(after.as_bytes())
+                .unwrap();
+            receipt.seal();
+            assert_eq!(receipt.confirmed(), expected, "{case}");
+            if expected {
+                let mut progressed = binding.clone();
+                progressed.last_offset = std::fs::metadata(&path).unwrap().len();
+                progressed.input_fifo_path = Some("compatibility-fifo".into());
+                progressed.relay_output_path = Some("compatibility-relay".into());
+                tui_prompt_dedupe::register_tmux_runtime_binding(&session, progressed);
+                assert!(
+                    receipt.confirmed(),
+                    "learned transport aliases do not change the native input source"
+                );
+            }
+            let replacement = path.with_extension("new");
+            std::fs::write(&replacement, format!("{}\n", user(frame))).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+            assert!(
+                !receipt.confirmed(),
+                "a replaced inode cannot confirm the old attempt"
+            );
+            tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+        }
+    }
+
+    #[test]
+    fn a2_receipt_cannot_borrow_a_later_turn_identical_record() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late.jsonl");
+        let session = format!("a2-late-receipt-{}", uuid::Uuid::new_v4());
+        std::fs::write(&path, "").unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("sid".into()),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let mut receipt = UserReceipt::before(&session, "same input").unwrap();
+        receipt.seal();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user", "sessionId":"sid", "message":{"content":"same input"}})
+            ),
+        )
+        .unwrap();
+        assert!(
+            !receipt.confirmed(),
+            "a later turn's identical user record is outside this attempt"
+        );
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    }
+}

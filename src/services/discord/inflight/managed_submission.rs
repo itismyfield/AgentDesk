@@ -10,6 +10,7 @@ use crate::services::turn_host::TurnHost;
 
 const MANAGED_SUBMISSION_PROTOCOL: u32 = 1;
 const FENCE_CALLER: &str = "managed_submission_fence";
+mod evidence;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum SubmissionPhase {
@@ -117,6 +118,7 @@ struct Attempt {
     target: String,
     gate: Mutex<Gate>,
     guarded: Mutex<GuardedState>,
+    evidence: Mutex<evidence::Evidence>,
 }
 
 /// Live input capability of the attempt that installed the boundary; never persisted.
@@ -200,6 +202,15 @@ impl ManagedSubmission {
 }
 
 impl Owner for Attempt {
+    fn receipt_finished(&self, session: &str) {
+        evidence::finish_receipt(self, session);
+    }
+    fn preparation_held(&self, hold: &crate::services::claude_tui::input::PreparationHold) {
+        evidence::hold(self, hold);
+    }
+    fn receipt(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
+        evidence::receipt(self, receipt);
+    }
     fn started(&self) {
         let idle = matches!(
             *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
@@ -390,6 +401,7 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
         target: state.tmux_session_name.clone().unwrap(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
+        evidence: Mutex::new(evidence::Evidence::default()),
     }));
     state.bind_managed_submission(submission.clone());
     Some(submission)

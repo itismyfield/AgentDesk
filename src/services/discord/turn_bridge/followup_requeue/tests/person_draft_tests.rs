@@ -71,6 +71,7 @@ async fn a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_i
     let idle = dir.path().join("idle.jsonl");
     let turn = r#"{"type":"system","subtype":"turn_duration","sessionId":"s"}"#;
     std::fs::write(&idle, format!("{turn}\n")).expect("idle transcript");
+    bind_watch_session(&session, &idle);
     // A person typed into the idle composer without Enter; the placeholder is drawn faint.
     let drafted = idle_pane_with("", "\x1b[39m\u{276f}\u{a0}D2E3 draft typed by a person");
     let placeholder = "\x1b[39m\u{276f}\u{a0}\x1b[2mTry \"refactor <filepath>\"\x1b[0m";
@@ -163,9 +164,9 @@ async fn a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_i
 }
 
 /// A composer the submit cannot read, or typed text outside the measured layout, holds only
-/// this input: nothing is typed and the pane stays unprotected.
+/// this input: nothing is typed and cleanup remains fenced until a safe observation.
 #[test]
-fn an_unread_composer_holds_the_follow_up_without_protecting_the_pane() {
+fn an_unread_composer_holds_the_follow_up_and_protects_the_pane() {
     use crate::services::claude_tui::composer_lock::draft_guarded;
     use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
     let dir = tempfile::tempdir().expect("transcript dir");
@@ -208,6 +209,6 @@ fn an_unread_composer_holds_the_follow_up_without_protecting_the_pane() {
                 .any(|c| writes.iter().any(|w| c.starts_with(w))),
             "{name}"
         );
-        assert!(!draft_guarded(&session), "{name}");
+        assert!(draft_guarded(&session), "{name}");
     }
 }

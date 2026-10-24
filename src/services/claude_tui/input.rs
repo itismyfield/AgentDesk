@@ -13,14 +13,21 @@ use super::{
 };
 
 mod literal_chunks;
+mod preparation_hold;
 mod submission;
+mod user_receipt;
 use literal_chunks::split_literal_chunks;
+pub(crate) use preparation_hold::PreparationHold;
+pub(crate) use preparation_hold::readiness_failure;
+pub(crate) use user_receipt::UserReceipt;
 
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
 pub(crate) use draft_hold::{composer_refusal, stranded_draft_is_ours};
 #[cfg(test)]
 mod final_ready_tests;
+#[cfg(test)]
+mod hold_lifecycle_tests;
 #[cfg(test)]
 mod timeout_draft_tests;
 
@@ -596,17 +603,7 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
             session_name,
             prompt,
         );
-        match run_actions_with_submission_confirmation(session_name, &actions, None, None) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                    "claude",
-                    session_name,
-                    prompt,
-                );
-                Err(error)
-            }
-        }
+        run_actions_with_submission_confirmation(session_name, &actions, None, None)
     })
 }
 
@@ -892,151 +889,11 @@ fn run_actions(
     host_input::run_legacy(session_name, actions, cancel_token).into_legacy()
 }
 
-fn run_actions_with_submission_confirmation(
-    session_name: &str,
-    actions: &[TuiInputAction],
-    submitted_prompt: Option<&str>,
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    let actions_contained_paste = actions_contain_paste_buffer(actions);
-    let run = host_input::run_legacy(session_name, actions, cancel_token);
-    let cleanup_may_follow =
-        host_input::InputTarget::legacy_tmux(session_name).keys_may_follow(&run);
-    let result = run.into_legacy().and_then(|()| {
-        confirm_prompt_submission_left_editor(session_name, submitted_prompt, cancel_token)
-    });
-    if cleanup_may_follow && should_clear_draft_on_error(actions_contained_paste, result.is_err()) {
-        clear_prompt_draft_before_error(session_name);
-    }
-    result
-}
-
-fn actions_contain_paste_buffer(actions: &[TuiInputAction]) -> bool {
-    actions
-        .iter()
-        .any(|action| matches!(action, TuiInputAction::PasteBuffer(_)))
-}
-
-fn should_clear_draft_on_error(actions_contained_paste: bool, result_is_err: bool) -> bool {
-    actions_contained_paste && result_is_err
-}
-
-fn confirm_prompt_submission_left_editor(
-    session_name: &str,
-    submitted_prompt: Option<&str>,
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    let mut attempt = 0usize;
-    loop {
-        std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
-        check_prompt_cancel(cancel_token)?;
-        let (pane, alive) =
-            host_input::observe_legacy(session_name, PROMPT_READY_CAPTURE_SCROLLBACK);
-        let snapshot = prompt_readiness_snapshot_from_capture(pane.as_deref(), alive);
-        let prompt_left = submitted_prompt
-            .zip(pane.as_deref())
-            .is_some_and(|(prompt, pane)| {
-                crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
-                    pane, prompt,
-                )
-            });
-        check_prompt_cancel(cancel_token)?;
-
-        match prompt_submit_confirmation_decision(
-            &snapshot,
-            prompt_left,
-            attempt,
-            PROMPT_SUBMIT_CONFIRM_RETRIES,
-        ) {
-            PromptSubmitConfirmationDecision::Submitted => return Ok(()),
-            PromptSubmitConfirmationDecision::FailedSessionDead => {
-                return Err("claude tui session died after prompt submit".to_string());
-            }
-            PromptSubmitConfirmationDecision::FailedCaptureUnavailable => {
-                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
-                return Err(format!(
-                    "claude tui prompt submit confirmation unavailable after {} retries; capture_available=false",
-                    PROMPT_SUBMIT_CONFIRM_RETRIES
-                ));
-            }
-            PromptSubmitConfirmationDecision::FailedDraftStuck => {
-                log_prompt_submit_left_draft(session_name, &snapshot);
-                return Err(format!(
-                    "claude tui prompt submit left draft after {} enter retries; prompt_marker_detected={}; prompt_draft_detected={}; capture_available={}",
-                    PROMPT_SUBMIT_CONFIRM_RETRIES,
-                    snapshot.prompt_marker_detected,
-                    snapshot.prompt_draft_detected,
-                    snapshot.capture_available
-                ));
-            }
-            PromptSubmitConfirmationDecision::RetrySnapshot => {
-                log_prompt_submit_capture_unavailable(session_name, attempt, &snapshot);
-                attempt += 1;
-            }
-            PromptSubmitConfirmationDecision::RetryEnter => {
-                tracing::warn!(
-                    tmux_session_name = session_name,
-                    retry = attempt + 1,
-                    max_retries = PROMPT_SUBMIT_CONFIRM_RETRIES,
-                    "claude_tui prompt submit left a draft after Enter; retrying Enter"
-                );
-                run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
-                attempt += 1;
-            }
-        }
-    }
-}
-
-fn prompt_submit_needs_enter_retry(snapshot: &PromptReadinessSnapshot) -> bool {
-    snapshot.tmux_pane_alive && snapshot.prompt_marker_detected && snapshot.prompt_draft_detected
-}
-
-fn prompt_submit_confirmation_decision(
-    snapshot: &PromptReadinessSnapshot,
-    prompt_left_in_composer: bool,
-    attempt: usize,
-    max_retries: usize,
-) -> PromptSubmitConfirmationDecision {
-    if !snapshot.tmux_pane_alive {
-        return PromptSubmitConfirmationDecision::FailedSessionDead;
-    }
-    if !snapshot.capture_available {
-        return if attempt >= max_retries {
-            PromptSubmitConfirmationDecision::FailedCaptureUnavailable
-        } else {
-            PromptSubmitConfirmationDecision::RetrySnapshot
-        };
-    }
-    let draft = prompt_submit_needs_enter_retry(snapshot);
-    if draft || prompt_left_in_composer {
-        // Only a probed draft fails; a prompt-text match just earns retries (a repaint can lag).
-        return match (attempt >= max_retries, draft) {
-            (false, _) => PromptSubmitConfirmationDecision::RetryEnter,
-            (true, true) => PromptSubmitConfirmationDecision::FailedDraftStuck,
-            (true, false) => PromptSubmitConfirmationDecision::Submitted,
-        };
-    }
-    PromptSubmitConfirmationDecision::Submitted
-}
-
-fn prompt_submit_settle_for_attempt(attempt: usize) -> Duration {
-    if attempt == 0 {
-        PROMPT_SUBMIT_INITIAL_SETTLE
-    } else {
-        PROMPT_SUBMIT_RETRY_SETTLE
-    }
-}
+mod legacy_submission;
+use legacy_submission::*;
 
 fn clear_prompt_draft_before_error(session_name: &str) {
-    let snapshot = prompt_readiness_snapshot(session_name);
-    let actions = prompt_draft_cleanup_actions(&snapshot);
-    if let Err(error) = run_actions(session_name, &actions, PROMPT_DRAFT_CLEANUP_CANCEL_TOKEN) {
-        tracing::warn!(
-            tmux_session_name = session_name,
-            error = %error,
-            "failed to clear Claude TUI draft after prompt submit retries"
-        );
-    }
+    legacy_submission::clear_prompt_draft(session_name);
 }
 
 /// F1 single authority: run an out-of-turn composer cleanup through the SAME
@@ -1044,13 +901,8 @@ fn clear_prompt_draft_before_error(session_name: &str) {
 /// prompt submit hold, so a stranded-draft clear and an auto `/compact` can never
 /// interleave their key sends.
 ///
-/// Both out-of-turn stranded-draft clearers funnel here: the readiness-timeout
-/// cleanup below (which runs OUTSIDE the send's composer critical section, unlike
-/// the in-send cleanup in `run_actions_with_submission_confirmation` that is
-/// already lock-held), and the warm-followup stranded-draft clear in
-/// `hosting::followup_support`. Callers MUST NOT already hold the composer lock —
-/// every readiness/warm-followup wait acquires it only AFTER the wait returns,
-/// so this is the outermost composer acquisition on those paths (no re-entry).
+/// Both out-of-turn stranded-draft clearers acquire this fence before checking ownership.
+/// Callers must not hold the composer lock. In-send errors retain their uncertain payload.
 /// A pane held for draft recovery takes no cleanup key; `None` reports the skipped cleanup.
 pub(crate) fn with_composer_cleanup_lock<R>(
     session_name: &str,
@@ -2989,7 +2841,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again() {
+    fn fresh_prompt_left_unconfirmed_in_the_composer_preserves_its_first_enter() {
         use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
@@ -3012,44 +2864,55 @@ mod tests {
              {rule}\n\u{276f} \n{footer}"
         );
         let token = CancelToken::new();
-        let enters_after = |tail: &[&str]| {
-            let mut captures = vec![Some(empty.clone()); 3];
-            captures.extend(tail.iter().map(|pane| Some(pane.to_string())));
+        let enters_after = |tail: &[&str], succeeds: bool| {
+            let session = format!("{session}-{}", uuid::Uuid::new_v4());
             let guard = SpyGuard::install(SpyState {
-                captures: captures.into(),
+                captures: std::iter::repeat_n(Some(empty.clone()), 30).collect(),
+                captures_after_send: Some(tail.iter().map(|pane| Some(pane.to_string())).collect()),
                 ..SpyState::default()
             });
-            assert_eq!(send_fresh_prompt(&session, prompt, Some(&token)), Ok(()));
+            assert_eq!(
+                send_fresh_prompt(&session, prompt, Some(&token)).is_ok(),
+                succeeds
+            );
             let calls = guard.calls();
-            assert_eq!(calls[6], format!("literal:{prompt}"), "{calls:?}");
+            assert!(calls.contains(&format!("literal:{prompt}")), "{calls:?}");
             calls.iter().filter(|call| *call == "keys:Enter").count()
         };
-        assert_eq!(enters_after(&[&stuck, &submitted]), 2);
+        assert_eq!(enters_after(&[&stuck, &submitted], false), 1);
         assert_eq!(
-            enters_after(&[&submitted]),
+            enters_after(&[&submitted], true),
             1,
             "a landed submit gets no extra Enter"
         );
-        // A repaint that lags every retry still counts as submitted, as on main.
-        assert_eq!(enters_after(&[&stuck, &stuck, &stuck]), 3);
+        assert_eq!(enters_after(&[&stuck, &stuck, &stuck], false), 1);
     }
 
     #[test]
-    fn prompt_submit_cleanup_on_error_is_limited_to_paste_actions() {
-        let literal_actions = vec![
-            TuiInputAction::Literal("abc".to_string()),
-            TuiInputAction::Enter,
-        ];
-        assert!(!actions_contain_paste_buffer(&literal_actions));
-        assert!(!should_clear_draft_on_error(false, true));
-
-        let paste_actions = vec![
-            TuiInputAction::PasteBuffer("line1\nline2".to_string()),
-            TuiInputAction::Enter,
-        ];
-        assert!(actions_contain_paste_buffer(&paste_actions));
-        assert!(!should_clear_draft_on_error(true, false));
-        assert!(should_clear_draft_on_error(true, true));
+    fn prompt_submit_errors_preserve_literal_and_paste_payloads() {
+        use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
+        for payload in [
+            TuiInputAction::Literal("abc".into()),
+            TuiInputAction::PasteBuffer("line1\nline2".into()),
+        ] {
+            let session = format!("preserved-payload-{}", uuid::Uuid::new_v4());
+            let spy = SpyGuard::install(SpyState {
+                fail_send: Some((1, Err("uncertain ACK".into()))),
+                ..SpyState::default()
+            });
+            assert!(
+                run_actions_with_submission_confirmation(
+                    &session,
+                    &[payload, TuiInputAction::Enter],
+                    None,
+                    None
+                )
+                .is_err()
+            );
+            assert!(!spy.calls().iter().any(|call| call.contains("C-u")
+                || call.contains("Escape")
+                || call.contains("BSpace")));
+        }
     }
 
     #[test]

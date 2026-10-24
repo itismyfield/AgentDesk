@@ -68,6 +68,9 @@ fn receipt_parts(
     local.turn_nonce = Some("receipt-nonce".into());
     local.session_id = Some("receipt-session".into());
     local.output_path = Some(rollout.display().to_string());
+    if provider == ProviderKind::Claude {
+        prove_claude_input(driver._temp.path(), local);
+    }
     let source = dr::ExactJsonlSourceIdentity {
         provider: provider.as_str().into(),
         tmux_session_name: tmux.into(),
@@ -1372,6 +1375,7 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
         driver.inflight.runtime_kind,
         driver.inflight.status_message_id,
     ) = (Some(ClaudeTui), Some(KEPT_PANEL));
+    prove_claude_input(driver._temp.path(), &mut driver.inflight);
     inflight::save_inflight_state(&driver.inflight).expect("seed the two-message row");
     let token = driver.shared.token_hash.clone();
     let channel = DRIVER_CHANNEL_ID;
@@ -1379,7 +1383,7 @@ async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverC
     let _mailbox = driver.shared.mailbox(ChannelId::new(channel));
     let owned = [(channel, ClaudeTui)];
     let _o = test_override::force_channels(&owned[..usize::from(o_channel)]);
-    let _posted = deliver::forget_posted_for_tests(channel);
+    driver.posted_restart_serialization = Some(deliver::forget_posted_for_tests(channel));
     let (ctx, state) = driver.parts();
     let output = run(ctx, state).await;
     assert!(output.terminal_delivery_committed);

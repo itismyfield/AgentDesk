@@ -451,6 +451,7 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
         target: row.tmux_session_name.clone().unwrap(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
+        evidence: Mutex::new(evidence::Evidence::default()),
     }));
     let session = row.tmux_session_name.as_deref().unwrap();
     assert!(crate::services::claude_tui::guarded_outcome::held(session).is_none());
