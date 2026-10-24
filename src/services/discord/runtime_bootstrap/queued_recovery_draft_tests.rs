@@ -102,9 +102,17 @@ async fn restored_draft_hold(held_record: HeldRecord) {
         .join(format!("{held_id}.json"));
     match held_record {
         HeldRecord::Current => {
-            let five_minutes = Duration::from_secs(300);
-            let held =
-                retries::record_attempt(&provider, ids(held_id), &[], five_minutes, Some(&session));
+            for _ in 0..retries::MAX_BUSY_RETRY_COUNT {
+                retries::record_attempt(&provider, ids(held_id), &[], Duration::ZERO, None)
+                    .unwrap();
+            }
+            let held = retries::record_attempt(
+                &provider,
+                ids(held_id),
+                &[],
+                Duration::ZERO,
+                Some(&session),
+            );
             assert!(held.unwrap().capped);
         }
         HeldRecord::LegacyBound | HeldRecord::LegacyUnbound | HeldRecord::LegacyLateBound => {
@@ -138,6 +146,20 @@ async fn restored_draft_hold(held_record: HeldRecord) {
         shared.tmux_watchers.insert(channel, handle);
     }
     let pane = FakeDraftPane::new(&session);
+    let transcript = tmp.path().join("draft-pane.jsonl");
+    std::fs::write(&transcript, "").unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            session_id: None,
+            relay_output_path: None,
+            input_fifo_path: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
     pane.show(&pane_with("\x1b[39m\u{276f}\u{a0}human draft A"));
     let taken = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = taken.clone();
@@ -163,9 +185,9 @@ async fn restored_draft_hold(held_record: HeldRecord) {
     ));
     let http = Arc::new(serenity::Http::new("Bot test-token"));
     let budget = |id: MessageId| retries::load(&provider, channel.get(), id.get()).unwrap();
-    let held_before = budget(held_id);
+    let mut held_before = budget(held_id);
     let busy_before = budget(busy_id);
-    let bytes_before = std::fs::read(&retry_path).unwrap();
+    let mut bytes_before = std::fs::read(&retry_path).unwrap();
     assert!(held_before.exhausted());
     if matches!(
         held_record,
@@ -233,6 +255,18 @@ async fn restored_draft_hold(held_record: HeldRecord) {
             .text,
         held_text
     );
+    if matches!(
+        held_record,
+        HeldRecord::LegacyBound | HeldRecord::LegacyLateBound
+    ) {
+        held_before.draft_session = Some(session.clone());
+        assert_eq!(
+            budget(held_id),
+            held_before,
+            "only the claimed pane binding is enriched"
+        );
+        bytes_before = std::fs::read(&retry_path).unwrap();
+    }
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_secs(6)).await;
         assert_eq!(
