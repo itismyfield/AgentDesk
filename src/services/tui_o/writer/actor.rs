@@ -425,6 +425,8 @@ mod fresh_resume;
 pub(crate) use fresh_resume::work_for_tests;
 mod automatic;
 mod automatic_age;
+mod codex_age;
+pub(crate) mod codex_retention;
 mod transition;
 mod transition_snapshot;
 

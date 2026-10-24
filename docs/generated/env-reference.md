@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 130
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 131
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -59,6 +59,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs` |  |
 | `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
+| `AGENTDESK_BA_MUTANT` | `src/services/tui_o/writer/actor/codex_age.rs`, `src/services/tui_o/writer/actor/codex_retention.rs` |  |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_BO_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/tui_o/writer/deliver.rs` |  |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
