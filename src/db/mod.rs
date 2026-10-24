@@ -6,6 +6,8 @@ pub mod automation_candidates;
 pub mod calendar_sync;
 pub mod campaigns;
 pub mod cancel_tombstones;
+#[cfg(test)]
+mod discarded_tx_result_scan_tests;
 pub mod dispatch_semaphores;
 #[path = "dispatched_sessions/canonical_identity.rs"]
 pub(crate) mod dispatched_session_canonical_identity;

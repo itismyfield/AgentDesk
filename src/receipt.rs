@@ -383,7 +383,7 @@ fn shorten_model(model: &str) -> String {
         _ => {
             let s = model.to_string();
             if s.len() > 20 {
-                format!("{}...", &s[..18])
+                format!("{}...", s.chars().take(18).collect::<String>())
             } else {
                 s
             }
