@@ -581,13 +581,15 @@ class RustSources(unittest.TestCase):
     def test_non_literal_include_and_gating_cfg_attr_are_unreadable(self):
         self.tree({"src/lib.rs": "mod t {\n    include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n}\n"
                                  "#[cfg_attr(unix, path = \"u.rs\")]\nmod u;\n"
-                                 "#[cfg_attr(not(test), allow(dead_code))]\nfn quiet() {}\n",
+                                 "#[cfg_attr(not(test), allow(dead_code))]\nfn quiet() {}\n"
+                                 "#[cfg_attr(test, derive(Default))]\nstruct Probe;\n",
                    "src/u.rs": ""})
         rc, err = self.cli("check")
         self.assertEqual(rc, 1)
         self.assertIn("include! with a non-literal path", err)
         self.assertIn("src/lib.rs:4 cfg_attr can change compilation", err)
         self.assertNotIn("src/lib.rs:6", err)
+        self.assertNotIn("src/lib.rs:8", err)
 
     def test_cfg_chain_decides_the_platform(self):
         self.tree({
