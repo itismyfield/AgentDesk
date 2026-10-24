@@ -750,18 +750,16 @@ fn hard_probe_failure_preserves_dead_looking_session() {
 fn formats_ssh_direct_prompt_notification() {
     let output = format_ssh_direct_prompt_notification("claude", "AgentDesk-claude-a", "hi");
 
-    assert!(output.contains("터미널에 직접 주입된 입력"));
-    assert!(output.contains("(tmux : `AgentDesk-claude-a`)"));
-    assert!(output.contains("```text\nhi\n```"));
+    assert_eq!(output, "-# ⌨️ hi");
 }
 
 #[test]
 fn formats_ssh_direct_prompt_notification_with_truncation() {
-    let prompt = "x".repeat(SSH_DIRECT_PROMPT_PREVIEW_LIMIT + 20);
+    let prompt = "x".repeat(2000);
     let output = format_ssh_direct_prompt_notification("codex", "AgentDesk-codex-a", &prompt);
 
-    assert!(output.contains("터미널에 직접 주입된 입력"));
-    assert!(output.contains("(tmux : `AgentDesk-codex-a`)"));
+    assert!(output.starts_with("-# ⌨️ "));
+    assert!(super::super::session_notice::is_inline(&output));
     assert!(output.contains("..."));
     assert!(output.len() < prompt.len() + 120);
 }
@@ -770,8 +768,7 @@ fn formats_ssh_direct_prompt_notification_with_truncation() {
 fn formats_ssh_direct_prompt_notification_escapes_code_fence() {
     let output = format_ssh_direct_prompt_notification("codex", "tmux`name", "a ``` fence");
 
-    assert!(output.contains("(tmux : `tmux'name`)"));
-    assert!(output.contains("a ` ` ` fence"));
+    assert_eq!(output, r"-# ⌨️ a \`\`\` fence");
 }
 
 #[test]
@@ -782,7 +779,7 @@ fn formats_ssh_direct_prompt_notification_strips_terminal_controls() {
         "\u{15}\u{1b}[31mhello\u{1b}[0m\n\tworld",
     );
 
-    assert!(output.contains("hello\n\tworld"));
+    assert_eq!(output, "-# ⌨️ hello (+1줄)");
     assert!(!output.contains('\u{15}'));
     assert!(!output.contains('\u{1b}'));
 }
@@ -805,7 +802,7 @@ fn notification_strip_drops_bare_control_bytes_but_keeps_whitespace() {
             output
         );
     }
-    assert!(output.contains("ringpagedelc1\n\tkeep"));
+    assert_eq!(output, "-# ⌨️ ringpagedelc1 (+1줄)");
 }
 
 // #3100: a human typing directly into the TUI is a real active turn.
@@ -1594,7 +1591,7 @@ fn slash_command_control_note_loop_and_generic_stdout_show_body() {
         stdout_note.contains("Set model to Fable 5"),
         "generic stdout notes must include a short body preview",
     );
-    assert!(stdout_note.contains("```text"));
+    assert!(super::super::session_notice::is_inline(&stdout_note));
 }
 
 // #4033 regression guard: broad `<local-command-stdout>...</local-command-stdout>`
@@ -1726,8 +1723,8 @@ fn local_command_stdout_negative_cases_stay_human_direct() {
 
     let rendered = format_ssh_direct_prompt_notification("claude", "sess-mid-body", mid_body_tag);
     assert!(
-        rendered.contains("<local-command-stdout>x</local-command-stdout>"),
-        "a mid-body stdout tag should remain part of the human prompt preview",
+        rendered == "-# ⌨️ please explain this transcript: (+1줄)",
+        "a later quoted stdout line is counted without expanding the input mirror",
     );
 }
 
@@ -2241,10 +2238,20 @@ fn system_continuation_note_is_neutral_not_active_turn() {
     assert!(!note.contains("터미널에 직접 주입된 입력"));
     assert_eq!(
         note,
-        "🧩 Session continued (compact/resume) · tmux: `AgentDesk-claude-adk-cc`"
+        "-# 🧩 Session continued (compact/resume) · tmux: AgentDesk-claude-adk-cc"
     );
     assert!(!note.contains("```text"));
     assert!(!note.contains("Summary:"));
+    let slash = format_slash_command_control_note(
+        "AgentDesk-claude-adk-cc",
+        "/compact",
+        "<command-name>/compact</command-name>",
+    );
+    assert!(slash.contains("tmux: AgentDesk-claude-adk-cc"));
+    assert!(
+        !slash.contains('`'),
+        "slash tmux name must be plain text without literal backticks"
+    );
 }
 
 #[cfg(unix)]

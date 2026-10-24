@@ -2,16 +2,154 @@ use super::*;
 use crate::services::turn_summary_line::{Outcome, render};
 use serde_json::json;
 
+#[cfg(unix)]
+#[test]
+fn statusline_quota_reaches_o_summary_when_cswap_usage_is_429() {
+    use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider};
+    use crate::services::tui_o::writer::pieces::{Derived, SummaryInputs, UnitDeriver};
+    use sha2::{Digest, Sha256};
+
+    if isolated_cswap_429_fixture(concat!(
+        module_path!(),
+        "::statusline_quota_reaches_o_summary_when_cswap_usage_is_429"
+    )) {
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(CswapService::global().list_accounts("fixture".into(), None))
+        .unwrap();
+    let usage_429 = CswapService::global()
+        .cached_accounts_for_summary()
+        .unwrap();
+    assert_eq!(
+        usage_429.accounts[0].extra["usageError"],
+        "429 usage-endpoint budget reached; backing off"
+    );
+    assert!(usage_429.accounts[0].usage_age_seconds.unwrap() >= 51.0 * 60.0);
+    assert_eq!(claude(&usage_429, Utc::now()), None);
+
+    let session = uuid::Uuid::new_v4().to_string();
+    let root = std::env::temp_dir().join("agentdesk-claude-rate-limits");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join(format!("{:x}.json", Sha256::digest(session.as_bytes())));
+    let started = Utc::now();
+    let five_reset = started + chrono::Duration::hours(5);
+    let seven_reset = started + chrono::Duration::days(7);
+    std::fs::write(
+        &path,
+        json!({
+            "session_id": session,
+            "rate_limits": {
+                "five_hour": {"used_percentage": 23.6, "resets_at": five_reset.timestamp()},
+                "seven_day": {"used_percentage": 61, "resets_at": seven_reset.timestamp()}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut deriver =
+        UnitDeriver::new(7_319_001, ShadowProvider::Claude).with_turn_summary(SummaryInputs {
+            turn_marks: Default::default(),
+            disposed: Default::default(),
+            context_window: None,
+        });
+    let row = |value: Value| CapturedRecord {
+        start: 0,
+        end: 1,
+        line: serde_json::to_vec(&value).unwrap(),
+    };
+    deriver.derive(&row(json!({"type":"user", "sessionId":session,
+        "timestamp":started.to_rfc3339(), "message":{"content":"request"}})));
+    deriver.derive(&row(json!({"type":"assistant", "sessionId":session,
+        "timestamp":started.to_rfc3339(), "uuid":"statusline-answer", "apiBlockIndex":0,
+        "message":{"id":"statusline-answer", "content":[{"type":"text","text":"answer"}]}})));
+    let work = deriver.derive(&row(json!({"type":"system", "subtype":"stop_hook_summary",
+        "sessionId":session, "timestamp":(started+chrono::Duration::seconds(2)).to_rfc3339()})));
+    let lines = work
+        .iter()
+        .filter_map(|work| match work {
+            Derived::Piece(piece) => Some(piece.payload.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected = format!(
+        "-# ⏱️ 2초 · 5h 24% ({}) · 7d 61% ({})",
+        five_reset
+            .with_timezone(&chrono_tz::Asia::Seoul)
+            .format("%H:%M"),
+        seven_reset
+            .with_timezone(&chrono_tz::Asia::Seoul)
+            .format("%m/%d %H:%M")
+    );
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        lines,
+        vec![expected.as_str()],
+        "fresh session statusline must survive cswap 429"
+    );
+}
+
+#[cfg(unix)]
+fn isolated_cswap_429_fixture(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let name = name
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap();
+    const CHILD: &str = "ADK_STATUSLINE_CSWAP_429_TEST";
+    if std::env::var(CHILD).as_deref() == Ok(name) {
+        return false;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("tmp")).unwrap();
+    std::fs::create_dir(root.path().join(".claude")).unwrap();
+    std::fs::write(root.path().join("config.yaml"), "server: {}\n").unwrap();
+    let executable = root.path().join("cswap");
+    std::fs::write(&executable, "#!/bin/sh\ncat \"$0.json\"\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let at = Utc::now();
+    std::fs::write(executable.with_extension("json"), json!({
+        "activeAccountNumber":2,"accounts":[{
+            "number":2,"active":true,"usageStatus":"ok",
+            "usageFetchedAt":(at-chrono::Duration::minutes(51)).to_rfc3339(),
+            "usageError":"429 usage-endpoint budget reached; backing off",
+            "usage":{"fiveHour":{"pct":15,"resetsAt":(at+chrono::Duration::hours(5)).to_rfc3339()}}
+        }]
+    }).to_string()).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD, name)
+        .env("AGENTDESK_CSWAP_PATH", executable)
+        .env("HOME", root.path())
+        .env("CLAUDE_CONFIG_DIR", root.path().join(".claude"))
+        .env("TMPDIR", root.path().join("tmp"))
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .env("AGENTDESK_CONFIG", root.path().join("config.yaml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "isolated cached cswap 429 test failed:\n{stdout}\n{stderr}"
+    );
+    true
+}
+
 pub(crate) fn with_locked_quota_cache<T>(run: impl FnOnce() -> T) -> T {
     let _guard = CACHE.write().unwrap();
     run()
 }
 
-fn now() -> DateTime<Utc> {
+pub(super) fn now() -> DateTime<Utc> {
     "2026-10-23T00:00:00Z".parse().unwrap()
 }
 
-fn accounts() -> ClaudeAccountsResponse {
+pub(super) fn accounts() -> ClaudeAccountsResponse {
     let account = |number, active, pct| {
         serde_json::from_value(json!({
             "number":number,"active":active,"usageStatus":"ok",
@@ -251,7 +389,7 @@ fn codex_requires_the_selected_profile_and_a_fresh_cache() {
         None
     );
     assert_eq!(
-        snapshot("unsupported", 42, Some(Selected::Before(now()))),
+        snapshot("unsupported", 42, Some(Selected::Before(now())), None),
         None
     );
 }
@@ -377,7 +515,7 @@ fn recorded_profile_and_collected_quota_reach_the_o_summary_boundary() {
     assert!(lines[0].contains(" · 7d 38% ("), "{lines:?}");
     publish("codex", &overlay.profile_id, "{}", started.timestamp());
     assert_eq!(
-        snapshot("codex", channel, Some(Selected::Before(started))),
+        snapshot("codex", channel, Some(Selected::Before(started)), None),
         None
     );
 }

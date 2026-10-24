@@ -903,7 +903,7 @@ async fn the_round_trip_reads_back_every_case_and_reports_any_difference() {
 }
 
 #[path = "rotation_tests.rs"]
-mod rotation;
+pub(crate) mod rotation;
 
 #[path = "unpinned_past_tests.rs"]
 mod unpinned_past;

@@ -138,6 +138,8 @@ def compare(path, messages, *, marker_regex=None, run_id=None, input_mirror_auth
         text = message.get("content") or ""
         author = message.get("author") or {}
         if author.get("bot") and DIRECT_NOTICE.match(text):
+            if text.startswith("-# ⌨️ "):
+                text = re.sub(r"\\([\\`*_~|\[\]#])", r"\1", text)
             target = notices
         elif (not author.get("bot") or is_our_send(message)
               or str(author.get("id")) in input_mirror_author_ids):

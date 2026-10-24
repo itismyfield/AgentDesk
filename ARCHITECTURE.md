@@ -387,9 +387,12 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── outbox_actionable_delivery/
+│   │   └── session_notice.rs
 │   ├── outbox_worker/
 │   │   ├── attachment_pg_tests.rs
-│   │   └── claim.rs
+│   │   ├── claim.rs
+│   │   └── session_notice_pg_tests.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -733,6 +736,9 @@ src/
 │   │   │   └── submit.rs
 │   │   ├── busy_inject_tests/
 │   │   │   └── common_glyph_tests.rs
+│   │   ├── hook_bundle/
+│   │   │   ├── statusline.rs
+│   │   │   └── statusline_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -1133,7 +1139,10 @@ src/
 │   │   │   │   │   └── termination.rs
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_idle.rs
-│   │   │   │   └── automatic_idle_tests.rs
+│   │   │   │   ├── automatic_idle_tests.rs
+│   │   │   │   ├── codex_census.rs
+│   │   │   │   ├── codex_context.rs
+│   │   │   │   └── codex_context_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -1927,10 +1936,17 @@ src/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
+│   │   │   ├── inline_contract_tests/
+│   │   │   │   ├── replacement_receipt_tests.rs
+│   │   │   │   └── retention_tests.rs
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
+│   │   │   │   ├── inline_claim.rs
+│   │   │   │   ├── memory_claim.rs
 │   │   │   │   ├── metadata_retirement_authority_tests.rs
 │   │   │   │   ├── missing_card_replacement.rs
+│   │   │   │   ├── monitor.rs
+│   │   │   │   ├── monitor_memory.rs
 │   │   │   │   ├── response_chunks.rs
 │   │   │   │   ├── response_fence.rs
 │   │   │   │   ├── response_identity.rs
@@ -1939,10 +1955,14 @@ src/
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
+│   │   │   ├── card_render_tests.rs
 │   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── footer_retirement_tests.rs
+│   │   │   ├── footer_surface_tests.rs
 │   │   │   ├── gateway.rs
+│   │   │   ├── inline_contract_tests.rs
+│   │   │   ├── inline_delivery.rs
 │   │   │   ├── metadata_retirement_pg_tests.rs
 │   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
@@ -2269,6 +2289,9 @@ src/
 │   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
+│   │   ├── tui_task_card/
+│   │   │   ├── completion_card.rs
+│   │   │   └── completion_card_tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
@@ -2682,6 +2705,7 @@ src/
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
 │   │   ├── monitoring_status.rs
+│   │   ├── monitoring_status_inline_tests.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
 │   │   ├── placeholder_cleanup.rs
@@ -2729,6 +2753,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_notice.rs
+│   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -2891,8 +2917,10 @@ src/
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
 │   │   ├── attachments.rs
+│   │   ├── diagnostics.rs
 │   │   ├── identity.rs
-│   │   └── identity_tests.rs
+│   │   ├── identity_tests.rs
+│   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs
@@ -3151,6 +3179,7 @@ src/
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
+│   │   ├── herdr_registry_census_tests.rs
 │   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
@@ -3304,6 +3333,8 @@ src/
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs
+│   │   │   │   ├── codex_history.rs
+│   │   │   │   ├── codex_history_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3351,6 +3382,8 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── transition_scope/
+│   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -3360,6 +3393,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3369,6 +3403,7 @@ src/
 │   │   │   ├── codex_end_proof_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
+│   │   │   ├── codex_snapshot.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_pg_tests.rs
@@ -3388,6 +3423,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -3453,6 +3489,7 @@ src/
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
+│   │   │   ├── transition_actor_bo_tests.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
 │   │   │   ├── transition_automatic_tests.rs
@@ -3490,11 +3527,16 @@ src/
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context/
+│   │   │   ├── inventory.rs
+│   │   │   └── inventory_tests.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
 │   │   │   │   │   └── resume_companions.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── observation.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
@@ -3531,6 +3573,7 @@ src/
 │   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
+│   │   │   ├── binding_access_tests.rs
 │   │   │   ├── claude_source.rs
 │   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs
@@ -3634,6 +3677,9 @@ src/
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs
 │   ├── turn_summary_line/
+│   │   ├── quota/
+│   │   │   ├── statusline.rs
+│   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
 │   ├── agent_identity.rs

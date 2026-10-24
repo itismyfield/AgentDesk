@@ -18,10 +18,11 @@ pub(crate) use codex_policy::{
 };
 mod codex_hook;
 pub use binding_access::register_provider_session;
+use binding_access::same_runtime_source;
 pub(crate) use binding_access::{
-    codex_verified_marker_metadata, codex_verified_publication_allowed,
+    RuntimeObservation, codex_verified_marker_metadata, codex_verified_publication_allowed,
     runtime_binding_for_tmux_session, runtime_binding_for_tmux_session_under_source_authority,
-    runtime_bindings_for_kind,
+    runtime_bindings_for_kind, runtime_observation_under_source_authority,
 };
 pub(crate) mod codex_verified;
 #[cfg(test)]
@@ -45,23 +46,6 @@ pub(crate) use codex_verified::{
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
 pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
-fn same_runtime_source(
-    left: Option<&TuiRuntimeBinding>,
-    right: Option<&TuiRuntimeBinding>,
-) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            left.runtime_kind == right.runtime_kind
-                && left.output_path == right.output_path
-                && left.relay_output_path == right.relay_output_path
-                && left.input_fifo_path == right.input_fifo_path
-                && left.session_id == right.session_id
-        }
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 struct RuntimeBindingPublication<'a, 'b> {
     target: &'a mut TuiPromptDedupeState,
     staged: TuiPromptDedupeState,

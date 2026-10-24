@@ -3,17 +3,16 @@ use crate::services::provider::ProviderKind;
 use std::sync::{Arc, Mutex};
 
 const NOTIFY_TOKEN: &str = "notify-6304-token";
+const PROVIDER_TOKEN: &str = "provider-6304-token";
 
 /// Requests the mock Discord saw: `(method, path, authorization, body)`.
 type Seen = Arc<Mutex<Vec<(String, String, String, serde_json::Value)>>>;
 
 /// A fence-forward takes custody and announces it: the operator notice must land as one outbox
-/// row and the worker's real drain must post it through the notify bot and settle it `sent`.
+/// row and the worker's real drain must post it through the provider bot and settle it `sent`.
 #[tokio::test]
 async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("root");
     let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -95,14 +94,22 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
     assert_eq!(reason_code.as_deref(), Some("adopt.fence_forward"));
     assert!(content.contains("응답 이어받기 실패"), "{content}");
 
-    let (http, seen, server) = mock_discord(channel_id).await;
+    let (notify_http, provider_http, seen, server) = mock_discord(channel_id).await;
     let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
     registry
         .set_utility_bot_http_for_tests(
             crate::services::discord::bot_role::UtilityBotRole::Notify,
-            http,
+            notify_http,
         )
         .await;
+    let _provider = crate::services::discord::session_notice_delivery::register_test_provider(
+        registry.as_ref(),
+        ProviderKind::Claude.as_str(),
+        channel_id,
+        provider_http,
+        pool.clone(),
+    )
+    .await;
     let pg = Arc::new(pool.clone());
     let drained =
         crate::server::outbox_worker::drain_message_outbox_once(&pg, &registry, "adopt-6304-test")
@@ -125,10 +132,12 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
     );
     assert_eq!(
         authorization,
-        &format!("Bot {NOTIFY_TOKEN}"),
-        "posted by the notify bot"
+        &format!("Bot {PROVIDER_TOKEN}"),
+        "posted by the channel provider bot"
     );
     let posted = body["content"].as_str().unwrap_or_default();
+    assert!(posted.starts_with("-# "), "{posted}");
+    assert_eq!(posted.lines().count(), 1, "{posted}");
     assert!(posted.contains("응답 이어받기 실패"), "{posted}");
     let settled = sqlx::query_as::<_, (String, String)>(
         "SELECT source, status FROM message_outbox WHERE target = $1",
@@ -150,6 +159,7 @@ async fn fence_forward_notice_is_enqueued_and_delivered_pg() {
 async fn mock_discord(
     channel_id: u64,
 ) -> (
+    Arc<poise::serenity_prelude::Http>,
     Arc<poise::serenity_prelude::Http>,
     Seen,
     tokio::task::JoinHandle<()>,
@@ -201,11 +211,15 @@ async fn mock_discord(
             .await
             .expect("serve mock Discord");
     });
-    let http = poise::serenity_prelude::HttpBuilder::new(NOTIFY_TOKEN)
-        .proxy(proxy)
-        .ratelimiter_disabled(true)
-        .build();
-    (Arc::new(http), seen, server)
+    let http = |token| {
+        Arc::new(
+            poise::serenity_prelude::HttpBuilder::new(token)
+                .proxy(proxy.clone())
+                .ratelimiter_disabled(true)
+                .build(),
+        )
+    };
+    (http(NOTIFY_TOKEN), http(PROVIDER_TOKEN), seen, server)
 }
 
 fn message_json(channel_id: u64, content: &str) -> serde_json::Value {

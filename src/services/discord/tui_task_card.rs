@@ -22,6 +22,10 @@ use serde_json::Value;
 
 use super::formatting::{byte_index_at_discord_message_units, discord_message_units};
 
+#[cfg(test)]
+#[path = "tui_task_card/completion_card_tests.rs"]
+mod completion_card_tests;
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
@@ -202,113 +206,21 @@ fn extract_one_tag(haystack: &str, name: &str) -> Option<String> {
     }
 }
 
-/// Render a `<task-notification>` payload as a compact Discord card (#3075).
-///
-/// `update_count` is the number of times this task-id has been seen (1 on the
-/// first card). When > 1 the header notes `updated Nx` and the body shows the
-/// LATEST result preview. A JSON `result` is summarized by top-level shape
-/// (`results`/`reviews`/`plans`) rather than dumped raw; a free-form Markdown
-/// `result` is truncated to a short preview with any PR URLs surfaced.
-pub(super) fn format_task_notification_card(note: &TaskNotification, update_count: u64) -> String {
-    let status = note.status.as_deref().unwrap_or("");
-    let icon = status_icon(status);
-    let status_label = if status.is_empty() {
-        "Task event".to_string()
-    } else {
-        format!("Task {status}")
-    };
-    let mut header = format!("{icon} {status_label}");
-    if update_count > 1 {
-        header.push_str(&format!(" · updated {update_count}x"));
-    }
+mod completion_card;
+pub(super) use completion_card::{format_legacy, format_task_notification_card};
 
-    let mut lines = vec![header];
-
-    if let Some(summary) = note.summary.as_deref().filter(|s| !s.is_empty()) {
-        // #3477 item 1: preserve the summary's newlines so multi-line task
-        // summaries stay readable (Discord renders multi-line bold fine). Still
-        // escapes the ``` fence hazard. The footer/preview slots below keep using
-        // `sanitize_oneline` so they remain compact single-line cells.
-        // #4338: decode one layer of harness XML-escaping first, once, so a literal
-        // `&`/`<`/`>` in the summary renders as itself rather than `&amp;`/`&lt;`.
-        lines.push(format!(
-            "**{}**",
-            sanitize_multiline(&decode_entities_once(summary))
-        ));
-    }
-
-    if let Some(result) = note.result.as_deref().filter(|s| !s.is_empty()) {
-        // #4338: decode ONE layer of harness XML-escaping up front so the preview,
-        // the JSON-shape summary, and PR-URL extraction all operate on the same
-        // human-facing text (`&amp;provider` → `&provider`). Doing it once here
-        // (not per sub-step) keeps the card a pure, idempotent function of the
-        // payload — a streaming edit re-renders byte-identical.
-        let result = decode_entities_once(result);
-        let body = render_result_preview(&result, update_count > 1);
-        if !body.is_empty() {
-            lines.push(String::new());
-            lines.push(body);
-        }
-        for url in extract_pr_urls(&result) {
-            lines.push(format!("🔗 {url}"));
-        }
-    }
-
-    // Footer: short task id + usage/duration metadata, all from structured
-    // fields (never generated prose). `output-file` is intentionally omitted.
-    let mut footer_parts: Vec<String> = Vec::new();
-    if let Some(task_id) = note.task_id.as_deref().filter(|s| !s.is_empty()) {
-        footer_parts.push(format!("task {}", short_task_id(task_id)));
-    }
-    // #3169: render the structured usage sub-fields human-readably. Multi-agent
-    // count, then tool count, then `Xm Ys` duration. The token total is omitted. The
-    // raw `usage` block is only surfaced as a fallback when it carries NO nested
-    // tags (`<`) — the workflow/agent payload nests `<subagent-tokens>` etc.,
-    // which we parse above, so we must not dump that XML into the footer.
-    if let Some(agents) = note
-        .agent_count
+/// Quoted reports retain a completion card; Monitor events keep their legacy card bytes.
+pub(super) fn has_completion_body(note: &TaskNotification) -> bool {
+    !note
+        .summary
         .as_deref()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|n| *n > 1)
-    {
-        footer_parts.push(format!("{agents} agents"));
-    }
-    if let Some(tool_uses) = note.tool_uses.as_deref().filter(|s| !s.is_empty()) {
-        footer_parts.push(format!("{} tools", sanitize_oneline(tool_uses)));
-    }
-    // Duration: prefer the millisecond field (human-formatted); fall back to a
-    // pre-formatted `<duration>` string if that is what the payload carried.
-    if let Some(dur) = note
-        .duration_ms
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(format_duration_ms)
-    {
-        footer_parts.push(format!("⏱ {dur}"));
-    } else if let Some(duration) = note.duration.as_deref().filter(|s| !s.is_empty()) {
-        footer_parts.push(format!("⏱ {}", sanitize_oneline(duration)));
-    }
-    // Fallback: a plain (non-XML) usage string, only when no structured
-    // sub-field was parsed and it is not itself nested XML.
-    if note.subagent_tokens.is_none() && note.agent_count.is_none() {
-        if let Some(usage) = note
-            .usage
+        .unwrap_or("")
+        .trim_start()
+        .starts_with("Monitor event")
+        && note
+            .result
             .as_deref()
-            .filter(|s| !s.is_empty() && !s.contains('<'))
-            .filter(|s| {
-                let normalized = s.to_ascii_lowercase();
-                !normalized.contains(" tok") && !normalized.contains("token")
-            })
-        {
-            footer_parts.push(sanitize_oneline(usage));
-        }
-    }
-    if !footer_parts.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("-# {}", footer_parts.join(" · ")));
-    }
-
-    clamp_discord_message_content(&lines.join("\n"))
+            .is_some_and(|result| !result.trim().is_empty())
 }
 
 pub(super) fn status_icon(status: &str) -> &'static str {
@@ -319,12 +231,6 @@ pub(super) fn status_icon(status: &str) -> &'static str {
         "" => "📋",
         _ => "📋",
     }
-}
-
-/// First 8 hex-ish chars of a task id for a compact, stable footer label.
-fn short_task_id(task_id: &str) -> String {
-    let trimmed = task_id.trim();
-    trimmed.chars().take(8).collect()
 }
 
 /// Render the `result` body: a JSON aggregate is summarized by shape; otherwise
@@ -1042,7 +948,7 @@ mod tests {
         assert!(card.contains("https://github.com/itismyfield/AgentDesk/pull/3034"));
         assert!(!card.contains("194k tok"));
         assert!(card.contains("⏱ 4.1s"));
-        assert!(card.contains("task aa37b21a"));
+        assert!(!card.contains("task aa37b21a"));
     }
 
     #[test]
@@ -1388,7 +1294,7 @@ fn main() {}
         assert_eq!(note.subagent_tokens.as_deref(), Some("66013"));
         let card = format_task_notification_card(&note, 0);
         assert!(card.contains("5 tools"), "{card}");
-        assert!(!card.contains(" tok"), "{card}");
+        assert!(card.ends_with("5 tools · ⏱ 8m 24s · 🪙 66k tok"), "{card}");
         assert!(
             !card.contains("999 tools") && !card.contains("889K"),
             "footer not poisoned: {card}"
@@ -1411,8 +1317,8 @@ fn main() {}
         assert_eq!(note.duration_ms.as_deref(), Some("504983"));
         let card = format_task_notification_card(&note, 0);
         assert!(
-            !card.contains(" tok"),
-            "token usage must be omitted: {card}"
+            card.ends_with("5 tools · ⏱ 8m 24s · 🪙 66k tok"),
+            "only structured usage supplies the token total: {card}"
         );
         assert!(card.contains("5 tools"), "{card}");
         assert!(card.contains("⏱ 8m 24s"), "{card}");

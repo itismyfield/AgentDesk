@@ -284,6 +284,7 @@ jobs:
               - 'src/server/mod.rs'
               - 'src/server/multinode_regression.rs'
               - 'src/server/outbox_worker/attachment_pg_tests.rs'
+              - 'src/server/outbox_worker/session_notice_pg_tests.rs'
               - 'src/server/resource_locks.rs'
               - 'src/server/routes/agents_host_guard_tests.rs'
               - 'src/server/routes/agents_turn_deliver/pg_tests.rs'
@@ -369,6 +370,7 @@ jobs:
               - 'src/services/discord/commands/text_commands/clear_http_overlap_tests.rs'
               - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
+              - 'src/services/discord/health/o_transition/codex_context_tests.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/self_watchdog/tests/health_response.rs'
@@ -474,6 +476,10 @@ jobs:
               - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
+              - 'src/services/discord/task_notification_delivery/footer_surface_tests.rs'
+              - 'src/services/discord/task_notification_delivery/inline_contract_tests.rs'
+              - 'src/services/discord/task_notification_delivery/inline_contract_tests/replacement_receipt_tests.rs'
+              - 'src/services/discord/task_notification_delivery/inline_contract_tests/retention_tests.rs'
               - 'src/services/discord/task_notification_delivery/metadata_retirement_pg_tests.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
@@ -612,6 +618,7 @@ jobs:
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
               - 'src/services/tui_o/repost/writer_activation_tests.rs'
               - 'src/services/tui_o/writer/always_on_repost_tests.rs'
+              - 'src/services/tui_o/writer/bo_post_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
@@ -877,6 +884,7 @@ jobs:
               - 'src/services/session_host/**'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
+              - 'src/services/turn_summary_line/quota_tests.rs'
               # DERIVED BLOCK (#5832) -- do not hand-edit. cross_os_rust does
               # not select 'src/services/discord/**' wholesale, so every file in
               # that subtree that carries a platform cfg shim (or names a
@@ -939,6 +947,7 @@ jobs:
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/session_idle_cleanup.rs'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/task_notification_delivery/**'
               - 'src/services/discord/task_supervisor.rs'
               - 'src/services/discord/terminal_delivery_custody/**'
               - 'src/services/discord/terminal_ui_obligation.rs'

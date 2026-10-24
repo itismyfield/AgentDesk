@@ -69,5 +69,19 @@ async fn cleanup_old_rows_pg_impl(pool: &PgPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|error| format!("task card bounded retention cleanup failed: {error}"))?;
+    sqlx::query(
+        "DELETE FROM task_notification_monitor_receipt
+         WHERE id IN (
+             SELECT id FROM task_notification_monitor_receipt
+             WHERE observed_at < NOW() - make_interval(days => $1::int)
+             ORDER BY observed_at ASC
+             LIMIT $2
+         )",
+    )
+    .bind(RETENTION_DAYS * 4)
+    .bind(RETENTION_DELETE_LIMIT)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("Monitor receipt bounded retention cleanup failed: {error}"))?;
     Ok(())
 }

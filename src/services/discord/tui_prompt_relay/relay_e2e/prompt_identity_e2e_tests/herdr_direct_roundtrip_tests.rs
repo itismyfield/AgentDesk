@@ -464,7 +464,7 @@ async fn scenario(rig: Arc<HerdrRig>, mut config: crate::config::Config) {
     crate::config_live_reload::install(config);
     h.answer_placeholders_immediately();
     h.cache_relay_transport();
-    h.use_mock_notify_bot(TIMEOUT).await;
+    h.use_mock_provider_bot(TIMEOUT).await;
     h.shared
         .restart
         .reconcile_done

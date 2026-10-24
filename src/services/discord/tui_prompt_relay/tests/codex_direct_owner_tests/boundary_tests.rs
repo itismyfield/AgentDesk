@@ -109,7 +109,7 @@ impl Fixture {
         automatic: bool,
     ) -> Self {
         enable_session_bound_delivery();
-        // The observer announces direct input through the notify utility bot.
+        // The channel provider owns automatic input notices.
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         Arc::get_mut(&mut shared)
             .expect("fresh shared")
@@ -143,6 +143,7 @@ impl Fixture {
             )
             .await;
         let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
+        registry.register("codex".into(), shared.clone()).await;
         let observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
         // The PG entry test uses production's callback; other scenarios relay observations explicitly.
         let (hooks, hook_rx) = tokio::sync::broadcast::channel(64);
@@ -549,6 +550,10 @@ async fn cursor_past_prompt(root: PathBuf, channel: u64, tmux: &str, answer_firs
     fx.append(&after);
     fx.scanned_past(prompt_end).await;
     super::super::super::relay_observed_prompt(&fx.shared, event).await;
+    let input = fx.sent(PROMPT);
+    assert_eq!(input.len(), 1, "one active input mirror");
+    let content: serde_json::Value = serde_json::from_str(&input[0].2).unwrap();
+    assert_eq!(content["content"], format!("-# ⌨️ {PROMPT}"));
     let anchor = fx
         .codex
         .row()
@@ -1311,6 +1316,88 @@ fn codex_6903_discovery_keeps_live_input_out_of_bootstrap_history() {
                         || event.prompt != "LIVE_DISCOVERY_6903"
                 );
             }
+            fx.finish();
+        })
+    });
+}
+
+#[test]
+fn notify_inline_prompt_entrypoints_use_the_channel_provider_and_single_line() {
+    run(|root| {
+        Box::pin(async move {
+            let channel = 7_228_800_101;
+            let tmux = "AgentDesk-codex-notify-inline";
+            let fx = Fixture::start(&root, channel, tmux).await;
+            let (notify_requests, notify_http, _notify_server) = recording_discord(channel).await;
+            fx._registry
+                .set_utility_bot_http_for_tests(
+                    crate::services::discord::bot_role::UtilityBotRole::Notify,
+                    notify_http,
+                )
+                .await;
+            let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(channel);
+            let cases = [
+                (
+                    "first **bold**\nsecond\nthird",
+                    false,
+                    "-# ⌨️ ",
+                    Some(r"-# ⌨️ first \*\*bold\*\* (+2줄)"),
+                ),
+                (
+                    "steer `now`\nmore",
+                    true,
+                    "-# ⌨️ ",
+                    Some(r"-# ⌨️ steer \`now\` (+1줄)"),
+                ),
+                ("/loop 5m inspect\nnext", false, "-# 🔁 ", None),
+                ("/compact", false, "-# 🧹 ", None),
+                ("<command-name>/clear</command-name>", false, "-# ⚙️ ", None),
+                (
+                    "This session is being continued from a previous conversation. Summary: hidden",
+                    false,
+                    "-# 🧩 ",
+                    None,
+                ),
+            ];
+            for (i, (text, steer, prefix, expected)) in cases.into_iter().enumerate() {
+                let mut prompt =
+                    super::super::local_control_prompt(tmux, text, &format!("inline-{i}"));
+                prompt.provider = "codex".into();
+                prompt.steer_echo = steer;
+                let before = fx.requests.lock().unwrap().len();
+                super::super::super::relay_observed_prompt(&fx.shared, prompt).await;
+                let posts = fx.requests.lock().unwrap()[before..]
+                    .iter()
+                    .filter(|(method, path, _)| method == "POST" && path.ends_with("/messages"))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    posts.len(),
+                    1,
+                    "the real prompt entrypoint posts one provider notice: {text}"
+                );
+                let wire: serde_json::Value = serde_json::from_str(&posts[0].2).unwrap();
+                let content = wire["content"].as_str().unwrap();
+                assert!(
+                    content.starts_with(prefix),
+                    "old prompt header returned: {content:?}"
+                );
+                assert!(
+                    crate::services::discord::session_notice::is_inline(content),
+                    "raw multiline notice: {content:?}"
+                );
+                if let Some(expected) = expected {
+                    assert_eq!(content, expected);
+                }
+                assert!(
+                    notify_requests.lock().unwrap().is_empty(),
+                    "notify fallback selected"
+                );
+            }
+            assert!(
+                fx.codex.row().is_none(),
+                "passive and control notices create no inflight"
+            );
             fx.finish();
         })
     });

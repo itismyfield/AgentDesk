@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import health_readiness, herdr_restart, http_auth  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth, restart_guard  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -126,7 +126,6 @@ TUI_IDLE_DRAFT_GUARD_AFTER_S = float(
 TUI_IDLE_DRAFT_GUARD_POLL_S = float(
     os.environ.get("AGENTDESK_E2E_TUI_IDLE_DRAFT_GUARD_POLL_S", "2")
 )
-DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
     "deliver_results",
     "discord_prompt_records",
@@ -2924,7 +2923,7 @@ def _classify_wait_timeout(
                 return "body_truncated_or_tail_missing_after_head"
 
     direct_notice_seen = any(
-        DIRECT_INPUT_NOTIFICATION_MARKER in (m.get("content") or "")
+        assertions.DIRECT_INPUT_NOTICE.match(m.get("content") or "")
         for m in window.raw_messages
     )
     target_mailboxes = health.get("target_mailboxes")
@@ -4562,12 +4561,7 @@ def _guard_no_foreign_active_turns(
                 f"for foreign mailbox guard (cell={cell}, channel={channel_id}): "
                 f"{type(error).__name__}: {error}"
             ) from error
-        mailboxes = detail.get("mailboxes")
-        if not isinstance(mailboxes, list):
-            raise assertions.AssertionError(
-                "refusing to restart dcserver: /api/health/detail mailboxes is not a list "
-                f"(payload={_payload_summary(detail)})"
-            )
+        mailboxes = restart_guard.observed_mailboxes(detail)
 
         busy: list[str] = []
         for mailbox in mailboxes:

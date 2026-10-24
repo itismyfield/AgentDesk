@@ -237,6 +237,9 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
         .set_utility_bot_http_for_tests(discord::bot_role::UtilityBotRole::Notify, http.clone())
         .await;
     let _rest = discord::shared_state::test_rest::install(http);
+    health
+        .register(ProviderKind::Codex.as_str().to_string(), shared.clone())
+        .await;
     let mut observed = dedupe::subscribe_observed_prompts();
     let mut completed = shared.inflight_signals.subscribe();
     assert!(
@@ -361,7 +364,7 @@ async fn direct_phase(fx: &Fixture, path: &Path, original: &hosted_source::Hoste
     assert_eq!(
         mock.post_snapshot()
             .iter()
-            .filter(|(_, text)| text.contains(DIRECT))
+            .filter(|(_, text)| text == r"-# ⌨️ ordinary direct prompt \[codex-t14\]")
             .count(),
         1,
         "one actual observed-prompt announcement"

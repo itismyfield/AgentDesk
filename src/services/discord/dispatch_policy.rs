@@ -69,6 +69,18 @@ pub(crate) fn prepend_operational_alert_origin(text: &str) -> String {
     }
 }
 
+/// Keep Discord's subtext prefix before the invisible provenance marker.
+pub(crate) fn prepend_inline_operational_alert_origin(text: &str) -> String {
+    let trimmed = text.trim();
+    if strip_operational_alert_origin(trimmed).1 {
+        return trimmed.to_string();
+    }
+    match trimmed.strip_prefix("-# ") {
+        Some(body) => format!("-# {}{body}", hidden_operational_alert_origin_marker()),
+        None => prepend_operational_alert_origin(trimmed),
+    }
+}
+
 pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
     text: &'a str,
 ) -> (Cow<'a, str>, bool) {
@@ -84,6 +96,12 @@ pub(in crate::services::discord) fn strip_monitor_auto_turn_origin<'a>(
 }
 
 pub(crate) fn strip_operational_alert_origin<'a>(text: &'a str) -> (Cow<'a, str>, bool) {
+    if let Some(body) = text.strip_prefix("-# ") {
+        let (body, marked) = strip_operational_alert_origin(body);
+        if marked {
+            return (Cow::Owned(format!("-# {body}")), true);
+        }
+    }
     if let Some(rest) = text.strip_prefix(hidden_operational_alert_origin_marker()) {
         return (Cow::Borrowed(rest), true);
     }
@@ -395,6 +413,32 @@ mod allowed_turn_sender_tests {
             true,
             &marked,
         ));
+        let inline_body = "-# DISPATCH:inline watchdog alert";
+        let inline = format!(
+            "-# {}",
+            prepend_operational_alert_origin("DISPATCH:inline watchdog alert")
+        );
+        assert!(
+            !is_allowed_turn_sender(
+                &[ANNOUNCE_ID],
+                Some(ANNOUNCE_ID),
+                ANNOUNCE_ID,
+                true,
+                &inline,
+            ),
+            "inline operational alert must be rejected by the real intake loop guard"
+        );
+        assert!(has_non_turn_provenance(&inline));
+        let (stripped, marked) = super::strip_operational_alert_origin(&inline);
+        assert!(marked);
+        assert_eq!(stripped, inline_body);
+        assert!(!is_allowed_turn_sender(
+            &[OTHER_BOT_ID],
+            None,
+            OTHER_BOT_ID,
+            true,
+            &inline,
+        ));
     }
 
     #[test]
@@ -483,19 +527,6 @@ pub(in crate::services::discord) async fn resolve_announce_bot_user_id(
     let registry = shared.health_registry()?;
     registry
         .utility_bot_user_id(super::bot_role::UtilityBotRole::Announce)
-        .await
-}
-
-/// Cached lookup for the notify bot's Discord user id. Used by the message
-/// router to classify incoming messages as `BackgroundTrigger` turns —
-/// see `TurnKind` in `router/message_handler.rs` and the race-handler
-/// preservation rule from #796.
-pub(in crate::services::discord) async fn resolve_notify_bot_user_id(
-    shared: &SharedData,
-) -> Option<u64> {
-    let registry = shared.health_registry()?;
-    registry
-        .utility_bot_user_id(super::bot_role::UtilityBotRole::Notify)
         .await
 }
 

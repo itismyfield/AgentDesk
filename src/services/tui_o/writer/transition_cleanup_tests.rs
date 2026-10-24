@@ -163,6 +163,8 @@ impl Fixture {
             sources.insert(key(n), facts);
         }
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -870,6 +872,8 @@ mod operations_shape {
         }
         let current = sources[OLD as usize].clone();
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -1001,6 +1005,8 @@ mod operations_shape {
                 facts.insert(source_key(&cursor.source), source_facts);
             }
             Snapshot {
+                reading: 0,
+                codex: None,
                 channel: CHANNEL,
                 provider: ShadowProvider::Claude,
                 home: Home::Settled,

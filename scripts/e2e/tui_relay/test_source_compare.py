@@ -72,6 +72,15 @@ class SourceCompareTests(unittest.TestCase):
         self.assertEqual(self.compare([notice])["verdict"], "missing_relay")
         self.assertEqual(self.compare([notice, {**notice, "id": "3"}, message(2)])["verdict"], "duplicated")
 
+    def test_inline_direct_notice_unescapes_only_its_markdown_preview(self):
+        escaped = MARKER.replace("[", r"\[").replace("]", r"\]")
+        notice = message(1, f"-# ⌨️ {escaped}")
+        result = self.compare([notice, message(2)])
+        self.assertEqual((result["verdict"], result["direct_input_notice_count"],
+                          result["relay_body_count"]), ("ok", 1, 1))
+        self.assertEqual(self.compare([notice])["verdict"], "missing_relay")
+        self.assertEqual(self.compare([notice, {**notice, "id": "3"}, message(2)])["verdict"], "duplicated")
+
     def test_explicit_webhook_mirror_author_is_not_relay(self):
         result = sc.compare(self.path, [message(1, author="webhook"), message(2)],
                             run_id="fixture", input_mirror_author_ids=("webhook",))[MARKER]
