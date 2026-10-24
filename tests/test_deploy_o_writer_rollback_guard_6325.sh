@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# A deploy whose source has the O writer on must not auto-roll back to a build
-# that is not recorded as an O writer build, nor ship an external artifact instead
-# of its own build. With the switch off, rollback and artifact deploys are unchanged.
+# A binary reporting the O writer on must not auto-roll back to a non-O-writer build nor be
+# replaced by an external artifact; switches come from `agentdesk build-info`, never source.
 
 set -euo pipefail
 
@@ -43,8 +42,8 @@ extract_function() {
 }
 
 for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stopped \
-    _source_o_tui_writer _manifest_o_tui_writer \
-    _source_o_ledger_operator_resume _rollback_would_revert_o_ledger _source_would_revert_o_ledger \
+    _binary_build_flag _manifest_o_tui_writer \
+    _rollback_would_revert_o_ledger _binary_would_revert_o_ledger \
     _rollback_would_revert_o_writer _write_release_source_manifest \
     _external_artifact_would_skip_o_writer; do
     body="$(extract_function "$fn")"
@@ -97,13 +96,26 @@ REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 MANIFEST="$ADK_REL/runtime/release-source.json"
 
-# $1 topology.rs body ("" = no switch in the source), $2 manifest JSON ("" = none).
+# $1 path, $2 marker, $3 `build-info` stdout ("" = a binary without the subcommand).
+make_binary() {
+    {
+        printf '#!/bin/sh\n# %s\n' "$2"
+        if [ -n "$3" ]; then
+            printf 'if [ "$1" = build-info ]; then printf "%%s\\n" %s; exit 0; fi\n' "'$3'"
+        fi
+        printf 'exit 2\n'
+    } >"$1"
+    chmod +x "$1"
+}
+
+marker() { sed -n 2p "$1" 2>/dev/null; }
+
+# $1 new binary's build-info ("" = none), $2 manifest JSON ("" = none).
 setup_case() {
     clean_paths "$ADK_REL" "$REPO" "$TMP_ROOT/calls"
-    mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime" "$REPO/src/services/tui_o"
-    printf 'new\n' >"$REL_BINARY"
-    printf 'old\n' >"$REL_BINARY_BACKUP"
-    [ -z "$1" ] || printf '%s\n' "$1" >"$REPO/src/services/tui_o/topology.rs"
+    mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime" "$REPO"
+    make_binary "$REL_BINARY" new "$1"
+    make_binary "$REL_BINARY_BACKUP" old ""
     [ -z "$2" ] || printf '%s\n' "$2" >"$MANIFEST"
 }
 
@@ -111,9 +123,9 @@ setup_case() {
 expect() {
     local label="$1" expected="$2" out actual
     out="$(_rollback_release_binary 2>&1)"
-    if [ "$(cat "$REL_BINARY")" = "old" ] && [ ! -e "$REL_BINARY_BACKUP" ]; then
+    if [ "$(marker "$REL_BINARY")" = "# old" ] && [ ! -e "$REL_BINARY_BACKUP" ]; then
         actual=rolled_back
-    elif [ "$(cat "$REL_BINARY")" = "new" ] && [ "$(cat "$REL_BINARY_BACKUP")" = "old" ] \
+    elif [ "$(marker "$REL_BINARY")" = "# new" ] && [ "$(marker "$REL_BINARY_BACKUP")" = "# old" ] \
         && ! grep -q bootout "$TMP_ROOT/calls" 2>/dev/null \
         && printf '%s' "$out" | grep -q "ROLLBACK REFUSED"; then
         actual=refused
@@ -123,8 +135,9 @@ expect() {
     if [ "$actual" = "$expected" ]; then pass "$label → $expected"; else fail "$label → expected $expected, got $actual: $out"; fi
 }
 
-SWITCH_OFF='pub(crate) const O_TUI_WRITER: bool = false;'
-SWITCH_ON='pub(crate) const O_TUI_WRITER: bool = true;'
+SWITCH_OFF='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":false}'
+SWITCH_ON='{"schema":1,"o_tui_writer":true,"o_ledger_operator_resume":false}'
+CAPABLE='{"schema":1,"o_tui_writer":false,"o_ledger_operator_resume":true}'
 OLD_MANIFEST='{"repo_head":"abc","latest_postgres_migration":"0001_init.sql"}'
 LEGACY_MANIFEST='{"repo_head":"abc","o_tui_writer":"false"}'
 O_MANIFEST='{"repo_head":"abc","o_tui_writer":"true"}'
@@ -132,8 +145,8 @@ O_MANIFEST='{"repo_head":"abc","o_tui_writer":"true"}'
 echo "== switch off: rollback unchanged =="
 setup_case "$SWITCH_OFF" "$OLD_MANIFEST"
 expect "switch off, old-format manifest" rolled_back
-setup_case "" ""
-expect "source without the switch, no manifest" rolled_back
+setup_case "$SWITCH_OFF" ""
+expect "switch off, no manifest" rolled_back
 
 echo "== switch on: the rollback target must be an O writer build =="
 setup_case "$SWITCH_ON" "$OLD_MANIFEST"
@@ -166,16 +179,16 @@ printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
 expect "floor, compatible target" rolled_back
 
 echo "== an unreadable switch counts as on =="
-setup_case 'pub(crate) const O_TUI_WRITER: bool = cfg!(feature = "o");' "$LEGACY_MANIFEST"
-expect "non-literal switch" refused
-setup_case "$SWITCH_OFF
-// pub(crate) const O_TUI_WRITER: bool = false;" "$LEGACY_MANIFEST"
-expect "switch plus a commented-out copy" refused
-setup_case "#[cfg(test)]
-$SWITCH_OFF
-#[cfg(not(test))]
-$SWITCH_ON" "$LEGACY_MANIFEST"
-expect "two definitions that disagree" refused
+setup_case "" "$LEGACY_MANIFEST"
+expect "binary without build-info" refused
+setup_case '{"schema":1,"o_ledger_operator_resume":false}' "$LEGACY_MANIFEST"
+expect "build-info without the switch (constant removed)" refused
+setup_case '{"schema":1,"o_tui_writer":"false"}' "$LEGACY_MANIFEST"
+expect "non-boolean switch" refused
+setup_case '{"schema":2,"o_tui_writer":false}' "$LEGACY_MANIFEST"
+expect "unknown build-info schema" refused
+setup_case 'not json' "$LEGACY_MANIFEST"
+expect "unparseable build-info" refused
 
 echo "== switch on: only this source's own build is deployed =="
 # Buffer the bounded selection range so a missing boundary cannot include later deploy steps.
@@ -188,68 +201,91 @@ if [ -z "$selection" ] || ! bash -n <<<"$selection" 2>/dev/null; then
     fail "the source floor and binary selection range is missing or invalid"
     exit 1
 fi
-for guard in _source_would_revert_o_ledger _external_artifact_would_skip_o_writer; do
-    if ! grep -qx "if $guard; then" <<<"$selection"; then
-        fail "the source floor and binary selection range does not run $guard"
-        exit 1
-    fi
-done
+if ! grep -qx "if _external_artifact_would_skip_o_writer; then" <<<"$selection"; then
+    fail "the binary selection range does not run _external_artifact_would_skip_o_writer"
+    exit 1
+fi
+if grep -qE '_source_o_|_source_would_revert|const O_TUI_WRITER|OPERATOR_RESUME_SUPPORTED|src/services/tui_o' "$DEPLOY_SH"; then
+    fail "deploy-release.sh still reads Rust source for a build switch"
+fi
+# The floor check runs on the selected binary once it exists, before anything is staged.
+floor_check="$(awk '
+    /^[[:space:]]*\[ -e "\$SOURCE_BINARY" \] && touch "\$SOURCE_BINARY"$/ { collecting = 1; next }
+    collecting && /^# Rebuild dashboard so deploy never ships a stale dist\.$/ { print body; exit }
+    collecting { body = body $0 ORS }
+' "$DEPLOY_SH")"
+if ! grep -qx 'if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then' <<<"$floor_check" \
+    || ! bash -n <<<"${floor_check#fi}" 2>/dev/null; then
+    fail "the build floor check after binary selection is missing or invalid"
+    exit 1
+fi
 _resolve_default_release_binary() {
     echo "select own-build" >>"$TMP_ROOT/calls"
     echo "own-build"
 }
 run_selection() {
     AGENTDESK_DEPLOY_BINARY="$1" REPO="$REPO" ADK_REL="$ADK_REL" TMP_ROOT="$TMP_ROOT" \
-        DEPLOY_BUILD_PROFILE=release bash -euo pipefail -c "$(declare -f _source_o_tui_writer \
-        _source_o_ledger_operator_resume _source_would_revert_o_ledger \
+        DEPLOY_BUILD_PROFILE=release bash -euo pipefail -c "$(declare -f _binary_build_flag \
         _external_artifact_would_skip_o_writer _resolve_default_release_binary)
 $selection
 echo \"\$SOURCE_BINARY\""
 }
-# $1 label, $2 topology.rs body, $3 AGENTDESK_DEPLOY_BINARY, $4 expected binary or "refused"
+ARTIFACT="$TMP_ROOT/artifact"
+# $1 label, $2 artifact build-info ("" = none), $3 deploy an artifact (yes|no), $4 expected
 expect_binary() {
-    local actual
-    setup_case "$2" ""
-    actual="$(run_selection "$3" 2>/dev/null)" || actual=refused
+    local actual deploy_binary=""
+    setup_case "$SWITCH_OFF" ""
+    make_binary "$ARTIFACT" artifact "$2"
+    [ "$3" = no ] || deploy_binary="$ARTIFACT"
+    actual="$(run_selection "$deploy_binary" 2>/dev/null)" || actual=refused
+    [ "$actual" != "$ARTIFACT" ] || actual=artifact
     if [ "$actual" = "$4" ]; then pass "$1 → $4"; else fail "$1 → expected $4, got $actual"; fi
 }
-expect_source_floor() {
-    local actual status=0 calls
-    actual="$(run_selection "" 2>"$TMP_ROOT/selection-error")" || status=$?
-    calls="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
-    if [ "$2" = refused ]; then
-        if [ "$status" -eq 1 ] && [ -z "$actual" ] && [ -z "$calls" ] \
-            && grep -q "OperatorResume floor refuses" "$TMP_ROOT/selection-error"; then
-            pass "$1 → refused before binary selection"
+run_floor_check() {
+    SOURCE_BINARY="$1" ADK_REL="$ADK_REL" bash -euo pipefail -c "$(declare -f _binary_build_flag \
+        _binary_would_revert_o_ledger)
+${floor_check#fi}
+echo staged"
+}
+# $1 label, $2 built binary's build-info ("" = none), $3 floor (yes|no), $4 expected: staged | refused
+expect_build_floor() {
+    local actual status=0
+    setup_case "$SWITCH_OFF" ""
+    make_binary "$ARTIFACT" built "$2"
+    if [ "$3" = yes ]; then
+        mkdir -p "$ADK_REL/o_store"
+        printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
+    fi
+    actual="$(run_floor_check "$ARTIFACT" 2>"$TMP_ROOT/floor-error")" || status=$?
+    if [ "$4" = refused ]; then
+        if [ "$status" -eq 1 ] && [ -z "$actual" ] \
+            && grep -q "OperatorResume floor refuses" "$TMP_ROOT/floor-error"; then
+            pass "$1 → refused before staging"
         else
-            fail "$1 → expected refusal before selection, got rc=$status output='$actual' calls='$calls'"
+            fail "$1 → expected refusal, got rc=$status output='$actual'"
         fi
-    elif [ "$status" -eq 0 ] && [ "$actual" = "$2" ] && [ "$calls" = "select own-build" ]; then
-        pass "$1 → $2 with binary selection observed"
+    elif [ "$status" -eq 0 ] && [ "$actual" = staged ]; then
+        pass "$1 → staged"
     else
-        fail "$1 → expected $2 with selection, got rc=$status output='$actual' calls='$calls'"
+        fail "$1 → expected staged, got rc=$status output='$actual'"
     fi
 }
-expect_binary "switch on, external artifact" "$SWITCH_ON" /tmp/artifact refused
-expect_binary "unreadable switch, external artifact" \
-    'pub(crate) const O_TUI_WRITER: bool = cfg!(feature = "o");' /tmp/artifact refused
-expect_binary "switch on, own build" "$SWITCH_ON" "" own-build
-expect_binary "switch off, external artifact" "$SWITCH_OFF" /tmp/artifact /tmp/artifact
-expect_binary "source without the switch, external artifact" "" /tmp/artifact /tmp/artifact
-expect_binary "switch off, own build" "$SWITCH_OFF" "" own-build
+expect_binary "switch on, external artifact" "$SWITCH_ON" yes refused
+expect_binary "artifact without build-info" "" yes refused
+expect_binary "capable artifact even with O switch off" "$CAPABLE" yes refused
+expect_binary "switch off, external artifact" "$SWITCH_OFF" yes artifact
+expect_binary "own build" "$SWITCH_ON" no own-build
 
-echo "== the manifest records the switch for the next deploy's guard =="
+echo "== the manifest records the installed binary's switch for the next deploy's guard =="
 for value in true false; do
-    setup_case "pub(crate) const O_TUI_WRITER: bool = ${value};" ""
+    setup_case "{\"schema\":1,\"o_tui_writer\":${value},\"o_ledger_operator_resume\":false}" ""
     _write_release_source_manifest >/dev/null 2>&1 || true
     recorded="$(_manifest_o_tui_writer || true)"
     if [ "$recorded" = "$value" ]; then pass "manifest records ${value}"; else fail "manifest records ${value}: got '${recorded}'"; fi
 done
 
-echo "== the capability records only this source's own reader and consumer =="
-setup_case "$SWITCH_OFF" ""
-mkdir -p "$REPO/src/services/tui_o/store"
-printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = true;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
+echo "== the manifest records the installed binary's OperatorResume capability =="
+setup_case "$CAPABLE" ""
 _write_release_source_manifest >/dev/null 2>&1 || true
 if python3 - "$MANIFEST" <<'PY'
 import json
@@ -257,36 +293,26 @@ import sys
 assert json.load(open(sys.argv[1]))["o_ledger_operator_resume"] is True
 PY
 then pass "manifest records OperatorResume capability"; else fail "manifest misses capability"; fi
-if AGENTDESK_DEPLOY_BINARY=/tmp/artifact _external_artifact_would_skip_o_writer; then
-    pass "capable source refuses an external artifact even with O switch off"
-else fail "external artifact could be assigned an unverified capability"; fi
-mkdir -p "$ADK_REL/o_store"
-printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
-expect_source_floor "source floor, compatible source" own-build
-setup_case "$SWITCH_OFF" ""
-mkdir -p "$REPO/src/services/tui_o/store"
-printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' >"$REPO/src/services/tui_o/store/ledger.rs"
-expect_source_floor "no source floor, legacy source" own-build
-for capability in missing false unknown unreadable; do
-    setup_case "$SWITCH_OFF" ""
-    mkdir -p "$ADK_REL/o_store" "$REPO/src/services/tui_o/store"
-    printf '1\n' >"$ADK_REL/o_store/operator_resume.floor"
-    case "$capability" in
-        false) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = false;\n' \
-            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
-        unknown) printf 'pub const OPERATOR_RESUME_SUPPORTED: bool = cfg!(feature = "o");\n' \
-            >"$REPO/src/services/tui_o/store/ledger.rs" ;;
-        unreadable) mkdir "$REPO/src/services/tui_o/store/ledger.rs" ;;
-    esac
-    expect_source_floor "source floor, $capability capability" refused
-done
+setup_case "" ""
+_write_release_source_manifest >/dev/null 2>&1 || true
+recorded="$(_manifest_o_tui_writer || true)"
+if [ "$recorded" = unknown ]; then pass "binary without build-info records unknown"; else fail "binary without build-info records '$recorded'"; fi
 
-echo "== this repository's switch reads as one value =="
-real="$(REPO="$REPO_ROOT" _source_o_tui_writer)"
-case "$real" in
-    true|false) pass "repository switch reads as $real" ;;
-    *) fail "repository switch reads as '$real'; every O build's rollback would be refused" ;;
-esac
+echo "== the OperatorResume floor reads the built binary =="
+expect_build_floor "floor, compatible build" "$CAPABLE" yes staged
+expect_build_floor "no floor, legacy build" "$SWITCH_OFF" no staged
+expect_build_floor "floor, legacy build" "$SWITCH_OFF" yes refused
+expect_build_floor "floor, build without build-info" "" yes refused
+expect_build_floor "floor, build without the capability field" '{"schema":1,"o_tui_writer":true}' yes refused
+
+echo "== the binary reports every switch this script reads =="
+for field in o_tui_writer o_ledger_operator_resume; do
+    if grep -q "\"$field\":" "$REPO_ROOT/src/cli/build_info.rs"; then
+        pass "build-info reports $field"
+    else
+        fail "build-info no longer reports $field; every guard reading it would refuse"
+    fi
+done
 
 if [ "$FAILURES" -ne 0 ]; then
     echo "$FAILURES failure(s)" >&2

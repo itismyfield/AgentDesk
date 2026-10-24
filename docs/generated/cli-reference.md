@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 55
-- Commands including nested subcommands: 100
+- Top-level commands: 56
+- Commands including nested subcommands: 101
 
 ## Global options
 
@@ -93,6 +93,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk phase`](#agentdesk-phase) | Phase-gate violation snapshot (issue #2657). |  |
 | [`agentdesk phase status`](#agentdesk-phase-status) | Show current violations (default). |  |
 | [`agentdesk deploy`](#agentdesk-deploy) | Build + deploy dev + promote to release |  |
+| [`agentdesk build-info`](#agentdesk-build-info) | Print this binary's build switches as JSON (read by deploy scripts) |  |
 | [`agentdesk agents`](#agentdesk-agents) | List agents and their status |  |
 | [`agentdesk diag`](#agentdesk-diag) | Show turn/session diagnostics for an agent ID or Discord channel ID |  |
 | [`agentdesk config`](#agentdesk-config) | Runtime config get/set |  |
@@ -911,6 +912,12 @@ Usage: `agentdesk phase status`
 Build + deploy dev + promote to release
 
 Usage: `agentdesk deploy`
+
+## `agentdesk build-info`
+
+Print this binary's build switches as JSON (read by deploy scripts)
+
+Usage: `agentdesk build-info`
 
 ## `agentdesk agents`
 

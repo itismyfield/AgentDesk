@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import health_readiness, herdr_restart, http_auth, restart_guard  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth, restart_guard, wait_timeout  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -2896,47 +2896,6 @@ def _target_mailbox_debug_snapshot(
     }
 
 
-def _classify_wait_timeout(
-    *,
-    window: assertions.Window,
-    needle: str,
-    head: str | None,
-    prompt_draft_present: bool | None,
-    health: dict[str, Any],
-) -> str:
-    if prompt_draft_present is True:
-        return "prompt_not_submitted_input_buffer_still_contains_prompt"
-
-    raw_has_needle = any(needle in (m.get("content") or "") for m in window.raw_messages)
-    relay_has_needle = any(
-        (body := assertions.relay_body(message)) is not None and needle in body
-        for message in window.messages
-    )
-    if raw_has_needle and not relay_has_needle:
-        return "relay_surface_filter_miss_raw_contains_needle"
-
-    if head:
-        for message in window.messages:
-            body = assertions.relay_body(message) or ""
-            head_at = body.find(head)
-            if head_at != -1 and body.find(needle, head_at + len(head)) == -1:
-                return "body_truncated_or_tail_missing_after_head"
-
-    direct_notice_seen = any(
-        assertions.DIRECT_INPUT_NOTICE.match(m.get("content") or "")
-        for m in window.raw_messages
-    )
-    target_mailboxes = health.get("target_mailboxes")
-    busy = False
-    if isinstance(target_mailboxes, list):
-        busy = any((m.get("busy_reasons") or []) for m in target_mailboxes if isinstance(m, dict))
-    if direct_notice_seen and busy:
-        return "direct_input_notified_provider_or_relay_still_busy"
-    if direct_notice_seen:
-        return "direct_input_notified_no_tail_observed"
-    return "no_direct_input_or_relay_evidence"
-
-
 def _collect_wait_timeout_diagnostics(
     *,
     base_url: str,
@@ -2979,9 +2938,10 @@ def _collect_wait_timeout_diagnostics(
         "after_id": after_id,
         "scenario_id": str(scenario.get("id") or ""),
         "cell": cell,
-        "classification": _classify_wait_timeout(
+        "classification": wait_timeout.classify(
             window=window,
             needle=needle,
+            after_id=after_id,
             head=head,
             prompt_draft_present=prompt_draft_present,
             health=health,
