@@ -136,7 +136,14 @@ pub const TURN_ACTIVITY_UNKNOWN: &str = "turn_activity_unknown";
 
 /// A TUI-direct, adopted or monitor turn owns the channel through its durable row alone; a
 /// headless start there could not create its own row and would lose the input.
+/// A prior process's Herdr row holds the channel the same way, whatever source started it.
 pub fn external_turn_holds_channel(provider: &ProviderKind, channel_id: u64) -> bool {
+    #[cfg(unix)]
+    if crate::services::discord::recovery_engine::herdr_row_end::owner::holds_rest(
+        provider, channel_id,
+    ) {
+        return true;
+    }
     crate::services::discord::inflight::load_inflight_state_read_only(provider, channel_id)
         .is_some_and(|row| {
             row.turn_source != crate::services::discord::inflight::TurnSource::Managed

@@ -616,6 +616,7 @@ fn migration_file_store_distinguishes_absence_corrupt_and_unreadable() {
 
 #[test]
 fn migration_file_store_old_schema_decodes_same_hosts_and_new_schema_is_not_corrupt() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let temp = tempfile::tempdir().unwrap();
     let store = FileApprovalStore(Some(temp.path().to_owned()));
     let candidate = fixture();

@@ -336,6 +336,7 @@ mod tests {
         use crate::services::turn_orchestrator::ActiveTurnKind;
         use serenity::all::{MessageId, UserId};
 
+        let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = crate::services::provider::ProviderKind::Claude;
         let channel_id = ChannelId::new(5_464_321);

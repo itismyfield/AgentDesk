@@ -1,5 +1,7 @@
 use super::super::*;
 
+pub(in crate::services::discord) mod retry_prompt_context;
+
 /// Shared Agent Knowledge placement for a turn.
 ///
 /// #5168: this used to also carry the memento `external_recall` / file-backend

@@ -154,6 +154,11 @@ async fn cold_claude(channel_id: u64) -> Cold {
         0,
     );
     row.runtime_kind = Some(ClaudeTui);
+    let mut wire = serde_json::to_value(&row).unwrap();
+    wire["host_locator"] = serde_json::json!({"host_kind":"herdr", "host_session_id":owner.logical_key, "pane":"w0:p1"});
+    wire["hosted_record_id"] = 1.into();
+    wire["hosted_execution_nonce"] = "cold-fixture-incarnation".into();
+    row = serde_json::from_value(wire).unwrap();
     row.turn_nonce = cancel.turn_nonce().map(str::to_owned);
     cancel.prepare_herdr_interrupt(provider.clone(), &owner);
     let message = MessageId::new(row.user_msg_id);

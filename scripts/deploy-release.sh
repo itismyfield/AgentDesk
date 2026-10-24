@@ -648,8 +648,8 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_SKIP_TURN_DRAIN="${AGENTDESK_SKIP_TURN_DRAIN:-1}" \
     AGENTDESK_MANIFEST_SKIP_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}" \
     AGENTDESK_MANIFEST_SKIP_REMOTE_FRESHNESS="${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}" \
-    AGENTDESK_MANIFEST_O_TUI_WRITER="$(_source_o_tui_writer)" \
-    AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_source_o_ledger_operator_resume)" \
+    AGENTDESK_MANIFEST_O_TUI_WRITER="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)" \
+    AGENTDESK_MANIFEST_O_LEDGER_OPERATOR_RESUME="$(_binary_build_flag "${REL_BINARY:-}" o_ledger_operator_resume)" \
     python3 - "$manifest_tmp" <<PY
 import json
 import os
@@ -972,25 +972,26 @@ _rollback_would_brick_on_migration() {
     return 1
 }
 
-_source_o_tui_writer() {
-    # The O writer build switch in this source: true, false (no switch in the
-    # source) or unknown when a definition exists but does not read as one value.
-    local defs values
-    defs="$(grep -rhE 'const O_TUI_WRITER\b' "$REPO/src" 2>/dev/null || true)"
-    if [ -z "$defs" ]; then
-        echo false
-        return 0
-    fi
-    if printf '%s\n' "$defs" \
-        | grep -qvE '^[[:space:]]*pub\(crate\) const O_TUI_WRITER: bool = (true|false);[[:space:]]*$'; then
-        echo unknown
-        return 0
-    fi
-    values="$(printf '%s\n' "$defs" | sed -E 's/.*= (true|false);.*/\1/' | sort -u)"
-    case "$values" in
-        true|false) echo "$values" ;;
-        *) echo unknown ;;
-    esac
+_binary_build_flag() {
+    # One `agentdesk build-info` switch ($2) of binary $1: true, false or unknown. A missing
+    # command, field or schema reads unknown, so a deleted constant refuses instead of "off".
+    local value
+    value="$(python3 - "$1" "$2" 2>/dev/null <<'PY'
+import json
+import subprocess
+import sys
+
+binary, field = sys.argv[1], sys.argv[2]
+try:
+    run = subprocess.run([binary, "build-info"], capture_output=True, timeout=30, check=True)
+    data = json.loads(run.stdout)
+except Exception:
+    data = None
+value = data.get(field) if isinstance(data, dict) and data.get("schema") == 1 else None
+print("true" if value is True else "false" if value is False else "unknown")
+PY
+)" || value=unknown
+    echo "${value:-unknown}"
 }
 
 _manifest_o_tui_writer() {
@@ -1014,28 +1015,6 @@ print(value)
 PY
 }
 
-_source_o_ledger_operator_resume() {
-    python3 - "$REPO/src/services/tui_o/store/ledger.rs" <<'PY'
-import pathlib
-import re
-import sys
-try:
-    text = pathlib.Path(sys.argv[1]).read_text()
-except FileNotFoundError:
-    print("false")
-    sys.exit(0)
-except OSError:
-    print("unknown")
-    sys.exit(0)
-definitions = [line.strip() for line in text.splitlines() if "const OPERATOR_RESUME_SUPPORTED" in line]
-if not definitions:
-    print("false")
-    sys.exit(0)
-match = re.fullmatch(r"pub const OPERATOR_RESUME_SUPPORTED: bool = (true|false);", definitions[0]) if len(definitions) == 1 else None
-print(match[1] if match else "unknown")
-PY
-}
-
 _rollback_would_revert_o_ledger() {
     # Only first use raises the floor; an unused new build can still roll back after a failed deploy.
     local floor="$ADK_REL/o_store/operator_resume.floor"
@@ -1056,18 +1035,19 @@ PY
     return 0
 }
 
-_source_would_revert_o_ledger() {
+_binary_would_revert_o_ledger() {
+    # Returns 0 (refuse) when the OperatorResume floor exists and binary $1 does not
+    # report a compatible O ledger reader.
     local floor="$ADK_REL/o_store/operator_resume.floor"
     [ -e "$floor" ] || [ -L "$floor" ] || return 1
-    [ "$(_source_o_ledger_operator_resume)" != "true" ]
+    [ "$(_binary_build_flag "$1" o_ledger_operator_resume)" != "true" ]
 }
 
 _rollback_would_revert_o_writer() {
-    # Returns 0 (refuse) when this source may have the O writer on and the
-    # rollback target is not recorded as an O writer build: the old binary would
-    # take Discord output back to the Legacy relay. No override reaches it.
+    # 0 (refuse, no override) when the new binary may run the O writer and the rollback target
+    # is not recorded as an O writer build: rolling back would return output to the Legacy relay.
     local new_value old_value
-    new_value="$(_source_o_tui_writer)"
+    new_value="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)"
     if [ "$new_value" = "false" ]; then
         return 1
     fi
@@ -1081,18 +1061,17 @@ _rollback_would_revert_o_writer() {
 }
 
 _external_artifact_would_skip_o_writer() {
-    # Returns 0 (refuse) when this source may have the O writer on and the binary
-    # would come from AGENTDESK_DEPLOY_BINARY: only this source's own build is
-    # known to carry its switch, which the manifest then records for rollback.
+    # 0 (refuse) when the AGENTDESK_DEPLOY_BINARY artifact may run the O writer or OperatorResume;
+    # an artifact without `build-info` reads unknown and is refused.
     local value
     [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 1
-    if [ "$(_source_o_ledger_operator_resume)" != "false" ]; then
+    if [ "$(_binary_build_flag "$AGENTDESK_DEPLOY_BINARY" o_ledger_operator_resume)" != "false" ]; then
         echo "✗ OperatorResume capability requires this source's own build; external artifact refused" >&2
         return 0
     fi
-    value="$(_source_o_tui_writer)"
+    value="$(_binary_build_flag "$AGENTDESK_DEPLOY_BINARY" o_tui_writer)"
     [ "$value" != "false" ] || return 1
-    echo "✗ O writer switch is ${value} in this source; AGENTDESK_DEPLOY_BINARY is refused — deploy a build of this source" >&2
+    echo "✗ O writer switch is ${value} in this artifact; AGENTDESK_DEPLOY_BINARY is refused — deploy a build of this source" >&2
     return 0
 }
 
@@ -2492,16 +2471,10 @@ else
     export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
-# Build the release binary from the current workspace by default so deploy
-# always ships code compiled from the current HEAD. An explicit external artifact
-# keeps the override behavior only while this source's O writer switch is false.
+# Build the release binary from HEAD by default; an external AGENTDESK_DEPLOY_BINARY is
+# deployed only while it reports both its O writer and OperatorResume off.
 _ensure_dashboard_dependencies
 _check_repo_remote_freshness
-if _source_would_revert_o_ledger; then
-    echo "✗ OperatorResume floor refuses this source's incompatible O ledger reader" >&2
-    exit 1
-fi
-
 if _external_artifact_would_skip_o_writer; then
     exit 1
 elif [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
@@ -2534,6 +2507,11 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     # below is mtime-based, and a successful current-HEAD cargo build can still
     # reuse an existing artifact, so align the mtime after build.
     [ -e "$SOURCE_BINARY" ] && touch "$SOURCE_BINARY"
+fi
+# The binary itself reports its O ledger reader; refuse before anything is staged.
+if _binary_would_revert_o_ledger "$SOURCE_BINARY"; then
+    echo "✗ OperatorResume floor refuses this build's incompatible O ledger reader" >&2
+    exit 1
 fi
 
 # Rebuild dashboard so deploy never ships a stale dist.

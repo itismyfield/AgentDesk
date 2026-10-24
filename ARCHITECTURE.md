@@ -67,6 +67,7 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── build_info.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -99,6 +100,9 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── runtime_root_guard/
+│   │   ├── process_tests.rs
+│   │   └── test_process.rs
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
@@ -121,6 +125,8 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
+│   ├── runtime_root_guard.rs
+│   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
 │   ├── session_hosts.rs
@@ -723,6 +729,7 @@ src/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
+│   │   │   │   ├── a1_stash_tests.rs
 │   │   │   │   ├── hold_tests.rs
 │   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
@@ -769,6 +776,8 @@ src/
 │   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
+│   │   │   ├── fresh_hold_tests.rs
+│   │   │   ├── fresh_lifecycle.rs
 │   │   │   ├── host_draft.rs
 │   │   │   ├── host_draft_tests.rs
 │   │   │   ├── mod.rs
@@ -777,10 +786,15 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   └── prompt_ready_setup_tests.rs
 │   │   │   ├── draft_hold.rs
+│   │   │   ├── draft_hold_session_tests.rs
 │   │   │   ├── final_ready_tests.rs
+│   │   │   ├── hold_lifecycle_tests.rs
+│   │   │   ├── legacy_submission.rs
 │   │   │   ├── literal_chunks.rs
+│   │   │   ├── preparation_hold.rs
 │   │   │   ├── submission.rs
-│   │   │   └── timeout_draft_tests.rs
+│   │   │   ├── timeout_draft_tests.rs
+│   │   │   └── user_receipt.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── busy_inject.rs
@@ -984,6 +998,7 @@ src/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
 │   │   ├── busy_followup_retry_store/
+│   │   │   ├── hold_release_tests.rs
 │   │   │   ├── policy.rs
 │   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
@@ -1279,6 +1294,8 @@ src/
 │   │   │   │   └── snapshot.rs
 │   │   │   ├── host_recovery_guard/
 │   │   │   │   └── log_state.rs
+│   │   │   ├── managed_submission/
+│   │   │   │   └── evidence.rs
 │   │   │   ├── model/
 │   │   │   │   ├── circuit_evidence.rs
 │   │   │   │   ├── identity.rs
@@ -1536,6 +1553,12 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── herdr_row_end/
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   ├── owner.rs
+│   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
@@ -1587,9 +1610,11 @@ src/
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
+│   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
+│   │   │   ├── herdr_row_end_settle_tests.rs
 │   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
@@ -1741,6 +1766,9 @@ src/
 │   │   │   │   │   │   └── requeue_tests.rs
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
+│   │   │   │   │   ├── retry_prompt/
+│   │   │   │   │   │   ├── tests.rs
+│   │   │   │   │   │   └── wiring_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -1753,6 +1781,7 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_tests.rs
+│   │   │   │   │   ├── retry_prompt.rs
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1808,6 +1837,11 @@ src/
 │   │   │   │   ├── voice_announcement_scope.rs
 │   │   │   │   ├── watchdog.rs
 │   │   │   │   └── watchdog_host_tests.rs
+│   │   │   ├── response_format/
+│   │   │   │   ├── retry_prompt_context/
+│   │   │   │   │   ├── store.rs
+│   │   │   │   │   └── tests.rs
+│   │   │   │   └── retry_prompt_context.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
 │   │   │   ├── herdr_consent.rs
@@ -2148,6 +2182,7 @@ src/
 │   │   │   │   └── clear_waiting.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
 │   │   │   │   ├── codex.rs
@@ -2303,11 +2338,16 @@ src/
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
+│   │   │   │   ├── prelude_lifecycle/
+│   │   │   │   │   ├── receipt_fallback_tests.rs
+│   │   │   │   │   ├── settlement_pg_tests.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── legacy_summary.rs
-│   │   │   │   └── legacy_summary_tests.rs
+│   │   │   │   ├── legacy_summary_tests.rs
+│   │   │   │   └── prelude_lifecycle.rs
 │   │   │   ├── entry_abort_cold_error_tests/
 │   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
@@ -2315,7 +2355,9 @@ src/
 │   │   │   ├── followup_requeue/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── person_draft_tests.rs
-│   │   │   │   └── draft_release.rs
+│   │   │   │   ├── attempt.rs
+│   │   │   │   ├── draft_release.rs
+│   │   │   │   └── preparation_notice.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
@@ -2383,6 +2425,7 @@ src/
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
 │   │   │   │   │   ├── codex_empty_tests.rs
+│   │   │   │   │   ├── preparation_hold_tests.rs
 │   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
@@ -2393,6 +2436,7 @@ src/
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
 │   │   │   │   ├── cancelled_body_retirement_tests.rs
+│   │   │   │   ├── completion_proof.rs
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
