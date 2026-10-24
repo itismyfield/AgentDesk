@@ -1,14 +1,6 @@
 {
   "schema_version": 1,
-<<<<<<< HEAD
-<<<<<<< HEAD
-  "measured_at_sha": "e143a3cd5cab3799cdbc73b0f02d64da6eb9083f",
-=======
-  "measured_at_sha": "3d7636f6959ecc0d3e562db712dce3c5fdbad885",
->>>>>>> refs/review/i7314b-r2
-=======
-  "measured_at_sha": "c3f4409fa5187f301242af7857ad7f5ec60781fd",
->>>>>>> refs/review/i7314a2-r4
+  "measured_at_sha": "d442a8e1575d55acfa74790fea4c9c863ac2b30f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -36540,6 +36532,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:d2c921157ddfd5624782a5d8ba3e8c3e2e825673549712e8e29394d8e397a453"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/completion_postlude/prelude_lifecycle/settlement_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:18c92f37b47eafc87b60ab3b8f0494aeb4a2dd4d046c2a8a7151f180756952ec"
     },
     {
       "root": "src",

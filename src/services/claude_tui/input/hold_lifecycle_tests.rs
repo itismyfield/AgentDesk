@@ -561,3 +561,79 @@ fn a2_fresh_receipt_wait_has_independent_ready_and_busy_boundaries() {
         Duration::from_secs(30)
     ));
 }
+
+#[test]
+#[cfg(unix)]
+fn bundle_fresh_folded_residue_requires_a_native_receipt_or_uncertain_hold() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let prompt = (0..15)
+        .map(|n| format!("[User: bundle] line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let folded = empty().replace("❯ \n", "❯ [Pasted text #8 +14 lines]\n");
+    for record_present in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("launch.jsonl");
+        let session = format!("bundle-fresh-folded-{}", uuid::Uuid::new_v4());
+        let output = path.clone();
+        let record = serde_json::json!({"type":"user", "sessionId":"sid",
+            "message":{"content":prompt}})
+        .to_string()
+            + "\n";
+        let spy = SpyGuard::install(SpyState {
+            captures: std::iter::repeat_n(Some(empty()), 32).collect(),
+            captures_after_send: Some(std::iter::repeat_n(Some(folded.clone()), 512).collect()),
+            on_send: Some(Box::new(move |call| {
+                if record_present && call == "keys:Enter" {
+                    std::fs::write(&output, &record).unwrap();
+                }
+            })),
+            ..SpyState::default()
+        });
+        let owner = Arc::new(ReceiptOwner(std::sync::Mutex::new(None)));
+        let result = guarded_outcome::with_owner(Some(owner), || {
+            guarded_outcome::fresh_receipt(&session, &prompt, path.to_str().unwrap(), "sid");
+            send_prompt_with_readiness(
+                &session,
+                &prompt,
+                PromptReadinessKind::FreshTurn,
+                Some(&CancelToken::new()),
+            )
+        });
+        let calls = spy.calls();
+        assert_eq!(
+            calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
+            1,
+            "folded residue never grants another Enter: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c.starts_with("paste:")).count(),
+            1,
+            "one payload only: {calls:?}"
+        );
+        assert_eq!(calls.iter().filter(|c| c.starts_with("load:")).count(), 1);
+        if record_present {
+            assert!(
+                result.is_ok(),
+                "exact launch receipt confirms folded input: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(SubmissionError::Held(ref hold))
+                if hold.phase == preparation_hold::EffectPhase::PayloadUncertain
+                    && hold.reason == "submission_uncertain"
+                    && hold.detail.contains("no exact native user record")
+                    && !hold.may_requeue()),
+                "FOLDED_NO_RECEIPT_IS_UNCERTAIN: no record must never become Submitted: {result:?}"
+            );
+            assert!(crate::services::claude_tui::composer_lock::draft_guarded(
+                &session
+            ));
+        }
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.contains("BSpace") || c.contains("C-u") || c.contains("Escape"))
+        );
+    }
+}
