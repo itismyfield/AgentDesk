@@ -577,3 +577,320 @@ fn rehydrated_fallback_commit_refuses_a_marker_lost_after_scan() {
         );
     });
 }
+
+const QUEUED_HEAD: &str = "preserve the queued instruction";
+/// The input queued before boot.
+const QUEUED_PROMPT: &str = "preserve the queued instruction\n한글";
+const QUEUED_ANSWER: &str = "I7327 queued head answered";
+
+/// The Discord stand-in a REST kickoff needs: it names the fixture channel so routing resolves.
+async fn channel_discord(
+    channel: u64,
+) -> crate::services::discord::health::test_support::MockDiscord {
+    crate::services::discord::health::test_support::MockDiscord::start_with(std::sync::Arc::new(
+        move |method: &axum::http::Method, path: &str| {
+            (method == axum::http::Method::GET && path.ends_with(&format!("/channels/{channel}")))
+                .then(|| {
+                    (
+                        200,
+                        json!({"id": channel.to_string(), "type": 0,
+                        "name": format!("wfx-{channel}-cdx"), "guild_id": "42000", "position": 0,
+                        "permission_overwrites": [], "nsfw": false, "parent_id": null}),
+                    )
+                })
+        },
+    ))
+    .await
+}
+
+async fn wait_for(what: &str, mut done: impl FnMut() -> bool, trace: impl Fn() -> String) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+    while !done() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: {}",
+            trace()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// A legacy turn-mode Codex channel after restart: idle pane, rollout marker from its last
+/// turn, no wrapper output, and one input queued before boot.
+struct LegacyQueued {
+    install: install::InstallFixture,
+    native: std::path::PathBuf,
+    _discord: crate::services::discord::health::test_support::MockDiscord,
+    _confirmation: crate::services::tui_o::turn_mode::TestConfirmation,
+    _ready: crate::config::TestEnvVarGuard,
+    _hosts: crate::config::session_hosts::ForcedSessionHosts,
+    _live: crate::config_live_reload::TestLiveGuard,
+}
+
+impl LegacyQueued {
+    async fn new(channel: u64) -> Self {
+        let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let live = crate::config_live_reload::test_live_guard(environment);
+        let hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let yaml = format!(
+            "server: {{}}\nagents:\n  - id: legacy-fixture\n    name: legacy-fixture\n    provider: codex\n    channels:\n      codex: {{id: '{channel}', name: wfx-{channel}-cdx, runtime: tui}}\n"
+        );
+        let mut config: crate::config::Config = serde_yaml::from_str(&yaml).unwrap();
+        config.session_hosts =
+            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
+        crate::config_live_reload::install(config);
+        dedupe::reset_state_for_tests();
+        let (install, discord) = install::fixture(ProviderKind::Codex, channel).await;
+        // Boot resolves a legacy pane's channel from the runtime config file.
+        let config_file = crate::runtime_layout::config_file_path(&install::root());
+        std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+        std::fs::write(config_file, yaml).unwrap();
+        std::fs::write(
+            install::root().join("tmux-sessions"),
+            format!("{}\n", install.session),
+        )
+        .unwrap();
+        let ready = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "ADK_TEST_CODEX_PROMOTE_READY",
+            std::ffi::OsStr::new("1"),
+        );
+        let native = legacy_rollout(ID);
+        std::fs::remove_file(&install.output).unwrap();
+        write_marker(&install.session, &native);
+        // The pane's last launch left its option evidence (default compact limit), so a
+        // follow-up with the same options reuses the pane.
+        crate::services::codex_tui::warm_followup::write_codex_tui_launch_options_evidence(
+            &install.session,
+            &crate::services::codex::CodexLaunchOptions::new("")
+                .with_compact_token_limit(Some(500_000))
+                .with_cwd(Some(&install::root().display().to_string())),
+        )
+        .unwrap();
+        // The binding writer's record of the last launch, which presence reads in turn mode.
+        crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(&install::root()));
+        crate::services::discord::turn_presence::activity::tests::log_turn_source(
+            &ProviderKind::Codex,
+            channel,
+            &install.session,
+            "legacy-launch",
+            &native,
+        );
+        let (_, channel_name) =
+            crate::services::provider::parse_provider_and_channel_from_tmux_name(&install.session)
+                .unwrap();
+        install.shared.core.lock().await.sessions.insert(
+            install.channel,
+            crate::services::discord::DiscordSession {
+                session_id: Some(ID.into()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: Some(install::root().display().to_string()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel),
+                channel_name: Some(channel_name),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+        let fixture = Self {
+            install,
+            native,
+            _discord: discord,
+            _confirmation: crate::services::tui_o::turn_mode::TestConfirmation::new(channel),
+            _ready: ready,
+            _hosts: hosts,
+            _live: live,
+        };
+        fixture.enqueue().await;
+        // Boot forgets every in-memory binding; only the pass may publish it again.
+        dedupe::reset_state_for_tests();
+        assert_eq!(
+            crate::services::discord::tui_prompt_relay::run_codex_rehydrate_pass_for_tests(
+                &fixture.install.shared,
+                &fixture.install.session,
+            ),
+            Some(channel)
+        );
+        fixture
+    }
+
+    async fn enqueue(&self) {
+        use crate::services::turn_orchestrator::{
+            Intervention, InterventionMode, SourceMessageQueuedGeneration,
+        };
+        let id = poise::serenity_prelude::MessageId::new(self.install.channel.get() + 1);
+        let generation = crate::services::discord::runtime_store::process_generation();
+        let item = Intervention {
+            author_id: poise::serenity_prelude::UserId::new(7),
+            author_is_bot: false,
+            message_id: id,
+            queued_generation: generation,
+            source_message_ids: vec![id],
+            source_message_queued_generations: vec![
+                SourceMessageQueuedGeneration::user_instruction(id, generation),
+            ],
+            source_text_segments: Vec::new(),
+            text: QUEUED_PROMPT.into(),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        };
+        let persistence = crate::services::discord::queue_persistence_context(
+            &self.install.shared,
+            &ProviderKind::Codex,
+            self.install.channel,
+        );
+        self.install
+            .shared
+            .mailbox(self.install.channel)
+            .replace_queue(vec![item], persistence)
+            .await;
+        assert_eq!(self.queue_depths().await, (1, 1));
+    }
+
+    /// Memory and durable queue depth.
+    async fn queue_depths(&self) -> (usize, usize) {
+        let channel = self.install.channel;
+        let memory =
+            crate::services::discord::mailbox_snapshot(&self.install.shared, channel).await;
+        let (durable, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+            &ProviderKind::Codex,
+            &self.install.shared.token_hash,
+            channel,
+        );
+        (memory.intervention_queue.len(), durable.len())
+    }
+
+    async fn activity(&self) -> (Activity, String) {
+        let observed =
+            crate::services::discord::turn_presence::activity::tests::companion_settled_activity(
+                &self.install.shared,
+                self.install.channel.get(),
+            )
+            .await;
+        (observed.activity, observed.reason.to_string())
+    }
+}
+
+/// The rollout rows Codex writes for the submitted queued head and its one answer.
+fn queued_turn_rows() -> String {
+    let at = chrono::Utc::now().to_rfc3339();
+    let message = |role: &str, kind: &str, text: &str| {
+        json!({"type":"response_item","timestamp":at,"payload":{"type":"message","role":role,
+            "content":[{"type":kind,"text":text}]}})
+    };
+    [
+        json!({"type":"event_msg","timestamp":at,
+            "payload":{"type":"task_started","turn_id":"i7327-boot"}}),
+        message("user", "input_text", QUEUED_PROMPT),
+        json!({"type":"event_msg","timestamp":at,
+            "payload":{"type":"agent_message","message":QUEUED_ANSWER}}),
+        message("assistant", "output_text", QUEUED_ANSWER),
+        json!({"type":"event_msg","timestamp":at,"payload":{"type":"task_complete",
+            "turn_id":"i7327-boot","last_agent_message":QUEUED_ANSWER}}),
+    ]
+    .map(|row| format!("{row}\n"))
+    .concat()
+}
+
+/// Boot order of an idle legacy Codex turn-mode channel whose input was queued before boot: the
+/// restored watcher lets the boot kickoff submit the queued head once, relay one answer and drain.
+#[test]
+fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
+    if !install::isolated(
+        module_path!(),
+        "rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains",
+    ) {
+        return;
+    }
+    runtime().block_on(async {
+        let fixture = LegacyQueued::new(7_061_941).await;
+        let channel = fixture.install.channel;
+        let shared = fixture.install.shared.clone();
+        install::ready_codex_composer();
+        let discord = channel_discord(channel.get()).await;
+        let submitted = Scope::new(&shared);
+        restore_tmux_watchers(&fixture.install.http, &shared).await;
+        // Boot kicks after presence settled; without a watcher the presence gate holds the queue.
+        let settled = fixture.activity().await;
+        let http = discord.http.clone();
+        let kick_shared = shared.clone();
+        let kickoff = tokio::spawn(async move {
+            let deps = crate::services::discord::router::IntakeDeps {
+                http: &http,
+                cache: None,
+                ctx_for_chained_dispatch: None,
+                shared: &kick_shared,
+                token: "i7327-boot",
+            };
+            crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queues_with_deps(
+                &deps,
+                &ProviderKind::Codex,
+            )
+            .await
+        });
+        let trace = || {
+            format!(
+                "presence {settled:?}; pane input {:?}; discord {:?}",
+                install::pane_input(),
+                discord.requests_for(channel.get()),
+            )
+        };
+        let entered = || {
+            let input = install::pane_input();
+            input.contains(QUEUED_HEAD) && input.contains("Enter")
+        };
+        wait_for("the queued head reaches the pane", entered, &trace).await;
+        let mut native = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.native)
+            .unwrap();
+        std::io::Write::write_all(&mut native, queued_turn_rows().as_bytes()).unwrap();
+        let answered = |requests: Vec<String>| {
+            requests
+                .iter()
+                .filter(|request| request.contains(QUEUED_ANSWER))
+                .count()
+        };
+        wait_for(
+            "the answer reaches Discord",
+            || answered(discord.requests_for(channel.get())) > 0,
+            &trace,
+        )
+        .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(40), kickoff)
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        // A duplicate submission or relay would land within the same watcher poll window.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            install::pane_input().matches(QUEUED_HEAD).count(),
+            1,
+            "{}",
+            trace()
+        );
+        assert_eq!(
+            answered(discord.requests_for(channel.get())),
+            1,
+            "{}",
+            trace()
+        );
+        assert_eq!(fixture.queue_depths().await, (0, 0));
+        assert_eq!(settled, (Activity::Idle, "closed".to_owned()));
+        let _ = submitted.cancel_and_join_all().await;
+    });
+}

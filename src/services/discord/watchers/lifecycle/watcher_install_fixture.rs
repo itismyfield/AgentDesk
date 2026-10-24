@@ -121,9 +121,22 @@ case "$1" in
     [ "$state" = unanswered ] && { echo 'error connecting to fixture socket' >&2; exit 1; }; exit 0 ;;
   list-panes) [ "$state" = listfail ] && exit 1
     case "$state" in dead|deadpane) echo 1 ;; *) echo 0 ;; esac; exit 0 ;;
-  capture-pane) [ "$state" = busy ] && printf '%s\n' '⏺ Running a fixture command'; exit 0 ;;
+  capture-pane) [ -s "ROOT/draft" ] && { /usr/bin/awk -v draft="ROOT/draft" 'index($0, "Ask Codex") {
+        lead = "\033[1m›\033[0m "; while ((getline row < draft) > 0) { print lead row; lead = "  " }; next } { print }' "ROOT/composer"; exit 0; }
+    [ -f "ROOT/composer" ] && { /bin/cat "ROOT/composer"; exit 0; }
+    [ "$state" = busy ] && printf '%s\n' '⏺ Running a fixture command'; exit 0 ;;
+  send-keys|paste-buffer|delete-buffer) [ -f "ROOT/composer" ] || { printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97; }
+    printf '%s\n' "$*" >> "ROOT/tmux-input"
+    for arg; do last=$arg; done
+    case "$1 $*" in paste-buffer*) /bin/cat "ROOT/buffer" >> "ROOT/draft" ;;
+      *" -l "*) printf '%s' "$last" >> "ROOT/draft" ;;
+      send-keys*) case "$last" in Enter|C-m) /bin/rm -f "ROOT/draft" ;; esac ;; esac; exit 0 ;;
+  load-buffer) [ -f "ROOT/composer" ] || { printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97; }
+    for arg; do last=$arg; done; /bin/cat "$last" > "ROOT/buffer"; { printf '%s\n' "$*"; /bin/cat "ROOT/buffer"; printf '\n'; } >> "ROOT/tmux-input"; exit 0 ;;
   show-options|show-option) exit 0 ;;
-  display-message) [ -f "ROOT/pane.pid" ] && /bin/cat "ROOT/pane.pid"; exit 0 ;;
+  display-message) [ -f "ROOT/composer" ] && case "$*" in *pane_dead*) echo 0; exit 0 ;;
+      *pane_width*) echo '120 40'; exit 0 ;; esac
+    [ -f "ROOT/pane.pid" ] && /bin/cat "ROOT/pane.pid"; exit 0 ;;
   kill-session) printf '%s\n' "$*" >> "ROOT/tmux-kills"; exit 0 ;;
   *) printf '%s\n' "$*" >> "ROOT/tmux-errors"; exit 97 ;;
 esac
@@ -190,6 +203,21 @@ pub(in crate::services::discord) fn isolated(module: &str, name: &str) -> bool {
 
 pub(in crate::services::discord) fn list_sessions(sessions: &[&str]) {
     std::fs::write(root().join("tmux-sessions"), sessions.join("\n")).unwrap();
+}
+
+/// A ready Codex composer on `capture-pane`. Pane input is recorded in `tmux-input`, and typed or
+/// pasted text shows as the composer draft until Enter.
+pub(in crate::services::discord) fn ready_codex_composer() {
+    std::fs::write(
+        root().join("composer"),
+        include_str!("../../../../../tests/fixtures/tui_input/codex-status-sol-80-idle.ansi"),
+    )
+    .unwrap();
+}
+
+/// Every pane write a ready composer received, one command per line with buffer text inline.
+pub(in crate::services::discord) fn pane_input() -> String {
+    std::fs::read_to_string(root().join("tmux-input")).unwrap_or_default()
 }
 
 pub(in crate::services::discord) fn pane(state: &str) {
