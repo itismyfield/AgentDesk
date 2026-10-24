@@ -202,12 +202,17 @@ pub(super) async fn post_steer_echo(
     let Some(registry) = shared.health_registry() else {
         return;
     };
-    let notify = super::super::bot_role::UtilityBotRole::Notify;
-    let http = match super::super::health::resolve_utility_bot_http(registry.as_ref(), notify).await
+    let provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
+    let http = match super::super::session_notice::provider_http(
+        registry.as_ref(),
+        &provider,
+        channel_id,
+    )
+    .await
     {
         Ok(http) => http,
-        Err((status, body)) => {
-            tracing::warn!(channel_id = channel_id.get(), %status, %body, "steer echo: notify bot unavailable");
+        Err(error) => {
+            tracing::warn!(channel_id = channel_id.get(), %error, "steer echo: channel provider unavailable");
             return;
         }
     };

@@ -623,7 +623,7 @@ impl super::SessionBoundDiscordRelaySink {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn confirm_task_context_card<T: TaskCardTransport>(
+pub(in crate::services::discord) async fn confirm_task_context_card<T: TaskCardTransport>(
     shared: Option<&Arc<SharedData>>,
     clients: &CardDeliveryClients,
     transport: &T,
@@ -737,7 +737,7 @@ mod tests {
 
     fn clients() -> CardDeliveryClients {
         CardDeliveryClients::new([CardBot::new(
-            "notify",
+            "provider:claude",
             Arc::new(serenity::Http::new("test-token")),
         )])
     }

@@ -85,7 +85,7 @@ async fn claim_pg(
            AND delivery_state = 'card_posted' AND discord_message_id = $5
            AND bot_key = $6 AND revision = $7 AND content_hash = $8
            AND (lease_owner IS NULL OR lease_expires_at <= NOW())
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(db_id(actual_scope.channel_id, "channel_id")?)
     .bind(&actual_scope.provider)

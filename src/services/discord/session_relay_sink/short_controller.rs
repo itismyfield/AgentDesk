@@ -193,3 +193,10 @@ pub(super) async fn deliver_short_replace_via_controller<
         ),
     }
 }
+
+pub(super) fn choose_gateway<'a>(
+    override_gateway: Option<&'a dyn crate::services::discord::gateway::TurnGateway>,
+    live: &'a dyn crate::services::discord::gateway::TurnGateway,
+) -> &'a dyn crate::services::discord::gateway::TurnGateway {
+    override_gateway.unwrap_or(live)
+}

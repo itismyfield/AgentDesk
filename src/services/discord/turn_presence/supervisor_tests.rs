@@ -438,7 +438,7 @@ async fn unknown_for_a_minute_notices_once_per_cause_spell() {
     wait(10 * 60).await;
     run.abort();
     assert_eq!(fake.notice_secs(), [60, 132]);
-    assert!(fake.notices()[0].1.contains("(사유: facts_halted)"));
+    assert!(fake.notices()[0].1.contains(r"(사유: facts\_halted)"));
     assert!(status(channel).unwrap()["unknown_notice"]["posted_at"].is_string());
 }
 
@@ -585,6 +585,12 @@ async fn a_queue_two_wakes_did_not_move_is_held_and_noticed_with_its_cause() {
         let notices = fake.notices();
         assert_eq!(notices.len(), 1, "{reason}");
         assert!(notices[0].1.contains(words), "{}", notices[0].1);
+        assert!(
+            notices[0].1.starts_with("-# ⚠️ ")
+                && crate::services::discord::session_notice::is_inline(&notices[0].1),
+            "the held notice must reach the provider effect as one subtext line: {}",
+            notices[0].1
+        );
     }
 }
 

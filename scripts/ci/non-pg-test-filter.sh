@@ -173,6 +173,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::session_idle_cleanup::recap_cleanup_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
+  --skip services::discord::task_notification_delivery::inline_contract_tests
   --skip services::discord::task_notification_delivery::retired_metadata::tests::pg
   --skip services::discord::task_notification_delivery::tests
   --skip services::discord::terminal_ui_obligation::sweep_tests

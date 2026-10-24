@@ -385,9 +385,12 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── outbox_actionable_delivery/
+│   │   └── session_notice.rs
 │   ├── outbox_worker/
 │   │   ├── attachment_pg_tests.rs
-│   │   └── claim.rs
+│   │   ├── claim.rs
+│   │   └── session_notice_pg_tests.rs
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
@@ -1922,10 +1925,17 @@ src/
 │   │   │   │   └── source_guard_tests.rs
 │   │   │   └── intake_placeholder_retirement_tests.rs
 │   │   ├── task_notification_delivery/
+│   │   │   ├── inline_contract_tests/
+│   │   │   │   ├── replacement_receipt_tests.rs
+│   │   │   │   └── retention_tests.rs
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
+│   │   │   │   ├── inline_claim.rs
+│   │   │   │   ├── memory_claim.rs
 │   │   │   │   ├── metadata_retirement_authority_tests.rs
 │   │   │   │   ├── missing_card_replacement.rs
+│   │   │   │   ├── monitor.rs
+│   │   │   │   ├── monitor_memory.rs
 │   │   │   │   ├── response_chunks.rs
 │   │   │   │   ├── response_fence.rs
 │   │   │   │   ├── response_identity.rs
@@ -1934,10 +1944,14 @@ src/
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
 │   │   │   ├── card_render.rs
+│   │   │   ├── card_render_tests.rs
 │   │   │   ├── claim_at_post_tests.rs
 │   │   │   ├── footer_only_marker.rs
 │   │   │   ├── footer_retirement_tests.rs
+│   │   │   ├── footer_surface_tests.rs
 │   │   │   ├── gateway.rs
+│   │   │   ├── inline_contract_tests.rs
+│   │   │   ├── inline_delivery.rs
 │   │   │   ├── metadata_retirement_pg_tests.rs
 │   │   │   ├── metadata_retirement_replay_tests.rs
 │   │   │   ├── mod.rs
@@ -2264,6 +2278,9 @@ src/
 │   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
+│   │   ├── tui_task_card/
+│   │   │   ├── completion_card.rs
+│   │   │   └── completion_card_tests.rs
 │   │   ├── turn_bridge/
 │   │   │   ├── bridge_entry_persist/
 │   │   │   │   ├── tests/
@@ -2675,6 +2692,7 @@ src/
 │   │   ├── model_catalog.rs
 │   │   ├── model_picker_interaction.rs
 │   │   ├── monitoring_status.rs
+│   │   ├── monitoring_status_inline_tests.rs
 │   │   ├── org_schema.rs
 │   │   ├── org_writer.rs
 │   │   ├── placeholder_cleanup.rs
@@ -2722,6 +2740,8 @@ src/
 │   │   ├── session_identity.rs
 │   │   ├── session_idle_cleanup.rs
 │   │   ├── session_idle_cleanup_tests.rs
+│   │   ├── session_notice.rs
+│   │   ├── session_notice_delivery.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
 │   │   ├── session_status_hook.rs
@@ -2884,8 +2904,10 @@ src/
 │   │   └── runtime_state.rs
 │   ├── message_outbox/
 │   │   ├── attachments.rs
+│   │   ├── diagnostics.rs
 │   │   ├── identity.rs
-│   │   └── identity_tests.rs
+│   │   ├── identity_tests.rs
+│   │   └── session_notice.rs
 │   ├── observability/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs

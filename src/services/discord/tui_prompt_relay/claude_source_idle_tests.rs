@@ -280,6 +280,7 @@ fn legacy_inflight_discovery_preserves_the_first_prompt_until_finalize() {
         Arc::get_mut(&mut pane.shared).unwrap().health_registry = Arc::downgrade(&registry);
         registry.set_utility_bot_http_for_tests(crate::services::discord::bot_role::UtilityBotRole::Notify, http.clone()).await;
         let _http = test_rest::install(http);
+        registry.register(ProviderKind::Claude.as_str().to_string(), pane.shared.clone()).await;
         let relay_shared = pane.shared.clone();
         super::super::hook_observer::spawn_tui_prompt_relay_observer(
             "claude".into(), subscribe_hook_events(), move |prompt| {

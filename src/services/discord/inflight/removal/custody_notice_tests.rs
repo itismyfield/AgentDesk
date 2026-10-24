@@ -168,6 +168,23 @@ async fn a_tui_direct_turn_is_one_outbox_row_across_boots_pg() {
     };
     tui_direct(&env, 5_998_001, true);
     assert_eq!(boot(&env, Some(&pool)).await, 1);
+    let display = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+        "SELECT session_notice FROM message_outbox WHERE source = 'boot_custody_notice'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .expect("the real custody notice producer must freeze provider display metadata at enqueue");
+    assert_eq!(display["provider_hint"], "claude");
+    let preview = display["content"].as_str().unwrap();
+    assert!(
+        preview.starts_with("-# "),
+        "custody display must use provider subtext"
+    );
+    assert!(
+        !preview.contains(['\r', '\n']) && preview.lines().count() == 1,
+        "custody display must stay on one line"
+    );
     settle(&pool, "sent").await;
     assert_eq!(
         boot(&env, Some(&pool)).await,
