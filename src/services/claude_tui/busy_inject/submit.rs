@@ -121,7 +121,10 @@ fn inject_gated_with(
                 if own {
                     dedupe::record_discord_originated_prompt("claude", request.session, &text);
                 }
-                let report = inject_locked(pane, request, &text, timing, stash, turn_gate);
+                let report =
+                    ownership::with_chip_witness(request.session, request.nonce, &text, || {
+                        inject_locked(pane, request, &text, timing, stash, turn_gate)
+                    });
                 if own && matches!(&report.outcome, Outcome::NotSent(_)) {
                     dedupe::remove_discord_originated_prompt("claude", request.session, &text);
                 }

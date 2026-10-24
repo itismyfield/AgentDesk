@@ -14,6 +14,8 @@ use super::{
 };
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
+#[cfg(test)]
+mod hold_release_tests;
 mod policy;
 pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};
@@ -168,7 +170,7 @@ fn expiry_stamp_ms(path: &Path, bytes: &[u8]) -> Result<Option<u64>, String> {
     let Ok(budget) = decode_checked(bytes) else {
         return Ok(None);
     };
-    if budget.has_budget() {
+    if budget.has_budget() || budget.draft_hold {
         return Ok(None);
     }
     if budget.first_busy_retry_at_ms != 0 {
@@ -527,6 +529,8 @@ pub(in crate::services::discord) struct DraftRelease {
 pub(in crate::services::discord) fn release_draft_holds(
     provider: &ProviderKind,
     channel_id: u64,
+    session: &str,
+    live_ids: &std::collections::HashSet<u64>,
 ) -> DraftRelease {
     let release = || -> Result<DraftRelease, String> {
         let (root, _guard) = locked_root()?;
@@ -553,11 +557,16 @@ pub(in crate::services::discord) fn release_draft_holds(
             let Some(user_msg_id) = stem.and_then(|stem| stem.parse().ok()) else {
                 continue;
             };
+            if !live_ids.contains(&user_msg_id) {
+                continue;
+            }
             let Ok(bytes) = fs::read(&path) else {
                 pass.retry = true;
                 continue;
             };
-            let Some(state) = decode_checked(&bytes).ok().filter(|state| state.draft_hold) else {
+            let Some(state) = decode_checked(&bytes).ok().filter(|state| {
+                state.draft_hold && state.draft_session.as_deref() == Some(session)
+            }) else {
                 continue;
             };
             let fresh = state.released_from_draft();
@@ -577,6 +586,23 @@ pub(in crate::services::discord) fn release_draft_holds(
         released: 0,
         retry: true,
     })
+}
+
+pub(in crate::services::discord) fn bind_legacy_draft_session(
+    provider: &ProviderKind,
+    channel: u64,
+    input: u64,
+    session: &str,
+) -> Result<(), String> {
+    let (root, _guard) = locked_root()?;
+    let Some(mut state) = refused(read_source_in_root(&root, provider, channel, input))? else {
+        return Err("held input record missing".into());
+    };
+    if state.draft_hold && state.draft_session.is_none() {
+        state.draft_session = Some(session.into());
+        save_in_root(&root, provider, channel, input, &state)?;
+    }
+    Ok(())
 }
 
 /// Draft-held inputs to watch after a restart; legacy records may have no saved pane.

@@ -15,9 +15,9 @@ use crate::services::claude_tui::input::{
 use crate::services::session_host::HostKind;
 
 /// A Discord prompt AgentDesk typed whose Enter never landed, in the measured idle layout.
-const DRAFT: &str = "\n\n────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
-const BAKED_DRAFT: &str = "\u{273b} Baked for 3m 2s\n\n────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
-const EMPTY: &str = "Claude Code v2.1.141\n\n────────────────────\n\u{276f} \n────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+const DRAFT: &str = "\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+const BAKED_DRAFT: &str = "\u{273b} Baked for 3m 2s\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\u{276f} [User: ann (ID: 7)] 남은 초안 한글\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
+const EMPTY: &str = "Claude Code v2.1.141\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n\u{276f} \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)";
 const PROMPT: &str = "다음 입력";
 const SESSION_ID: &str = "0b7c4f0e-5d0b-4e57-9d55-3f3a3c1f7a10";
 
@@ -139,6 +139,10 @@ fn owned() -> Vec<String> {
     vec!["capture:draft".to_string()]
 }
 
+fn cleanup_read() -> Vec<String> {
+    vec!["capture:draft".to_string(), "alive".to_string()]
+}
+
 /// Keys and reads of one legacy clear attempt on a draft that stays.
 fn attempt(clear: DraftClear) -> Vec<String> {
     let tail = prompt_readiness_snapshot_from_capture(Some(DRAFT), true).pane_tail;
@@ -150,10 +154,10 @@ fn attempt(clear: DraftClear) -> Vec<String> {
     let mut calls = Vec::new();
     for group in groups {
         calls.extend(keys(&[group]));
-        calls.extend(read());
+        calls.extend(cleanup_read());
     }
     calls.extend(keys(&["C-e", &vec!["BSpace"; budget].join("+")]));
-    calls.extend(read());
+    calls.extend(cleanup_read());
     calls
 }
 
@@ -220,7 +224,14 @@ fn tf2_legacy_tmux_clear_then_submits_once() {
     let mut scenario = Scenario::tmux(true, vec![DRAFT, DRAFT, DRAFT, EMPTY, EMPTY, EMPTY, EMPTY]);
     scenario.cancel_on = Some(("literal:", 1));
     let (ended, calls, streamed) = follow_up("p6a2-cleared", scenario);
-    let cleared = [read(), owned(), read(), keys(&["C-e+C-u"]), read()].concat();
+    let cleared = [
+        read(),
+        owned(),
+        cleanup_read(),
+        keys(&["C-e+C-u"]),
+        cleanup_read(),
+    ]
+    .concat();
     let (clear, submit) = calls.split_at(cleared.len().min(calls.len()));
     assert_eq!(clear, &cleared[..], "{calls:?}");
     let literal = format!("literal:{PROMPT}");
@@ -248,7 +259,7 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     let expected = [
         read(),
         owned(),
-        read(),
+        cleanup_read(),
         attempt(DraftClear::Strong),
         attempt(DraftClear::Strong),
         retire("stranded_prompt_draft_recreate", persisted),
@@ -263,7 +274,7 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     let expected = [
         read(),
         owned(),
-        read(),
+        cleanup_read(),
         attempt(DraftClear::Gentle),
         attempt(DraftClear::Gentle),
         retire("stranded_prompt_draft_recreate", persisted),
@@ -278,7 +289,7 @@ fn tf2_legacy_tmux_recreates_only_after_retiring_the_session() {
     let expected = [
         read(),
         owned(),
-        read(),
+        cleanup_read(),
         keys(&["C-e+C-u"]),
         retire(
             "stranded_prompt_draft_clear_failed_recreate",
@@ -300,7 +311,14 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&stopped))));
     assert_eq!(
         calls,
-        [read(), owned(), read(), keys(&["C-e+C-u"]), read()].concat()
+        [
+            read(),
+            owned(),
+            cleanup_read(),
+            keys(&["C-e+C-u"]),
+            cleanup_read()
+        ]
+        .concat()
     );
     stopped_without_side_effects("swap", &ended, &calls, streamed);
 
@@ -310,7 +328,7 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     let (ended, calls, streamed) = follow_up("p6a2-refused-first", refused_first);
     let refused = HostInputOutcome::Refused(InputRefusal::IdentityMismatch);
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&refused))));
-    assert_eq!(calls, [read(), owned(), read()].concat());
+    assert_eq!(calls, [read(), owned(), cleanup_read()].concat());
     stopped_without_side_effects("refused first", &ended, &calls, streamed);
 
     // ACK lost, then the host is swapped before the retire: no kill, no fresh ID.
@@ -321,7 +339,7 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     assert_eq!(ended, Ended::Terminal(Err(stopped_error(&refused))));
     assert_eq!(
         calls,
-        [read(), owned(), read(), keys(&["C-e+C-u"])].concat()
+        [read(), owned(), cleanup_read(), keys(&["C-e+C-u"])].concat()
     );
     stopped_without_side_effects("retire refused", &ended, &calls, streamed);
 
@@ -332,7 +350,7 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     assert_eq!(ended, Ended::Terminal(Ok(())));
     assert_eq!(
         calls,
-        [read(), owned(), read(), keys(&["C-e+C-u"])].concat()
+        [read(), owned(), cleanup_read(), keys(&["C-e+C-u"])].concat()
     );
     stopped_without_side_effects("stop", &ended, &calls, streamed);
 
@@ -343,7 +361,7 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     let expected = [
         read(),
         owned(),
-        read(),
+        cleanup_read(),
         attempt(DraftClear::Gentle),
         attempt(DraftClear::Gentle),
         read(),
@@ -352,4 +370,48 @@ fn tf2_swap_stop_or_lingering_draft_never_recreates() {
     assert_eq!(ended, Ended::Terminal(Ok(())));
     assert_eq!(calls, expected);
     stopped_without_side_effects("lingering", &ended, &calls, streamed);
+}
+
+#[test]
+fn a2_cleanup_stops_when_the_next_capture_no_longer_proves_ownership() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let session = format!("a2-cleanup-change-{}", uuid::Uuid::new_v4());
+    let own = DRAFT.to_string();
+    let person = DRAFT
+        .replace("[User: ann (ID: 7)] 남은 초안 한글", "person's draft")
+        .replace("  ⏵⏵ bypass permissions on (shift+tab to cycle)", "");
+    assert!(prompt_readiness_snapshot_from_capture(Some(&person), true).prompt_draft_detected);
+    assert!(prompt_readiness_snapshot_from_capture(Some(&own), true).prompt_draft_detected);
+    assert_eq!(
+        crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &own),
+        crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
+    );
+    let spy = SpyGuard::install(SpyState {
+        captures: [Some(own), Some(person)].into(),
+        ..SpyState::default()
+    });
+    let cleared = clear_draft(
+        &FollowupHost::legacy_tmux(&session),
+        &session,
+        DraftClear::Strong,
+        None,
+    );
+    assert!(
+        matches!(cleared.run, InputRun::Refused(InputRefusal::Composer(_))),
+        "run={:?} snapshot={:?} calls={:?}",
+        cleared.run,
+        cleared.snapshot,
+        spy.calls()
+    );
+    let calls = spy.calls();
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("keys:")).count(),
+        1,
+        "no cleanup follows lost ownership: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("Escape") || c.contains("BSpace"))
+    );
 }

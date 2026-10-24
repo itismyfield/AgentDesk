@@ -180,6 +180,9 @@ pub(super) fn producer_error(
     channel_id: u64,
     error: String,
 ) -> Option<StreamMessage> {
+    if submission.is_some_and(|attempt| attempt.preparation_hold().is_some()) {
+        return None;
+    }
     match submission.map(ManagedSubmission::classify_failure) {
         Some(SubmissionFailure::GuardedStopped(run)) => {
             tracing::warn!(channel_id, ?run, "guarded Claude submission remains held");

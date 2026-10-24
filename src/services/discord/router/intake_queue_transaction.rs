@@ -348,7 +348,7 @@ where
     let source = request.source;
     let author_class = request.author_class;
     let options = request.options;
-    let intervention = request.intervention.for_queue();
+    let intervention = request.intervention.for_queue().mark_raw();
     let mailbox_outcome = effects.enqueue_soft_intervention(intervention).await;
 
     let status = classify_mailbox_outcome(&mailbox_outcome);
