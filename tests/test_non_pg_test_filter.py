@@ -341,7 +341,7 @@ bash -euo pipefail -c "$PROGRAM"
                                  + " --nocapture --test-threads=1")
             self.assertEqual(len(calls[0]), 1)
             self.assertEqual(len(calls[1]), 1)
-            self.assertEqual(len(calls[2]), 7)
+            self.assertEqual(len(calls[2]), 8)
             self.assertTrue(all("--exact" not in call for call in calls[2]))
             log.write_text("")
             env.pop("PG_INCLUDE_SHARD")

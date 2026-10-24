@@ -731,6 +731,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_fallback_commit_refuses_a_marker_lost_after_scan
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::restart_gap_message_catch_up_first_is_submitted_once_and_drains
+  services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::restart_gap_message_gateway_first_is_submitted_once_and_drains
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
