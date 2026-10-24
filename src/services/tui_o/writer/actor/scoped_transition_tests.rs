@@ -167,22 +167,16 @@ where
         let pending = port.request(Operation::Inspect(request), context);
         tokio::pin!(pending);
         assert!(futures::poll!(&mut pending).is_pending());
-        for _ in 0..3 {
-            actor.poll_transition(true, &watch::channel(None).0).await;
-            if matches!(
-                actor.transitions.job.as_ref().map(|job| &job.stage),
-                Some(Stage::Quiet(_))
-            ) {
-                break;
-            }
-        }
+        actor.take_request();
         let job = actor
             .transitions
             .job
             .as_mut()
             .expect("mailbox accepted Inspect");
-        assert!(matches!(job.stage, Stage::Quiet(until) if until > now()));
         assert!(!job.apply);
+        // Codex currently has no eligible probes and finishes in the same poll. Retain the
+        // mailbox-admitted Inspect at Quiet to exercise suspension across a future probe wait.
+        job.stage = Stage::Quiet(now() + RETIRE_QUIET);
         // Tap the actor reply, then forward it unchanged through the port's suspension check.
         let (reply, completed) = oneshot::channel();
         let port_reply = std::mem::replace(&mut job.reply, reply);

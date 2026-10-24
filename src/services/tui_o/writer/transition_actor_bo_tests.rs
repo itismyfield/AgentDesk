@@ -137,11 +137,12 @@ where
         .with_suspension(suspension.clone());
     let ready = Arc::new(crate::services::tui_o::writer::host::Readiness::default());
     let _hosted = ready.host_port_for_test(7, &harness.gate, port, (resumed, stopped));
-    let receiver = std::sync::Mutex::new(receiver);
-    run(
+    let receiver = Arc::new(std::sync::Mutex::new(receiver));
+    let mailbox = receiver.clone();
+    let result = run(
         ready,
         Box::new(move || {
-            let Ok(Some(envelope)) = receiver.lock().unwrap().try_next() else {
+            let Ok(Some(envelope)) = mailbox.lock().unwrap().try_next() else {
                 return false;
             };
             suspension.extend("fresh".into(), [source.clone()]);
@@ -153,7 +154,9 @@ where
             true
         }),
     )
-    .await
+    .await;
+    drop(receiver);
+    result
 }
 
 #[derive(Default)]
