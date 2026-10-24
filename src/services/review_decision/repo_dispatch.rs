@@ -623,28 +623,24 @@ pub(super) async fn claim_review_decision_side_effects_resume_pg_first(
     Ok(rows == 1)
 }
 
-/// #3038 route_srp: named repo lookup extracted verbatim from the #229
-/// safety-net block in `decision_route_dispute_re_review`. True when the card
-/// has any live (`pending`/`dispatched`) `review` or `review-decision`
-/// dispatch; `false` on query failure or when no postgres pool is wired in —
-/// identical to the original inline expression.
+/// `Ok(true)` when the card has a live (`pending`/`dispatched`) review or review-decision
+/// dispatch, `Ok(false)` without one or without a PG pool; query failures are `Err`.
 pub(super) async fn has_pending_reviewish_dispatch_pg_first(
     state: &AppState,
     card_id: &str,
-) -> bool {
-    if let Some(pool) = state.pg_pool_ref() {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT COUNT(*) > 0
+) -> Result<bool, String> {
+    let Some(pool) = state.pg_pool_ref() else {
+        return Ok(false);
+    };
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COUNT(*) > 0
                          FROM task_dispatches
                          WHERE kanban_card_id = $1
                            AND dispatch_type IN ('review', 'review-decision')
                            AND status IN ('pending', 'dispatched')",
-        )
-        .bind(card_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false)
-    } else {
-        false
-    }
+    )
+    .bind(card_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("check live review dispatches for {card_id}: {error}"))
 }

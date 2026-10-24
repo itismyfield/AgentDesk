@@ -11399,6 +11399,7 @@ services::dispatches::discord_delivery::guard::tests::dispatch_send_deadline_is_
 services::dispatches::discord_delivery::guard::tests::duplicate_result_carries_dispatch_idempotency_keys
 services::dispatches::discord_delivery::orchestration::slot_routing_pure_tests::review_and_phase_gate_require_independent_slot_thread
 services::dispatches::discord_delivery::owner_tests::dispatch_thread_owner_comes_from_discord_owner_id
+services::dispatches::discord_delivery::thread_reuse::fail_closed_tests::reuse_is_refused_when_the_active_dispatch_check_fails
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_duplicate_path
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_permanent_failure_path
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_success_path
