@@ -42,6 +42,8 @@ src/
 │   │   │   ├── health_snapshot.rs
 │   │   │   ├── herdr_policy.rs
 │   │   │   ├── herdr_policy_tests.rs
+│   │   │   ├── managed_herdr_config.rs
+│   │   │   ├── managed_herdr_config_tests.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
@@ -439,6 +441,9 @@ src/
 │   │   ├── health_api/
 │   │   │   ├── db_deadline_tests/
 │   │   │   │   └── resource_regression_tests.rs
+│   │   │   ├── runtime_profile/
+│   │   │   │   ├── managed_herdr.rs
+│   │   │   │   └── managed_herdr_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
 │   │   │   ├── host_guard_tests.rs
@@ -3087,6 +3092,8 @@ src/
 │   ├── session_host/
 │   │   ├── herdr/
 │   │   │   ├── managed_config/
+│   │   │   │   ├── maintenance.rs
+│   │   │   │   ├── maintenance_tests.rs
 │   │   │   │   ├── path.rs
 │   │   │   │   └── publication.rs
 │   │   │   ├── policy/

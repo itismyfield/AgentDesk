@@ -13,7 +13,7 @@ when the code has none).
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
 - AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 130
-- Platform and third-party variables: 29
+- Platform and third-party variables: 30
 
 ## AgentDesk variables
 
@@ -183,3 +183,4 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs` |  |
+| `XDG_CONFIG_HOME` | `src/services/session_host/herdr/managed_config/path.rs` | The executing account's home and XDG config home; an unknown home authorizes nothing. |
