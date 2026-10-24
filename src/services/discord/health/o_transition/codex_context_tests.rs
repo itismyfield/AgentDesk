@@ -173,7 +173,7 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
         ))
         .unwrap();
     let observed = fixture.observe(&prepared).unwrap();
-    assert_eq!(observed.coverage, model::Coverage::Complete);
+    assert_eq!(observed.coverage, Ok(()));
     assert_eq!(observed.current, fixture.source);
     assert_eq!(
         observed.panes,

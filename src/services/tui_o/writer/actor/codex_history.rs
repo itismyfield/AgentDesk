@@ -23,9 +23,7 @@ fn clean(path: &Path) -> bool {
             .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
 }
 
-fn checked(inputs: Inputs) -> Result<Snapshot, String> {
-    #[cfg(test)]
-    let mut inputs = inputs;
+fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
     let complete = matches!(inputs.coverage, Coverage::Ok(()));
     #[cfg(test)]
     let complete = complete || mutant("coverage");
