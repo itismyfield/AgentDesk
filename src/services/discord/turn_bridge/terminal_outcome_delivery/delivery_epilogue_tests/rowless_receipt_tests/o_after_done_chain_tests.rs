@@ -114,12 +114,13 @@ async fn finish_turn(
     driver.inflight.runtime_kind = Some(ClaudeTui);
     driver.inflight.status_message_id = Some(PANEL);
     driver.inflight.full_response = driver.body.clone();
+    prove_claude_input(driver._temp.path(), &mut driver.inflight);
     inflight::save_inflight_state(&driver.inflight).expect("seed the two-message row");
     let (token, channel) = (driver.shared.token_hash.clone(), DRIVER_CHANNEL_ID);
     singleton::bind_if_owned(&ProviderKind::Claude, &token, channel, PANEL, None).unwrap();
     let _mailbox = driver.shared.mailbox(ChannelId::new(channel));
     let _o = test_override::force_channels(&[(channel, ClaudeTui)]);
-    let _posted = deliver::forget_posted_for_tests(channel);
+    driver.posted_restart_serialization = Some(deliver::forget_posted_for_tests(channel));
     let rest = if headless {
         Some(
             crate::services::discord::shared_state::test_rest::recording_mock(REST_BASE, channel)
@@ -135,6 +136,9 @@ async fn finish_turn(
         state.gateway = Arc::new(crate::services::discord::gateway::HeadlessGateway);
     }
     let (delegated, claim) = hand_off_after_done(&driver, &mut state).await;
+    state.inflight_state = state
+        .inflight_state
+        .with_live_submission_from(&driver.inflight);
     let owner = classify_bridge_output_owner(false, delegated);
     (
         ctx.bridge_relay_delegated_to_watcher,
@@ -160,6 +164,7 @@ async fn finish_turn(
         .map(|o| o.call)
         .collect();
     let log = rest.map(|(log, _guard)| log.lock().unwrap().clone());
+    drop(driver.posted_restart_serialization.take());
     (driver, panel, calls, log)
 }
 

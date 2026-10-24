@@ -259,6 +259,11 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                 ));
             }
             Err(err) => {
+                let err = match crate::services::claude_tui::input::readiness_failure(tmux_session_name, err) {
+                    hold @ SubmissionError::Held(_) => return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(hold.into_legacy())),
+                    SubmissionError::Guarded(run) => return ClaudeTuiWarmFollowupSubmitOutcome::Stopped(run),
+                    SubmissionError::Legacy(error) => error,
+                };
                 if let Some(run) = guarded_outcome::held(tmux_session_name) {
                     return ClaudeTuiWarmFollowupSubmitOutcome::Stopped(run);
                 }
@@ -365,6 +370,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         );
         return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(result);
     }
+    guarded_outcome::set_receipt_session_id(resolved_session_id);
     let turn_started_at = chrono::Utc::now();
     if let Err(error) =
         crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript_owned(
@@ -379,6 +385,13 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                 return ClaudeTuiWarmFollowupSubmitOutcome::Stopped(run);
             }
             SubmissionError::Legacy(error) => error,
+            hold @ SubmissionError::Held(_) => {
+                let error = hold.into_legacy();
+                if crate::services::claude_tui::input::is_prompt_ready_cancelled_error(&error) {
+                    return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
+                }
+                return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
+            }
         };
         // A held prompt is neither a cancellation nor a provider failure; nothing reached the pane.
         if crate::services::claude_tui::submission_fence::refusal().is_some() {
@@ -447,14 +460,18 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         let snapshot =
             crate::services::claude_tui::input::prompt_readiness_snapshot(tmux_session_name);
         if claude_tui_prompt_remained_in_input_buffer(&snapshot, prompt) {
-            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(
-                claude_tui_zero_advance_input_buffer_error(
+            return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(SubmissionError::Held(
+                crate::services::claude_tui::input::PreparationHold::uncertain(
                     tmux_session_name,
-                    &transcript_path_string,
-                    start_offset,
-                    &snapshot,
+                    claude_tui_zero_advance_input_buffer_error(
+                        tmux_session_name,
+                        &transcript_path_string,
+                        start_offset,
+                        &snapshot,
+                    ),
                 ),
-            ));
+            )
+            .into_legacy()));
         }
     }
     match classify_followup_result(

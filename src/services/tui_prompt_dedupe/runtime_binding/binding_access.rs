@@ -2,6 +2,98 @@
 
 use super::*;
 
+pub(super) fn same_runtime_source(
+    left: Option<&TuiRuntimeBinding>,
+    right: Option<&TuiRuntimeBinding>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            left.runtime_kind == right.runtime_kind
+                && left.output_path == right.output_path
+                && left.relay_output_path == right.relay_output_path
+                && left.input_fifo_path == right.input_fifo_path
+                && left.session_id == right.session_id
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Raw diagnostic state; `Present` also passed a read-only source permission check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeObservation {
+    Missing,
+    Expired(TuiRuntimeBinding),
+    Withheld(TuiRuntimeBinding),
+    Present(TuiRuntimeBinding),
+}
+
+/// Observes without TTL purge, refresh, publication or reacquiring the caller's source authority.
+pub(crate) fn runtime_observation_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) -> RuntimeObservation {
+    let raw = {
+        let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        state.runtime_by_tmux.get(authority.session()).map(|entry| {
+            (
+                entry.value.clone(),
+                entry.recorded_at.elapsed() > SESSION_MAPPING_TTL,
+            )
+        })
+    };
+    match raw {
+        None => RuntimeObservation::Missing,
+        Some((binding, true)) => RuntimeObservation::Expired(binding),
+        Some((binding, false)) if observation_allowed(authority, &binding) => {
+            RuntimeObservation::Present(binding)
+        }
+        Some((binding, false)) => RuntimeObservation::Withheld(binding),
+    }
+}
+
+fn observation_allowed(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> bool {
+    use super::super::binding_context::{self, SpawnNonceMarker};
+    use crate::services::tmux_common as tc;
+    if binding.runtime_kind != RuntimeHandoffKind::CodexTui {
+        return true;
+    }
+    let SpawnNonceMarker::Known(nonce) =
+        binding_context::observe_spawn_nonce_marker(authority.session())
+    else {
+        return false;
+    };
+    let Ok(context) = binding_context::execution_context("codex", &nonce) else {
+        return false;
+    };
+    if context.tmux_session != authority.session()
+        || context.owner_runtime_root != tc::current_tmux_owner_marker()
+    {
+        return false;
+    }
+    match context.source_policy.as_deref() {
+        None | Some("shadow") => true,
+        Some("verified") => {
+            let Ok(proof) = codex_verified::proof_for_binding(authority, &context, binding) else {
+                return false;
+            };
+            let path =
+                tc::session_temp_path(authority.session(), tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|marker| {
+                    marker["codex_ownership"] == codex_verified::marker_proof(&context, &proof)
+                        && marker["rollout_path"].as_str() == proof.source.path.to_str()
+                        && marker["session_id"].as_str() == Some(&proof.source.session_id)
+                })
+        }
+        Some(_) => false,
+    }
+}
+
 pub fn register_provider_session(
     provider: &str,
     provider_session_id: &str,
@@ -119,3 +211,7 @@ pub(crate) fn codex_verified_marker_metadata(
 ) -> Result<Option<serde_json::Value>, String> {
     codex_verified::marker_metadata(authority, path, id)
 }
+
+#[cfg(all(test, unix))]
+#[path = "binding_access_tests.rs"]
+mod tests;

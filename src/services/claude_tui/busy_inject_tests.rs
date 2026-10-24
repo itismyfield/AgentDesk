@@ -468,7 +468,9 @@ fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
 #[test]
 fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_prompt() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    use crate::services::claude_tui::composer_lock::DraftSighting;
+    use crate::services::claude_tui::composer_lock::{
+        ComposerAdmission, DraftGuard, DraftSighting, composer_admission, guard_draft,
+    };
     let source = "discord:1479671298497183835:1561196979327869080";
     let framed = crate::services::tui_input::human_frame::inject(
         source,
@@ -481,9 +483,24 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
     let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
     let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());
     let typed_first = format!("person typed {wrapped}");
-    for shown in [&framed, &wrapped, &typed_first].map(|composer| screen(composer, "")) {
+    for composer in [&framed, &wrapped, &typed_first] {
+        let shown = screen(composer, "");
         assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{shown}");
-        assert_eq!(composer_owner(&shown), ComposerOwner::Person, "{shown}");
+        assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{shown}");
+        let fake = Fake::new();
+        fake.caps(std::slice::from_ref(&shown));
+        let session = fake.session();
+        guard_draft(&session, DraftGuard::RecoveryRequired);
+        assert_eq!(
+            composer_admission(&session, || Some(shown.clone())),
+            ComposerAdmission::Held,
+            "our residue must keep a person's mixed-in text protected"
+        );
+        assert_eq!(fake.run(&FAST), Outcome::NotSent(Veto::Draft));
+        assert_eq!(fake.keys(), (0, 0, 0));
+        assert!(fake.calls("load-buffer").is_empty());
+        let pane = Pane::with_program(&session, fake.dir.path().join("tmux"));
+        assert_eq!(pane.capture().as_deref(), Some(shown.as_str()));
     }
     let idle = screen("[User: 0hbujang (ID: 343742347365974026)] status?", "");
     assert_eq!(composer_owner(&idle), ComposerOwner::AgentDesk);

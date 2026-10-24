@@ -20,6 +20,8 @@ fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|root| root.join(format!("{channel}.log"))))
 }
 
+mod observation;
+pub(crate) use observation::observe_channel;
 mod commit;
 #[cfg(unix)]
 pub(crate) mod settled;
@@ -403,7 +405,11 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
     if read.lines != read.records.len() as u64 {
         return Err(invalid("unreadable Codex ownership history"));
     }
-    for (index, logged) in read.records.iter().enumerate() {
+    checked_ownership_records(channel, read.records)
+}
+
+fn checked_ownership_records(channel: u64, records: Vec<Logged>) -> io::Result<Vec<Logged>> {
+    for (index, logged) in records.iter().enumerate() {
         let event = &logged.event;
         if event.seq != index as u64 + 1 || event.channel_id != channel {
             return Err(invalid("Codex ownership history sequence/channel mismatch"));
@@ -468,21 +474,20 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
             {
                 return Err(invalid("Codex claim/source mismatch"));
             }
-            validate_reused_proof(proof, event, &read.records)?;
-            validate_witnesses(proof, event, &read.records)?;
+            validate_reused_proof(proof, event, &records)?;
+            validate_witnesses(proof, event, &records)?;
         }
     }
     let mut checked = std::collections::HashSet::new();
-    for proof in read
-        .records
+    for proof in records
         .iter()
         .filter_map(|record| record.codex_ownership.as_ref())
     {
         if checked.insert((&proof.context.tmux_session, &proof.context.execution_nonce)) {
-            fold_records(&proof.context, &read.records)?;
+            fold_records(&proof.context, &records)?;
         }
     }
-    Ok(read.records)
+    Ok(records)
 }
 
 /// The first proof of an executed resume may resolve the native resume Pending naming its

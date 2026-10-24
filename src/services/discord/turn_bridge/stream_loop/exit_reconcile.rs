@@ -16,6 +16,14 @@ pub(in crate::services::discord::turn_bridge) fn held_before_submit(
 ) -> bool {
     if creator_state
         .managed_submission_capability()
+        .is_some_and(|attempt| {
+            attempt.matches_attempt(creator_state) && attempt.preparation_hold().is_some()
+        })
+    {
+        return false;
+    }
+    if creator_state
+        .managed_submission_capability()
         .is_some_and(|submission| submission.guarded_hold())
     {
         return true;

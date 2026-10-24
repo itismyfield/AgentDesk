@@ -13,6 +13,9 @@ use std::{
 };
 
 pub(crate) const UNSET_CONTEXT: &str = "unset AGENTDESK_BINDING_CONTEXT\n";
+mod inventory;
+pub(crate) use inventory::inventory;
+use inventory::read_hook_context;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BindingContext {
@@ -486,20 +489,6 @@ pub(super) fn pane_context(tmux: &str, nonce: &str) -> Option<BindingContext> {
         && ctx.tmux_session == tmux
         && ctx.execution_nonce == nonce)
         .then_some(ctx)
-}
-
-fn read_hook_context(path: &Path) -> io::Result<BindingContext> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(CONTEXT_LIMIT + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > CONTEXT_LIMIT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "context exceeds size limit",
-        ));
-    }
-    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn context_temp(path: &Path) -> bool {

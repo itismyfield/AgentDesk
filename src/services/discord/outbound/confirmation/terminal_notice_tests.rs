@@ -210,7 +210,7 @@ async fn turn_end_summary_spends_one_physical_post_and_consumes_every_response()
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            post_live(gateway.as_ref(), &ProviderKind::Claude, summary),
+            post_live(gateway.as_ref(), &ProviderKind::Claude, summary.clone()),
         )
         .await
         .unwrap();

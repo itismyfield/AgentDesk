@@ -1592,13 +1592,13 @@ mod s1a {
             assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);
             assert_eq!(off.read("composer").as_deref(), Some(draft));
             assert_eq!(f.counts().await, (0, 0));
-            // ON, the contract's multi-line frame never renders flat, so the draft stays and the
-            // input waits in the queue: the stashed bytes above belong to the OFF path alone.
+            // A tab has unmeasured geometry; the ON path must retain it without typing.
             let on_channel = f.channel + 100;
             f.add_agent("s1b-on-stash", on_channel).await;
             let mut on = InjectPane::new(on_channel, "external");
+            let unsupported = "status?\tunmeasured";
             on.stash(draft, true);
-            let body = input(Some(guid), "status?", 200);
+            let body = input(Some(guid), unsupported, 200);
             let answer = call(&f.app, "s1b-on-stash", true, f.probe(), body).await;
             assert_eq!(
                 (&answer.1["reason"], &answer.1["inject_veto"]),
@@ -1606,8 +1606,17 @@ mod s1a {
             );
             assert!(on.applied().is_empty());
             assert_eq!(on.read("composer").as_deref(), Some(draft));
-            assert_eq!(queue_texts(&f.shared, on_channel).await, ["status?"]);
+            assert_eq!(queue_texts(&f.shared, on_channel).await, [unsupported]);
             drop((off, on));
+            f.close().await;
+            let f = Fixture::create(8_624_549).await;
+            let mut normal = InjectPane::new(f.channel, "external");
+            normal.stash(draft, true);
+            let answer = f.call(true, input(Some("p:0/MULTI"), "status?", 200)).await;
+            assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
+            assert_eq!(normal.applied(), ["C-s", "paste", "Enter"]);
+            assert_eq!(normal.read("composer").as_deref(), Some(draft));
+            drop(normal);
             f.close().await;
         }
 
