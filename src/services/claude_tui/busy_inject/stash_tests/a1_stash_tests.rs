@@ -211,3 +211,100 @@ fn a1_our_folded_attempt_residue_is_unread_not_a_person() {
         DraftSighting::PersonDraft
     );
 }
+
+#[test]
+fn a1_restore_waits_for_normal_footer_after_the_original_window() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    for folded in [false, true] {
+        let draft = "human original\n\n  preserve these bytes";
+        let tui = Tui::new(draft);
+        tui.put("attached", "1");
+        tui.put("fold", "");
+        let chip = "[Pasted text #7 +2 lines]";
+        if folded {
+            tui.put("chip", chip);
+        }
+        let normal_footer = tui.get("footer").unwrap();
+        tui.put("normal-footer", &normal_footer);
+        tui.put("next-footer", "  paste again to expand\n");
+        tui.put("human.before-Enter", "cp \"$d/next-footer\" \"$d/footer\"");
+        tui.person_after_capture(4, ": > \"$d/restoring\"");
+        let (actual, finished, normal_at) = std::thread::scope(|scope| {
+            let normal = scope.spawn(|| {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while tui.get("restoring").is_none() {
+                    assert!(Instant::now() < deadline, "restore observation never began");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                std::thread::sleep(Duration::from_millis(800));
+                let normal_at = Instant::now();
+                tui.put("footer", &normal_footer);
+                normal_at
+            });
+            let actual = tui.run_text(&long_text(), &FAST);
+            let finished = Instant::now();
+            (actual, finished, normal.join().unwrap())
+        });
+        assert_eq!(
+            actual,
+            report(Outcome::Injected, DraftState::RestoredObserved)
+        );
+        assert!(
+            finished >= normal_at,
+            "the hint is not final restoration evidence"
+        );
+        assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+        assert_eq!(tui.drafts(), (draft.to_string(), None));
+        assert!(tui.taken());
+        assert!(tui.alerts().is_empty());
+        let rows: Vec<String> = if folded {
+            vec![chip.to_string()]
+        } else {
+            draft.split('\n').map(str::to_string).collect()
+        };
+        let capture = tui.capture();
+        assert!(screen::restored(&capture, &rows));
+        assert!(!screen::restored(
+            &capture.replace(&normal_footer, "  paste again to expand\n"),
+            &rows,
+        ));
+    }
+}
+
+#[test]
+fn a1_restore_hint_with_different_draft_keeps_the_original_timeout() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let tui = Tui::new("human original");
+    tui.put("attached", "1");
+    tui.put("next-footer", "  paste again to expand\n");
+    tui.put(
+        "human.before-Enter",
+        "cp \"$d/next-footer\" \"$d/footer\"; printf '%s' 'changed human draft' > \"$d/stash\"",
+    );
+    tui.person_after_capture(4, ": > \"$d/restoring\"");
+    let quick = Timing {
+        restore_window: Duration::from_millis(40),
+        ..FAST
+    };
+    let (actual, finished, restore_started) = std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while tui.get("restoring").is_none() {
+                assert!(Instant::now() < deadline, "restore observation never began");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Instant::now()
+        });
+        let actual = tui.run_text(TEXT, &quick);
+        let finished = Instant::now();
+        (actual, finished, observer.join().unwrap())
+    });
+    assert_eq!(actual, report(Outcome::Injected, DraftState::Unknown));
+    assert!(
+        finished.saturating_duration_since(restore_started) < Duration::from_secs(5),
+        "a different draft earns no hint grace"
+    );
+    assert_eq!(tui.applied(), ["C-s", "paste", "Enter"]);
+    assert_eq!(tui.drafts(), ("changed human draft".to_string(), None));
+    assert!(tui.taken());
+}
