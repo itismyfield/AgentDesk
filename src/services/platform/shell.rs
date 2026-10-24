@@ -49,6 +49,33 @@ pub fn hostname_short() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// The short hostname for `/health/detail`: `gethostname` instead of a `hostname -s` process per
+/// request, with the same short-name parsing and "localhost" fallback.
+#[cfg(unix)]
+pub fn health_hostname_short() -> String {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the pointer and length describe `buffer`, which is writable and outlives the call;
+    // gethostname writes at most `len` bytes.
+    let rc = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    health_hostname_from(rc, &buffer)
+}
+
+#[cfg(not(unix))]
+pub fn health_hostname_short() -> String {
+    hostname_short()
+}
+
+/// A name that filled the buffer may have been cut without a NUL, so only a NUL-terminated
+/// name counts.
+#[cfg(unix)]
+fn health_hostname_from(rc: i32, buffer: &[u8]) -> String {
+    buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .and_then(|len| parse_short_hostname(rc == 0, &buffer[..len]))
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
 fn parse_short_hostname(success: bool, stdout: &[u8]) -> Option<String> {
     if !success {
         return None;
@@ -90,6 +117,37 @@ mod hostname_tests {
             (true, b"\xff"),
         ] {
             assert_eq!(parse_short_hostname(success, output), None);
+        }
+    }
+
+    /// The health detail's native read must name this machine exactly as `hostname -s` does.
+    #[cfg(unix)]
+    #[test]
+    fn health_hostname_native_matches_command() {
+        let command = hostname_short();
+        assert_ne!(
+            command, "localhost",
+            "`hostname -s` must answer here, or two fallbacks would match"
+        );
+        assert_eq!(health_hostname_short(), command);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_hostname_falls_back_on_failed_empty_invalid_or_cut_names() {
+        let mut full = [b'a'; 256];
+        full[10] = b'.';
+        for (rc, buffer, expected) in [
+            (0, b"Mac-mini.local\0".as_slice(), "Mac-mini"),
+            (0, b"worker-1\0\0\0", "worker-1"),
+            (-1, b"worker-1\0", "localhost"),
+            (0, b"\0worker-1\0", "localhost"),
+            (0, b"\xff\0", "localhost"),
+            (0, &full, "localhost"),
+            (0, b".local\0", "localhost"),
+            (0, b"two words\0", "localhost"),
+        ] {
+            assert_eq!(health_hostname_from(rc, buffer), expected, "{buffer:?}");
         }
     }
 

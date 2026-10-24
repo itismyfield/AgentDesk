@@ -301,6 +301,9 @@ src/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
 │   │   │   └── session_liveness_tests.rs
+│   │   ├── read_bridge/
+│   │   │   ├── contract_tests.rs
+│   │   │   └── epoch_tests.rs
 │   │   ├── timeouts_ops/
 │   │   │   ├── host_repair.rs
 │   │   │   └── host_repair_tests.rs
@@ -321,6 +324,7 @@ src/
 │   │   ├── pipeline_ops.rs
 │   │   ├── quality_ops.rs
 │   │   ├── queue_ops.rs
+│   │   ├── read_bridge.rs
 │   │   ├── review_automation_ops.rs
 │   │   ├── review_ops.rs
 │   │   ├── runtime_ops.rs
@@ -434,6 +438,19 @@ src/
 │   │   │   └── runtime.rs
 │   │   ├── health_api/
 │   │   │   ├── db_deadline_tests/
+│   │   │   │   ├── amplification_records_tests/
+│   │   │   │   │   └── raw_cases_tests.rs
+│   │   │   │   ├── amplification_verdict_tests/
+│   │   │   │   │   ├── cases_tests.rs
+│   │   │   │   │   ├── claim_verdict_tests.rs
+│   │   │   │   │   ├── policy_verdict_tests.rs
+│   │   │   │   │   ├── s2_cases_tests.rs
+│   │   │   │   │   └── s3_cases_tests.rs
+│   │   │   │   ├── amplification_claim_tests.rs
+│   │   │   │   ├── amplification_policy_tests.rs
+│   │   │   │   ├── amplification_profile_tests.rs
+│   │   │   │   ├── amplification_records_tests.rs
+│   │   │   │   ├── amplification_verdict_tests.rs
 │   │   │   │   └── resource_regression_tests.rs
 │   │   │   ├── db_collection.rs
 │   │   │   ├── db_deadline_tests.rs
@@ -544,6 +561,9 @@ src/
 │   │   ├── voice_audio.rs
 │   │   ├── voice_conductor.rs
 │   │   └── voice_config.rs
+│   ├── task_dispatch_claims/
+│   │   ├── config_read.rs
+│   │   └── config_read_tests.rs
 │   ├── web_surface/
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs

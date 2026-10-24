@@ -1,23 +1,30 @@
+use std::sync::Arc;
+
+use futures::future::BoxFuture;
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
-use sqlx::PgPool;
+use sqlx::postgres::PgConnection;
+
+use super::read_bridge::{ReadBridge, ReadCommand};
 
 // ── Config ops ───────────────────────────────────────────────────
 
 const RUNTIME_CONFIG_BLOB_KEY: &str = "runtime-config";
 
-pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+pub(super) fn register_config_ops<'js>(
+    ctx: &Ctx<'js>,
+    reads: Option<Arc<ReadBridge>>,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let config_obj = Object::new(ctx.clone())?;
 
     // __config_get_raw(key) → serialized JSON consumed by the JS wrapper below.
-    let pg_c = pg_pool;
     config_obj.set(
         "__get_raw",
         Function::new(
             ctx.clone(),
             rquickjs::function::MutFn::from(move |key: String| -> String {
-                if let Some(pool) = pg_c.as_ref() {
-                    return config_get_raw_pg(pool, &key);
+                if let Some(reads) = reads.as_ref() {
+                    return config_get_raw_pg(reads, &key);
                 }
                 "null".to_string()
             }),
@@ -41,26 +48,41 @@ pub(super) fn register_config_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) 
     Ok(())
 }
 
-fn config_get_raw_pg(pool: &PgPool, key: &str) -> String {
+fn config_get_raw_pg(reads: &ReadBridge, key: &str) -> String {
     if key == RUNTIME_CONFIG_BLOB_KEY {
         return "null".to_string();
     }
 
-    let key = key.to_string();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
+    reads
+        .read(ReadCommand::Config(ConfigRead {
+            key: key.to_string(),
+        }))
+        .unwrap_or_else(|_error| "null".to_string())
+}
+
+/// The fixed `config.get` read run on the read bridge: the scalar, then the allowlisted blob.
+pub(super) struct ConfigRead {
+    pub(super) key: String,
+}
+
+impl ConfigRead {
+    pub(super) fn select<'c>(
+        &'c self,
+        connection: &'c mut PgConnection,
+    ) -> BoxFuture<'c, Result<String, String>> {
+        let key = self.key.as_str();
+        Box::pin(async move {
             let scalar =
                 sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
-                    .bind(&key)
-                    .fetch_optional(&bridge_pool)
+                    .bind(key)
+                    .fetch_optional(&mut *connection)
                     .await
                     .map_err(|error| format!("load postgres kv_meta {key}: {error}"))?;
 
-            let runtime_config = if should_load_runtime_config(&key, scalar.as_deref()) {
+            let runtime_config = if should_load_runtime_config(key, scalar.as_deref()) {
                 sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1")
                     .bind(RUNTIME_CONFIG_BLOB_KEY)
-                    .fetch_optional(&bridge_pool)
+                    .fetch_optional(&mut *connection)
                     .await
                     .map_err(|error| format!("load postgres runtime-config for {key}: {error}"))?
             } else {
@@ -68,14 +90,12 @@ fn config_get_raw_pg(pool: &PgPool, key: &str) -> String {
             };
 
             Ok(resolve_config_get_raw(
-                &key,
+                key,
                 scalar.as_deref(),
                 runtime_config.as_deref(),
             ))
-        },
-        |_error| "null".to_string(),
-    )
-    .unwrap_or_else(|_error| "null".to_string())
+        })
+    }
 }
 
 fn should_load_runtime_config(key: &str, scalar: Option<&str>) -> bool {
