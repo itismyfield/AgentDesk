@@ -1,8 +1,7 @@
 #![recursion_limit = "256"]
 
 #[cfg(test)]
-#[path = "config/runtime_root_guard/test_process.rs"]
-mod test_runtime_process;
+include!("config/runtime_root_guard/test_process.rs");
 
 use anyhow::Result;
 
