@@ -79,7 +79,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
     }
 }
 
-/// A preexisting operator job isolates the quiescence gate; Codex mailbox admission stays closed.
+/// Inspect crosses the real mailbox; only Apply uses a synthetic job to test its closed gate.
 pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
     mut writer: ChannelWriter<P, L, A>,
     bindings: Arc<B>,
@@ -103,6 +103,15 @@ where
         writer.store().ledger(),
     );
     let (_stop, stopped) = watch::channel(false);
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let (port, receiver) = TransitionPort::new(
+        81,
+        gate.clone(),
+        Arc::new(std::time::SystemTime::now),
+        stopped.clone(),
+    );
+    let port = port.with_suspension(suspension.clone());
     let mut actor = Actor {
         writer,
         deriver,
@@ -111,17 +120,19 @@ where
         sources: Sources::new(channel, ShadowProvider::Codex, bindings.clone())
             .with_suspension(suspension),
         bindings,
-        transitions: Transitions::new(None, stopped.clone()),
+        transitions: Transitions::new(Some(receiver), stopped.clone()),
         notice: None,
         waiting: Waiting::default(),
         clock: (Instant::now(), chrono::Utc::now()),
         scope_hold: None,
         boot_previous_nonce: None,
     };
-    assert!(
-        actor.rescope(),
-        "the first exact root must install its selection"
+    assert_eq!(actor.rescope(), !inspect);
+    assert_eq!(
+        actor.writer.suspension.nonce().as_deref(),
+        Some(initial_nonce)
     );
+    assert_eq!(actor.writer.suspension.is_empty(), inspect);
     actor
         .sources
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
@@ -141,79 +152,41 @@ where
         nonce: initial_nonce.into(),
         lock: Arc::default(),
     };
-    let gate = Arc::new(OwnershipGate::default());
-    gate.acquired();
-    let (_, common) = actor
-        .build_snapshot(&context, &gate, &BTreeMap::new())
-        .unwrap();
-    let (reply, completed) = oneshot::channel();
-    actor.transitions.job = Some(Job {
-        request: Request {
-            channel,
-            cutoff: actor.writer.store().binding_checkpoint().unwrap().unwrap(),
-            job_id: "fresh-root-waiting".into(),
-            operator: "fixture".into(),
-            at: chrono::Utc::now(),
-            reason: "finish an existing transition before selecting a new root".into(),
-            termination: None,
-        },
-        // Apply is a synthetic pre-existing job; Codex mailbox Apply remains refused.
-        apply: !inspect,
-        automatic: None,
-        scope: None,
-        stopping: stopped,
-        context,
-        reply,
-        gate,
-        wall: Arc::new(std::time::SystemTime::now),
-        common,
-        first: Vec::new(),
-        probes: BTreeMap::new(),
-        queue: VecDeque::new(),
-        stage: Stage::First,
-        worker: None,
-        deadline: now() + DEADLINE,
-        hashed: 0,
-        outcomes: BTreeMap::new(),
-    });
+    let request = Request {
+        channel,
+        cutoff: actor.writer.store().binding_checkpoint().unwrap().unwrap(),
+        job_id: "fresh-root-waiting".into(),
+        operator: "fixture".into(),
+        at: chrono::Utc::now(),
+        reason: "finish an existing transition before selecting a new root".into(),
+        termination: None,
+    };
+    let nonce;
     if inspect {
-        let cursors: Vec<_> = actor.writer.store().cursors().cloned().collect();
-        let cursor = cursors
-            .into_iter()
-            .find(|cursor| !actor.writer.suspension.contains(&cursor.source))
-            .expect("the proven current source is readable");
-        let key = source_key(&cursor.source);
-        let token = actor.token(&cursor);
-        let job = actor.transitions.job.as_mut().unwrap();
-        job.probes.insert(
-            key.clone(),
-            Probe {
-                token,
-                earlier: None,
-                later: None,
-                last_dialogue: None,
-            },
-        );
-        job.queue.push_back(key);
-        // Reach Quiet through the production worker/probe state machine, without advancing time.
-        for _ in 0..4 {
-            let mut job = actor.transitions.job.take().unwrap();
-            assert!(!actor.step(&mut job, &watch::channel(None).0).await);
-            let quiet = matches!(job.stage, Stage::Quiet(until) if until > now());
-            actor.transitions.job = Some(job);
-            test_hooks::settle_workers();
-            if quiet {
+        // No source has been denied yet, so this is reachable through the production port.
+        let pending = port.request(Operation::Inspect(request), context);
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        for _ in 0..3 {
+            actor.poll_transition(true, &watch::channel(None).0).await;
+            if matches!(
+                actor.transitions.job.as_ref().map(|job| &job.stage),
+                Some(Stage::Quiet(_))
+            ) {
                 break;
             }
         }
-        let job = actor.transitions.job.as_ref().unwrap();
+        let job = actor
+            .transitions
+            .job
+            .as_mut()
+            .expect("mailbox accepted Inspect");
         assert!(matches!(job.stage, Stage::Quiet(until) if until > now()));
         assert!(!job.apply);
-        assert!(job.probes.values().all(|probe| probe.earlier.is_some()));
-    }
-    let nonce = next_root();
-    assert!(actor.transitions.has_job());
-    if inspect {
+        // Tap the actor reply, then forward it unchanged through the port's suspension check.
+        let (reply, completed) = oneshot::channel();
+        let port_reply = std::mem::replace(&mut job.reply, reply);
+        nonce = next_root();
         assert!(
             actor.rescope(),
             "a read-only Inspect in Quiet must not delay a proven fresh root"
@@ -223,12 +196,47 @@ where
             actor.writer.suspension.nonce().as_deref(),
             Some(nonce.as_str())
         );
-        assert!(matches!(
-            actor.transitions.job.as_ref().unwrap().stage,
-            Stage::Quiet(_)
-        ));
+        assert!(!actor.writer.suspension.is_empty());
+        actor.observe_waiting(false);
         held();
+        for _ in 0..3 {
+            actor.poll_transition(true, &watch::channel(None).0).await;
+        }
+        let reply = tokio::time::timeout(Duration::from_millis(100), completed)
+            .await
+            .expect("fresh suspension must answer the active Inspect in finite time")
+            .expect("the actor must send an explicit refusal");
+        assert_eq!(reply.refused, Some(Refused::CodexDeferred));
+        assert!(actor.transitions.job.is_none());
+        port_reply.send(reply).unwrap();
+        assert_eq!(pending.await.unwrap_err(), "suspended_sources");
     } else {
+        let (_, common) = actor
+            .build_snapshot(&context, &gate, &BTreeMap::new())
+            .unwrap();
+        let (reply, completed) = oneshot::channel();
+        // Codex mailbox Apply stays closed; a synthetic existing Apply isolates its hold guard.
+        actor.transitions.job = Some(Job {
+            request,
+            apply: true,
+            automatic: None,
+            scope: None,
+            stopping: stopped,
+            context,
+            reply,
+            gate,
+            wall: Arc::new(std::time::SystemTime::now),
+            common,
+            first: Vec::new(),
+            probes: BTreeMap::new(),
+            queue: VecDeque::new(),
+            stage: Stage::First,
+            worker: None,
+            deadline: now() + DEADLINE,
+            hashed: 0,
+            outcomes: BTreeMap::new(),
+        });
+        nonce = next_root();
         for _ in 0..3 {
             assert!(
                 !actor.rescope(),
@@ -238,21 +246,16 @@ where
             actor.observe_waiting(false);
             held();
         }
-    }
-    let mut job = actor.transitions.job.take().unwrap();
-    if inspect {
-        tokio::time::advance(RETIRE_QUIET).await;
-    }
-    for _ in 0..4 {
-        if actor.step(&mut job, &watch::channel(None).0).await {
-            break;
+        let mut job = actor.transitions.job.take().unwrap();
+        for _ in 0..4 {
+            if actor.step(&mut job, &watch::channel(None).0).await {
+                break;
+            }
+            test_hooks::settle_workers();
         }
-        test_hooks::settle_workers();
-    }
-    actor.finish(job);
-    assert!(completed.await.unwrap().refused.is_none());
-    assert!(!actor.transitions.has_job());
-    if !inspect {
+        actor.finish(job);
+        assert!(completed.await.unwrap().refused.is_none());
+        assert!(!actor.transitions.has_job());
         assert!(
             actor.rescope(),
             "finishing Apply must permit the exact new root"

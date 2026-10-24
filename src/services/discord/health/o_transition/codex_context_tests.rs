@@ -231,6 +231,91 @@ fn codex_prepare_unknown_preserves_nonce_component_in_stats_and_log() {
     assert!(text.contains("current spawn nonce unavailable"), "{text}");
 }
 
+#[tokio::test(start_paused = true)]
+async fn codex_sweep_timeout_keeps_later_observations_running() {
+    let fixture = Fixture::new(false);
+    let registry = HealthRegistry::new();
+    let shared = fixture.shared(None);
+    shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+    registry.register("codex".into(), shared).await;
+    crate::services::tui_o::writer::tests::with_blocked_codex(
+        fixture.source.clone(),
+        |ready, _suspend| async move {
+            use super::super::automatic::test_support;
+            for _ in 0..2 {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(90),
+                    test_support::codex_sweep_for_test(&registry, &ready, CHANNEL),
+                )
+                .await
+                .expect("Codex sweep must finish a stalled Inspect before its outer deadline");
+                assert_eq!(result.unwrap_err(), "codex_inspect_timeout");
+                assert_eq!(
+                    test_support::codex_skips_for_test(),
+                    std::collections::BTreeMap::from([("codex_inspect_timeout".into(), 1)])
+                );
+            }
+        },
+    )
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn codex_sweep_classifies_existing_and_inflight_suspension() {
+    let fixture = Fixture::new(false);
+    let registry = HealthRegistry::new();
+    let shared = fixture.shared(None);
+    shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+    registry.register("codex".into(), shared).await;
+    crate::services::tui_o::writer::tests::with_blocked_codex(
+        fixture.source.clone(),
+        |ready, suspend| async move {
+            use super::super::automatic::test_support;
+            // The in-flight request was prepared against the old, unsuspended scope.
+            let sweep = test_support::codex_sweep_for_test(&registry, &ready, CHANNEL);
+            tokio::pin!(sweep);
+            assert!(futures::poll!(&mut sweep).is_pending());
+            let mut refused = false;
+            for _ in 0..10000 {
+                if suspend() {
+                    refused = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+                assert!(futures::poll!(&mut sweep).is_pending());
+            }
+            assert!(
+                refused,
+                "the sweep reached the mailbox before fresh suspension"
+            );
+            let result = tokio::time::timeout(std::time::Duration::from_secs(90), &mut sweep)
+                .await
+                .expect("inflight suspension must not stall the sweep");
+            assert_eq!(result.unwrap_err(), "codex_suspended_sources");
+            assert_eq!(
+                test_support::codex_skips_for_test(),
+                std::collections::BTreeMap::from([("codex_suspended_sources".into(), 1)])
+            );
+            // A later tick must report policy suspension before any prepare I/O.
+            std::fs::remove_file(tc::session_temp_path(
+                &fixture.context.tmux_session,
+                "spawn_nonce",
+            ))
+            .unwrap();
+            assert!(
+                test_support::codex_sweep_for_test(&registry, &ready, CHANNEL)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                test_support::codex_skips_for_test(),
+                std::collections::BTreeMap::from([("codex_suspended_sources".into(), 1)])
+            );
+        },
+    )
+    .await;
+}
+
 #[test]
 fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
     let fixture = Fixture::new(false);

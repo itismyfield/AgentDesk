@@ -115,6 +115,47 @@ where
     result
 }
 
+/// A live mailbox whose actor deliberately does not poll, with a shared suspension witness.
+pub(crate) async fn with_blocked_codex<T, F, Fut>(source: SourceId, run: F) -> T
+where
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>, Box<dyn Fn() -> bool>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let harness = Harness::build_channel(7, |_| Vec::new());
+    harness.gate.acquired();
+    let (_stopping, stopped) = watch::channel(false);
+    let (_resumed, resumed) = watch::channel(true);
+    let suspension = crate::services::tui_o::writer::suspension::Suspension::default();
+    let (port, receiver) = TransitionPort::new(
+        1,
+        harness.gate.clone(),
+        Arc::new(SystemTime::now),
+        stopped.clone(),
+    );
+    let port = port
+        .with_provider(ShadowProvider::Codex)
+        .with_suspension(suspension.clone());
+    let ready = Arc::new(crate::services::tui_o::writer::host::Readiness::default());
+    let _hosted = ready.host_port_for_test(7, &harness.gate, port, (resumed, stopped));
+    let receiver = std::sync::Mutex::new(receiver);
+    run(
+        ready,
+        Box::new(move || {
+            let Ok(Some(envelope)) = receiver.lock().unwrap().try_next() else {
+                return false;
+            };
+            suspension.extend("fresh".into(), [source.clone()]);
+            let id = &envelope.operation.request_ref().job_id;
+            envelope
+                .reply
+                .send(Reply::refused(id, Refused::CodexDeferred))
+                .unwrap();
+            true
+        }),
+    )
+    .await
+}
+
 #[derive(Default)]
 struct Delta {
     tail: bool,

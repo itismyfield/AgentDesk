@@ -811,11 +811,11 @@ async fn scope_during_transition(inspect: bool) {
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
-    let (_, n2) = proven(root.path());
+    let n2 = (!inspect).then(|| proven(root.path()).1);
     let (n3_context, n3) = proven(root.path());
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| {
-        [&n2, &n3]
-            .into_iter()
+        n2.iter()
+            .chain(std::iter::once(&n3))
             .map(|source| InitSource {
                 source_id: source.clone(),
                 delivery_start: std::fs::metadata(&source.path).unwrap().len(),
@@ -833,9 +833,13 @@ async fn scope_during_transition(inspect: bool) {
         .channel()
         .set_binding_checkpoint(checkpoint)
         .unwrap();
-    let old_cursor = harness.channel().cursor(&n2).unwrap().clone();
-    let old_bytes = std::fs::read(&n2.path).unwrap();
-    let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&n2.path);
+    let old = n2.as_ref().map(|n2| {
+        (
+            harness.channel().cursor(n2).unwrap().clone(),
+            std::fs::read(&n2.path).unwrap(),
+            crate::services::codex::actual_submit_tests::source_io::Watch::start(&n2.path),
+        )
+    });
     answer(&n3, "Q1 before transition");
     let writer = harness.writer();
     let selection = writer.suspension.clone();
@@ -864,7 +868,10 @@ async fn scope_during_transition(inspect: bool) {
         inspect,
         || {
             assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
-            assert!(selection.contains(&n2));
+            assert_eq!(selection.is_empty(), inspect);
+            if let Some(n2) = &n2 {
+                assert!(selection.contains(n2));
+            }
             assert_eq!(alarm_count(), 0);
             let (context, n4) = proven(root.path());
             answer(&n4, "Q2 after transition");
@@ -899,7 +906,9 @@ async fn scope_during_transition(inspect: bool) {
     )
     .await;
     assert_eq!(selection.nonce().as_deref(), Some(n4_nonce.as_str()));
-    assert!(selection.contains(&n2));
+    if let Some(n2) = &n2 {
+        assert!(selection.contains(n2));
+    }
     assert!(selection.contains(&n3));
     assert_eq!(
         harness.port.posts(),
@@ -920,9 +929,11 @@ async fn scope_during_transition(inspect: bool) {
         usize::from(!inspect),
         "only an actual Apply hold leaves a waiting incident to clear"
     );
-    assert_eq!(harness.channel().cursor(&n2), Some(&old_cursor));
-    assert_eq!(std::fs::read(&n2.path).unwrap(), old_bytes);
-    assert_eq!(old_io.stats().read_bytes, 0);
+    if let (Some(n2), Some((old_cursor, old_bytes, old_io))) = (&n2, old) {
+        assert_eq!(harness.channel().cursor(n2), Some(&old_cursor));
+        assert_eq!(std::fs::read(&n2.path).unwrap(), old_bytes);
+        assert_eq!(old_io.stats().read_bytes, 0);
+    }
     dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
     dedupe::binding_events::set_test_root(None);
     dedupe::reset_state_for_tests();
