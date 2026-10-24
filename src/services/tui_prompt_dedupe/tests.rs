@@ -8,11 +8,10 @@ const PRIVATE_REGISTRY_TESTS: &[&str] = &[
     "services::tui_prompt_dedupe::tests::reconcile_holds_source_authority_across_read_decision_and_replacement",
 ];
 const PRIVATE_REGISTRY_CHILD: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TEST";
-// When set, each private child appends its test name so the list can be checked end to end.
+// When set, each probe body appends its test name so the list can be checked end to end.
 const PRIVATE_REGISTRY_TRACE: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TRACE";
 
-// A private process gives lock-state probes their own registry, including unguarded readers.
-pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+fn listed_private_registry_test(test_name: &str) -> &str {
     let test_name = test_name
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .expect("crate-qualified test name");
@@ -20,16 +19,14 @@ pub(super) fn run_with_private_registry(test_name: &str) -> bool {
         PRIVATE_REGISTRY_TESTS.contains(&test_name),
         "{test_name} must be listed in PRIVATE_REGISTRY_TESTS"
     );
+    test_name
+}
+
+// A private process gives lock-state probes their own registry, including unguarded readers.
+// Returns true in the shared process, which must then return without running the body.
+pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+    let test_name = listed_private_registry_test(test_name);
     if std::env::var(PRIVATE_REGISTRY_CHILD).as_deref() == Ok(test_name) {
-        if let Some(trace) = std::env::var_os(PRIVATE_REGISTRY_TRACE) {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(trace)
-                .expect("open private registry trace");
-            writeln!(file, "{test_name}").expect("write private registry trace");
-        }
         return false;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -50,6 +47,25 @@ pub(super) fn run_with_private_registry(test_name: &str) -> bool {
         status = output.status,
     );
     true
+}
+
+// First line of a probe body: the body may only run inside its own private registry process.
+pub(super) fn assert_private_registry_body(test_name: &str) {
+    let test_name = listed_private_registry_test(test_name);
+    assert_eq!(
+        std::env::var(PRIVATE_REGISTRY_CHILD).as_deref(),
+        Ok(test_name),
+        "{test_name} body ran outside its private registry process"
+    );
+    if let Some(trace) = std::env::var_os(PRIVATE_REGISTRY_TRACE) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(trace)
+            .expect("open private registry trace");
+        writeln!(file, "{test_name}").expect("write private registry trace");
+    }
 }
 
 // Every listed probe must run its body in a child, so the shared sweep never runs it unisolated.
@@ -3005,12 +3021,14 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
-    if run_with_private_registry(concat!(
+    let name = concat!(
         module_path!(),
         "::reconcile_holds_source_authority_across_read_decision_and_replacement"
-    )) {
+    );
+    if run_with_private_registry(name) {
         return;
     }
+    assert_private_registry_body(name);
     // The authority key follows the runtime root env, so no other test may move it mid-probe.
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK

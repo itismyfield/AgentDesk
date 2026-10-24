@@ -39,12 +39,14 @@ mod tests {
 
     #[test]
     fn existing_binding_peek_semantics_are_preserved() {
-        if super::super::tests::run_with_private_registry(concat!(
+        let name = concat!(
             module_path!(),
             "::existing_binding_peek_semantics_are_preserved"
-        )) {
+        );
+        if super::super::tests::run_with_private_registry(name) {
             return;
         }
+        super::super::tests::assert_private_registry_body(name);
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -127,12 +129,14 @@ mod tests {
 
     #[test]
     fn detailed_binding_peek_distinguishes_busy_without_mutating_state() {
-        if super::super::tests::run_with_private_registry(concat!(
+        let name = concat!(
             module_path!(),
             "::detailed_binding_peek_distinguishes_busy_without_mutating_state"
-        )) {
+        );
+        if super::super::tests::run_with_private_registry(name) {
             return;
         }
+        super::super::tests::assert_private_registry_body(name);
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -159,12 +163,14 @@ mod tests {
 
     #[test]
     fn detailed_binding_peek_recovers_poison_with_existing_optional_semantics() {
-        if super::super::tests::run_with_private_registry(concat!(
+        let name = concat!(
             module_path!(),
             "::detailed_binding_peek_recovers_poison_with_existing_optional_semantics"
-        )) {
+        );
+        if super::super::tests::run_with_private_registry(name) {
             return;
         }
+        super::super::tests::assert_private_registry_body(name);
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
