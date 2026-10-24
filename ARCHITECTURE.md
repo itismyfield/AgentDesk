@@ -999,6 +999,7 @@ src/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── codex_end_tests/
 │   │   │   │   │   │   ├── capture_fold_tests.rs
+│   │   │   │   │   │   ├── reader_retirement_tests.rs
 │   │   │   │   │   │   └── successor_tests.rs
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   ├── clear_end_record_tests.rs
@@ -3258,6 +3259,7 @@ src/
 │   │   │   ├── rotation/
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── clear_end.rs
+│   │   │   │   ├── codex_end.rs
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
@@ -3281,6 +3283,7 @@ src/
 │   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
+│   │   │   ├── codex_end_proof_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
 │   │   │   ├── confirm.rs
