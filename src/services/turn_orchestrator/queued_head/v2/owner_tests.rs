@@ -59,7 +59,7 @@ async fn prepare(handle: &ChannelMailboxHandle, id: u64, target: &str) -> Attemp
     handle
         .v2_request(move |slot| {
             let owner = slot.as_mut().unwrap();
-            assert!(owner.enqueue(item(id))?);
+            assert!(owner.enqueue(&item(id))?);
             let key = owner.reserve(attempt(id, &target), payload())?;
             assert_eq!(
                 key.identity.primary, id,
@@ -198,7 +198,7 @@ fn v2_commit_readback_requires_full_candidate_and_sync_before_permit() {
     .enumerate()
     {
         let mut owner = owner(727210 + index as u64);
-        owner.enqueue(item(100)).unwrap();
+        owner.enqueue(&item(100)).unwrap();
         let key = owner
             .reserve(attempt(100, &format!("pane-commit-{index}")), payload())
             .unwrap();
@@ -253,12 +253,12 @@ fn v2_commit_readback_requires_full_candidate_and_sync_before_permit() {
         }
     }
     let mut owner = owner(727219);
-    owner.enqueue(item(100)).unwrap();
+    owner.enqueue(&item(100)).unwrap();
     let mut changed: Value = serde_json::from_str(owner.bytes.as_ref().unwrap()).unwrap();
     changed["items"][0]["text"] = json!("externally different original");
     std::fs::write(&owner.path, changed.to_string()).unwrap();
     assert!(
-        owner.enqueue(item(200)).is_err(),
+        owner.enqueue(&item(200)).is_err(),
         "comparison must include original items, not metadata alone"
     );
 }
@@ -276,7 +276,7 @@ fn v2_restart_adopts_reserved_and_unknown_without_reset_or_resend() {
     {
         let channel = 727230 + index as u64;
         let mut first = owner(channel);
-        first.enqueue(item(100)).unwrap();
+        first.enqueue(&item(100)).unwrap();
         let key = first
             .reserve(attempt(100, "pane-restart"), payload())
             .unwrap();
@@ -352,7 +352,7 @@ fn v2_restart_adopts_reserved_and_unknown_without_reset_or_resend() {
 fn v2_source_fences_ignore_generation_and_terminal_age_begins_at_settlement() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner(727240);
-    owner.enqueue(item(100)).unwrap();
+    owner.enqueue(&item(100)).unwrap();
     let key = owner
         .reserve(attempt(100, "pane-source"), payload())
         .unwrap();
@@ -361,7 +361,7 @@ fn v2_source_fences_ignore_generation_and_terminal_age_begins_at_settlement() {
     let mut replay = item(10100);
     replay.queued_generation = 900;
     assert!(
-        !owner.enqueue(replay.clone()).unwrap(),
+        !owner.enqueue(&replay.clone()).unwrap(),
         "merged secondary source is fenced across generations"
     );
     owner.tick(9_000_000_000).unwrap();
@@ -373,27 +373,27 @@ fn v2_source_fences_ignore_generation_and_terminal_age_begins_at_settlement() {
     owner.settle(&key, true, 9_000_000_000).unwrap();
     owner.tick(9_086_399_999).unwrap();
     assert!(
-        !owner.enqueue(replay.clone()).unwrap(),
+        !owner.enqueue(&replay.clone()).unwrap(),
         "terminal survives a full day from settlement"
     );
     let mut other = Owner::adopt(path(727241), "other-namespace".into()).unwrap();
     assert!(
-        other.enqueue(replay.clone()).unwrap(),
+        other.enqueue(&replay.clone()).unwrap(),
         "another namespace is independent"
     );
     owner.tick(9_086_400_000).unwrap();
-    assert!(owner.enqueue(replay).unwrap());
+    assert!(owner.enqueue(&replay).unwrap());
 }
 
 #[test]
 fn v2_parked_and_slot_projection_preserve_uncertainty_and_late_identity() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner(727250);
-    sources::migrate_parked(&mut owner, item(100), false).unwrap();
-    sources::migrate_parked(&mut owner, item(200), true).unwrap();
+    sources::migrate_parked(&mut owner, &item(100), false).unwrap();
+    sources::migrate_parked(&mut owner, &item(200), true).unwrap();
     assert_eq!(owner.snapshot.retained_inputs.len(), 1);
     assert_eq!(owner.snapshot.items.len(), 1);
-    sources::migrate_parked(&mut owner, item(100), false).unwrap();
+    sources::migrate_parked(&mut owner, &item(100), false).unwrap();
     assert_eq!(
         owner.snapshot.retained_inputs.len(),
         1,
@@ -413,7 +413,7 @@ fn v2_parked_and_slot_projection_preserve_uncertainty_and_late_identity() {
             ),
             "nine Unknown inputs must release pending capacity"
         );
-        owner.enqueue(item(id)).unwrap();
+        owner.enqueue(&item(id)).unwrap();
         let key = owner.reserve(attempt(id, "pane-slots"), payload()).unwrap();
         drop(owner.arm(&key, 1000).unwrap());
         owner.tick(31_000).unwrap();
@@ -431,7 +431,7 @@ fn v2_parked_and_slot_projection_preserve_uncertainty_and_late_identity() {
 fn v2_retained_snapshot_cost_is_measured_without_compacting_originals() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner(727260);
-    owner.enqueue(item(100)).unwrap();
+    owner.enqueue(&item(100)).unwrap();
     let key = owner.reserve(attempt(100, "pane-size"), payload()).unwrap();
     drop(owner.arm(&key, 0).unwrap());
     owner.tick(30_000).unwrap();
@@ -449,11 +449,11 @@ fn v2_retained_snapshot_cost_is_measured_without_compacting_originals() {
     }
     for id in 20_000..20_030 {
         assert!(
-            owner.enqueue(item(id)).unwrap(),
+            owner.enqueue(&item(id)).unwrap(),
             "retained metadata must not consume executable queue capacity"
         );
     }
-    assert!(owner.enqueue(item(20_030)).is_err());
+    assert!(owner.enqueue(&item(20_030)).is_err());
     assert_eq!(owner.snapshot.retained_inputs.len(), 1024);
 }
 
@@ -461,11 +461,11 @@ fn v2_retained_snapshot_cost_is_measured_without_compacting_originals() {
 fn v2_late_success_and_failure_never_settle_the_current_head() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner(727265);
-    owner.enqueue(item(100)).unwrap();
+    owner.enqueue(&item(100)).unwrap();
     let a = owner.reserve(attempt(100, "pane-late"), payload()).unwrap();
     drop(owner.arm(&a, 1000).unwrap());
     owner.tick(31_000).unwrap();
-    owner.enqueue(item(200)).unwrap();
+    owner.enqueue(&item(200)).unwrap();
     let b = owner.reserve(attempt(200, "pane-late"), payload()).unwrap();
     drop(owner.arm(&b, 32_000).unwrap());
     let before = owner.json().unwrap();
@@ -488,7 +488,7 @@ fn v2_late_success_and_failure_never_settle_the_current_head() {
 fn v2_exact_attempt_checks_every_source_and_target_field() {
     let _root = TestRuntimeRootGuard::new();
     let mut owner = owner(727266);
-    owner.enqueue(item(100)).unwrap();
+    owner.enqueue(&item(100)).unwrap();
     let key = owner
         .reserve(attempt(100, "pane-fields"), payload())
         .unwrap();
@@ -548,7 +548,7 @@ fn v2_exact_attempt_checks_every_source_and_target_field() {
 fn v2_writer_lease_survives_owner_adoption() {
     let _root = TestRuntimeRootGuard::new();
     let mut first = owner(727267);
-    first.enqueue(item(100)).unwrap();
+    first.enqueue(&item(100)).unwrap();
     let a = first
         .reserve(attempt(100, "pane-adoption"), payload())
         .unwrap();
@@ -556,7 +556,7 @@ fn v2_writer_lease_survives_owner_adoption() {
     first.tick(31_000).unwrap();
     drop(first);
     let mut restored = owner(727267);
-    restored.enqueue(item(200)).unwrap();
+    restored.enqueue(&item(200)).unwrap();
     let b = restored
         .reserve(attempt(200, "pane-adoption"), payload())
         .unwrap();
@@ -580,7 +580,7 @@ async fn v2_unsupported_host_veto_precedes_may_have_sent_and_effect() {
     handle
         .v2_request(|slot| {
             let owner = slot.as_mut().unwrap();
-            owner.enqueue(item(100))?;
+            owner.enqueue(&item(100))?;
             let mut key = attempt(100, "herdr-not-connected");
             key.target.host = "herdr".into();
             owner.reserve(key, payload())?;
@@ -670,7 +670,7 @@ fn v2_adoption_reapplies_slots_after_crash_between_commit_and_projection() {
     }
     first.fault = Fault::BeforeProjection;
     for n in 0..8 {
-        first.enqueue(item(2000 + n)).unwrap();
+        first.enqueue(&item(2000 + n)).unwrap();
         let key = first
             .reserve(attempt(2000 + n, "pane-projection"), payload())
             .unwrap();
@@ -703,3 +703,6 @@ fn v2_adoption_reapplies_slots_after_crash_between_commit_and_projection() {
 
 #[path = "owner_tests/pg_tests.rs"]
 mod pg_tests;
+
+#[path = "owner_tests/conservation_tests.rs"]
+mod conservation_tests;

@@ -44,3 +44,67 @@ pub(super) fn read_legacy(path: &Path) -> Result<Store, String> {
         )),
     }
 }
+
+#[cfg(test)]
+fn v2_value(path: &Path) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (value.get("version")?.as_u64() == Some(2) && value.get("entries").is_none()).then_some(value)
+}
+
+#[cfg(test)]
+pub(super) fn known_v2(path: &Path, hashes: &[String]) -> Option<bool> {
+    let value = v2_value(path)?;
+    let entries = value["live"].as_array()?.iter().chain(
+        value["passive"]
+            .as_array()?
+            .iter()
+            .filter_map(|p| p.get("entry")),
+    );
+    let bound = entries.into_iter().any(|e| {
+        e["class_hash"]
+            .as_str()
+            .is_some_and(|h| hashes.iter().any(|x| x == h))
+    });
+    let planned = value
+        .get("planned")
+        .and_then(|p| p.as_array())
+        .is_some_and(|ps| {
+            ps.iter().any(|p| {
+                p["frame"]["class_hash"]
+                    .as_str()
+                    .is_some_and(|h| hashes.iter().any(|x| x == h))
+            })
+        });
+    let unbound = value["passive"].as_array()?.iter().any(|p| {
+        p["registration"]["frame"]["class_hash"]
+            .as_str()
+            .is_some_and(|h| hashes.iter().any(|x| x == h))
+    });
+    Some(bound || planned || unbound)
+}
+
+#[cfg(test)]
+pub(super) fn screen_frames_v2(path: &Path) -> Option<Vec<(String, String)>> {
+    let value = v2_value(path)?;
+    let entries = value["live"].as_array()?.iter().chain(
+        value["passive"]
+            .as_array()?
+            .iter()
+            .filter(|p| p["state"] == "retained")
+            .filter_map(|p| p.get("entry")),
+    );
+    Some(
+        entries
+            .filter(|e| {
+                e["provider"] == "claude" && e["events"].as_array().is_some_and(Vec::is_empty)
+            })
+            .filter_map(|e| {
+                Some((
+                    e["session"].as_str()?.into(),
+                    e["screen_prefix"].as_str()?.into(),
+                ))
+            })
+            .filter(|(_, prefix): &(String, String)| !prefix.is_empty())
+            .collect(),
+    )
+}

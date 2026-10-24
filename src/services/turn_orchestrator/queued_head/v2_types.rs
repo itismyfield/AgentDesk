@@ -21,6 +21,8 @@ pub(crate) struct InputAttempt {
     pub(crate) attempt: Option<AttemptIdentity>,
     pub(crate) payload: Option<PreparedPayload>,
     pub(crate) confirmation_deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_source: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

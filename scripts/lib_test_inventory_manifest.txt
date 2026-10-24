@@ -4675,6 +4675,7 @@ services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_stays_queued_when_the_execution_changes_before_the_paste_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_without_the_exact_receipt_stays_unknown_and_holds_the_tail_pg
+services::discord::health::turn_deliver::inject::queued_provider::history_pg_tests::exact_history_adapter_pastes_once_and_reconciles_after_restart_pg
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_command_counts_only_after_its_removal_in_file_order
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_head_recorded_before_attempts_needs_the_whole_absorbed_chain_after_its_clock
 services::discord::health::turn_deliver::inject::queued_reconcile::tests::a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock
@@ -13263,6 +13264,14 @@ services::tui_input::human_frame::history::screen_tests::pending_screen_matches_
 services::tui_input::human_frame::history::tests::codex_receipt_identity_selects_each_identical_attempt_and_replays_its_own_entry
 services::tui_input::human_frame::history::tests::durable_frame_replay_is_injected_and_headerless_human_is_not
 services::tui_input::human_frame::history::tests::unreadable_ledger_defers_plain_user_frames_and_leaves_headerless_humans_alone
+services::tui_input::human_frame::history::v2::tests::history_v2_active_cap_excludes_passive_evidence
+services::tui_input::human_frame::history::v2::tests::history_v2_actual_writer_golden_is_read_only_for_the_approved_rollback_reader
+services::tui_input::human_frame::history::v2::tests::history_v2_enqueue_evidence_survives_slot_return_and_blocks_late_command_misattribution
+services::tui_input::human_frame::history::v2::tests::history_v2_five_thousand_registrations_return_slots_and_keep_old_recognition
+services::tui_input::human_frame::history::v2::tests::history_v2_passive_encoding_tracks_late_binding_receipts_and_settlement
+services::tui_input::human_frame::history::v2::tests::history_v2_planned_binds_once_without_changing_the_full_attempt_key
+services::tui_input::human_frame::history::v2::tests::history_v2_same_body_retained_never_blocks_registration_or_claims_an_ambiguous_row
+services::tui_input::human_frame::history::v2::tests::history_v2_scope_validates_the_prepared_frame_and_is_removed_after_unwind
 services::tui_input::human_frame_tests::a_name_or_source_cannot_forge_the_header
 services::tui_input::human_frame_tests::an_inject_frame_opens_like_the_idle_header_and_reads_back
 services::tui_input::human_frame_tests::busy_header_bytes_equal_idle_for_one_line_and_multiline
@@ -15103,6 +15112,12 @@ services::turn_orchestrator::queued_head::tests::restore_cancel_and_purge_keep_a
 services::turn_orchestrator::queued_head::tests::the_downgrade_converts_only_a_resolved_snapshot
 services::turn_orchestrator::queued_head::tests::without_a_claim_the_queue_file_stays_the_legacy_array
 services::turn_orchestrator::queued_head::tests::write_failures_issue_no_ticket_or_leave_the_head_unknown
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::directory_sync_failure_issues_no_permit_and_recovery_requires_sync
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::expiry_removes_only_the_selected_head_and_preserves_duplicate_identity_raw
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::failed_enqueue_and_parked_migration_keep_the_callers_original_for_retry
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::head_mismatch_refuses_expiry_and_settlement_without_publishing
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::resolved_source_commit_is_repaired_after_history_projection_failure_without_changing_key
+services::turn_orchestrator::queued_head::v2::tests::conservation_tests::settlement_removes_only_the_selected_head_and_preserves_duplicate_identity_raw
 services::turn_orchestrator::queued_head::v2::tests::pg_tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 services::turn_orchestrator::queued_head::v2::tests::v2_adoption_reapplies_slots_after_crash_between_commit_and_projection
 services::turn_orchestrator::queued_head::v2::tests::v2_commit_readback_requires_full_candidate_and_sync_before_permit

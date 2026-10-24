@@ -22,15 +22,20 @@ impl Owner {
         if actual != self.bytes {
             return Err("snapshot changed outside owner".into());
         }
+        let mut sync_unconfirmed = false;
         let result = if self.fault == Fault::Before {
             Err("before publish".into())
         } else {
-            runtime_store::critical_publish(
+            runtime_store::durable_publish::critical_publish_status(
                 &self.path,
                 &candidate,
                 runtime_store::AtomicWriteContext::new("queued_input_v2"),
             )
-            .and_then(|()| {
+            .and_then(|status| {
+                if status != runtime_store::durable_publish::FlushStatus::Flushed {
+                    sync_unconfirmed = true;
+                    return Err("directory sync unconfirmed".into());
+                }
                 if self.fault != Fault::None {
                     Err("after publish".into())
                 } else {
@@ -43,6 +48,9 @@ impl Owner {
                 std::fs::write(&self.path, b"third state").map_err(|e| e.to_string())?;
             }
             self.pending = Some((candidate, next));
+            if sync_unconfirmed {
+                return Err("directory sync unconfirmed; recover before proceeding".into());
+            }
             return self.recover();
         }
         self.bytes = Some(candidate);
@@ -70,7 +78,13 @@ impl Owner {
                 .open(&self.path)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| e.to_string())?;
-            runtime_store::fsync_parent_and_ancestors(&self.path).map_err(|e| e.to_string())?;
+            let status = runtime_store::durable_publish::retry_published_status(
+                &self.path,
+                runtime_store::AtomicWriteContext::new("queued_input_v2"),
+            );
+            if status != runtime_store::durable_publish::FlushStatus::Flushed {
+                return Err("candidate directory sync unavailable".into());
+            }
             let (bytes, snapshot) = self.pending.take().ok_or("candidate disappeared")?;
             self.bytes = Some(bytes);
             self.snapshot = snapshot;

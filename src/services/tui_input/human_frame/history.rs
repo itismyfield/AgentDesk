@@ -9,6 +9,8 @@ mod compat_tests;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
+#[cfg(test)]
+pub(crate) mod v2;
 
 const CAPACITY: usize = 4096;
 
@@ -19,7 +21,7 @@ struct Event {
     kind: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     id: String,
     provider: String,
@@ -146,6 +148,12 @@ pub(crate) fn register(
     offset: u64,
     frame: &str,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(result) =
+        v2::scoped_register((provider, session, id, author), transcript, offset, frame)
+    {
+        return result;
+    }
     let file = file_id(&std::fs::metadata(transcript).map_err(|error| error.to_string())?);
     let digest = hash(frame);
     update(|store| {
@@ -197,6 +205,10 @@ pub(crate) fn register(
 }
 
 pub(crate) fn withdraw(id: &str, transcript: &Path) {
+    #[cfg(test)]
+    if v2::scoped() {
+        return;
+    }
     if let Err(error) = update(|store| {
         store
             .entries
@@ -208,6 +220,10 @@ pub(crate) fn withdraw(id: &str, transcript: &Path) {
 }
 
 pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
+    #[cfg(test)]
+    if let Some(registered) = v2::scoped_registered(id, transcript, frame) {
+        return registered;
+    }
     let Ok(meta) = std::fs::metadata(transcript) else {
         return false;
     };
@@ -223,6 +239,10 @@ pub(crate) fn registered(id: &str, transcript: &Path, frame: &str) -> bool {
 }
 
 pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
+    #[cfg(test)]
+    if v2::scoped() {
+        return false;
+    }
     path().and_then(|path| read(&path)).is_ok_and(|store| {
         !store
             .entries
@@ -232,6 +252,13 @@ pub(crate) fn allows_legacy(id: &str, transcript: &Path) -> bool {
 }
 
 pub(crate) fn known(frame: &str) -> bool {
+    #[cfg(test)]
+    if let Some(known) = path()
+        .ok()
+        .and_then(|p| compat::known_v2(&p, &class_hashes(frame)))
+    {
+        return known;
+    }
     let Some(store) = path().ok().and_then(|path| read(&path).ok()) else {
         return false;
     };
@@ -255,6 +282,10 @@ pub(crate) fn receipt(
     row: Option<&str>,
     frame: &str,
 ) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(receipt) = v2::scoped_receipt(id, transcript, offset, kind, row, frame) {
+        return receipt;
+    }
     let file = file_id(&std::fs::metadata(transcript).ok()?);
     update(|store| {
         let Some(target) = store.entries.iter().position(|entry| {
@@ -319,6 +350,10 @@ fn observed_at(
     prompts: &[String],
     row: Option<&str>,
 ) -> ObservedAttempt {
+    #[cfg(test)]
+    if let Some(observed) = v2::scoped_observed(provider, session, prompts, row) {
+        return observed;
+    }
     let Ok(store) = path.and_then(|path| read(&path)) else {
         let plain = prompts
             .iter()
@@ -368,6 +403,10 @@ fn observed_at(
 }
 
 pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Some(row) = v2::scoped_receipt_row(id, transcript) {
+        return row;
+    }
     let store = read(&path().ok()?).ok()?;
     store
         .entries

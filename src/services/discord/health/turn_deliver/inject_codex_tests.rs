@@ -90,9 +90,9 @@ fn steerable() -> String {
 
 /// A scripted Codex pane over `rollout`, its row/binding and a per-channel mode/program override.
 /// This does not force the Codex capability.
-struct CodexPane {
-    dir: tempfile::TempDir,
-    channel: u64,
+pub(super) struct CodexPane {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) channel: u64,
 }
 
 impl CodexPane {
@@ -141,11 +141,11 @@ impl CodexPane {
         pane
     }
 
-    fn session(&self) -> String {
+    pub(super) fn session(&self) -> String {
         ProviderKind::Codex.build_tmux_session_name(&format!("inject-{}", self.channel))
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
@@ -168,7 +168,7 @@ impl CodexPane {
     }
 
     /// Paste and Enter commands the server applied.
-    fn keys(&self) -> String {
+    pub(super) fn keys(&self) -> String {
         let keys = fs::read_to_string(self.path("keys")).unwrap_or_default();
         let first = keys
             .lines()
@@ -460,11 +460,11 @@ async fn an_enabled_codex_channel_steers_the_open_turn_quietly_pg() {
     );
 }
 
-struct QueuedCodex {
+pub(super) struct QueuedCodex {
     _db: crate::db::auto_queue::test_support::TestPostgresDb,
-    shared: std::sync::Arc<crate::services::discord::SharedData>,
-    pane: CodexPane,
-    head: crate::services::turn_orchestrator::Intervention,
+    pub(super) shared: std::sync::Arc<crate::services::discord::SharedData>,
+    pub(super) pane: CodexPane,
+    pub(super) head: crate::services::turn_orchestrator::Intervention,
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -519,7 +519,7 @@ async fn queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg() 
 }
 
 impl QueuedCodex {
-    async fn new(channel: u64) -> Self {
+    pub(super) async fn new(channel: u64) -> Self {
         use crate::services::turn_orchestrator::{Intervention, InterventionMode};
         use poise::serenity_prelude::{MessageId, UserId};
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -633,7 +633,7 @@ async fn queued_codex_real_entry_settles_native_receipt_once_pg() {
 }
 
 impl QueuedCodex {
-    fn disk_path(&self) -> PathBuf {
+    pub(super) fn disk_path(&self) -> PathBuf {
         crate::services::discord::runtime_store::discord_pending_queue_root()
             .unwrap()
             .join("codex")

@@ -50,15 +50,15 @@ impl Owner {
         Ok(owner)
     }
 
-    pub(crate) fn enqueue(&mut self, item: PendingQueueItem) -> Result<bool, String> {
-        if self.fenced(&item) {
+    pub(crate) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, String> {
+        if self.fenced(item) {
             return Ok(false);
         }
         if self.snapshot.items.len() >= 30 {
             return Err("queue full".into());
         }
         let mut next = self.snapshot.clone();
-        next.items.push(item);
+        next.items.push(item.clone());
         self.commit(next)?;
         Ok(true)
     }
@@ -85,6 +85,7 @@ impl Owner {
             attempt: Some(attempt),
             payload: Some(payload),
             confirmation_deadline_ms: None,
+            resolved_source: None,
         });
         self.commit(next)?;
         Ok(key)

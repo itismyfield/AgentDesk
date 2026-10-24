@@ -13,8 +13,7 @@ impl Owner {
                 .head_injection
                 .take()
                 .ok_or("active head disappeared")?;
-            next.items
-                .retain(|item| sources::identity(item) != input.identity);
+            remove_first(&mut next, &input.identity)?;
             next.retained_inputs.push(RetainedInput {
                 input,
                 reason: RetainedReason::Unconfirmed,
@@ -60,8 +59,7 @@ impl Owner {
         if delivered {
             if active {
                 next.head_injection = None;
-                next.items
-                    .retain(|item| sources::identity(item) != key.identity);
+                remove_first(&mut next, &key.identity)?;
             }
             if let Some(at) = retained {
                 next.retained_inputs.remove(at);
@@ -76,7 +74,9 @@ impl Owner {
                 .ok_or("active head disappeared")?
                 .phase = HeadPhase::Unknown;
         }
-        self.commit(next)
+        self.commit(next)?;
+        self.project_slots();
+        Ok(())
     }
 
     pub(crate) fn project_slots(&self) {
@@ -104,4 +104,16 @@ impl Owner {
         entry.notice.enqueued = true;
         self.commit(next)
     }
+}
+
+fn remove_first(snapshot: &mut SnapshotV2, identity: &QueueIdentity) -> Result<(), String> {
+    if !snapshot
+        .items
+        .first()
+        .is_some_and(|item| sources::identity(item) == *identity)
+    {
+        return Err("queue first item differs from selected head".into());
+    }
+    snapshot.items.remove(0);
+    Ok(())
 }

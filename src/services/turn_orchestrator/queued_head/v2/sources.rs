@@ -72,6 +72,7 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
                     }),
                     payload: None,
                     confirmation_deadline_ms: None,
+                    resolved_source: None,
                 });
             SnapshotV2 {
                 version: 2,
@@ -131,10 +132,10 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
 /// Parked without positive evidence of no attempt is retained, never rejected or retried.
 pub(crate) fn migrate_parked(
     owner: &mut Owner,
-    item: PendingQueueItem,
+    item: &PendingQueueItem,
     proven_unattempted: bool,
 ) -> Result<(), String> {
-    if owner.fenced(&item) {
+    if owner.fenced(item) {
         return Ok(());
     }
     if proven_unattempted {
@@ -144,12 +145,13 @@ pub(crate) fn migrate_parked(
     let mut next = owner.snapshot.clone();
     next.retained_inputs.push(RetainedInput {
         input: InputAttempt {
-            identity: identity(&item),
-            original: item,
+            identity: identity(item),
+            original: item.clone(),
             phase: HeadPhase::Unknown,
             attempt: None,
             payload: None,
             confirmation_deadline_ms: None,
+            resolved_source: None,
         },
         reason: RetainedReason::Unconfirmed,
         notice: NoticeIntent {
@@ -158,4 +160,84 @@ pub(crate) fn migrate_parked(
         },
     });
     owner.commit(next)
+}
+
+impl Owner {
+    pub(crate) fn prepare_history(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    ) -> Result<(), String> {
+        let input = self
+            .snapshot
+            .head_injection
+            .as_ref()
+            .ok_or("no selected input")?;
+        history.prepare(
+            self.snapshot
+                .namespace
+                .as_deref()
+                .ok_or("missing namespace")?,
+            &serde_json::to_value(input).map_err(|e| e.to_string())?,
+        )
+    }
+    pub(crate) fn bind_source(
+        &mut self,
+        key: &super::AttemptRef,
+        source: &crate::services::tui_input::human_frame::history::v2::Source,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    ) -> Result<(), String> {
+        let encoded = serde_json::to_value(key).map_err(|e| e.to_string())?;
+        source.validate(&encoded)?;
+        let mut next = self.snapshot.clone();
+        let input = if next.head_injection.as_ref().is_some_and(|h| key.matches(h)) {
+            next.head_injection.as_mut().ok_or("head disappeared")?
+        } else {
+            &mut next
+                .retained_inputs
+                .iter_mut()
+                .find(|r| key.matches(&r.input))
+                .ok_or("stale source bind")?
+                .input
+        };
+        let value = serde_json::to_value(source).map_err(|e| e.to_string())?;
+        if input
+            .resolved_source
+            .as_ref()
+            .is_some_and(|old| *old != value)
+        {
+            return Err("source already bound".into());
+        }
+        input.resolved_source = Some(value);
+        self.commit(next)?;
+        history.bind(
+            self.snapshot
+                .namespace
+                .as_deref()
+                .ok_or("missing namespace")?,
+            &encoded,
+            source,
+        )
+    }
+    pub(crate) fn sync_history(
+        &self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+    ) -> Result<(), String> {
+        for input in self
+            .snapshot
+            .head_injection
+            .iter()
+            .chain(self.snapshot.retained_inputs.iter().map(|r| &r.input))
+        {
+            if input.attempt.is_some() && input.payload.is_some() {
+                history.prepare(
+                    self.snapshot
+                        .namespace
+                        .as_deref()
+                        .ok_or("missing namespace")?,
+                    &serde_json::to_value(input).map_err(|e| e.to_string())?,
+                )?;
+            }
+        }
+        history.project(&self.json()?)
+    }
 }

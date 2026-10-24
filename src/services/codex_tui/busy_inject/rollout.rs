@@ -168,6 +168,19 @@ fn ends(review: &Review, turn_id: Option<&str>) -> bool {
 /// The turn a complete user record after `offset` carrying the nonce names, the first one found.
 /// The outer Some is the sighting; the inner value is the turn id when the record names one.
 pub(crate) fn submitted(path: &Path, offset: u64, nonce: &str) -> Option<Option<String>> {
+    #[cfg(test)]
+    if let Some(source) = crate::services::tui_input::human_frame::history::v2::scoped_source() {
+        let source = source.ok()?;
+        if source.provider != "codex"
+            || crate::services::codex_tui::rollout_index::read_rollout_session_meta(path)?
+                .id
+                .as_deref()
+                != Some(&source.session_id)
+        {
+            return None;
+        }
+    }
+
     let mut file = std::fs::File::open(path).ok()?;
     if file.metadata().ok()?.len() < offset {
         return None;

@@ -109,3 +109,87 @@ impl QueuedProvider {
         }
     }
 }
+
+#[cfg(test)]
+pub(super) struct ReceiptAdapter<K> {
+    provider: QueuedProvider,
+    history: crate::services::tui_input::human_frame::history::v2::Registry,
+    namespace: String,
+    key: K,
+    encoded: serde_json::Value,
+}
+#[cfg(test)]
+impl QueuedProvider {
+    pub(super) fn receipt_adapter<K: serde::Serialize + Clone>(
+        self,
+        history: &crate::services::tui_input::human_frame::history::v2::Registry,
+        namespace: &str,
+        key: &K,
+    ) -> Result<ReceiptAdapter<K>, String> {
+        let encoded = serde_json::to_value(key).map_err(|e| e.to_string())?;
+        // Legacy Claude reconcile does not yet carry the full receipt identity.
+        if self != Self::Codex || encoded["attempt"]["provider"] != "codex" {
+            return Err("exact provider receipt unavailable".into());
+        }
+        history.source(namespace, &encoded)?.validate(&encoded)?;
+        Ok(ReceiptAdapter {
+            provider: self,
+            history: history.clone(),
+            namespace: namespace.into(),
+            key: key.clone(),
+            encoded,
+        })
+    }
+}
+#[cfg(test)]
+impl<K: Clone> ReceiptAdapter<K> {
+    pub(super) fn run(
+        &self,
+        pane: (&busy_inject::Pane, Option<&HerdrTarget>),
+        target: (&str, &Path, Option<&str>),
+        turn: Option<String>,
+        message: MessageId,
+        input: &Input,
+    ) -> Result<(InjectAttempt, K), String> {
+        crate::services::tui_input::human_frame::history::v2::with_attempt(
+            &self.history,
+            &self.namespace,
+            &self.encoded,
+            || {
+                (
+                    self.provider.run(pane, target, turn, message, input),
+                    self.key.clone(),
+                )
+            },
+        )
+    }
+    pub(super) fn proof(&self, bound: &Bound) -> Option<Proof> {
+        let source = self.history.source(&self.namespace, &self.encoded).ok()?;
+        let recorded = Recorded {
+            nonce: self.encoded["attempt"]["nonce"].as_str()?.into(),
+            transcript: source.transcript.display().to_string(),
+            session_id: source.session_id,
+            file: (source.file[0], source.file[1]),
+            offset: source.offset,
+        };
+        if !recorded.matches(bound) || source.target["owner"] != bound.session {
+            return None;
+        }
+        crate::services::tui_input::human_frame::history::v2::with_attempt(
+            &self.history,
+            &self.namespace,
+            &self.encoded,
+            || super::codex_inject::submitted(&bound.path, recorded.offset, &recorded.nonce),
+        )
+        .ok()??;
+        Some(Proof {
+            nonce: recorded.nonce,
+            session: bound.session_id.clone(),
+            offset: recorded.offset,
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "queued_provider/history_pg_tests.rs"]
+mod history_pg_tests;

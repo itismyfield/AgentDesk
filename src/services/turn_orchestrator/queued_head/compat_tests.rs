@@ -212,7 +212,7 @@ fn v2_writer_golden_remains_inspectable_as_read_only_and_new_fields_default() {
     let mut owner = v2::Owner::adopt(path.clone(), "golden".into()).unwrap();
     let input = &expected["retained_inputs"][0]["input"];
     owner
-        .enqueue(serde_json::from_value(input["original"].clone()).unwrap())
+        .enqueue(&serde_json::from_value(input["original"].clone()).unwrap())
         .unwrap();
     let key = owner
         .reserve(
