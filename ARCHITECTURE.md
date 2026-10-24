@@ -98,6 +98,9 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── runtime_root_guard/
+│   │   ├── process_tests.rs
+│   │   └── test_process.rs
 │   ├── session_hosts/
 │   │   ├── migration/
 │   │   │   ├── consent_holds.rs
@@ -120,6 +123,8 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
+│   ├── runtime_root_guard.rs
+│   ├── runtime_root_tests.rs
 │   ├── runtime_settings.rs
 │   ├── runtime_validation.rs
 │   ├── session_hosts.rs
@@ -1564,6 +1569,12 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── herdr_row_end/
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   ├── owner.rs
+│   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
@@ -1615,9 +1626,11 @@ src/
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
+│   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
+│   │   │   ├── herdr_row_end_settle_tests.rs
 │   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
@@ -2191,6 +2204,7 @@ src/
 │   │   │   │   └── clear_waiting.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
 │   │   │   │   ├── codex.rs

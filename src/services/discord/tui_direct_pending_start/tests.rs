@@ -3612,4 +3612,6 @@ fn anchor_slot_rig_teardown_preserves_absent_root() {
 }
 
 mod headless_row_tests;
+#[cfg(unix)]
+mod restarted_herdr_sweep_tests;
 mod retire_tests;

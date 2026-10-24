@@ -186,6 +186,7 @@ test-postgres:
     source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
     # Session continuity must run on PRs through test_fast, not only main's
     # non-PG sweep; these name tests the manifest does not already select.
+    cargo test --lib config::runtime_root_tests -- --nocapture --test-threads=1
     cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
     cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
     cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
@@ -213,6 +214,7 @@ test-postgres-continuity:
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/ci/non-pg-test-filter.sh
+    run_prepared_lib_test cargo test --lib config::runtime_root_tests -- --nocapture --test-threads=1
     run_prepared_lib_test cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
     run_prepared_lib_test cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
     run_prepared_lib_test cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1

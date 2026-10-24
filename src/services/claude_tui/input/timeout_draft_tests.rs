@@ -18,9 +18,7 @@ fn timed_out(
     pane: &str,
     send: impl FnOnce(&str, &CancelToken) -> Result<(), String>,
 ) -> (Result<(), String>, Vec<String>, String) {
-    let _env = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let session = format!("timeout-draft-{}", uuid::Uuid::new_v4().simple());
     FOLLOWUP_TIMEOUT_FOR_TESTS.with(|timeout| timeout.set(Some(Duration::ZERO)));
     let spy = SpyGuard::install(SpyState {
@@ -28,6 +26,10 @@ fn timed_out(
         ..SpyState::default()
     });
     let result = send(&session, &CancelToken::new());
+    let log = crate::config::runtime_root()
+        .unwrap()
+        .join("debug/claude_tui.log");
+    assert!(std::fs::read_to_string(log).unwrap().contains(&session));
     FOLLOWUP_TIMEOUT_FOR_TESTS.with(|timeout| timeout.set(None));
     let write = |call: &String| {
         ["keys:", "literal:", "load:", "paste:", "retire:"]

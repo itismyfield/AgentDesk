@@ -242,16 +242,38 @@ fn the_exact_clear_removes_only_the_turn_the_pass_read() {
     for (case, change) in kept {
         let read = saved();
         rewrite(change);
-        let outcome = read.clear_restarted_herdr_row(&claude, CURRENT);
+        let outcome = read.clear_restarted_herdr_row(&claude, CURRENT, false);
         assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared, "{case}");
         assert!(path().exists(), "{case} keeps the row");
     }
+    // A silent clear stands on O owning the output, reread under the lock.
+    let _no_o = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let read = saved();
+    let silent = read.clear_restarted_herdr_row(&claude, CURRENT, true);
+    assert_ne!(
+        silent,
+        inflight::GuardedClearOutcome::Cleared,
+        "O no longer owns"
+    );
+    assert!(path().exists(), "a silent clear without O keeps the row");
+    drop(_no_o);
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let read = saved();
+    let silent = read.clear_restarted_herdr_row(&claude, CURRENT, true);
+    assert_eq!(
+        silent,
+        inflight::GuardedClearOutcome::Cleared,
+        "O still owns"
+    );
     let read = saved();
     rewrite(&|row| row["restart_mode"] = "drain_restart".into());
     let mut drained = read.clone();
     drained.restart_mode = Some(InflightRestartMode::DrainRestart);
     assert_eq!(
-        drained.clear_restarted_herdr_row(&claude, CURRENT),
+        drained.clear_restarted_herdr_row(&claude, CURRENT, false),
         inflight::GuardedClearOutcome::Cleared,
         "a drain-restart mark is not a hand-off"
     );
@@ -327,8 +349,14 @@ fn the_turn_body_is_its_result_or_its_streamed_text() {
             writeln!(file, "{record}").unwrap();
         }
         let len = file.metadata().unwrap().len();
-        let read = crate::services::claude::herdr_turn::closed_turn(&mut file, Some(input), len);
-        let body = read.map(turn_body);
+        let read =
+            crate::services::claude::herdr_turn::closed_turn_read(&mut file, Some(input), len);
+        let body = read.map(|read| match read {
+            Some(crate::services::claude::herdr_turn::TurnRead::Terminal(terminal)) => {
+                turn_body(Some(terminal))
+            }
+            _ => None,
+        });
         assert_eq!(body.as_ref().map(Option::as_deref), expected, "{case}");
     }
 }
