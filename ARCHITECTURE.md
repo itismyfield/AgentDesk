@@ -40,6 +40,8 @@ src/
 │   │   │   ├── dispatch_outbox_tests.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
+│   │   │   ├── herdr_policy.rs
+│   │   │   ├── herdr_policy_tests.rs
 │   │   │   ├── observation_checks.rs
 │   │   │   ├── observation_tests.rs
 │   │   │   ├── provider_credentials.rs
@@ -93,6 +95,17 @@ src/
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
 ├── config/
+│   ├── session_hosts/
+│   │   ├── migration/
+│   │   │   ├── consent_holds.rs
+│   │   │   └── consent_holds_tests.rs
+│   │   ├── approval_store.rs
+│   │   ├── boot_pg_tests.rs
+│   │   ├── migration.rs
+│   │   ├── migration_tests.rs
+│   │   ├── projection.rs
+│   │   ├── user_default.rs
+│   │   └── user_default_tests.rs
 │   ├── test_env/
 │   │   └── teardown_probe.rs
 │   ├── agent_channels.rs
@@ -173,6 +186,8 @@ src/
 │   │   ├── metadata.rs
 │   │   └── mod.rs
 │   ├── intake_outbox/
+│   │   ├── consent_handoff.rs
+│   │   ├── consent_handoff_tests.rs
 │   │   ├── owner_fence_pg_tests.rs
 │   │   ├── postgres_tests.rs
 │   │   └── worker_status.rs
@@ -656,7 +671,10 @@ src/
 │   │   └── worker.rs
 │   ├── claude/
 │   │   ├── herdr_turn/
+│   │   │   ├── boot_host_tests.rs
 │   │   │   ├── coldstop_input_tests.rs
+│   │   │   ├── composer.rs
+│   │   │   ├── composer_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
 │   │   │   ├── provider_terminal_tests.rs
@@ -803,6 +821,7 @@ src/
 │   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── tests/
 │   │   │   │   └── source_guard_tests.rs
+│   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
@@ -877,7 +896,11 @@ src/
 │   ├── codex/
 │   │   ├── actual_submit_tests/
 │   │   │   └── source_io_tests.rs
+│   │   ├── herdr_turn/
+│   │   │   └── composer_tests.rs
 │   │   ├── tui_session_launch/
+│   │   │   ├── launch_policy/
+│   │   │   │   └── fresh_tests.rs
 │   │   │   └── launch_policy.rs
 │   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
@@ -1027,6 +1050,7 @@ src/
 │   │   │   │   ├── codex_clear_relaunch_tests.rs
 │   │   │   │   ├── codex_clear_retirement_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
+│   │   │   │   ├── consent_clear_tests.rs
 │   │   │   │   ├── herdr_recovery.rs
 │   │   │   │   ├── herdr_report_tests.rs
 │   │   │   │   ├── home_fence.rs
@@ -1647,6 +1671,16 @@ src/
 │   │   │   ├── capacity.rs
 │   │   │   └── model.rs
 │   │   ├── router/
+│   │   │   ├── herdr_consent/
+│   │   │   │   ├── admission.rs
+│   │   │   │   ├── admission_tests.rs
+│   │   │   │   ├── custody.rs
+│   │   │   │   ├── custody_tests.rs
+│   │   │   │   ├── service_tests.rs
+│   │   │   │   ├── startup.rs
+│   │   │   │   ├── startup_tests.rs
+│   │   │   │   ├── transport.rs
+│   │   │   │   └── transport_tests.rs
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
 │   │   │   │   │   ├── transition_busy_tests/
@@ -1754,6 +1788,8 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_live_end_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_t14_actual_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_t14_composed_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_start_offset_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -1777,6 +1813,7 @@ src/
 │   │   │   │   └── watchdog_host_tests.rs
 │   │   │   ├── authorization.rs
 │   │   │   ├── dispatch_trigger.rs
+│   │   │   ├── herdr_consent.rs
 │   │   │   ├── intake_dispatch.rs
 │   │   │   ├── intake_gate.rs
 │   │   │   ├── intake_queue_transaction.rs
@@ -1837,6 +1874,7 @@ src/
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_boot_restore_tests.rs
+│   │   │   ├── queued_recovery_consent_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
 │   │   │   ├── queued_recovery_held.rs
 │   │   │   ├── queued_recovery_held_tests.rs
@@ -2126,6 +2164,9 @@ src/
 │   │   │   ├── relay_e2e/
 │   │   │   │   ├── cancel_backstop_e2e_tests/
 │   │   │   │   │   └── autoheal.rs
+│   │   │   │   ├── prompt_identity_e2e_tests/
+│   │   │   │   │   ├── herdr_direct_actual_client_tests.rs
+│   │   │   │   │   └── herdr_direct_roundtrip_tests.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
@@ -2191,9 +2232,10 @@ src/
 │   │   │   │   │   ├── boundary_tests.rs
 │   │   │   │   │   └── runtime_switch_tests.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests/
-│   │   │   │   │   └── herdr_synthetic_identity_pg_tests/
-│   │   │   │   │       ├── final_recheck_tests.rs
-│   │   │   │   │       └── hosted_classification_tests.rs
+│   │   │   │   │   ├── herdr_synthetic_identity_pg_tests/
+│   │   │   │   │   │   ├── final_recheck_tests.rs
+│   │   │   │   │   │   └── hosted_classification_tests.rs
+│   │   │   │   │   └── herdr_synthetic_identity_pg_tests.rs
 │   │   │   │   ├── absent_tmux_host_tests.rs
 │   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
@@ -2816,6 +2858,8 @@ src/
 │   ├── herdr_launch/
 │   │   ├── retired_hold/
 │   │   │   └── tests.rs
+│   │   ├── policy.rs
+│   │   ├── policy_tests.rs
 │   │   └── retired_hold.rs
 │   ├── herdr_launch_tests/
 │   │   └── retired_hold_tests.rs
@@ -3042,10 +3086,57 @@ src/
 │   │   └── trusted_target.rs
 │   ├── session_host/
 │   │   ├── herdr/
+│   │   │   ├── policy/
+│   │   │   │   ├── consent/
+│   │   │   │   │   ├── apply_owner.rs
+│   │   │   │   │   ├── apply_owner_tests.rs
+│   │   │   │   │   ├── boot_recovery.rs
+│   │   │   │   │   ├── card.rs
+│   │   │   │   │   ├── card_tests.rs
+│   │   │   │   │   ├── engine.rs
+│   │   │   │   │   ├── engine_tests.rs
+│   │   │   │   │   ├── preview.rs
+│   │   │   │   │   ├── preview_tests.rs
+│   │   │   │   │   ├── settlement.rs
+│   │   │   │   │   ├── settlement_tests.rs
+│   │   │   │   │   ├── workflow.rs
+│   │   │   │   │   └── workflow_tests.rs
+│   │   │   │   ├── apply.rs
+│   │   │   │   ├── apply_fs.rs
+│   │   │   │   ├── apply_tests.rs
+│   │   │   │   ├── boot_grants.rs
+│   │   │   │   ├── boot_grants_tests.rs
+│   │   │   │   ├── cache.rs
+│   │   │   │   ├── checker.rs
+│   │   │   │   ├── checker_tests.rs
+│   │   │   │   ├── consent.rs
+│   │   │   │   ├── consent_tests.rs
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
+│   │   │   │   ├── durable.rs
+│   │   │   │   ├── durable_tests.rs
+│   │   │   │   ├── editor.rs
+│   │   │   │   ├── editor_tests.rs
+│   │   │   │   ├── file.rs
+│   │   │   │   ├── file_tests.rs
+│   │   │   │   ├── grant_store.rs
+│   │   │   │   ├── grant_store_tests.rs
+│   │   │   │   ├── loaded_image.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── peer.rs
+│   │   │   │   ├── peer_tests.rs
+│   │   │   │   ├── permit.rs
+│   │   │   │   ├── proof_tests.rs
+│   │   │   │   ├── types.rs
+│   │   │   │   ├── witness_codec.rs
+│   │   │   │   ├── writer_compat.rs
+│   │   │   │   └── writer_compat_tests.rs
 │   │   │   ├── contract.rs
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
+│   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
+│   │   │   ├── launch_policy_tests.rs
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
@@ -3058,6 +3149,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
+│   │   │   ├── policy_tests.rs
 │   │   │   ├── root_replaced.rs
 │   │   │   └── root_replaced_tests.rs
 │   │   ├── herdr_host_tests/
@@ -3069,6 +3161,7 @@ src/
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
 │   │   ├── herdr_socket_rig_tests.rs
+│   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
@@ -3548,6 +3641,7 @@ src/
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
+│   │   ├── source_generation_origin_tests.rs
 │   │   ├── turn_finished_signal.rs
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs

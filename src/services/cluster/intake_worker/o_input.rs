@@ -1,6 +1,10 @@
 //! Claimed input keeps its SQL identity and home fence while the writer observes fresh eligibility.
 
+#[cfg(test)]
+use super::test_executor::execute_intake_turn_core;
 use super::*;
+#[cfg(not(test))]
+use crate::services::discord::execute_intake_turn_core;
 use crate::services::tui_o::cutover::intake_route::IntakeRoute;
 
 pub(super) async fn hold_off_o_gateway(
@@ -69,3 +73,75 @@ pub(super) async fn hold_off_o_gateway(
     );
     Ok(true)
 }
+
+/// Issued only between the worker's spawned CAS and the first executor effects.
+#[cfg(unix)]
+pub(crate) struct BeforeEffects(IntakeOutboxRow);
+
+#[cfg(unix)]
+impl BeforeEffects {
+    pub(crate) fn row(&self) -> &IntakeOutboxRow {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(row: &IntakeOutboxRow) -> Self {
+        Self(row.clone())
+    }
+}
+
+#[cfg(unix)]
+tokio::task_local! {
+    static BEFORE_EFFECTS: std::cell::RefCell<Option<BeforeEffects>>;
+}
+
+/// The executor consumes this once at entry, including normal paths, before any mutation.
+#[cfg(unix)]
+pub(crate) fn take_before_effects(request: &IntakeRequest) -> Option<BeforeEffects> {
+    BEFORE_EFFECTS
+        .try_with(|slot| slot.borrow_mut().take())
+        .ok()
+        .flatten()
+        .filter(|proof| {
+            intake_request_from_row(proof.row()).is_ok_and(|original| original == *request)
+        })
+}
+
+#[cfg(unix)]
+async fn scope_before_effects<T>(
+    row: &IntakeOutboxRow,
+    execution: impl std::future::Future<Output = T>,
+) -> T {
+    let mut spawned = row.clone();
+    spawned.status = IntakeOutboxStatus::Spawned;
+    BEFORE_EFFECTS
+        .scope(
+            std::cell::RefCell::new(Some(BeforeEffects(spawned))),
+            execution,
+        )
+        .await
+}
+
+pub(super) async fn execute_before_effects(
+    row: &IntakeOutboxRow,
+    http: &Arc<serenity::http::Http>,
+    shared: &Arc<SharedData>,
+    token: &str,
+    request: IntakeRequest,
+    uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
+    let execution = execute_intake_turn_core(http, shared, token, request, uploads);
+    #[cfg(unix)]
+    {
+        scope_before_effects(row, execution).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = row;
+        execution.await
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "consent_scope_tests.rs"]
+mod tests;

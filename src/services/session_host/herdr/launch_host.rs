@@ -1,9 +1,14 @@
-//! Production `HerdrLaunchHost` over the Unix socket. Nothing constructs it yet: the
-//! launch selector, `host_for(Herdr)` and Claude input keep refusing Herdr.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Socket launch adapter; legacy E7 and user-default permits remain separate.
 
+use super::policy::grant_store::GrantRestoration;
+use super::policy::permit::{CreatePermit, ExistingMutationEvidence, LaunchAdmissionGrant};
+use super::policy::{LocalChecker, PeerSource, ProofCache, Unverified, peer::SocketPeerSource};
+use crate::config::session_hosts::EndpointMode;
+use crate::services::herdr_launch::policy::{PermitFuture, UserDefaultCreateRequest};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::contract::{self, CreatedPane, HerdrTransport, ServerWitness};
@@ -22,11 +27,73 @@ use crate::services::herdr_launch::{
 use crate::services::session_host::model::HostMutation;
 
 pub(crate) struct SocketHerdrLaunchHost {
-    endpoints: Vec<(HerdrEndpoint, HerdrSocketTransport)>,
+    endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
+    policy: ProofCache,
+    sources: Vec<Arc<dyn PeerSource>>,
+    witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
+    grants: Mutex<GrantCache>,
+    grant_store: super::policy::grant_store::FileGrantStore,
     next_id: AtomicU64,
     read_restore: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     os: Box<dyn ProcessOs>,
     provider_window: Duration,
+}
+
+struct CachedGrant {
+    grant: LaunchAdmissionGrant,
+    remembered: bool,
+}
+
+#[derive(Default)]
+struct GrantCache {
+    grants: HashMap<(HerdrLaunchEndpoint, String), CachedGrant>,
+    failed: HashSet<HerdrLaunchEndpoint>,
+    unknown_failure: bool,
+}
+
+impl GrantCache {
+    fn restored(prepared: Result<GrantRestoration, Unverified>) -> Self {
+        let restored = match prepared {
+            Ok(restored) => restored,
+            Err(_) => {
+                return Self {
+                    unknown_failure: true,
+                    ..Self::default()
+                };
+            }
+        };
+        let mut cache = Self {
+            unknown_failure: restored.unknown_failure,
+            ..Self::default()
+        };
+        for (endpoint, grants) in restored.by_endpoint {
+            match grants {
+                Ok(grants) => {
+                    for grant in grants {
+                        cache.grants.insert(
+                            (endpoint.clone(), grant.nonce().into()),
+                            CachedGrant {
+                                grant,
+                                remembered: false,
+                            },
+                        );
+                    }
+                }
+                Err(_) => {
+                    cache.failed.insert(endpoint);
+                }
+            }
+        }
+        cache
+    }
+}
+
+struct PaneCommand<'a> {
+    endpoint: &'a HerdrLaunchEndpoint,
+    label: &'a str,
+    cwd: &'a Path,
+    command: &'a str,
+    witness: &'a ServerWitness,
 }
 
 fn same_endpoint(
@@ -57,11 +124,30 @@ impl SocketHerdrLaunchHost {
             .into_iter()
             .map(|endpoint| {
                 let transport = HerdrSocketTransport::new(&endpoint, config, LineJsonFraming);
-                (endpoint, transport)
+                (endpoint, Arc::new(transport))
             })
             .collect();
+        let endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)> = endpoints;
+        let sources = endpoints
+            .iter()
+            .map(|(endpoint, transport)| {
+                let hello = transport.clone();
+                let witness = transport.clone();
+                Arc::new(SocketPeerSource::new(
+                    endpoint.socket_path().into(),
+                    move || hello.hello().map_err(|_| Unverified::Peer),
+                    move || witness.server_witness().map_err(|_| Unverified::Peer),
+                )) as Arc<dyn PeerSource>
+            })
+            .collect();
+        let grants = GrantCache::restored(super::policy::boot_grants::prepared());
         Self {
             endpoints,
+            policy: ProofCache::default(),
+            sources,
+            witnessed: Mutex::default(),
+            grants: Mutex::new(grants),
+            grant_store: super::policy::boot_grants::store(),
             next_id: AtomicU64::new(1),
             read_restore: observe::read_restore_resume,
             os: Box::new(HostOs),
@@ -72,7 +158,7 @@ impl SocketHerdrLaunchHost {
     fn endpoint(
         &self,
         launch: &HerdrLaunchEndpoint,
-    ) -> Option<&(HerdrEndpoint, HerdrSocketTransport)> {
+    ) -> Option<&(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
         self.endpoints.iter().find(|(endpoint, _)| {
             same_endpoint(
                 endpoint,
@@ -82,6 +168,112 @@ impl SocketHerdrLaunchHost {
                 &launch.herdr_session,
             )
         })
+    }
+
+    fn source(&self, launch: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
+        self.endpoints
+            .iter()
+            .position(|(e, _)| {
+                same_endpoint(
+                    e,
+                    &launch.execution_node,
+                    &launch.config_key,
+                    &launch.socket_addr,
+                    &launch.herdr_session,
+                )
+            })
+            .and_then(|index| self.sources.get(index))
+            .cloned()
+    }
+
+    pub(crate) fn consent_source(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+    ) -> Option<Arc<dyn PeerSource>> {
+        self.source(endpoint)
+    }
+
+    pub(crate) fn mutation_evidence(
+        &self,
+        endpoint: &HerdrEndpoint,
+        nonce: &str,
+    ) -> Result<ExistingMutationEvidence, Unverified> {
+        let key = HerdrLaunchEndpoint {
+            execution_node: endpoint.execution_node().into(),
+            config_key: endpoint.config_key().into(),
+            socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
+            herdr_session: endpoint.herdr_session().into(),
+        };
+        let witness = self
+            .witnessed
+            .lock()
+            .map_err(|_| Unverified::Cache)?
+            .get(&key)
+            .cloned();
+        let startup = witness
+            .map(|w| self.policy.startup_for(&w))
+            .transpose()?
+            .flatten();
+        let cache = self.grants.lock().map_err(|_| Unverified::Cache)?;
+        let grant = cache.grants.get(&(key.clone(), nonce.into()));
+        // Async owners remember only grants whose durable save/load completed this process.
+        if (cache.unknown_failure || cache.failed.contains(&key))
+            && !grant.is_some_and(|grant| grant.remembered)
+        {
+            return Err(Unverified::Cache);
+        }
+        let grant = grant.map(|grant| grant.grant.clone());
+        Ok(ExistingMutationEvidence { startup, grant })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_grants_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.grants.lock().unwrap();
+            panic!("injected grant cache failure");
+        }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
+        self.witnessed.lock().unwrap().insert(
+            HerdrLaunchEndpoint {
+                execution_node: endpoint.execution_node().into(),
+                config_key: endpoint.config_key().into(),
+                socket_addr: endpoint.socket_path().to_string_lossy().into_owned(),
+                herdr_session: endpoint.herdr_session().into(),
+            },
+            witness,
+        );
+    }
+    #[cfg(test)]
+    pub(crate) fn poison_witnessed_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.witnessed.lock().unwrap();
+            panic!("injected witnessed cache failure");
+        }));
+    }
+    #[cfg(test)]
+    pub(crate) fn poison_proof_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.policy.poison_for_test()
+        }));
+    }
+    #[cfg(test)]
+    pub(crate) fn with_prepared_for_test(
+        mut self,
+        prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
+    ) -> Self {
+        self.grants = Mutex::new(GrantCache::restored(
+            prepared.map(GrantRestoration::from_grants),
+        ));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
+        self.grants = Mutex::new(GrantCache::restored(Ok(restored)));
+        self
     }
 
     fn call(&self, request: HerdrRequest) -> HerdrCall {
@@ -96,7 +288,7 @@ impl SocketHerdrLaunchHost {
     /// server that also reads `Off` is not the one this launch was checked against.
     fn still_off(
         &self,
-        (endpoint, transport): &(HerdrEndpoint, HerdrSocketTransport),
+        (endpoint, transport): &(HerdrEndpoint, Arc<HerdrSocketTransport>),
         witness: &ServerWitness,
     ) -> Result<(), String> {
         match (self.read_restore)(transport, endpoint) {
@@ -118,19 +310,26 @@ impl SocketHerdrLaunchHost {
         (read.map_err(|error| format!("{error:?}")), witness)
     }
 
-    /// The create after the local checks: everything from the first socket call on.
-    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
-        let Some(configured) = self.endpoint(&request.endpoint) else {
+    /// Both policies share the two send sites; each supplies its own authorization fence.
+    fn create_checked(
+        &self,
+        request: PaneCommand<'_>,
+        fence: impl Fn(
+            &(HerdrEndpoint, Arc<HerdrSocketTransport>),
+            &ServerWitness,
+        ) -> Result<(), String>,
+    ) -> HerdrCreateOutcome {
+        let Some(configured) = self.endpoint(request.endpoint) else {
             return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
         };
-        let witness = &request.restore_off_witness;
-        if let Err(detail) = self.still_off(configured, witness) {
+        let witness = request.witness;
+        if let Err(detail) = fence(configured, witness) {
             return HerdrCreateOutcome::NotSent(detail);
         }
         let transport = &configured.1;
         let call = self.call(HerdrRequest::WorkspaceCreate {
             cwd: request.cwd.to_string_lossy().into_owned(),
-            label: request.label.clone(),
+            label: request.label.to_string(),
             focus: false,
         });
         let outcome = transport.call_with_witness(&call, witness);
@@ -143,15 +342,15 @@ impl SocketHerdrLaunchHost {
             pane_id: pane.pane_id.clone(),
             detail,
         };
-        if !same_dir(&request.cwd, pane.cwd.as_deref()) {
+        if !same_dir(request.cwd, pane.cwd.as_deref()) {
             return unconfirmed(format!("pane opened in {:?}", pane.cwd));
         }
-        if let Err(detail) = self.still_off(configured, witness) {
+        if let Err(detail) = fence(configured, witness) {
             return unconfirmed(detail);
         }
         let call = self.call(HerdrRequest::PaneSendInput {
             pane_id: pane.pane_id.clone(),
-            text: request.command.clone(),
+            text: request.command.to_string(),
             keys: vec!["enter".to_string()],
         });
         let outcome = transport.call_with_witness(&call, witness);
@@ -162,9 +361,99 @@ impl SocketHerdrLaunchHost {
             other => unconfirmed(format!("command input: {other:?}")),
         }
     }
+    fn create_eligible(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        self.create_checked(
+            PaneCommand {
+                endpoint: &request.endpoint,
+                label: &request.label,
+                cwd: &request.cwd,
+                command: &request.command,
+                witness: &request.restore_off_witness,
+            },
+            |configured, witness| self.still_off(configured, witness),
+        )
+    }
 }
 
 impl HerdrLaunchHost for SocketHerdrLaunchHost {
+    fn grants(&self) -> &dyn crate::services::herdr_launch::policy::LaunchGrantStore {
+        &self.grant_store
+    }
+
+    fn remember_grant(&self, grant: LaunchAdmissionGrant) {
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.grants.insert(
+                (grant.endpoint().clone(), grant.nonce().into()),
+                CachedGrant {
+                    grant,
+                    remembered: true,
+                },
+            );
+        }
+    }
+
+    fn mode(&self, launch: &HerdrLaunchEndpoint) -> EndpointMode {
+        self.endpoint(launch)
+            .map_or(EndpointMode::LegacyDedicated, |(e, _)| e.mode())
+    }
+
+    fn create_permit<'a>(&'a self, launch: &'a HerdrLaunchEndpoint) -> PermitFuture<'a> {
+        Box::pin(async move {
+            if self.mode(launch) != EndpointMode::UserDefault {
+                return Err("endpoint mode is not user_default".into());
+            }
+            let source = self.source(launch).ok_or("endpoint is not configured")?;
+            let checked = self.policy.next_restart(source, &LocalChecker).await;
+            super::policy::diagnostics::record(
+                Path::new(&launch.socket_addr),
+                &self.policy,
+                &checked,
+            );
+            let proof =
+                checked.map_err(|why| format!("next_restart_policy_unverified: {why:?}"))?;
+            self.witnessed
+                .lock()
+                .map_err(|_| "policy cache unavailable")?
+                .insert(launch.clone(), proof.witness().clone());
+            CreatePermit::new(launch.clone(), proof).map_err(|why| format!("{why:?}"))
+        })
+    }
+
+    fn current_witness(&self, launch: &HerdrLaunchEndpoint) -> Result<ServerWitness, String> {
+        self.endpoint(launch)
+            .ok_or("endpoint is not configured")?
+            .1
+            .server_witness()
+            .map_err(|why| format!("{why:?}"))
+    }
+
+    fn create_user_default(&self, request: &UserDefaultCreateRequest) -> HerdrCreateOutcome {
+        if let Err(detail) = launch_command_eligible(&request.cwd, &request.command) {
+            return HerdrCreateOutcome::NotSent(detail);
+        }
+        if self.endpoint(&request.endpoint).is_none() {
+            return HerdrCreateOutcome::NotSent("endpoint is not configured".into());
+        }
+        let Some(source) = self.source(&request.endpoint) else {
+            return HerdrCreateOutcome::NotSent("policy source unavailable".into());
+        };
+        self.create_checked(
+            PaneCommand {
+                endpoint: &request.endpoint,
+                label: &request.label,
+                cwd: &request.cwd,
+                command: &request.command,
+                witness: request.permit.witness(),
+            },
+            |_, _| {
+                request
+                    .permit
+                    .fence(&request.endpoint, source.as_ref())
+                    .map_err(|why| format!("policy fence: {why:?}"))
+            },
+        )
+    }
+
     fn restore_resume(&self, launch: &HerdrLaunchEndpoint) -> RestoreResume {
         match self.endpoint(launch) {
             Some((endpoint, transport)) => (self.read_restore)(transport, endpoint),
@@ -217,3 +506,7 @@ mod tests;
 #[cfg(test)]
 #[path = "launch_host_real_tests.rs"]
 mod real_tests;
+
+#[cfg(all(test, unix))]
+#[path = "launch_host_t19_real_tests.rs"]
+mod t19_real_tests;

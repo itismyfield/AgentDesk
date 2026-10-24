@@ -62,7 +62,85 @@ impl<'a> AdmissionFence<'a> {
         if self.read_current().await? != self.observed {
             return Err("synthetic hosted row changed under admission".into());
         }
-        Ok(())
+        self.publish_poll_owner().await
+    }
+
+    /// A verified Herdr source needs an idle reader even without a tmux watcher.
+    /// The transition and exact hosted observation, never the dedupe mirror, authorize routing.
+    async fn publish_poll_owner(&self) -> Result<(), String> {
+        let Some(observed) = &self.observed else {
+            return Ok(());
+        };
+        match self
+            .shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(&self.logical)
+        {
+            Some(owner) if owner == self.channel => return Ok(()),
+            Some(_) => return Err("poll owner belongs to another channel".into()),
+            None => {}
+        }
+        let pool = self
+            .shared
+            .pg_pool
+            .as_ref()
+            .ok_or("poll owner has no database")?;
+        let channel = self.channel.to_string();
+        let canonical = HostedLookupKey::Canonical {
+            provider: self.provider.as_str(),
+            identity: CanonicalSessionIdentity {
+                kind: SessionIdentityKind::DiscordChannel,
+                discord_token_hash: &self.shared.token_hash,
+                channel_id: &channel,
+            },
+        };
+        // The process probe may yield; publish routing only for its same canonical row afterward.
+        if load_hosted_execution_pg(pool, canonical).await != HostedLookup::Found(observed.clone())
+        {
+            return Err("synthetic hosted execution changed during process probe".into());
+        }
+        let pin = self
+            .lease
+            .hosted_source
+            .as_ref()
+            .ok_or("poll owner has no source pin")?;
+        crate::services::tmux_common::with_tmux_source_authority(&self.logical, |authority| {
+            let binding =
+                tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                    authority,
+                )
+                .ok_or("poll owner source is unavailable")?;
+            if !source_matches(
+                &pin.source,
+                Path::new(&binding.output_path),
+                binding.session_id.as_deref(),
+            ) || tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker(&self.logical)
+                != tui_prompt_dedupe::binding_context::SpawnNonceMarker::Known(
+                    pin.execution_nonce.clone(),
+                )
+            {
+                return Err("poll owner source changed".into());
+            }
+            let owner = self
+                .shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(&self.logical);
+            if owner.is_some_and(|owner| owner != self.channel) {
+                return Err("poll owner belongs to another channel".into());
+            }
+            if owner.is_none() {
+                self.shared
+                    .tmux_watchers
+                    .restore_owner_channel_for_tmux_session(&self.logical, self.channel);
+            }
+            (self
+                .shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(&self.logical)
+                == Some(self.channel))
+            .then_some(())
+            .ok_or_else(|| "poll owner publication failed".into())
+        })
     }
 
     pub(super) fn hosted_identity(&self) -> Option<(i64, String)> {
@@ -217,6 +295,9 @@ impl<'a> AdmissionFence<'a> {
         if load_hosted_execution_pg(pool, canonical).await != HostedLookup::Found(observed.clone())
         {
             return Err("synthetic exact and canonical hosted rows differ".into());
+        }
+        if !crate::services::tui_prompt_dedupe::hosted_source::execution_current(record).await {
+            return Err("synthetic original execution is no longer alive".into());
         }
         // The map guard is a leaf: no database, file or actor await runs while it is held.
         let admitted = tui_prompt_dedupe::herdr_claim_admission(&self.logical, true)

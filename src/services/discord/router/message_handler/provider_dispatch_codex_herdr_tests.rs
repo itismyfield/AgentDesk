@@ -54,6 +54,10 @@ struct Launcher {
 }
 
 impl HerdrLaunchHost for Launcher {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        crate::config::session_hosts::EndpointMode::LegacyDedicated
+    }
+
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
         RestoreResume::Off {
             witness: ServerWitness::for_test(1),

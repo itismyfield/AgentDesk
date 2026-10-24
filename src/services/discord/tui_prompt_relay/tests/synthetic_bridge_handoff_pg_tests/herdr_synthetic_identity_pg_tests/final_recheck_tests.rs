@@ -186,7 +186,7 @@ async fn dormant_case(replace: bool, id: u64) {
     let channel = ChannelId::new(id);
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(channel.get(), NODE)]);
     let mut fixture = Fixture::new(root.path(), channel).await;
-    fixture.shared.tmux_watchers.remove(&channel).unwrap();
+    fixture.remove_watcher_and_prepare_poll_owner();
     let original = fixture.pending(N1, &fixture.source, id + 1);
     let mut lease = fixture.publish_pending_lease(&original);
     lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;

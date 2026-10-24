@@ -14,6 +14,25 @@ use crate::services::provider_hosting::channel_effective_tui_request;
 const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
 const CLAUDE_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
 
+pub(crate) mod approval_store;
+pub(crate) mod migration;
+pub(crate) mod projection;
+mod user_default;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointMode {
+    #[default]
+    LegacyDedicated,
+    UserDefault,
+}
+
+impl EndpointMode {
+    fn is_legacy(&self) -> bool {
+        *self == Self::LegacyDedicated
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionHostsConfig {
@@ -49,10 +68,15 @@ impl HerdrSection {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
+    #[serde(default, skip_serializing_if = "EndpointMode::is_legacy")]
+    pub mode: EndpointMode,
     /// The `cluster.instance_id` of the only node that may run this endpoint.
     pub execution_node: String,
+    #[serde(default)]
     pub socket_path: PathBuf,
+    #[serde(default)]
     pub herdr_home: PathBuf,
+    #[serde(default)]
     pub herdr_session: String,
 }
 
@@ -110,6 +134,9 @@ fn normalized(config: &Config) -> Result<(Config, &'static str)> {
     let ids = GUARD_INPUT.get_or_init(|| read_guard_input().map_err(|error| error.to_string()));
     let ids = ids.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut effective = config.clone();
+    user_default::resolve(&mut effective, || {
+        std::env::var_os("HOME").map(PathBuf::from)
+    })?;
     let source = match ids {
         None => "yaml",
         Some(ids) => {
@@ -173,10 +200,26 @@ pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>
 }
 
 fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
-    let herdr = &config.session_hosts.herdr;
+    let channels = projected_channels(&config.session_hosts)?;
+    for &channel in channels.keys() {
+        bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
+    }
+    for &channel in &config.session_hosts.claude_guard_channels {
+        bound_as_tui(config, CLAUDE_GUARD_KEY, channel, &["claude"])?;
+    }
+    Ok(channels)
+}
+
+fn projected_channels(hosts: &SessionHostsConfig) -> Result<BTreeMap<u64, ChannelEndpoint>> {
+    let herdr = &hosts.herdr;
     for (key, endpoint) in &herdr.endpoints {
         let at = format!("session_hosts.herdr.endpoints.{key}");
         let filled = |value: &str| !value.trim().is_empty();
+        ensure!(
+            endpoint.mode != EndpointMode::UserDefault,
+            "{at}.mode: user_default support pieces have not landed; keep the existing \
+             legacy_dedicated endpoint until support is complete (지원 조각 미착지)"
+        );
         ensure!(
             filled(key),
             "session_hosts.herdr.endpoints has an empty key"
@@ -190,11 +233,13 @@ fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>>
             "{at}.herdr_session is empty"
         );
         ensure!(
-            endpoint.socket_path.is_absolute(),
+            endpoint.socket_path.is_absolute()
+                || (endpoint.mode == EndpointMode::UserDefault
+                    && endpoint.socket_path.as_os_str().is_empty()),
             "{at}.socket_path is not absolute"
         );
         ensure!(
-            endpoint.herdr_home.is_absolute(),
+            endpoint.herdr_home.is_absolute() || endpoint.mode == EndpointMode::UserDefault,
             "{at}.herdr_home is not absolute"
         );
     }
@@ -207,7 +252,6 @@ fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>>
         let Some(endpoint) = herdr.endpoints.get(key) else {
             anyhow::bail!("{CHANNELS_KEY}: channel {channel} names unknown endpoint {key:?}");
         };
-        bound_as_tui(config, CHANNELS_KEY, channel, &["claude", "codex"])?;
         let endpoint = ChannelEndpoint {
             key: key.clone(),
             execution_node: endpoint.execution_node.trim().to_owned(),
@@ -221,13 +265,12 @@ fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>>
         );
     }
     // A guarded channel is a tmux Claude TUI; a Herdr channel never gets a tmux session.
-    for &channel in &config.session_hosts.claude_guard_channels {
+    for &channel in &hosts.claude_guard_channels {
         ensure!(channel != 0, "{CLAUDE_GUARD_KEY}: 0 is not a channel id");
         ensure!(
             !channels.contains_key(&channel),
             "{CLAUDE_GUARD_KEY}: channel {channel} runs on Herdr"
         );
-        bound_as_tui(config, CLAUDE_GUARD_KEY, channel, &["claude"])?;
     }
     Ok(channels)
 }
@@ -257,13 +300,50 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
     Ok(())
 }
 
+/// Migration metadata stays outside the boot configuration's equality contract.
+#[derive(Debug, Clone)]
+pub(crate) struct BootMigration {
+    candidate: SessionHostsConfig,
+    diagnostic: Option<migration::Diagnostic>,
+    admission_stopped: bool,
+}
+
+impl BootMigration {
+    pub(crate) fn restart_required(&self, config: &Config) -> bool {
+        normalized(config).map_or(true, |(effective, _)| {
+            self.candidate != effective.session_hosts
+        })
+    }
+
+    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
+        &self.candidate
+    }
+
+    pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    pub(crate) fn admission_stopped(&self) -> bool {
+        self.admission_stopped
+    }
+}
+
+static BOOT_MIGRATION: OnceLock<BootMigration> = OnceLock::new();
 static BOOT: OnceLock<BootSessionHosts> = OnceLock::new();
 
-/// Fixes the section for the process lifetime; a later install keeps the first one.
+#[cfg(test)]
 pub(crate) fn install(config: &Config) -> Result<()> {
     let boot = BootSessionHosts::from_config(config)?;
     let _ = BOOT.set(boot);
     Ok(())
+}
+
+pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
+    let (hosts, migration) = selection.into_parts();
+    BOOT.get_or_init(|| {
+        let _ = BOOT_MIGRATION.set(migration);
+        hosts
+    });
 }
 
 /// The boot section, or `None` before install, which configures nothing.
@@ -273,6 +353,14 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
         return read(Some(&forced));
     }
     read(BOOT.get())
+}
+
+pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
+    #[cfg(test)]
+    if FORCED.with(|forced| forced.borrow().is_some()) {
+        return read(None);
+    }
+    read(BOOT_MIGRATION.get())
 }
 
 pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
@@ -337,6 +425,7 @@ pub(crate) fn force_with_claude_guard_for_test(
     };
     for (channel, endpoint) in &channels {
         let written = EndpointConfig {
+            mode: EndpointMode::LegacyDedicated,
             execution_node: endpoint.execution_node.clone(),
             socket_path: endpoint.socket_path.clone(),
             herdr_home: endpoint.herdr_home.clone(),
@@ -368,6 +457,20 @@ pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)
         BOOT.set(boot).is_ok(),
         "the boot section is installed once per process"
     );
+}
+
+#[cfg(test)]
+impl ForcedSessionHosts {
+    pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
+        FORCED.with(|forced| {
+            if let Some(boot) = forced.borrow_mut().as_mut() {
+                for endpoint in boot.config.herdr.endpoints.values_mut() {
+                    endpoint.mode = mode;
+                }
+            }
+        });
+        self
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,45 @@
+{
+  "commit": "7b116c05bfda646af39d2524c54e70c751f57ee8",
+  "sources": {
+    "src/config/io.rs": {
+      "url": "https://raw.githubusercontent.com/herdrdev/herdr/7b116c05bfda646af39d2524c54e70c751f57ee8/src/config/io.rs",
+      "sha256": "a4b7447c874f9f7d10d93485dd6f1e8fd8d44d1933a0492f1e5208d6d06b099b"
+    },
+    "src/config/write.rs": {
+      "url": "https://raw.githubusercontent.com/herdrdev/herdr/7b116c05bfda646af39d2524c54e70c751f57ee8/src/config/write.rs",
+      "sha256": "d72f1d49947b03406b0c19da4a56eb73d16b42b08309b78386dc1dd47c7a2c73"
+    }
+  },
+  "fixtures": {
+    "upstream_functions.rs": {
+      "sha256": "34d68ba09d624a32d0dee3b350dfa9696081e19b5b065c12f84f70ff7d2c38fe",
+      "io_lines": [
+        [
+          570,
+          595
+        ],
+        [
+          606,
+          636
+        ],
+        [
+          690,
+          748
+        ]
+      ]
+    },
+    "upstream_unit_tests.txt": {
+      "sha256": "9e6c2c36b6885e2b54f6e91a16d60d98e86359ded13ac0a7e8cab5f9856d44b2",
+      "io_lines": [
+        [
+          754,
+          777
+        ]
+      ]
+    },
+    "upstream_unit_outputs.json": {
+      "sha256": "91e599c5c234c990365f2c6698d58db0b43ccbd581d0bb27a30b5ca4900ef382",
+      "derivation": "Exact whole outputs of upstream unit-test inputs; tested against the pinned function excerpts."
+    }
+  }
+}
