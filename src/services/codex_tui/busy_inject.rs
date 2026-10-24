@@ -316,6 +316,9 @@ struct Attempt<'a> {
 
 impl Attempt<'_> {
     fn paste(&self, size: Option<(usize, usize)>) -> Guard {
+        if crate::services::claude_tui::owner_input::before_payload().is_err() {
+            return Guard::Failed;
+        }
         let command = format!(
             "paste-buffer -p -r -d -b {} -t '{}'",
             self.buffer,

@@ -1302,3 +1302,112 @@ fn managed_idle_receipt_accepts_only_exact_measured_paste_wrappers() {
         }
     }
 }
+
+#[test]
+fn owner_idle_stash_commits_payload_after_c_s_and_restores_exact_draft() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let name = "owner-stash-window";
+    let original = "사람 초안\n둘째 줄  \n마지막 줄";
+    let prompt = format!(
+        "[User: test]\n{}",
+        (0..14)
+            .map(|i| format!("outgoing {i}: {}", "긴 메시지 ".repeat(12)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let root = renderer_with(
+        &f,
+        name,
+        "wrapped",
+        effort_view(original, false),
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+        &prompt,
+    );
+    fs::write(root.join("draft-bytes"), original.as_bytes()).unwrap();
+    fs::write(root.join("stashed"), effort_view("", true)).unwrap();
+    let chip = format!("[Pasted text #2 +{} lines]", prompt.matches('\n').count());
+    fs::write(
+        root.join("own"),
+        effort_view(&chip, true).replace(
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+            "  paste again to expand",
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("after"), effort_view(original, false)).unwrap();
+    let nonce = "00112233445566778899aabbccddee13";
+    let owner_root = crate::services::tmux_common::current_tmux_owner_marker();
+    let context = serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727422,"owner_runtime_root":owner_root,"host":"epoch-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null});
+    let _prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(
+            serde_json::from_value(context).unwrap(),
+        )
+        .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(marker, nonce).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727422));
+    runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("stash-owner.json"),serde_json::json!({"nonce":"stash-window","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.clone(),727422)).unwrap();
+    let check = root.clone();
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = ticks.clone();
+    let clock = Arc::new(move || {
+        assert_eq!(
+            events(&check),
+            ["C-s"],
+            "payload deadline starts after stash, before paste"
+        );
+        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        90_000
+    });
+    let input_root = root.clone();
+    let sent = prompt.clone();
+    let (_, outcome) = runtime
+        .block_on(mailbox.v2_cold_bootstrap(1000, clock, move |_| {
+            assert!(
+                crate::services::tui_input::human_frame::history::v2::scoped_source().is_some()
+            );
+            let authority = Authority {
+                identity: SubmissionTmux.pin_guarded(name).unwrap().identity(),
+                admitted: Cell::new(true),
+            };
+            let target = InputTarget::legacy_tmux(name);
+            let request = Request {
+                target: &target,
+                gate: &LegacyTmuxGate,
+                prompt: &sent,
+                transcript: &input_root.join("transcript"),
+                cancel: None,
+                timing: &FAST,
+            };
+            let report = run(Some(&authority), true, &request).ok_or("stash unavailable")?;
+            Ok((report.delivery, report.draft))
+        }))
+        .unwrap();
+    assert_eq!(
+        outcome.unwrap(),
+        (Delivery::Observed, DraftState::RestoredObserved)
+    );
+    assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
+    assert_eq!(fs::read(root.join("body")).unwrap(), prompt.as_bytes());
+    assert_eq!(
+        fs::read(root.join("draft-bytes")).unwrap(),
+        original.as_bytes()
+    );
+    assert_eq!(ticks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let snapshot = runtime
+        .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
+        .unwrap();
+    assert_eq!(
+        snapshot["head_injection"]["confirmation_deadline_ms"],
+        120_000
+    );
+    assert_eq!(snapshot["head_injection"]["phase"], "may_have_sent");
+}

@@ -65,7 +65,9 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
     let (owner, target) = bound_target(&rig, logical);
     rig.answer("pane.read", serde_json::json!({"type":"pane_read","read":{"pane_id":PANE,
         "source":"recent_unwrapped","text":pane("✻ Baked for 2s", ""),"revision":1,"truncated":false}}));
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .on_thread_start(rig.thread_installer(NODE, KEY, rig.socket(), SESSION))
         .enable_all()
         .build()
         .unwrap();
@@ -75,24 +77,6 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
         .unwrap();
     let transcript = root.path().join("not-created.jsonl");
     let prompt = "reply _ literal\nattachment + voice";
-    let turn = HerdrTurn {
-        pool: &pool,
-        owner,
-        channel_id: 1,
-        endpoint: HerdrLaunchEndpoint {
-            execution_node: NODE.into(),
-            config_key: KEY.into(),
-            socket_addr: rig.socket().display().to_string(),
-            herdr_session: SESSION.into(),
-        },
-        row: None,
-        prompt,
-        working_dir: "/tmp",
-        system_prompt: None,
-        model: None,
-        hook_endpoint: None,
-        cancel: None,
-    };
     let attached = Attached {
         nonce: NONCE.into(),
         session_id: "cold-native".into(),
@@ -101,7 +85,45 @@ fn cold_herdr_submit_returns_before_source_and_emits_init_before_one_paste_enter
         bound: true,
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    let submitted = submit(&turn, attached, &tx)
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727398));
+    runtime.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),serde_json::json!({"nonce":"claude-herdr-scope","provider":"claude","target":{"host":"herdr","owner":logical,"root":"test","execution_nonce":NONCE},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727398)).unwrap();
+    let socket = rig.socket().display().to_string();
+    let (_, result) = runtime
+        .block_on(
+            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+                assert!(
+                    crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
+                    "actual Claude Herdr submit requires exact source scope"
+                );
+                assert!(
+                    crate::services::claude_tui::owner_input::active(),
+                    "actual Claude Herdr submit requires owner scope"
+                );
+                let turn = HerdrTurn {
+                    pool: &pool,
+                    owner,
+                    channel_id: 1,
+                    endpoint: HerdrLaunchEndpoint {
+                        execution_node: NODE.into(),
+                        config_key: KEY.into(),
+                        socket_addr: socket,
+                        herdr_session: SESSION.into(),
+                    },
+                    row: None,
+                    prompt: &frame,
+                    working_dir: "/tmp",
+                    system_prompt: None,
+                    model: None,
+                    hook_endpoint: None,
+                    cancel: None,
+                };
+
+                submit(&turn, attached, &tx)
+            }),
+        )
+        .unwrap();
+    let submitted = result
         .unwrap()
         .expect("physical Herdr submit returns its observer");
     assert_eq!(submitted.before, 0);

@@ -188,12 +188,16 @@ impl SubmissionTmux {
             return Err(unavailable());
         }
         let geometry = Geometry::read(output).ok_or_else(held)?;
-        Ok(GuardedPane {
+        let pane = GuardedPane {
             session: session.to_owned(),
             geometry,
             #[cfg(unix)]
             stash_attempted: false,
-        })
+        };
+        #[cfg(unix)]
+        crate::services::claude_tui::owner_input::observe_pin(session, &pane.identity())
+            .map_err(|_| InputRefusal::IdentityMismatch)?;
+        Ok(pane)
     }
 }
 
@@ -287,6 +291,9 @@ impl GuardedPane {
                         ));
                     }
                 }
+                if crate::services::claude_tui::owner_input::before_payload().is_err() {
+                    return EffectOutcome::Held;
+                }
                 return self.effect(
                     &format!(
                         "paste-buffer -p -r -d -b {} -t {}",
@@ -297,11 +304,19 @@ impl GuardedPane {
             }
             _ => return EffectOutcome::Held,
         };
+        if crate::services::claude_tui::owner_input::before_payload().is_err() {
+            return EffectOutcome::Held;
+        }
         self.effect(&command, true)
     }
 
     fn effect(&self, command: &str, payload: bool) -> EffectOutcome {
-        let condition = self.geometry.condition();
+        let Ok(condition) = crate::services::claude_tui::owner_input::condition(
+            &self.session,
+            &self.geometry.condition(),
+        ) else {
+            return EffectOutcome::Held;
+        };
         let (applied, held) = if payload {
             (PAYLOAD_APPLIED, PAYLOAD_HELD)
         } else {
@@ -394,3 +409,42 @@ fn classify_effect(result: Result<Output, String>, applied: &[u8], held: &[u8]) 
 mod protocol_tests;
 #[cfg(test)]
 pub(crate) mod transport_tests;
+
+#[cfg(unix)]
+impl PaneIdentity {
+    pub(crate) fn epoch_fields(&self) -> [String; 5] {
+        [
+            self.server_pid.clone(),
+            self.session.clone(),
+            self.window.clone(),
+            self.pane.clone(),
+            self.pane_pid.clone(),
+        ]
+    }
+    pub(crate) fn observe(session: &str) -> Option<Self> {
+        let out = SubmissionTmux
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session}:"),
+                "#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid}",
+            ])
+            .ok()?;
+        if !out.status.success() || !out.stderr.is_empty() {
+            return None;
+        }
+        let text = String::from_utf8(out.stdout).ok()?;
+        let fields: Vec<_> = text.split_ascii_whitespace().collect();
+        let [server, s, w, p, pid] = fields.as_slice() else {
+            return None;
+        };
+        Some(Self {
+            server_pid: positive_pid(server)?,
+            session: identity(s, '$')?,
+            window: identity(w, '@')?,
+            pane: identity(p, '%')?,
+            pane_pid: positive_pid(pid)?,
+        })
+    }
+}

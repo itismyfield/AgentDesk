@@ -7,7 +7,9 @@ use serde_json::json;
 fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    let rig = HerdrRig::start();
     let rt = tokio::runtime::Builder::new_multi_thread()
+        .on_thread_start(rig.thread_installer(NODE, KEY, rig.socket(), SESSION))
         .worker_threads(2)
         .enable_all()
         .build()
@@ -15,7 +17,6 @@ fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
     let _entered = rt.enter();
     let db = rt.block_on(crate::db::auto_queue::test_support::TestPostgresDb::create());
     let pool = rt.block_on(db.connect_and_migrate());
-    let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
     let nonce = "11223344556677889900aabbccddeeff";
     let context = rig.context(nonce);
@@ -88,7 +89,44 @@ fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
         "herdr",
     )
     .unwrap();
-    let submitted = submit(&turn, rt.handle(), nonce)
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727399));
+    rt.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),json!({"nonce":"codex-herdr-scope","provider":"codex","target":{"host":"herdr","owner":turn.owner.logical_key,"root":"test","execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),turn.prompt.into(),727399)).unwrap();
+    let effect_pool = pool.clone();
+    let effect_owner = turn.owner.clone();
+    let effect_endpoint = turn.endpoint.clone();
+    let (_, result) = rt
+        .block_on(
+            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+                assert!(
+                    crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
+                    "actual Codex Herdr submit requires exact source scope"
+                );
+                assert!(
+                    crate::services::claude_tui::owner_input::active(),
+                    "actual Codex Herdr submit requires owner scope"
+                );
+                let turn = CodexHerdrTurn {
+                    pool: &effect_pool,
+                    owner: effect_owner,
+                    channel_id: 7272392,
+                    endpoint: effect_endpoint,
+                    row: None,
+                    prompt: &frame,
+                    working_dir: "/tmp",
+                    system_prompt: None,
+                    allowed_tools: &[],
+                    model: None,
+                    fast_mode: None,
+                    goals: None,
+                    compact_token_limit: None,
+                    cancel: None,
+                };
+                submit(&turn, &tokio::runtime::Handle::current(), nonce)
+            }),
+        )
+        .unwrap();
+    let submitted = result
         .unwrap()
         .expect("Codex physical submit returns its observer");
     assert!(

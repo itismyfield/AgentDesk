@@ -2,13 +2,12 @@
 //! pane mutation, and typed outcomes. A confirmed tmux session takes keys; a recorded
 //! Herdr pane takes them only through its own gate.
 
-use std::process::Output;
-
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
     PromptReadinessKind, TuiInputAction, ensure_tmux_success, literal_action_needs_post_settle,
     prompt_marker_confirms_prompt_ready, prompt_readiness_snapshot_from_capture,
 };
+use super::owner_input::payload as owner_payload;
 use super::startup_dialog::detect_claude_startup_dialog;
 use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
 use crate::services::platform::tmux;
@@ -19,6 +18,7 @@ use crate::services::session_host::{
     ResolvedSessionTarget, TargetHost, TmuxHost, herdr_endpoints,
 };
 use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal;
+use std::process::Output;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputTarget {
@@ -263,7 +263,7 @@ fn herdr_written(result: Result<HostMutation, HostError>) -> Result<Output, Stri
 
 impl InputTransport for HerdrInput<'_> {
     fn send_literal(&mut self, _session: &str, text: &str) -> Result<Output, String> {
-        herdr_written(self.target.send_text(text))
+        owner_payload(|| herdr_written(self.target.send_text(text)))
     }
 
     /// Kept here until its paste, which is judged again; nothing reaches the pane.
@@ -276,7 +276,7 @@ impl InputTransport for HerdrInput<'_> {
     fn paste_buffer(&mut self, _s: &str, buffer: &str, _delete: bool) -> Result<Output, String> {
         let text = self.buffers.remove(buffer);
         let text = text.ok_or_else(|| format!("herdr paste of unknown buffer {buffer}"))?;
-        herdr_written(self.target.send_paste(&text))
+        owner_payload(|| herdr_written(self.target.send_paste(&text)))
     }
 
     fn send_keys(&mut self, _session: &str, keys: &[HostKey]) -> Result<Output, String> {

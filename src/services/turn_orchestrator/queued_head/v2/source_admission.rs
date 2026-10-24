@@ -44,7 +44,7 @@ impl Custody {
     pub(crate) fn advance(&mut self, owner: &mut Owner) -> Result<Admitted, AdmitError> {
         match &self.state {
             State::Done => return Ok(Admitted::Duplicate),
-            State::Pending(candidate, outcome) => {
+            State::Pending(receipt, outcome) => {
                 if let Err(error) = owner.recover() {
                     if owner.pending.is_none() {
                         self.state = State::New;
@@ -52,7 +52,11 @@ impl Custody {
                     }
                     return Err(AdmitError::Pending);
                 }
-                if owner.bytes.as_ref() != Some(candidate) {
+                if !owner.snapshot.admission_receipts.contains(receipt) {
+                    if owner.pending.is_none() {
+                        self.state = State::New;
+                        return Err(AdmitError::NotCommitted("admission receipt absent".into()));
+                    }
                     return Err(AdmitError::Pending);
                 }
                 let outcome = *outcome;
@@ -66,15 +70,18 @@ impl Custody {
             self.state = State::Done;
             return Ok(outcome);
         };
-        match owner.admit_commit(next) {
+        let receipt = format!(
+            "{}:{}",
+            owner.snapshot.admission_sequence.saturating_add(1),
+            uuid::Uuid::new_v4()
+        );
+        match owner.admit_commit(next, Some(receipt.clone())) {
             Ok(()) => {
                 self.state = State::Done;
                 Ok(outcome)
             }
             Err(AdmitError::Pending) => {
-                if let Some((candidate, _)) = &owner.pending {
-                    self.state = State::Pending(candidate.clone(), outcome);
-                }
+                self.state = State::Pending(receipt, outcome);
                 Err(AdmitError::Pending)
             }
             Err(error) => Err(error),
@@ -83,7 +90,18 @@ impl Custody {
 }
 
 impl Owner {
-    pub(super) fn admit_commit(&mut self, next: SnapshotV2) -> Result<(), AdmitError> {
+    pub(super) fn admit_commit(
+        &mut self,
+        mut next: SnapshotV2,
+        receipt: Option<String>,
+    ) -> Result<(), AdmitError> {
+        next.admission_sequence = next
+            .admission_sequence
+            .checked_add(1)
+            .ok_or_else(|| AdmitError::NotCommitted("admission sequence exhausted".into()))?;
+        if let Some(receipt) = receipt {
+            next.admission_receipts.push(receipt);
+        }
         self.commit(next).map_err(|error| {
             if self.pending.is_some() {
                 AdmitError::Pending
@@ -142,15 +160,18 @@ impl Owner {
                     input: InputAttempt {
                         identity: sources::identity(original),
                         original: original.clone(),
-                        phase: HeadPhase::Unknown,
+                        phase: HeadPhase::Reserved,
                         attempt: None,
                         payload: None,
                         confirmation_deadline_ms: None,
                         resolved_source: None,
+                        payload_window: None,
+                        resolved_target: None,
+                        preparation_hold: None,
                     },
-                    reason: RetainedReason::Unconfirmed,
+                    reason: RetainedReason::OpaqueUnsent,
                     notice: NoticeIntent {
-                        kind: "unconfirmed".into(),
+                        kind: "retained_retry_required".into(),
                         enqueued: false,
                     },
                 });

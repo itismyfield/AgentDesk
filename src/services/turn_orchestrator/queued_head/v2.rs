@@ -32,6 +32,8 @@ impl Owner {
             Some(raw) => sources::restore(raw, &namespace)?,
             None => SnapshotV2 {
                 version: 2,
+                admission_receipts: vec![],
+                admission_sequence: 0,
                 items: vec![],
                 head_injection: None,
                 retained_inputs: vec![],
@@ -46,8 +48,16 @@ impl Owner {
             pending: None,
             fault: Fault::None,
         };
-        // Adoption commits conversion before any projection or new effect can occur.
-        owner.commit(owner.snapshot.clone())?;
+        // A restored bootstrap is possibly sent; missing deadline never proves NotSent.
+        let mut restored = owner.snapshot.clone();
+        if owner.bytes.is_some()
+            && let Some(head) = restored.head_injection.as_mut()
+            && head.phase != HeadPhase::Reserved
+            && matches!(head.payload_window, Some(PayloadWindow::Bootstrap))
+        {
+            head.phase = HeadPhase::Unknown;
+        }
+        owner.commit(restored)?;
         owner.project_slots();
         Ok(owner)
     }
@@ -64,7 +74,7 @@ impl Owner {
         }
         let mut next = self.snapshot.clone();
         next.items.push(item.clone());
-        self.admit_commit(next)?;
+        self.admit_commit(next, None)?;
         Ok(true)
     }
 
@@ -96,6 +106,9 @@ impl Owner {
             payload: Some(payload),
             confirmation_deadline_ms: None,
             resolved_source: None,
+            payload_window: None,
+            resolved_target: None,
+            preparation_hold: None,
         });
         self.commit(next)?;
         Ok(key)

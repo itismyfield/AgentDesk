@@ -11,6 +11,10 @@ pub(crate) struct SnapshotV2 {
     pub(crate) terminal_identities: Vec<TerminalIdentity>,
     #[serde(default)]
     pub(crate) namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) admission_receipts: Vec<String>,
+    #[serde(default)]
+    pub(crate) admission_sequence: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -23,6 +27,19 @@ pub(crate) struct InputAttempt {
     pub(crate) confirmation_deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolved_source: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) payload_window: Option<PayloadWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_target: Option<crate::services::tui_input::target_epoch::PaneEpoch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) preparation_hold: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PayloadWindow {
+    Bootstrap,
+    Started { at_ms: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +92,7 @@ pub(crate) struct RetainedInput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RetainedReason {
     Unconfirmed,
+    OpaqueUnsent,
     Rejected { reason: String },
 }
 

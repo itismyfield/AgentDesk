@@ -234,6 +234,10 @@ pub(crate) struct Request {
 }
 
 fn request(session: &str) -> Option<Rc<Request>> {
+    #[cfg(unix)]
+    if let Some(request) = crate::services::claude_tui::owner_input::request(session) {
+        return Some(request);
+    }
     #[cfg(test)]
     if let Some(request) = test_support::request(session) {
         return Some(request);

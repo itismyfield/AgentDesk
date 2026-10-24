@@ -122,21 +122,29 @@ pub(crate) enum ComposerAdmission {
     Held,
 }
 
-static DRAFT_GUARDS: LazyLock<Mutex<HashMap<String, DraftGuard>>> = LazyLock::new(Default::default);
+type DraftKey = (
+    String,
+    Option<crate::services::tui_input::target_epoch::PaneEpoch>,
+);
+type DraftGuards = HashMap<DraftKey, DraftGuard>;
+static DRAFT_GUARDS: LazyLock<Mutex<DraftGuards>> = LazyLock::new(Default::default);
 
 /// An automatic composer write refused because the pane protects a person's draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DraftRecoveryHold;
 
-fn draft_guards() -> MutexGuard<'static, HashMap<String, DraftGuard>> {
+fn draft_guards() -> MutexGuard<'static, DraftGuards> {
     DRAFT_GUARDS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
 /// Protects this pane's composer until a capture shows no stash and an empty composer.
+fn draft_key(session: &str) -> DraftKey {
+    (session.into(), super::owner_input::epoch())
+}
 pub(crate) fn guard_draft(tmux_session_name: &str, guard: DraftGuard) {
-    draft_guards().insert(tmux_session_name.to_string(), guard);
+    draft_guards().insert(draft_key(tmux_session_name), guard);
 }
 
 /// Decides one automatic write under the composer lock, before any key. Only a protected pane is
@@ -145,7 +153,13 @@ pub(crate) fn composer_admission(
     tmux_session_name: &str,
     capture: impl FnOnce() -> Option<String>,
 ) -> ComposerAdmission {
-    if !draft_guards().contains_key(tmux_session_name) {
+    let key = draft_key(tmux_session_name);
+    if super::owner_input::active()
+        && draft_guards().contains_key(&(tmux_session_name.into(), None))
+    {
+        return ComposerAdmission::Held;
+    }
+    if !draft_guards().contains_key(&key) {
         return ComposerAdmission::Any;
     }
     let sighting = capture().map_or(DraftSighting::Unsettled, |capture| {
@@ -153,7 +167,7 @@ pub(crate) fn composer_admission(
     });
     match sighting {
         DraftSighting::Settled => {
-            draft_guards().remove(tmux_session_name);
+            draft_guards().remove(&key);
             ComposerAdmission::Any
         }
         DraftSighting::PersonDraft => {
@@ -166,7 +180,7 @@ pub(crate) fn composer_admission(
 
 /// Whether this pane protects a person's draft now; reads no pane.
 pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
-    draft_guards().contains_key(tmux_session_name)
+    draft_guards().contains_key(&draft_key(tmux_session_name))
 }
 
 /// One look, between composer mutations, for whether automatic writes may run again; a pane

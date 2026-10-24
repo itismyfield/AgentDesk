@@ -2445,6 +2445,7 @@ services::claude_tui::host_input::guarded_submission::idle_stash::tests::managed
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::managed_idle_stash_modal_after_stash_or_paste_never_enters
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::managed_multiline_stash_restores_plain_and_chip_bytes_with_measured_effort_status
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::missing_capability_and_off_do_no_preparation_or_io
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::owner_idle_stash_commits_payload_after_c_s_and_restores_exact_draft
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::pinned_idle_stash_preserves_delivery_and_protects_unrestored_draft
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::pinned_stash_is_single_attempt_even_when_acknowledgement_is_lost
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::restore_observation_holds_same_pane_writer_while_other_pane_proceeds
@@ -2609,6 +2610,8 @@ services::claude_tui::memento_writer_hook::tests::session_scope_uses_effective_s
 services::claude_tui::memento_writer_hook::tests::torn_confirmation_is_repaired_by_a_correlated_successful_post
 services::claude_tui::memento_writer_hook::tests::uncertain_results_and_unrelated_posts_never_claim_success_or_block_new_facts
 services::claude_tui::memento_writer_hook::tests::unconfirmed_concurrent_or_cancelled_calls_do_not_block_new_facts
+services::claude_tui::owner_input_tests::i7314_c_epoch_preserves_old_guard_and_unknown_nonce_never_writes
+services::claude_tui::owner_input_tests::owner_scope_claim_does_not_start_payload_and_is_not_inherited_by_threads
 services::claude_tui::prompt_readiness::tests::authoritative_idle_excludes_background_agent_status_from_busy_evidence
 services::claude_tui::prompt_readiness::tests::background_agent_chrome_requires_composer_adjacency
 services::claude_tui::prompt_readiness::tests::background_agent_footer_rejects_assistant_footer_separated_by_many_blanks
@@ -4599,6 +4602,7 @@ services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_r
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::confirmed_source_blocks_late_pending_rest_marker
 services::discord::health::turn_deliver::inject::first_input::pg_tests::cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg
+services::discord::health::turn_deliver::inject::first_input::pg_tests::completion_clock_keeps_retained_a_fence_without_touching_active_b_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
@@ -4630,7 +4634,6 @@ services::discord::health::turn_deliver::inject_codex_tests::queued_codex_receip
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_same_owner_serializes_two_inputs_across_effect_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_unknown_restart_waits_for_complete_receipt_without_retyping_pg
 services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_compat_clear_keeps_original_and_marker_pg
-services::discord::health::turn_deliver::inject_codex_tests::queued_codex_v2_real_entry_uses_permit_adapter_and_native_receipt_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
@@ -15121,6 +15124,9 @@ services::turn_orchestrator::queued_head::v2::tests::conservation_tests::failed_
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::head_mismatch_refuses_expiry_and_settlement_without_publishing
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::resolved_source_commit_is_repaired_after_history_projection_failure_without_changing_key
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::settlement_removes_only_the_selected_head_and_preserves_duplicate_identity_raw
+services::turn_orchestrator::queued_head::v2::tests::epoch_tests::bootstrap_excludes_preparation_and_payload_commit_is_idempotent
+services::turn_orchestrator::queued_head::v2::tests::epoch_tests::bootstrap_restart_preserves_raw_and_never_rearms_without_a_deadline
+services::turn_orchestrator::queued_head::v2::tests::epoch_tests::physical_supplement_preserves_logical_lease_across_epoch_and_labels
 services::turn_orchestrator::queued_head::v2::tests::pg_tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 services::turn_orchestrator::queued_head::v2::tests::v2_adoption_reapplies_slots_after_crash_between_commit_and_projection
 services::turn_orchestrator::queued_head::v2::tests::v2_commit_readback_requires_full_candidate_and_sync_before_permit

@@ -1,6 +1,8 @@
 //! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
+#[cfg(unix)]
+mod epoch;
 mod ownership;
 pub(crate) use ownership::{
     ComposerOwner, composer_owner, composer_owner_in_session, draft_sighting,
@@ -411,6 +413,14 @@ impl Pane {
             let positioned = format!("#{{&&:#{{==:#{{cursor_x}},{x}}},#{{==:#{{cursor_y}},{y}}}}}");
             condition = format!("#{{&&:{condition},{positioned}}}");
         }
+        #[cfg(unix)]
+        let condition = match epoch::condition(
+            self.target.trim_start_matches('=').trim_end_matches(':'),
+            &condition,
+        ) {
+            Ok(value) => value,
+            Err(_) => return Guard::Failed,
+        };
         let args = [
             "if-shell",
             "-F",
@@ -631,6 +641,10 @@ fn inject_locked(
         return Report::not_sent(Veto::PaneUnavailable);
     };
     let capture = || Some(before.clone());
+    #[cfg(unix)]
+    if epoch::observe(request.session).is_err() {
+        return Report::not_sent(Veto::PaneUnavailable);
+    }
     let admission = super::composer_lock::composer_admission(request.session, capture);
     if admission == ComposerAdmission::Held {
         return Report::not_sent(Veto::Draft);
@@ -744,6 +758,9 @@ impl Attempt<'_> {
 
     /// With `size`, the paste lands only in a pane still that size.
     fn paste(&self, size: Option<(usize, usize)>) -> Guard {
+        if super::owner_input::before_payload().is_err() {
+            return Guard::Failed;
+        }
         let command = format!(
             "paste-buffer -p -r -d -b {} -t '{}'",
             self.buffer, self.pane.target

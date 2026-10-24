@@ -19,6 +19,12 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         "0".as_ref(),
     );
     let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     for failed in [false, true] {
         let name = if failed {
             "cold-codex-refused"
@@ -59,15 +65,35 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
         );
         let mut end =
             crate::services::codex_tui::execution_end::producer::LaunchObservation::new(None, name);
-        let result = create(Create {
-            tmux_session_name: name,
-            working_dir: root.path().to_str().unwrap(),
-            prompt,
-            auth_profile: &overlay.profile_id,
-            launch,
-            selection: &selection,
-            end_observation: &mut end,
-        });
+        let channel = 727396 + u64::from(failed);
+        let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
+        runtime.block_on(mailbox.v2_cold_fixture(root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared.context.owner_runtime_root,"execution_nonce":launch.prepared.context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
+        let working = root.path().display().to_string();
+        let profile = overlay.profile_id.clone();
+        let (_, result) = runtime
+            .block_on(
+                mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+                    assert!(
+                        crate::services::tui_input::human_frame::history::v2::scoped_source()
+                            .is_some(),
+                        "actual Codex create requires exact source scope"
+                    );
+                    assert!(
+                        crate::services::claude_tui::owner_input::active(),
+                        "actual Codex create requires owner scope"
+                    );
+                    create(Create {
+                        tmux_session_name: name,
+                        working_dir: &working,
+                        prompt: &frame,
+                        auth_profile: &profile,
+                        launch,
+                        selection: &selection,
+                        end_observation: &mut end,
+                    })
+                }),
+            )
+            .unwrap();
         if failed {
             assert!(
                 result.is_err(),

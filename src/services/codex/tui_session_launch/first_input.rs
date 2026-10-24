@@ -37,11 +37,14 @@ pub(in crate::services::codex) fn create(input: Create<'_>) -> Result<Submitted,
         handoff,
     } = launch;
     end_observation.prepare(&prepared.context);
-    let tmux_result = crate::services::platform::tmux::create_session(
-        tmux_session_name,
-        Some(working_dir),
-        &format!("bash {}", shell_escape(&script_path)),
-    )?;
+    let tmux_result =
+        crate::services::claude_tui::owner_input::argv_payload(&prepared.context, || {
+            crate::services::platform::tmux::create_session(
+                tmux_session_name,
+                Some(working_dir),
+                &format!("bash {}", shell_escape(&script_path)),
+            )
+        })?;
 
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);

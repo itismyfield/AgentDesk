@@ -5,9 +5,11 @@ impl Owner {
         let mut next = self.snapshot.clone();
         if next.head_injection.as_ref().is_some_and(|head| {
             head.phase != HeadPhase::Reserved
-                && head
-                    .confirmation_deadline_ms
-                    .is_none_or(|deadline| now >= deadline)
+                && (head.confirmation_deadline_ms.map_or(
+                    head.phase == HeadPhase::Unknown
+                        || !matches!(head.payload_window, Some(PayloadWindow::Bootstrap)),
+                    |deadline| now >= deadline,
+                ))
         }) {
             let input = next
                 .head_injection

@@ -14,10 +14,41 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
     let prompt = "reply + attachments\nvoice _ literal";
     renderer(&f, name, prompt, &screen(""), &screen(prompt), &screen(""));
     let transcript = f.root.path().join("not-created.jsonl");
-    let submitted =
-        submit(transcript.to_str().unwrap(), 0, None, name, prompt).unwrap_or_else(|error| {
-            panic!("cold physical submit must finish without Source: {error:?}")
-        });
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let nonce = "00112233445566778899aabbccddee02";
+    let owner_root = crate::services::tmux_common::current_tmux_owner_marker();
+    let context:crate::services::tui_prompt_dedupe::binding_context::BindingContext=serde_json::from_value(serde_json::json!({"schema":1,"provider":"claude","created_at":chrono::Utc::now(),"execution_nonce":nonce,"tmux_session":name,"channel_id":727395,"owner_runtime_root":owner_root,"host":"scope-test","expected_native_session_id":null,"launch_mode":"fresh","provider_root":null})).unwrap();
+    let _prepared =
+        crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)
+            .unwrap();
+    let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(marker, nonce).unwrap();
+    let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
+    let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727395));
+    runtime.block_on(mailbox.v2_cold_fixture(f.root.path().join("cold-owner.json"),serde_json::json!({"nonce":"claude-cold-scope","provider":"claude","target":{"host":"tmux","owner":name,"root":owner_root,"execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727395)).unwrap();
+    let transcript_for_submit = transcript.display().to_string();
+    let (_, outcome) = runtime
+        .block_on(
+            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+                assert!(
+                    crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
+                    "actual Claude submit requires exact source scope"
+                );
+                assert!(
+                    crate::services::claude_tui::owner_input::active(),
+                    "actual Claude submit requires owner scope"
+                );
+                submit(&transcript_for_submit, 0, None, name, &frame).map_err(|e| format!("{e:?}"))
+            }),
+        )
+        .unwrap();
+    let submitted = outcome
+        .unwrap_or_else(|error| panic!("cold physical submit must finish without Source: {error}"));
     assert_eq!(submitted.start_offset, 0);
     assert!(
         !transcript.exists(),

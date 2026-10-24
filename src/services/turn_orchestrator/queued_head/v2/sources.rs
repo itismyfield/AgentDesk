@@ -73,9 +73,14 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
                     payload: None,
                     confirmation_deadline_ms: None,
                     resolved_source: None,
+                    payload_window: None,
+                    resolved_target: None,
+                    preparation_hold: None,
                 });
             SnapshotV2 {
                 version: 2,
+                admission_receipts: vec![],
+                admission_sequence: 0,
                 items,
                 head_injection: input,
                 retained_inputs: vec![],
@@ -155,6 +160,9 @@ pub(super) fn migrate_parked(
             payload: None,
             confirmation_deadline_ms: None,
             resolved_source: None,
+            payload_window: None,
+            resolved_target: None,
+            preparation_hold: None,
         },
         reason: RetainedReason::Unconfirmed,
         notice: NoticeIntent {

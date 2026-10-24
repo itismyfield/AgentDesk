@@ -706,3 +706,6 @@ mod pg_tests;
 
 #[path = "owner_tests/conservation_tests.rs"]
 mod conservation_tests;
+
+#[path = "owner_tests/epoch_tests.rs"]
+mod epoch_tests;

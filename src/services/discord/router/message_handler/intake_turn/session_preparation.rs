@@ -85,6 +85,7 @@ pub(in crate::services::discord) async fn restore(
 }
 
 #[cfg(test)]
+#[path = "session_preparation/restore_tests.rs"]
 mod tests;
 
 #[cfg(test)]

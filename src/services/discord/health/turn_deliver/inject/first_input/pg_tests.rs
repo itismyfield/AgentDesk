@@ -180,3 +180,104 @@ async fn cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg(
         "unsupported cold must preserve Reserved custody"
     );
 }
+
+impl crate::services::turn_orchestrator::ChannelMailboxHandle {
+    pub(crate) async fn v2_cold_fixture(
+        &self,
+        path: std::path::PathBuf,
+        attempt: serde_json::Value,
+        frame: String,
+        channel: u64,
+    ) -> Result<(), String> {
+        self.v2_adopt(path, format!("cold-scope-{channel}")).await?;
+        self.v2_request(move |slot| {
+            let owner=slot.as_mut().ok_or("owner absent")?;
+            let id=8_000_000_000_100_000_000u64+channel;
+            let original=serde_json::from_value(serde_json::json!({"author_id":7,"channel_id":channel,"message_id":id,"source_message_ids":[id],"queued_generation":1,"text":frame})).map_err(|e|e.to_string())?;
+            owner.enqueue_fixture(&original).map_err(|e|format!("{e:?}"))?;
+            owner.reserve(serde_json::from_value(attempt).map_err(|e|e.to_string())?,serde_json::from_value(serde_json::json!({"frame":frame,"digest":"fixture","attribution":{}})).map_err(|e|e.to_string())?)?;
+            Ok(())
+        }).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_clock_keeps_retained_a_fence_without_touching_active_b_pg() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    let _root = TestRuntimeRootGuard::new();
+    let f = QueuedCodex::new(7_272_415).await;
+    let mailbox = f
+        .shared
+        .mailbox(poise::serenity_prelude::ChannelId::new(f.pane.channel));
+    mailbox
+        .v2_adopt(f.disk_path(), "completion-clock".into())
+        .await
+        .unwrap();
+    let (key,original)=mailbox.v2_request(|s| {
+        let owner=s.as_mut().unwrap();let original=serde_json::to_value(&owner.snapshot.items[0]).map_err(|e|e.to_string())?;
+        let attempt=serde_json::from_value(json!({"nonce":"clock-a","provider":"codex","target":{"host":"tmux","owner":"clock-target","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}})).unwrap();
+        let key=owner.reserve(attempt,serde_json::from_value(json!({"frame":"clock frame","digest":"clock","attribution":{}})).unwrap())?;
+        Ok((serde_json::to_value(key).map_err(|e|e.to_string())?,original))
+    }).await.unwrap();
+    let clock = Arc::new(AtomicU64::new(1000));
+    let read = clock.clone();
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let handle = mailbox.clone();
+    let task = tokio::spawn(async move {
+        handle
+            .v2_effect_clock(
+                1000,
+                Arc::new(move || read.load(Ordering::SeqCst)),
+                move |_| {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                    Ok(true)
+                },
+            )
+            .await
+    });
+    ready.await.unwrap();
+    mailbox.v2_request(|s| {let owner=s.as_mut().unwrap();owner.tick(31_000)?;
+        let item=serde_json::from_value(json!({"author_id":7,"message_id":7272416,"channel_id":7272415,"source_message_ids":[7272416],"queued_generation":1,"text":"active B"})).unwrap();
+        owner.enqueue_fixture(&item)?;let attempt=serde_json::from_value(json!({"nonce":"clock-b","provider":"codex","target":{"host":"tmux","owner":"clock-target","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}})).unwrap();
+        owner.reserve(attempt,serde_json::from_value(json!({"frame":"B","digest":"B","attribution":{}})).unwrap())?;Ok(())}).await.unwrap();
+    let completed = 1000 + 25 * 60 * 60 * 1000;
+    clock.store(completed, Ordering::SeqCst);
+    release.send(()).unwrap();
+    assert_eq!(task.await.unwrap(), Ok(true));
+    let snap = mailbox
+        .v2_request(|s| s.as_ref().unwrap().json())
+        .await
+        .unwrap();
+    assert_eq!(
+        snap["terminal_identities"][0]["settled_at_ms"], completed,
+        "settlement must read the completion clock, not ARM time"
+    );
+    assert_eq!(
+        snap["head_injection"]["original"]["text"], "active B",
+        "late A cannot settle active B"
+    );
+    mailbox
+        .v2_request(move |s| {
+            let owner = s.as_mut().unwrap();
+            owner.tick(completed + 86_399_999)?;
+            let item = serde_json::from_value(original.clone()).unwrap();
+            assert!(
+                !owner.enqueue_fixture(&item)?,
+                "completion fence lasts a full day"
+            );
+            owner.tick(completed + 86_400_000)?;
+            assert!(
+                owner.enqueue_fixture(&serde_json::from_value(original).unwrap())?,
+                "completion fence expires from actual settlement"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(key["attempt"]["nonce"], "clock-a");
+}

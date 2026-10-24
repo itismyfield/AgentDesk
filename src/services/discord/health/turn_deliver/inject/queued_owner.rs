@@ -353,6 +353,25 @@ impl crate::services::turn_orchestrator::ChannelMailboxHandle {
         now: u64,
         effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
     ) -> Result<bool, String> {
+        self.v2_effect_clock(
+            now,
+            std::sync::Arc::new(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            }),
+            effect,
+        )
+        .await
+    }
+    pub(crate) async fn v2_effect_clock(
+        &self,
+        now: u64,
+        clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+        effect: impl FnOnce(String) -> Result<bool, String> + Send + 'static,
+    ) -> Result<bool, String> {
         let mailbox = self.clone();
         tokio::spawn(async move {
             let (key, permit, frame) = mailbox
@@ -394,7 +413,7 @@ impl crate::services::turn_orchestrator::ChannelMailboxHandle {
                 .v2_settle_exact(
                     identity,
                     completion.outcome.as_ref().copied().unwrap_or(false),
-                    now,
+                    clock(),
                 )
                 .await?;
             completion.outcome
