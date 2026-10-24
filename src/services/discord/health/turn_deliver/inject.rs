@@ -3,6 +3,8 @@
 //! Herdr pane's gate (`herdr`) or, once enabled, `codex_tui::busy_inject`.
 
 mod catch_up_race;
+#[cfg(test)]
+mod first_input;
 mod herdr;
 mod names;
 mod queued_owner;

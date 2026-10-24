@@ -1907,7 +1907,8 @@ fn execute_streaming_local_tui_tmux(
         &owner_path,
     )
 }
-
+#[cfg(unix)]
+mod first_input;
 #[cfg(unix)]
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;
@@ -1940,7 +1941,6 @@ fn run_claude_tui_fresh_turn_and_finalize(
         owner_path,
     })
 }
-
 #[cfg(unix)]
 fn remove_claude_tui_owner_marker_after_teardown(owner_path: &str) {
     let _ = std::fs::remove_file(owner_path);

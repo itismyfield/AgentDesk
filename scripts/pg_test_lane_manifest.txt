@@ -136,6 +136,7 @@ src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/intake_worker/owner_fence_pg_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/machine_resources/store.rs
+src/services/codex/herdr_turn/first_input/pg_tests.rs
 src/services/discord/admin_host_guard_tests.rs
 src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/cancel_backstop_tests.rs
@@ -165,6 +166,7 @@ src/services/discord/health/recovery/self_watchdog/tests/health_response.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/snapshot/health_observation_pg_tests.rs
 src/services/discord/health/turn_deliver/inject/catch_up_race_tests.rs
+src/services/discord/health/turn_deliver/inject/first_input/pg_tests.rs
 src/services/discord/health/turn_deliver/inject/herdr_tests.rs
 src/services/discord/health/turn_deliver/inject/queued_provider/history_pg_tests.rs
 src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
@@ -569,6 +571,7 @@ services::cluster::intake_worker::o_route_tests
 services::cluster::intake_worker::owner_fence_pg_tests
 services::cluster::intake_worker::replay_hold_tests
 services::cluster::machine_resources::store::tests
+services::codex::herdr_turn::first_input::pg_tests
 services::discord::admin_host_guard::tests
 services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::cancel_backstop_tests
@@ -598,6 +601,7 @@ services::discord::health::recovery::stall_alert::tests
 services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::snapshot::health_observation::pg_tests
 services::discord::health::turn_deliver::inject::catch_up_race_tests
+services::discord::health::turn_deliver::inject::first_input::pg_tests
 services::discord::health::turn_deliver::inject::herdr::tests
 services::discord::health::turn_deliver::inject::queued_provider::history_pg_tests
 services::discord::health::turn_deliver::inject_codex_tests
@@ -1737,6 +1741,7 @@ services::cluster::intake_worker::replay_hold_tests::replay_hold_committed_after
 services::cluster::intake_worker::replay_hold_tests::replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg
 services::cluster::intake_worker::replay_hold_tests::replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg
 services::cluster::machine_resources::store::tests::postgres_machine_history_is_durable_ordered_deduplicated_and_retained
+services::codex::herdr_turn::first_input::pg_tests::cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg
 services::discord::admin_host_guard::tests::a_clear_goes_ahead_on_any_host_while_a_reset_refuses_a_kept_session_pg
 services::discord::admin_host_guard::tests::a_configured_channel_refuses_a_dispatch_reset_before_any_change_pg
 services::discord::admin_host_guard::tests::a_dispatch_reusing_a_configured_thread_is_refused_before_its_bootstrap_pg
@@ -1861,6 +1866,7 @@ services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_r
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reuse_keeps_foreign_merged_rich_and_disabled_heads_queued_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_reused_head_veto_keeps_one_original_queue_entry_pg
 services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_sole_head_live_entry_injects_once_and_has_no_pending_rest_marker_pg
+services::discord::health::turn_deliver::inject::first_input::pg_tests::cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
