@@ -420,6 +420,7 @@ fn guard_and_herdr_checks_read_provider_keys_as_the_installed_resolver_does() {
         load_from_path(&path).unwrap()
     };
     let herdr_endpoint = EndpointConfig {
+        mode: EndpointMode::LegacyDedicated,
         execution_node: "mac-mini".into(),
         socket_path: root.path().join("herdr.sock"),
         herdr_home: root.path().join("herdr"),

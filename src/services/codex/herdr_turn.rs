@@ -746,3 +746,6 @@ mod coldstop_input_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod composer_tests;

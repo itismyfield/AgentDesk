@@ -17,6 +17,24 @@ use crate::services::claude_tui::hook_server::{
 };
 use crate::services::tui_prompt_dedupe as dedupe;
 
+// These views expose fixture evidence without changing the mock transport's production census.
+impl super::discord_mock::DiscordMockState {
+    /// Every minted message, with its final edited body.
+    pub(in crate::services::discord) fn message_snapshot(&self) -> Vec<(u64, String)> {
+        self.messages
+            .lock()
+            .expect("messages")
+            .iter()
+            .map(|(id, (_, text))| (*id, text.clone()))
+            .collect()
+    }
+
+    /// POST bodies include the announcement later edited into an answer.
+    pub(in crate::services::discord) fn post_snapshot(&self) -> Vec<(u64, String)> {
+        self.channel_posts.lock().expect("channel posts").clone()
+    }
+}
+
 const PROMPT: &str = "턴 도중에 입력한 질문";
 const PROMPT_ID: &str = "7d4a7a0e-d052-488b-9a89-d0f3aac426bb";
 const ROW_UUID: &str = "5845e2e0-0000-0000-0000-00000000a001";
@@ -114,13 +132,23 @@ async fn hook_prompt_without_watcher(herdr: bool) {
     post_hook(&hooks, session, PROMPT).await;
     wait_for_relays(&relayed, 1).await;
     if herdr {
-        wait_for_announcement(&harness).await;
+        assert!(harness.shared.pg_pool.is_none());
+        assert!(
+            !crate::services::tui_prompt_dedupe::hosted_source::current_execution_for_adoption(
+                &harness.shared,
+                PROVIDER_KEY,
+                harness.channel_id,
+                tmux,
+            )
+            .await,
+            "missing_live_authority_is_unverified_contract"
+        );
     }
     let counts = settled_counts(&harness).await;
     let log = String::from_utf8(REGISTRY_MISS_LOG.lock().unwrap().clone()).unwrap();
     eprintln!("registry_miss herdr={herdr} posts/announcements/placeholders={counts:?}\n{log}");
-    assert_eq!(counts, if herdr { (1, 1, 1) } else { (0, 0, 0) });
-    assert_eq!(harness.messages().len(), if herdr { 2 } else { 0 });
+    assert_eq!(counts, (0, 0, 0), "unverified_hook_posts_nothing_contract");
+    assert!(harness.messages().is_empty());
     assert_eq!(relayed.load(Ordering::SeqCst), 1);
     assert_eq!(
         harness
@@ -139,9 +167,9 @@ async fn hook_prompt_without_watcher(herdr: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn herdr_hook_prompt_registry_miss_is_mirrored_exactly_once() {
+async fn herdr_hook_without_live_authority_is_unverified_and_posts_nothing() {
     if registry_miss_child(
-        "herdr_hook_prompt_registry_miss_is_mirrored_exactly_once",
+        "herdr_hook_without_live_authority_is_unverified_and_posts_nothing",
         true,
     ) {
         hook_prompt_without_watcher(true).await;
@@ -873,3 +901,261 @@ async fn a_hook_resent_after_a_relay_without_a_post_is_announced_once() {
     assert_eq!(settled_counts(&harness).await, (1, 1, 1));
     drop(hook_tx);
 }
+
+#[test]
+fn herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg() {
+    if !registry_miss_child(
+        "herdr_hook_prompt_registry_miss_is_mirrored_exactly_once_pg",
+        true,
+    ) {
+        return;
+    }
+    let rig = crate::services::session_host::herdr_socket_rig_tests::HerdrRig::start();
+    let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
+    let registry = rig.thread_installer(
+        &endpoint.execution_node,
+        &endpoint.key,
+        &endpoint.socket_path,
+        &endpoint.herdr_session,
+    );
+    let events = tempfile::tempdir().unwrap();
+    let event_root = events.path().to_path_buf();
+    let install = move || {
+        registry();
+        dedupe::binding_events::set_test_root(Some(&event_root));
+    };
+    install();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap()
+        .block_on(Box::pin(bound_live_hook_without_watcher(
+            rig,
+            events.path(),
+        )));
+}
+
+async fn bound_live_hook_without_watcher(
+    rig: crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
+    events: &std::path::Path,
+) {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedExecution, HostedLocation, HostedOwner, HostedState, SourceRef,
+    };
+    use crate::services::claude_tui::hook_server::observation_ingress::tests::claude;
+    use crate::services::session_host::herdr_socket_rig_tests::PANE;
+    use dedupe::binding_context::{BindingContext, PreparedIncarnation};
+    use dedupe::binding_events as log;
+    use serde_json::json;
+    let mut database = None;
+    let h = Box::pin(RelayE2eHarness::start_inner(
+        super::ProviderStub::Success,
+        true,
+        async {
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            database = Some(db);
+            Some(pool)
+        },
+        true,
+    ))
+    .await;
+    let database = database.unwrap();
+    let pool = h.shared.pg_pool.clone().unwrap();
+    h.answer_placeholders_immediately();
+    h.cache_relay_transport();
+    h.use_mock_notify_bot(WAIT).await;
+    let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
+    let logical = "herdr-prompt-registry-miss";
+    let nonce = "00112233445566778899aabbccddee13";
+    let session = "7d4a7a0e-d052-488b-9a89-d0f3aac426cc";
+    let path = h.root.path().join("bound-live-native.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    dedupe::register_tmux_channel(logical, super::CHANNEL_ID);
+    dedupe::register_tmux_runtime_binding(logical, claude(&path, session));
+    let source =
+        crate::services::tui_o::shadow::binding_reader::source_id_for(session, &path).unwrap();
+    let root = crate::config::runtime_root().unwrap().display().to_string();
+    let owner = HostedOwner {
+        provider: "claude".into(),
+        discord_token_hash: h.shared.token_hash.clone(),
+        channel_id: super::CHANNEL_ID.to_string(),
+        logical_key: logical.into(),
+        owner_node: endpoint.execution_node.clone(),
+        runtime_root: root.clone(),
+    };
+    let incarnation = PreparedIncarnation::create(BindingContext {
+        schema: 1,
+        provider: "claude".into(),
+        created_at: chrono::Utc::now(),
+        execution_nonce: nonce.into(),
+        tmux_session: logical.into(),
+        channel_id: Some(super::CHANNEL_ID),
+        owner_runtime_root: root.clone(),
+        host: None,
+        expected_native_session_id: Some(session.into()),
+        launch_mode: "fresh".into(),
+        provider_root: None,
+        first_prompt_digest: None,
+        source_policy: None,
+    })
+    .unwrap();
+    rig.run_provider(&incarnation.path, false);
+    rig.show_panes(&[PANE]);
+    let execution = HostedExecution {
+        schema: 1,
+        state: HostedState::Bound,
+        execution_nonce: nonce.into(),
+        owner: owner.clone(),
+        expected: Some(rig.expected(nonce)),
+        location: Some(HostedLocation {
+            host: "herdr".into(),
+            execution_node: endpoint.execution_node,
+            endpoint_config_key: endpoint.key,
+            socket_addr: endpoint.socket_path.display().to_string(),
+            named_session: endpoint.herdr_session,
+            pane_id: PANE.into(),
+        }),
+        source_ref: SourceRef {
+            runtime_root: root,
+            channel: owner.channel_id.clone(),
+            provider: "claude".into(),
+            logical_key: logical.into(),
+            execution_nonce: nonce.into(),
+            initial_source: None,
+            baseline_event_seq: None,
+        },
+    };
+    let key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &h.shared.token_hash,
+        &h.data.provider,
+        logical,
+    );
+    sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)")
+        .bind(&key).bind(&owner.discord_token_hash).bind(&owner.channel_id)
+        .bind(serde_json::to_value(&execution).unwrap()).execute(&pool).await.unwrap();
+    let event = log::BindingEvent {
+        seq: 1,
+        channel_id: super::CHANNEL_ID,
+        provider: "claude".into(),
+        tmux_session: logical.into(),
+        execution_nonce: Some(nonce.into()),
+        old: None,
+        new: log::BindingTarget::Source(source.clone()),
+        cause: log::BindingCause::Startup,
+        parent_hint: None,
+        evidence: log::BindingEvidence {
+            hook_event: Some("SessionStart".into()),
+            received_at: chrono::Utc::now(),
+        },
+        committed_at: chrono::Utc::now(),
+    };
+    std::fs::create_dir_all(events.join(log::BINDING_EVENTS_DIR)).unwrap();
+    std::fs::write(
+        events
+            .join(log::BINDING_EVENTS_DIR)
+            .join(format!("{}.log", super::CHANNEL_ID)),
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(logical, "host_kind"),
+        "herdr",
+    )
+    .unwrap();
+    assert!(
+        dedupe::hosted_source::current_execution_for_adoption(
+            &h.shared,
+            PROVIDER_KEY,
+            h.channel_id,
+            logical
+        )
+        .await,
+        "matched_live_positive_contract"
+    );
+    let hooks = HookServerState::new();
+    dedupe::register_provider_session(PROVIDER_KEY, session, logical);
+    let relayed = observe_hooks(&h, hooks.subscribe(), None);
+    let row = json!({"type":"user", "uuid":PROMPT_ID, "sessionId":session,
+        "timestamp":chrono::Utc::now().to_rfc3339(), "message":{"role":"user", "content":PROMPT}});
+    std::fs::write(&path, format!("{row}\n")).unwrap();
+    let payload = json!({"hook_event_name":"UserPromptSubmit", "session_id":session,
+        "transcript_path":path, "prompt":PROMPT, "prompt_id":PROMPT_ID});
+    let pin = dedupe::hosted_source::capture_hook(
+        PROVIDER_KEY,
+        logical,
+        super::CHANNEL_ID,
+        &payload,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        (pin.execution_nonce.as_str(), &pin.source),
+        (nonce, &source)
+    );
+    assert_eq!(
+        h.shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(logical),
+        None
+    );
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/hooks/claude/UserPromptSubmit?session_id={session}"
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    assert!(
+        hook_receiver_router_with_state(hooks.clone())
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    wait_for_relays(&relayed, 1).await;
+    wait_for_announcement(&h).await;
+    assert_eq!(
+        settled_counts(&h).await,
+        (1, 1, 1),
+        "bound_live_mirror_positive_contract"
+    );
+    assert_eq!(h.messages().len(), 2);
+    assert_eq!(relayed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(logical),
+        None
+    );
+    assert!(
+        rig.sends().is_empty(),
+        "mirroring a typed prompt sends no provider input"
+    );
+    let after = dedupe::hosted_source::capture_hook(
+        PROVIDER_KEY,
+        logical,
+        super::CHANNEL_ID,
+        &payload,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        after, pin,
+        "same execution and native source through mirror"
+    );
+    assert!(h.unhandled_requests().is_empty());
+    drop(hooks);
+    drop(h);
+    pool.close().await;
+    database.drop().await;
+}
+
+#[cfg(unix)]
+#[path = "prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs"]
+mod herdr_direct_roundtrip_tests;

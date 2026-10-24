@@ -50,9 +50,14 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
     if let Some(pool) = pg_pool.as_ref() {
         crate::services::agent_recovery::hydrate_from_pg(pool).await;
     }
-    crate::bootstrap::install_boot_snapshots(&config)?;
+    after_database_ready(&config, pg_pool.as_ref(), || {
+        serve(&config, pg_pool.clone())
+    })
+    .await
+}
 
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
+async fn serve(config: &crate::config::Config, pg_pool: Option<sqlx::PgPool>) -> Result<()> {
+    let engine = crate::engine::PolicyEngine::new_with_pg(config, pg_pool.clone())
         .context("Failed to init policy engine")?;
 
     tracing::info!(
@@ -67,4 +72,17 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         .context("Server error")?;
 
     Ok(())
+}
+
+pub(crate) async fn after_database_ready<F, Fut>(
+    config: &crate::config::Config,
+    pool: Option<&sqlx::PgPool>,
+    serve: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    crate::bootstrap::prepare_and_install_boot_snapshots(config, pool).await?;
+    serve().await
 }

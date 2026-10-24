@@ -252,6 +252,9 @@ async fn discard_waiting(
             if !cleared.persistence.failed.is_empty() {
                 report.discarded = None;
             }
+            report
+                .settle_consents(shared, provider, channel, &cleared)
+                .await;
             tracing::info!(channel_id = channel.get(), discarded_ids = ?cleared.discarded_message_ids, failed = ?report.failed, "herdr_clear_waiting_discard");
         }
         Err(_) => {
