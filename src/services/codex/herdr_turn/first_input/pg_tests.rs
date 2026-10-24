@@ -4,10 +4,14 @@ use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE,
 use serde_json::json;
 
 #[test]
-fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() { run_case(false); }
+fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
+    run_case(false);
+}
 
 #[test]
-fn cold_codex_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys_pg() { run_case(true); }
+fn cold_codex_herdr_payload_commit_refusal_preserves_raw_and_hold_with_zero_keys_pg() {
+    run_case(true);
+}
 
 fn run_case(refuse_commit: bool) {
     let root = tempfile::tempdir().unwrap();
@@ -129,10 +133,13 @@ fn run_case(refuse_commit: bool) {
                     cancel: None,
                 };
                 if refuse_commit {
-                    tokio::runtime::Handle::current().block_on(effect_mailbox.v2_request(|slot| {
-                        slot.as_mut().unwrap().fault = crate::services::turn_orchestrator::queued_head::v2::Fault::Before;
-                        Ok(())
-                    })).unwrap();
+                    tokio::runtime::Handle::current()
+                        .block_on(effect_mailbox.v2_request(|slot| {
+                            slot.as_mut().unwrap().fault =
+                                crate::services::turn_orchestrator::queued_head::v2::Fault::Before;
+                            Ok(())
+                        }))
+                        .unwrap();
                 }
                 submit(&turn, &tokio::runtime::Handle::current(), nonce)
             }),
@@ -142,11 +149,27 @@ fn run_case(refuse_commit: bool) {
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))
         .unwrap();
     if refuse_commit {
-        assert!(result.is_err(), "payload commit refusal must reach the caller");
-        assert_eq!(rig.sends().len(), 0, "refused owner commit permits no Herdr content or Enter");
-        assert_eq!(owner_snapshot["head_injection"]["payload_window"]["kind"], "bootstrap");
-        assert_eq!(owner_snapshot["head_injection"]["original"]["text"], turn.prompt);
-        assert!(not_held(nonce).is_err(), "refused first input preserves its provider hold");
+        assert_eq!(
+            rig.sends().len(),
+            0,
+            "refused owner commit permits no Herdr content or Enter"
+        );
+        assert!(
+            result.is_err(),
+            "payload commit refusal must reach the caller"
+        );
+        assert_eq!(
+            owner_snapshot["head_injection"]["payload_window"]["kind"],
+            "bootstrap"
+        );
+        assert_eq!(
+            owner_snapshot["head_injection"]["original"]["text"],
+            turn.prompt
+        );
+        assert!(
+            not_held(nonce).is_err(),
+            "refused first input preserves its provider hold"
+        );
         return;
     }
     assert_eq!(
