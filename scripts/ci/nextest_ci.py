@@ -5,6 +5,7 @@
   verify-archive  worker preflight: archive digest, checkout SHA, run and config must match the plan
   audit           per-worker artifacts -> verdict JSON and Markdown summary; any gap is red
   base-diff       compare a plan with the plan of a fixed comparison base SHA
+  required-context, comparison-base, classify-worker   see nextest_required.py
 
 Every input format carries a version and is rejected when it does not match; a missing or
 unreadable artifact is a failure, never an empty pass.
@@ -22,6 +23,9 @@ import re
 import sys
 import tomllib
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import nextest_required  # noqa: E402
 
 
 PLAN_KIND = "agentdesk-nextest-plan"
@@ -568,6 +572,11 @@ def cmd_base_diff(args):
     return 1 if lost and not args.report_only else 0
 
 
+# The plan and JUnit readers that nextest_required reuses.
+_SELF = argparse.Namespace(load_plan=load_plan, PlanError=PlanError, _junit_root=_junit_root, _cases=_cases,
+                           classify=classify)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -610,11 +619,12 @@ def main(argv=None):
     b.add_argument("--comparison-base-sha", required=True)
     b.add_argument("--json-out", required=True)
     b.add_argument("--report-only", action="store_true")
+    delegated = nextest_required.register(sub)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "verify-archive": cmd_verify_archive,
-               "audit": cmd_audit, "base-diff": cmd_base_diff}[args.command]
+               "audit": cmd_audit, "base-diff": cmd_base_diff}.get(args.command)
     try:
-        return handler(args)
+        return handler(args) if handler else delegated[args.command](_SELF, args)
     except PlanError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1

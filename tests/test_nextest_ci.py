@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ SCRIPT = ROOT / "scripts/ci/nextest_ci.py"
 spec = importlib.util.spec_from_file_location("nextest_ci", SCRIPT)
 nci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nci)
+nreq = sys.modules["nextest_required"]
 spec = importlib.util.spec_from_file_location("pg_test_classifier", ROOT / "scripts/ci/pg_test_classifier.py")
 pgc = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pgc  # dataclasses resolve postponed annotations through sys.modules
@@ -90,11 +92,11 @@ class Fixture(unittest.TestCase):
         return rc, err.getvalue()
 
     def plan(self, names, workers=2, ignored=(), timings=None, out="plan", policy=None,
-             order=None, today="2026-10-24", base="base.toml", build=None):
+             order=None, today="2026-10-24", base="base.toml", build=None, sha=SHA):
         self.write("list.json", nextest_list(names, ignored, order))
         policy = policy or ("policy.toml" if FLAKY in names else "empty.toml")
         argv = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
-                "--workers", workers, "--sha", SHA, "--scope", "linux-lib", "--run-id", "7",
+                "--workers", workers, "--sha", sha, "--scope", "linux-lib", "--run-id", "7",
                 "--base-config", self.dir / base, "--retry-policy", self.dir / policy,
                 "--today", today, "--output", self.dir / out]
         build = BUILD if build is None else build
@@ -526,6 +528,151 @@ class BaseDiff(Fixture):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a", "m::b"], workers=1)
         self.assertEqual(self.diff(SHA)[0], 0)
+
+
+class RequiredContext(Fixture):
+    """The nine branch-protection names: N AND each context's own jobs, failing closed like the old mirror."""
+
+    NAMES = ["Lint", "Script checks", "Fast check (ubuntu-latest)", "High-risk recovery", "Dashboard (Node 22)",
+             "Fast targeted tests (ubuntu-latest)", "relay-authority-contract", "Library test sweep (ubuntu-latest)",
+             "Fast check cross OS required context (ubuntu-latest)"]
+    RUN = {k: "true" for k in ("rust_tests", "rust_or_policy", "relay_contract", "high_risk_recovery",
+                               "dashboard", "cross_os_rust")} | {"rust_tests_skip": "false"}
+    SKIP = {k: "false" for k in RUN} | {"rust_tests_skip": "true"}
+
+    def needs(self, outputs, result="success", changes="success", **overrides):
+        jobs = {job: result for spec in nreq.CONTEXTS.values() for jobs, _ in spec for job in jobs} | overrides
+        return {"changes": {"result": changes, "outputs": outputs}, **{k: {"result": v} for k, v in jobs.items() if v}}
+
+    def verdict(self, name, needs):
+        with contextlib.redirect_stdout(out := io.StringIO()):
+            return nci.main(["required-context", name, "--needs-json", json.dumps(needs)]), out.getvalue()
+
+    def test_the_nine_names_pass_when_their_jobs_succeed(self):
+        self.assertEqual(sorted(nreq.CONTEXTS), sorted(self.NAMES))
+        for name in self.NAMES:
+            self.assertEqual(self.verdict(name, self.needs(self.RUN))[0], 0, name)
+
+    def test_expected_skip_passes_but_a_skip_of_an_expected_job_fails(self):
+        skipped = self.needs(self.SKIP, "skipped", scripts="success", scripts_guards="success",
+                             scripts_contracts="success")
+        for name in self.NAMES:
+            self.assertEqual(self.verdict(name, skipped)[0], 0, name)
+            rc, out = self.verdict(name, {**skipped, "changes": {"result": "success",
+                                                                 "outputs": {**self.SKIP, "rust_tests": "true"}}})
+            self.assertEqual(rc, 1, name)
+            self.assertIn("rust_build: 'skipped' but expected to run: true", out)
+        high_risk = {**skipped, "changes": {"result": "success", "outputs": {**self.SKIP, "high_risk_recovery": "true"}}}
+        self.assertEqual(self.verdict("High-risk recovery", high_risk)[0], 1)
+
+    def test_a_failed_cancelled_or_missing_job_fails_every_context_that_needs_it(self):
+        for result in ("failure", "cancelled", None):
+            for name in self.NAMES:
+                self.assertEqual(self.verdict(name, self.needs(self.RUN, test_evidence=result))[0], 1, (name, result))
+                rc = self.verdict(name, self.needs(self.SKIP, "skipped", scripts="success", scripts_guards="success",
+                                                   scripts_contracts="success", rust_tests=result))[0]
+                self.assertEqual(rc, 1, (name, result))
+        lint_failed = self.needs(self.RUN, lint="failure")
+        self.assertEqual([self.verdict(n, lint_failed)[0] for n in ("Lint", "Fast check (ubuntu-latest)",
+                                                                    "Library test sweep (ubuntu-latest)")], [1, 1, 0])
+
+    def test_changes_failure_bad_output_unknown_name_or_bad_json_fails(self):
+        for changes in ("failure", "cancelled", "skipped"):
+            self.assertEqual(self.verdict("Lint", self.needs(self.RUN, changes=changes))[0], 1, changes)
+        for bad in ({k: v for k, v in self.RUN.items() if k != "rust_tests"}, {**self.RUN, "rust_tests": ""}):
+            self.assertEqual(self.verdict("Library test sweep (ubuntu-latest)", self.needs(bad))[0], 1)
+        self.assertEqual(self.verdict("Unit tests", self.needs(self.RUN))[0], 1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(nci.main(["required-context", "Lint", "--needs-json", "{"]), 1)
+
+
+class ComparisonBase(Fixture):
+    """Which SHA a PR plan is compared with, and that the baseline belongs to it."""
+
+    def git(self, *argv):
+        return subprocess.run(["git", "-C", self.dir / "repo", *argv], check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, message):
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", message)
+        return self.git("rev-parse", "HEAD")
+
+    def setUp(self):
+        super().setUp()
+        (self.dir / "repo").mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.a = self.commit("A")
+        self.git("checkout", "-q", "-b", "pr")
+        self.p = self.commit("P")
+        self.git("checkout", "-q", "main")
+        self.b = self.commit("B")
+        # Like refs/pull/N/merge: a detached merge of the PR into the base; main itself stays at B.
+        self.git("checkout", "-q", "--detach")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "M", "pr")
+        self.m = self.git("rev-parse", "HEAD")
+
+    def base(self, head, *extra):
+        out = self.dir / f"out-{len(list(self.dir.glob('out-*')))}"
+        rc, _ = self.run_cli("comparison-base", "--repo", self.dir / "repo", "--head", head, "--pr-head-sha", self.p,
+                             "--base-ref", "main", "--github-output", out, *extra)
+        return rc, dict(line.split("=", 1) for line in out.read_text().split()) if out.exists() else {}
+
+    def test_merge_ref_uses_its_first_parent_and_head_uses_the_merge_base(self):
+        self.assertEqual(self.base(self.m), (0, {"base_sha": self.b, "mode": "merge"}))
+        self.assertEqual(self.base(self.p), (0, {"base_sha": self.a, "mode": "head"}))
+        self.assertEqual(self.base(self.b)[0], 1)
+
+    def test_baseline_must_exist_and_belong_to_the_base_and_scope(self):
+        self.assertEqual(self.base(self.p, "--baseline", self.dir / "none.json", "--scope", "linux-lib")[0], 2)
+        self.plan_ok(["m::a"], workers=1, out="newer", sha=self.b)
+        self.plan_ok(["m::a"], workers=1, out="right", sha=self.a)
+        self.assertEqual(self.base(self.p, "--baseline", self.dir / "newer/plan.json", "--scope", "linux-lib")[0], 2)
+        self.assertEqual(self.base(self.p, "--baseline", self.dir / "right/plan.json", "--scope", "macos-lib")[0], 2)
+        self.assertEqual(self.base(self.p, "--baseline", self.dir / "right/plan.json", "--scope", "linux-lib")[0], 0)
+
+
+class ClassifyWorker(Fixture):
+    """Only an infra failure of the first attempt is retryable; a real test failure never is."""
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.plan_ok(["m::a", "m::b"], workers=1)
+
+    def attempt(self, attempt, cases=None, exit_code="0", record_attempt=None):
+        name = nreq.artifact_name(0, attempt)
+        rc, err = self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json", "--worker", 0, "--archive",
+                               self.archive, "--config", self.dir / "plan/worker-0.toml", "--sha", SHA, "--run-id",
+                               "7", "--run-attempt", record_attempt or attempt, "--record", self.dir / "art" / name)
+        self.assertEqual(rc, 0, err)
+        if exit_code is not None:
+            self.write(f"art/{name}/exit-code", exit_code)
+            self.write(f"art/{name}/junit.xml", junit(cases or [("m::a", "", 0.1), ("m::b", "", 0.1)]))
+
+    def classify(self, attempt):
+        out = self.dir / f"gh-{attempt}-{len(list(self.dir.glob('gh-*')))}"
+        self.assertEqual(self.run_cli("classify-worker", "--plan", self.dir / "plan/plan.json", "--artifacts",
+                                      self.dir / "art", "--worker", 0, "--run-attempt", attempt, "--github-output", out)[0], 0)
+        got = dict(line.split("=", 1) for line in out.read_text().split())
+        return got["class"], got["retryable"]
+
+    def test_test_failure_is_never_retryable_and_a_pass_is_a_pass(self):
+        self.attempt(1, [("m::a", '<failure message="x"/>', 0.1), ("m::b", "", 0.1)], exit_code="100")
+        self.attempt(2)
+        self.assertEqual((self.classify(1), self.classify(2)), (("test", "false"), ("pass", "false")))
+
+    def test_lost_runner_or_killed_run_is_infra_and_retryable_once(self):
+        self.assertEqual((self.classify(1), self.classify(2)), (("infra", "true"), ("infra", "false")))
+        self.attempt(1, exit_code=None)
+        self.assertEqual(self.classify(1), ("infra", "true"))
+
+    def test_another_attempt_or_unclear_evidence_is_unknown_not_infra(self):
+        self.attempt(1)
+        self.assertEqual(self.classify(2), ("infra", "false"))
+        self.attempt(2, record_attempt="1")
+        self.assertEqual((self.classify(1), self.classify(2)), (("pass", "false"), ("unknown", "false")))
+        self.attempt(1, exit_code="1")
+        self.assertEqual(self.classify(1), ("unknown", "false"))
+        (self.dir / "art" / nreq.artifact_name(0, 1) / "worker.json").unlink()
+        self.assertEqual(self.classify(1), ("unknown", "false"))
 
 
 class RustSources(unittest.TestCase):
