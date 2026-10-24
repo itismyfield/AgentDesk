@@ -6,8 +6,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 /// Build switch for the O writer. With no channel in the boot list, intake and health stay as before.
 pub(crate) const O_TUI_WRITER: bool = true;
 
-/// The switch as `agentdesk build-info` reports it; the deploy rollback guard reads that report,
-/// so keep returning `true` here if the switch itself is ever retired (#7348 P1).
+/// What `agentdesk build-info` reports to the deploy guard; keep `true` if the switch retires.
 // CONSUMED-BY: scripts/deploy-release.sh via src/cli/build_info.rs.
 pub(crate) fn o_tui_writer_build_switch() -> bool {
     O_TUI_WRITER

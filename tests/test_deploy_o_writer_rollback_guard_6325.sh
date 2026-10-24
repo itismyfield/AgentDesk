@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# A deploy whose binary has the O writer on must not auto-roll back to a build
-# that is not recorded as an O writer build, nor ship an external artifact instead
-# of its own build. With the switch off, rollback and artifact deploys are unchanged.
-# The switches come from `agentdesk build-info`, never from Rust source (#7348 P1).
+# A binary reporting the O writer on must not auto-roll back to a non-O-writer build nor be
+# replaced by an external artifact; switches come from `agentdesk build-info`, never source.
 
 set -euo pipefail
 

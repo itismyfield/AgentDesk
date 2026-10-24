@@ -1,5 +1,5 @@
 //! `agentdesk build-info`: build switches the deploy scripts read from the binary they are
-//! about to install or roll back from, never from Rust source text (#7348 P1).
+//! about to install or roll back from, never from Rust source text.
 
 /// Bumped when a field changes meaning; scripts read any other schema as unknown values.
 const BUILD_INFO_SCHEMA: u64 = 1;

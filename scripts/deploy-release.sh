@@ -973,9 +973,8 @@ _rollback_would_brick_on_migration() {
 }
 
 _binary_build_flag() {
-    # One `agentdesk build-info` switch ($2) of binary $1: true, false or unknown. The deploy
-    # reads the binary it installs or rolls back from, never Rust source, so a renamed or
-    # deleted constant reads unknown (refuse) instead of "off" (#7348 P1).
+    # One `agentdesk build-info` switch ($2) of binary $1: true, false or unknown. A missing
+    # command, field or schema reads unknown, so a deleted constant refuses instead of "off".
     local value
     value="$(python3 - "$1" "$2" 2>/dev/null <<'PY'
 import json
@@ -1045,9 +1044,8 @@ _binary_would_revert_o_ledger() {
 }
 
 _rollback_would_revert_o_writer() {
-    # Returns 0 (refuse) when the installed new binary may have the O writer on and
-    # the rollback target is not recorded as an O writer build: the old binary would
-    # take Discord output back to the Legacy relay. No override reaches it.
+    # 0 (refuse, no override) when the new binary may run the O writer and the rollback target
+    # is not recorded as an O writer build: rolling back would return output to the Legacy relay.
     local new_value old_value
     new_value="$(_binary_build_flag "${REL_BINARY:-}" o_tui_writer)"
     if [ "$new_value" = "false" ]; then
@@ -1063,9 +1061,8 @@ _rollback_would_revert_o_writer() {
 }
 
 _external_artifact_would_skip_o_writer() {
-    # Returns 0 (refuse) when the AGENTDESK_DEPLOY_BINARY artifact may have the O
-    # writer or OperatorResume on: only a build of this source is deployed then. An
-    # artifact without `build-info` reads unknown and is refused.
+    # 0 (refuse) when the AGENTDESK_DEPLOY_BINARY artifact may run the O writer or OperatorResume;
+    # an artifact without `build-info` reads unknown and is refused.
     local value
     [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 1
     if [ "$(_binary_build_flag "$AGENTDESK_DEPLOY_BINARY" o_ledger_operator_resume)" != "false" ]; then
@@ -2474,9 +2471,8 @@ else
     export CARGO_BUILD_RUSTC_WRAPPER=""
 fi
 
-# Build the release binary from the current workspace by default so deploy
-# always ships code compiled from the current HEAD. An explicit external artifact
-# keeps the override behavior only while it reports its O writer and OperatorResume off.
+# Build the release binary from HEAD by default; an external AGENTDESK_DEPLOY_BINARY is
+# deployed only while it reports both its O writer and OperatorResume off.
 _ensure_dashboard_dependencies
 _check_repo_remote_freshness
 if _external_artifact_would_skip_o_writer; then
