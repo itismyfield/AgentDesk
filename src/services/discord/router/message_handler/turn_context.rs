@@ -2,7 +2,7 @@
 use super::*;
 use crate::services::discord::prompt_builder::ChannelRecentContextManifestInput;
 
-pub(super) struct TurnContext<'a> {
+pub(in crate::services::discord) struct TurnContext<'a> {
     pub provider: &'a ProviderKind,
     pub session_id: Option<&'a str>,
     pub uploads: &'a [String],
@@ -17,44 +17,11 @@ pub(super) struct TurnContext<'a> {
 
 impl TurnContext<'_> {
     pub(super) fn build(self) -> String {
-        let mut chunks = Vec::new();
-        if let Some(trigger) = self.trigger {
-            chunks.push(trigger);
-        }
-        if let Some(reply) = self.reply {
-            chunks.push(reply.to_string());
-        }
-        if let Some(recent) = self.recent {
-            recent.append_rendered_context_to(&mut chunks);
-        }
-        if let Some(knowledge) = self.knowledge {
-            chunks.push(knowledge.to_string());
-        }
-        let input = wrap_user_prompt_with_author(self.author_name, self.author_id, self.user_input);
-        crate::services::provider::compact_resumed_provider_turn_prompt(
-            self.provider,
-            self.session_id,
-            render_input_chunks(self.uploads, chunks, input),
-        )
+        super::input_payload::render_turn(self)
     }
 }
 
-/// Input chunks have one ordering regardless of the transport's outer author frame.
-pub(in crate::services::discord::router) fn render_input_chunks(
-    uploads: &[String],
-    context: impl IntoIterator<Item = String>,
-    user_input: String,
-) -> String {
-    let mut chunks = Vec::new();
-    if !uploads.is_empty() {
-        chunks.push(uploads.join("\n"));
-    }
-    chunks.extend(context);
-    if !user_input.is_empty() {
-        chunks.push(user_input);
-    }
-    chunks.join("\n\n")
-}
+pub(in crate::services::discord::router) use super::input_payload::render_input_chunks;
 
 #[cfg(test)]
 mod tests {

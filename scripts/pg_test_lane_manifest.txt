@@ -223,6 +223,7 @@ src/services/discord/router/intake_gate/busy_inject/payload_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
+src/services/discord/router/message_handler/input_payload/tests/pg_tests.rs
 src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
 src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs
@@ -420,6 +421,7 @@ src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/services/turn_orchestrator/queued_head/v2/owner_tests/pg_tests.rs
+src/services/turn_orchestrator/queued_head/v2/source_admission/tests/pg_tests.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
 [modules]
@@ -655,6 +657,7 @@ services::discord::router::intake_gate::busy_inject::payload_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
+services::discord::router::message_handler::input_payload::tests::pg_tests
 services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests
 services::discord::router::message_handler::intake_turn::replay_start_tests::kickoff_tests
@@ -857,6 +860,7 @@ services::tui_o::writer::tests::actor::repost_turn::tool_result
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
+services::turn_orchestrator::queued_head::v2::source_admission::tests::pg_tests
 services::turn_orchestrator::queued_head::v2::tests::pg_tests
 voice::announce_meta::tests
 voice::turn_link::tests
@@ -2160,6 +2164,7 @@ services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_partial_settlement_failure_preserves_queue_and_retries
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_settlement_preserves_queue_then_admits_once
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
+services::discord::router::message_handler::input_payload::tests::pg_tests::normal_and_busy_preparation_preserve_attachment_bytes_and_retention_pg
 services::discord::router::message_handler::intake_turn::claim_bootstrap::recap_cleanup_tests::discord_claim_clears_the_idle_card_only_for_the_winning_turn_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::exact_retry_starts_only_through_its_continuation_pg
 services::discord::router::message_handler::intake_turn::replay_start_tests::held_dispatch_is_not_inherited_by_an_active_start_pg
@@ -3050,6 +3055,7 @@ services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
+services::turn_orchestrator::queued_head::v2::source_admission::tests::pg_tests::admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg
 services::turn_orchestrator::queued_head::v2::tests::pg_tests::v2_real_owner_entry_and_persistent_notice_are_independent_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
 voice::announce_meta::tests::durable_handoff_persist_does_not_resurrect_consumed_row

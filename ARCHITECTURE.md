@@ -1743,6 +1743,10 @@ src/
 │   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   └── routine_metadata.rs
+│   │   │   │   ├── input_payload/
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── pg_tests.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
@@ -1770,6 +1774,7 @@ src/
 │   │   │   │   │   ├── route_claim_tests.rs
 │   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
+│   │   │   │   │   ├── session_preparation.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
@@ -1790,6 +1795,7 @@ src/
 │   │   │   │   ├── foreign_row.rs
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
+│   │   │   │   ├── input_payload.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
@@ -3656,11 +3662,16 @@ src/
 │   │   │   │   ├── owner_tests/
 │   │   │   │   │   ├── conservation_tests.rs
 │   │   │   │   │   └── pg_tests.rs
+│   │   │   │   ├── source_admission/
+│   │   │   │   │   ├── tests/
+│   │   │   │   │   │   └── pg_tests.rs
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── actor.rs
 │   │   │   │   ├── attempt.rs
 │   │   │   │   ├── commit.rs
 │   │   │   │   ├── owner_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── source_admission.rs
 │   │   │   │   └── sources.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs

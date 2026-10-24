@@ -1,10 +1,6 @@
 use super::*;
 
-/// #3837 decomposition: voice-transcript announcement resolution lifted
-/// verbatim from `handle_text_message`. Behavior-preserving — returns the
-/// resolved announcement (if any) plus the `already_accepted` flag exactly as
-/// the inline `let voice_announcement = ...` expression and its
-/// `voice_announcement_already_accepted` local produced.
+/// Resolves the authorized durable announcement without changing its claim owner.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_intake_voice_announcement(
     shared: &Arc<SharedData>,
@@ -22,21 +18,7 @@ pub(super) async fn resolve_intake_voice_announcement(
 ) {
     let mut voice_announcement_already_accepted = false;
     let voice_announcement = if let Some(resolved) = gate_resolved_voice_announcement {
-        // #3905: the intake gate already resolved + authorized this voice
-        // announcement (non-consuming) at `intake_gate::resolve_voice_transcript_announcement_for_intake`
-        // before choosing direct dispatch. Trust that carry-forward instead of
-        // re-deriving from scratch here — independent re-derivation re-checks the
-        // LIVE durable row (`consumed_at IS NULL`) and loses to a sibling gateway
-        // (one process hosts many agent-bot gateways) that consumed the row
-        // between gate resolution and here, spuriously dropping a message the
-        // gate already authorized (queued dispatch is immune because it carries
-        // the payload via `Intervention.voice_announcement` accepted-replay;
-        // only the direct path was exposed). `voice_announcement_already_accepted`
-        // deliberately stays `false` so the per-message durable claim in
-        // `route_voice_transcript_announcement_once` still runs: the claim winner
-        // dispatches and racing siblings get `DuplicateSuppressed` (clean, no
-        // warn), so the #3464 single-dispatch dedup is preserved — never a double
-        // answer.
+        // The gate authorized this payload; the per-message durable claim still deduplicates it.
         Some(resolved)
     } else if announce_bot_id == Some(request_owner.get()) {
         if let Some((announcement, accepted_replay)) = stored_voice_announcement {
@@ -153,4 +135,56 @@ pub(super) async fn resolve_intake_voice_announcement(
         None
     };
     (voice_announcement, voice_announcement_already_accepted)
+}
+
+pub(super) fn prompt(announcement: &crate::voice::prompt::VoiceTranscriptAnnouncement) -> String {
+    let mut context = format!("voice_utterance_id: {}", announcement.utterance_id);
+    if let Some(started_at) = announcement.started_at.as_deref() {
+        context.push_str(&format!("\nvoice_started_at: {started_at}"));
+    }
+    if let Some(completed_at) = announcement.completed_at.as_deref() {
+        context.push_str(&format!("\nvoice_completed_at: {completed_at}"));
+    }
+    if let Some(samples_written) = announcement.samples_written {
+        context.push_str(&format!("\nvoice_samples_written: {samples_written}"));
+    }
+    crate::voice::prompt::voice_bridge_prompt(
+        &announcement.transcript,
+        &announcement.language,
+        announcement.verbose_progress,
+        Some(&context),
+    )
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    #[test]
+    fn extracted_voice_prompt_keeps_transcription_and_provenance_bytes() {
+        let voice: crate::voice::prompt::VoiceTranscriptAnnouncement = serde_json::from_value(serde_json::json!({
+            "transcript":"두 문단\n\n_ literal WIP", "user_id":"42", "utterance_id":"utterance", "language":"ko-KR", "verbose_progress":true,
+            "started_at":"start", "completed_at":"end", "samples_written":48000,
+            "control_channel_id":null, "stt_mode":null, "stt_latency_ms":null })).unwrap();
+        let saved = serde_json::to_value(&voice).unwrap();
+        let expected = crate::voice::prompt::voice_bridge_prompt(
+            "두 문단\n\n_ literal WIP",
+            "ko-KR",
+            true,
+            Some(
+                "voice_utterance_id: utterance\nvoice_started_at: start\nvoice_completed_at: end\nvoice_samples_written: 48000",
+            ),
+        );
+        let normalize = |text: String| {
+            let tags = regex::Regex::new(r"user_transcript_([0-9a-f]{32})").unwrap();
+            let captures: Vec<_> = tags.captures_iter(&text).map(|c| c[1].to_owned()).collect();
+            assert_eq!(captures.len(), 4);
+            assert!(captures.iter().all(|nonce| nonce == &captures[0]));
+            text.replace(&captures[0], "NONCE")
+        };
+        assert_eq!(
+            normalize(prompt(&voice)).as_bytes(),
+            normalize(expected).as_bytes()
+        );
+        assert_eq!(serde_json::to_value(&voice).unwrap(), saved);
+    }
 }

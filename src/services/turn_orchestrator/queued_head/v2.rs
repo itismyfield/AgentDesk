@@ -7,9 +7,11 @@ pub(crate) mod actor;
 mod attempt;
 mod commit;
 mod retained;
+pub(crate) mod source_admission;
 mod sources;
 pub(crate) use attempt::AttemptRef;
 pub(crate) use commit::Fault;
+use source_admission::AdmitError;
 
 pub(crate) struct Owner {
     pub(crate) snapshot: SnapshotV2,
@@ -50,16 +52,19 @@ impl Owner {
         Ok(owner)
     }
 
-    pub(crate) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, String> {
+    pub(crate) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
+        if self.pending.is_some() {
+            return Err(AdmitError::NotCommitted("owner recovery required".into()));
+        }
         if self.fenced(item) {
             return Ok(false);
         }
         if self.snapshot.items.len() >= 30 {
-            return Err("queue full".into());
+            return Err(AdmitError::Full);
         }
         let mut next = self.snapshot.clone();
         next.items.push(item.clone());
-        self.commit(next)?;
+        self.admit_commit(next)?;
         Ok(true)
     }
 

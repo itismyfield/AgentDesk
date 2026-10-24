@@ -134,7 +134,10 @@ pub(crate) fn migrate_parked(
     owner: &mut Owner,
     item: &PendingQueueItem,
     proven_unattempted: bool,
-) -> Result<(), String> {
+) -> Result<(), AdmitError> {
+    if owner.pending.is_some() {
+        return Err(AdmitError::NotCommitted("owner recovery required".into()));
+    }
     if owner.fenced(item) {
         return Ok(());
     }
@@ -159,7 +162,7 @@ pub(crate) fn migrate_parked(
             enqueued: false,
         },
     });
-    owner.commit(next)
+    owner.admit_commit(next)
 }
 
 impl Owner {

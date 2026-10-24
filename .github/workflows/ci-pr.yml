@@ -435,6 +435,7 @@ jobs:
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
+              - 'src/services/discord/router/message_handler/input_payload/tests/pg_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs'
               - 'src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/retry_prompt/tests.rs'
@@ -632,6 +633,7 @@ jobs:
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/services/turn_orchestrator/queued_head/v2/owner_tests/pg_tests.rs'
+              - 'src/services/turn_orchestrator/queued_head/v2/source_admission/tests/pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths

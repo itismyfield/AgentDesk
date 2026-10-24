@@ -7161,6 +7161,9 @@ services::discord::router::message_handler::headless_turn::routine_metadata::mem
 services::discord::router::message_handler::headless_turn::routine_metadata::memory_scope_tests::routine_memory_group_reaches_binding_and_three_tier_hint
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
+services::discord::router::message_handler::input_payload::tests::fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
+services::discord::router::message_handler::input_payload::tests::pg_tests::normal_and_busy_preparation_preserve_attachment_bytes_and_retention_pg
+services::discord::router::message_handler::input_payload::tests::shared_payload_preserves_literal_text_attachment_only_and_author_bytes
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_inherited_route_is_republished_by_its_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_lost_claim_replays_its_resolved_route
@@ -7229,10 +7232,12 @@ services::discord::router::message_handler::intake_turn::retry_prompt::wiring_te
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::handoff_ownership_guard_ignores_comments
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
+services::discord::router::message_handler::intake_turn::session_preparation::tests::preparation_keeps_existing_and_explicit_restore_veto_states
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
+services::discord::router::message_handler::intake_turn::voice_intake::preparation_tests::extracted_voice_prompt_keeps_transcription_and_provenance_bytes
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment
@@ -15070,6 +15075,12 @@ services::turn_orchestrator::queued_head::tests::restore_cancel_and_purge_keep_a
 services::turn_orchestrator::queued_head::tests::the_downgrade_converts_only_a_resolved_snapshot
 services::turn_orchestrator::queued_head::tests::without_a_claim_the_queue_file_stays_the_legacy_array
 services::turn_orchestrator::queued_head::tests::write_failures_issue_no_ticket_or_leave_the_head_unknown
+services::turn_orchestrator::queued_head::v2::source_admission::tests::mixed_sources_partition_only_explicit_text_and_retain_opaque_originals
+services::turn_orchestrator::queued_head::v2::source_admission::tests::not_committed_full_and_duplicate_keep_distinct_custody
+services::turn_orchestrator::queued_head::v2::source_admission::tests::pending_a_and_fresh_b_keep_separate_originals_and_finish_once
+services::turn_orchestrator::queued_head::v2::source_admission::tests::pending_synthetic_admission_recovers_the_same_candidate_without_reenqueue
+services::turn_orchestrator::queued_head::v2::source_admission::tests::pg_tests::admission_failure_keeps_consumed_voice_assets_and_ack_custody_pg
+services::turn_orchestrator::queued_head::v2::source_admission::tests::two_mailbox_requests_share_custody_and_ack_once
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::directory_sync_failure_issues_no_permit_and_recovery_requires_sync
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::expiry_removes_only_the_selected_head_and_preserves_duplicate_identity_raw
 services::turn_orchestrator::queued_head::v2::tests::conservation_tests::failed_enqueue_and_parked_migration_keep_the_callers_original_for_retry
