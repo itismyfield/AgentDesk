@@ -95,7 +95,8 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::ProviderCli(..)
         | Commands::Health
         | Commands::MachineCompare
-        | Commands::Activity { .. } => true,
+        | Commands::Activity { .. }
+        | Commands::BuildInfo => true,
 
         // Text-only / operational commands — no JSON output path.
         Commands::Dcserver { .. }
@@ -634,6 +635,10 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             }
         }
         Commands::Deploy => exit_for_cli(super::client::cmd_deploy()),
+        Commands::BuildInfo => {
+            super::build_info::handle_build_info();
+            Ok(())
+        }
         Commands::Config { action } => exit_for_cli(match action {
             ConfigAction::Get => super::client::cmd_config_get(),
             ConfigAction::Set { json } => super::client::cmd_config_set(&json),
