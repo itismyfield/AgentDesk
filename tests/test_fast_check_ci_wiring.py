@@ -713,7 +713,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ("check_fast_cross_os_targets",
                  "set -euo pipefail\n"
                  "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
-                 "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json\n"),
+                 "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json\n"),
             ],
         )
         # The Windows list must come from the Windows runner, with the pinned nextest.

@@ -669,7 +669,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json
-          python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json
+          python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json
 
       - name: sccache stats
         if: always() && runner.os != 'macOS'
@@ -923,7 +923,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 432795141303ad5cb2fb8ce22166e387169402459baab831f17d60632035a27f
-          pin scripts/check-ci-runner-hardening.sh 6bc22319395f9fe0e3b4ca4e2690ff1d5c836cb6e42ce4dea39472f480487b24
+          pin scripts/check-ci-runner-hardening.sh eb5f060740808bfa33e1c8a014c05824529feb7948e10c262dea83164e93a297
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context

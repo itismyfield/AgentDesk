@@ -667,6 +667,41 @@ class RustSources(unittest.TestCase):
         for os_name in ("linux", "windows"):
             self.assertEqual(self.split(os_name)[0], {"imp::same"})
 
+    def test_every_workflow_compare_step_runs_as_written(self):
+        """Each compare command ci-pr.yml runs must parse and write its JSON, not only match a pinned string."""
+        import shlex
+        import shutil
+        import subprocess
+        import yaml
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci-pr.yml").read_text())["jobs"]
+        runs = [s["run"] for job in jobs.values() for s in job.get("steps", [])
+                if "rust_test_sources.py compare" in s.get("run", "")]
+        self.assertEqual(len(runs), 2)
+        self.tree({"src/lib.rs": "#[test]\nfn a() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"
+                                 "#[cfg(unix)]\n#[test]\nfn u() {}\n"})
+        (self.root / "scripts/ci").mkdir(parents=True)
+        shutil.copy(ROOT / "scripts/ci/rust_test_sources.py", self.root / "scripts/ci")
+        bin_dir, nextest_dir = self.root / "bin", self.root / "nextest"
+        for d in (bin_dir, nextest_dir, self.root / "target"):
+            d.mkdir()
+        for name in ("python", "python3"):
+            (bin_dir / name).write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+            (bin_dir / name).chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "NEXTEST_DIR": str(nextest_dir)}
+        for run in runs:
+            line = next(l for l in run.replace("\\\n", " ").splitlines() if "rust_test_sources.py compare" in l)
+            argv = [a.replace("$NEXTEST_DIR", str(nextest_dir)) for a in shlex.split(line)]
+            platform = argv[argv.index("--platform") + 1]
+            names = {"a": {"ignored": False}, ("w" if platform == "windows" else "u"): {"ignored": False}}
+            (self.root / argv[argv.index("--list") + 1]).write_text(json.dumps(
+                {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": names}}}))
+            with self.subTest(platform=platform):
+                done = subprocess.run(["bash", "-c", line], cwd=self.root, env=env, capture_output=True, text=True)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn("--json-out", argv)
+                written = json.loads((self.root / argv[argv.index("--json-out") + 1]).read_text())
+                self.assertEqual(written["static_only"], [])
+
     def compare(self, doc, platform="linux"):
         listed = self.root / "list.json"
         listed.write_text(json.dumps(doc))

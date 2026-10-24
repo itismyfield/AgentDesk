@@ -770,7 +770,7 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "11465c82e34e913892d90f16e39f89aa48531342a9d426ed7421ba32872cb2e1",
+    "job_sha256" => "6a7671032f461e68dfba34df04f7cc3ee3cb2e31a7c692703979fbdca20fd0c8",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
@@ -781,7 +781,7 @@ targets = {
         "commands" => [
           "set -euo pipefail",
           "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json",
-          "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json",
+          "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json --json-out target/compare-windows.json",
         ],
         "timeout_minutes" => 30,
         "if_condition" => "runner.os == 'Windows'",
