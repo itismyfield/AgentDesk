@@ -4603,6 +4603,7 @@ services::discord::health::turn_deliver::inject::catch_up_race_tests::catch_up_s
 services::discord::health::turn_deliver::inject::catch_up_race_tests::confirmed_source_blocks_late_pending_rest_marker
 services::discord::health::turn_deliver::inject::first_input::pg_tests::cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg
 services::discord::health::turn_deliver::inject::first_input::pg_tests::completion_clock_keeps_retained_a_fence_without_touching_active_b_pg
+services::discord::health::turn_deliver::inject::first_input::pg_tests::live_payload_refusal_proof_preserves_raw_without_becoming_restart_authority_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg

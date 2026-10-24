@@ -81,6 +81,31 @@ impl Owner {
         Ok(())
     }
 
+    pub(crate) fn retain_not_sent(
+        &mut self,
+        key: &AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+    ) -> Result<(), String> {
+        let reason = proof.into_reason(&serde_json::to_value(key).map_err(|e| e.to_string())?)?;
+        let mut next = self.snapshot.clone();
+        if !next.head_injection.as_ref().is_some_and(|h| key.matches(h)) {
+            return Err("stale NotSent attempt".into());
+        }
+        let mut input = next.head_injection.take().ok_or("missing NotSent input")?;
+        remove_first(&mut next, &key.identity)?;
+        input.phase = HeadPhase::Reserved;
+        next.retained_inputs.push(RetainedInput {
+            input,
+            reason: RetainedReason::KnownNotSent { reason },
+            notice: NoticeIntent {
+                kind: "retained_retry_required".into(),
+                enqueued: false,
+            },
+        });
+        self.commit(next)?;
+        self.project_slots();
+        Ok(())
+    }
     pub(crate) fn project_slots(&self) {
         if self.fault == Fault::BeforeProjection {
             return;

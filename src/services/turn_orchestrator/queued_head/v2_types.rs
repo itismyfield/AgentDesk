@@ -93,6 +93,7 @@ pub(crate) struct RetainedInput {
 pub(crate) enum RetainedReason {
     Unconfirmed,
     OpaqueUnsent,
+    KnownNotSent { reason: String },
     Rejected { reason: String },
 }
 

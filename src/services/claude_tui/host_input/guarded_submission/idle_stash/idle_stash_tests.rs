@@ -1345,7 +1345,7 @@ fn owner_idle_stash_commits_payload_after_c_s_and_restores_exact_draft() {
         )
         .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
-    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, nonce).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

@@ -20,7 +20,7 @@ fn context(name: &str, nonce: &str) -> serde_json::Value {
         )
         .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
-    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
     serde_json::json!({"host":"tmux","owner":name,"root":root,"execution_nonce":nonce})
 }

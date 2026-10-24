@@ -281,3 +281,118 @@ async fn completion_clock_keeps_retained_a_fence_without_touching_active_b_pg() 
         .unwrap();
     assert_eq!(key["attempt"]["nonce"], "clock-a");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_payload_refusal_proof_preserves_raw_without_becoming_restart_authority_pg() {
+    use crate::services::discord::runtime_store::durable_probe::{Plan, Step, Watch};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let _root = TestRuntimeRootGuard::new();
+    let fixture = QueuedCodex::new(7_272_425).await;
+    let mailbox = fixture
+        .shared
+        .mailbox(poise::serenity_prelude::ChannelId::new(
+            fixture.pane.channel,
+        ));
+    let path = fixture.disk_path().with_file_name("payload-refusal.json");
+    let attempt = json!({"nonce":"payload-refusal","provider":"codex","target":{"host":"herdr","owner":"payload-refusal","root":"/test","execution_nonce":"execution"},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    mailbox
+        .v2_cold_fixture(
+            path.clone(),
+            attempt.clone(),
+            "original kept after refusal".into(),
+            7272425,
+        )
+        .await
+        .unwrap();
+    let keys = Arc::new(AtomicUsize::new(0));
+    let count = keys.clone();
+    let disk = path.clone();
+    let (key, outcome) = mailbox
+        .v2_cold_observed(1, Arc::new(|| 90000), move |_| {
+            let _watch = Watch::new(
+                &disk,
+                Plan {
+                    fail: vec![Step::ParentSync],
+                    ..Default::default()
+                },
+            );
+            crate::services::claude_tui::owner_input::payload(|| {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    assert!(outcome.result.is_err());
+    assert_eq!(
+        keys.load(Ordering::SeqCst),
+        0,
+        "failed payload commit authorizes no content I/O"
+    );
+    let proof = outcome
+        .not_sent
+        .expect("a live refusing gate proves no content was entered");
+    mailbox
+        .v2_request(move |s| {
+            let owner = s.as_mut().unwrap();
+            owner.recover()?;
+            owner.retain_not_sent(
+                &serde_json::from_value(key).map_err(|e| e.to_string())?,
+                proof,
+            )
+        })
+        .await
+        .unwrap();
+    let snap = mailbox
+        .v2_request(|s| s.as_ref().unwrap().json())
+        .await
+        .unwrap();
+    assert!(snap["head_injection"].is_null());
+    assert_eq!(
+        snap["retained_inputs"][0]["reason"]["kind"],
+        "known_not_sent"
+    );
+    assert_eq!(
+        snap["retained_inputs"][0]["input"]["original"]["text"],
+        "original kept after refusal"
+    );
+    mailbox
+        .v2_adopt(path, "cold-scope-7272425".into())
+        .await
+        .unwrap();
+    assert!(
+        mailbox
+            .v2_effect(100000, |_| panic!("retained proof is not a replay permit"))
+            .await
+            .is_err()
+    );
+    assert_eq!(keys.load(Ordering::SeqCst), 0);
+    let other = fixture
+        .shared
+        .mailbox(poise::serenity_prelude::ChannelId::new(7272426));
+    other
+        .v2_cold_fixture(
+            fixture.disk_path().with_file_name("ambiguous-content.json"),
+            attempt,
+            "maybe sent".into(),
+            7272426,
+        )
+        .await
+        .unwrap();
+    let (_, outcome) = other
+        .v2_cold_observed(1, Arc::new(|| 90000), |_| {
+            crate::services::claude_tui::owner_input::payload(|| {
+                Err::<(), _>("ambiguous transport acknowledgement".into())
+            })
+        })
+        .await
+        .unwrap();
+    assert!(outcome.result.is_err());
+    assert!(
+        outcome.not_sent.is_none(),
+        "content entered before an error cannot become KnownNotSent"
+    );
+}

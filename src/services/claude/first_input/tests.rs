@@ -26,7 +26,7 @@ fn cold_claude_submit_returns_before_missing_source_and_keeps_payload_once() {
         crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context)
             .unwrap();
     let marker = crate::services::tmux_common::session_temp_path(name, "spawn_nonce");
-    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(marker, nonce).unwrap();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727395));

@@ -3,7 +3,10 @@ use super::{guarded_outcome, submission_fence};
 use crate::services::tui_input::target_epoch::PaneEpoch;
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub(crate) type Commit = Arc<dyn Fn(Option<PaneEpoch>) -> Result<(), String> + Send + Sync>;
@@ -16,6 +19,8 @@ struct Scope {
     commit: Commit,
     pin: Pin,
     hold: Hold,
+    allowed: AtomicBool,
+    known_before: AtomicBool,
     #[cfg(unix)]
     epoch: Mutex<Option<crate::services::tui_input::target_epoch::LiveEpoch>>,
     refused: Mutex<Option<submission_fence::PreSubmitPersistenceRefused>>,
@@ -51,13 +56,7 @@ pub(crate) fn before_payload() -> Result<(), String> {
         }
         (scope.commit)(epoch())
     })();
-    if let Err(reason) = &result {
-        *scope.refused.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(submission_fence::PreSubmitPersistenceRefused {
-                reason: reason.clone(),
-            });
-    }
-    result
+    scope.gate_result(result)
 }
 pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
@@ -168,6 +167,9 @@ impl guarded_outcome::Owner for Scope {
     fn started(&self) {}
     fn finished(&self, _: &super::host_input::InputRun) {}
     fn preparation_held(&self, hold: &super::input::PreparationHold) {
+        if hold.may_requeue() {
+            self.known_before.store(true, Ordering::SeqCst);
+        }
         let value = serde_json::json!({"target":hold.target,"reason":hold.reason,"phase":format!("{:?}",hold.phase),"detail":hold.detail,"epoch":epoch()});
         if let Err(reason) = (self.hold)(value) {
             *self.refused.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -176,7 +178,7 @@ impl guarded_outcome::Owner for Scope {
     }
 }
 #[cfg(all(test, unix))]
-pub(crate) fn with_scope<R>(
+pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,
@@ -184,7 +186,7 @@ pub(crate) fn with_scope<R>(
     pin: Pin,
     hold: Hold,
     run: impl FnOnce() -> R,
-) -> R {
+) -> (R, Option<NotSentProof>) {
     struct Restore(Option<Arc<Scope>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -198,13 +200,44 @@ pub(crate) fn with_scope<R>(
         commit,
         pin,
         hold,
+        allowed: AtomicBool::new(false),
+        known_before: AtomicBool::new(false),
         epoch: Mutex::new(None),
         refused: Mutex::new(None),
     });
     let _restore = Restore(CURRENT.with(|v| v.replace(Some(scope.clone()))));
-    submission_fence::with_scope(Some(scope.clone()), || {
-        guarded_outcome::with_owner(Some(scope), run)
-    })
+    let result = submission_fence::with_scope(Some(scope.clone()), || {
+        guarded_outcome::with_owner(Some(scope.clone()), run)
+    });
+    let proof = (!scope.allowed.load(Ordering::SeqCst)
+        && scope.known_before.load(Ordering::SeqCst))
+    .then(|| scope.target.get("_attempt").cloned())
+    .flatten()
+    .map(|attempt| NotSentProof {
+        attempt,
+        reason: scope
+            .refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or_else(
+                || "preparation held before payload".into(),
+                |e| e.reason.clone(),
+            ),
+    });
+    (result, proof)
+}
+#[cfg(all(test, unix))]
+pub(crate) fn with_scope<R>(
+    provider: String,
+    target: serde_json::Value,
+    channel: u64,
+    commit: Commit,
+    pin: Pin,
+    hold: Hold,
+    run: impl FnOnce() -> R,
+) -> R {
+    capture_scope(provider, target, channel, commit, pin, hold, run).0
 }
 
 pub(crate) fn argv_payload<R>(
@@ -221,7 +254,39 @@ pub(crate) fn argv_payload<R>(
         {
             return Err("foreign argv execution".into());
         }
-        (scope.commit)(None)?;
+        scope.gate_result((scope.commit)(None))?;
     }
     send()
+}
+
+impl Scope {
+    fn gate_result(&self, result: Result<(), String>) -> Result<(), String> {
+        match &result {
+            Ok(()) => {
+                self.allowed.store(true, Ordering::SeqCst);
+            }
+            Err(reason) => {
+                self.known_before.store(true, Ordering::SeqCst);
+                *self.refused.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(submission_fence::PreSubmitPersistenceRefused {
+                        reason: reason.clone(),
+                    });
+            }
+        }
+        result
+    }
+}
+#[cfg(test)]
+pub(crate) struct NotSentProof {
+    attempt: serde_json::Value,
+    reason: String,
+}
+#[cfg(test)]
+impl NotSentProof {
+    pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
+        if self.attempt != *key {
+            return Err("NotSent proof belongs to another attempt".into());
+        }
+        Ok(self.reason)
+    }
 }

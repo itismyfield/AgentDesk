@@ -59,6 +59,10 @@ pub(super) async fn submit<O: Send + 'static>(
 #[path = "first_input/pg_tests.rs"]
 mod pg_tests;
 
+pub(crate) struct ColdOutcome<O> {
+    pub(crate) result: Result<O, String>,
+    pub(crate) not_sent: Option<crate::services::claude_tui::owner_input::NotSentProof>,
+}
 impl ChannelMailboxHandle {
     pub(crate) async fn v2_cold_bootstrap<O: Send + 'static>(
         &self,
@@ -66,6 +70,16 @@ impl ChannelMailboxHandle {
         clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
         effect: impl FnOnce(String) -> Result<O, String> + Send + 'static,
     ) -> Result<(serde_json::Value, Result<O, String>), String> {
+        self.v2_cold_observed(now, clock, effect)
+            .await
+            .map(|(key, outcome)| (key, outcome.result))
+    }
+    pub(crate) async fn v2_cold_observed<O: Send + 'static>(
+        &self,
+        now: u64,
+        clock: std::sync::Arc<dyn Fn() -> u64 + Send + Sync>,
+        effect: impl FnOnce(String) -> Result<O, String> + Send + 'static,
+    ) -> Result<(serde_json::Value, ColdOutcome<O>), String> {
         use crate::services::claude_tui::owner_input;
         use std::sync::{Arc, Mutex};
         let (key, permit, frame, registry, namespace, channel) = self
@@ -141,19 +155,26 @@ impl ChannelMailboxHandle {
                             .record_preparation_hold(&key, value)
                     }))
                 });
+                let mut target =
+                    serde_json::to_value(&key.attempt.target).map_err(|e| e.to_string())?;
+                target["_attempt"] = identity.clone();
                 history::with_attempt(&registry, &namespace, &identity, || {
-                    owner_input::with_scope(
+                    owner_input::capture_scope(
                         key.attempt.provider.clone(),
-                        serde_json::to_value(&key.attempt.target).map_err(|e| e.to_string())?,
+                        target,
                         channel,
                         commit,
                         pin,
                         hold,
                         || effect(frame),
                     )
-                })?
+                })
             })();
-            (identity, outcome)
+            let (result, not_sent) = match outcome {
+                Ok(pair) => pair,
+                Err(error) => (Err(error), None),
+            };
+            (identity, ColdOutcome { result, not_sent })
         })
         .await
         .map_err(|e| format!("cold effect {fallback}: {e}"))
