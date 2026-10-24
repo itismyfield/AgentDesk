@@ -68,7 +68,13 @@ fn reclaim_orphan_inflight_owner(
     let Some(state) = load_inflight_state(provider, channel_id) else {
         return false;
     };
-    if !orphan_row_is_reclaimable(&state, require_tmux_session) {
+    let owner =
+        crate::services::discord::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner;
+    let generation = crate::services::discord::runtime_store::process_generation();
+    // A restarted Herdr row's end belongs to its dedicated owner, not to this fallback.
+    if owner(provider, &state, generation)
+        || !orphan_row_is_reclaimable(&state, require_tmux_session)
+    {
         return false;
     }
     let identity = InflightTurnIdentity::from_state(&state);

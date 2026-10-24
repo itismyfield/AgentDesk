@@ -912,7 +912,8 @@ use live_reader::read_to_provider_terminal;
 pub(crate) mod start_offset;
 mod terminal_replay;
 pub(crate) use terminal_replay::{
-    EndedTurn, Terminal, TurnOutput, closed_turn, ended_turn, replay_herdr_turn,
+    EndedTurn, Terminal, TurnOutput, TurnRead, closed_turn_read, ended_turn, ended_turn_read,
+    replay_herdr_turn,
 };
 
 #[cfg(test)]

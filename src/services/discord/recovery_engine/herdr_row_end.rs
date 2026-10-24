@@ -1,7 +1,8 @@
 //! A prior process's path-less Herdr row ends once its provider is seen idle or its execution gone,
-//! and a live turn's once its execution is gone. Every unclear read leaves the row as it was.
+//! and a live turn's once its execution is gone. Every unclear read leaves the row as it was, and
+//! says which gate left it.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::sync::LazyLock;
@@ -27,6 +28,7 @@ use crate::services::session_host::{
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingTarget, SourceId, binding_events_since,
 };
+use outcome::{Outcome, Settle};
 
 /// Boot restore keeps a held turn, and a row this leaf ends later, off the wrapper path.
 pub(super) fn held_at_restore(
@@ -79,10 +81,24 @@ fn hosted_provider(provider: &ProviderKind) -> bool {
     }
 }
 
-/// Channels whose row an end task is reading now.
-static ENDING: LazyLock<std::sync::Mutex<HashSet<(String, u64)>>> = LazyLock::new(Default::default);
+/// Channels whose row an end task is reading now, with the phase it is in.
+static ENDING: LazyLock<std::sync::Mutex<HashMap<(String, u64), diagnostics::Phase>>> =
+    LazyLock::new(Default::default);
 
 struct Ending((String, u64));
+
+impl Ending {
+    /// Claims the channel for one end task; `None` while another task reads it.
+    fn claim(provider: &ProviderKind, channel: u64) -> Option<Self> {
+        let key = (provider.as_str().to_owned(), channel);
+        let mut ending = ENDING.lock().unwrap_or_else(|e| e.into_inner());
+        if ending.contains_key(&key) {
+            return None;
+        }
+        ending.insert(key.clone(), diagnostics::Phase::start());
+        Some(Self(key))
+    }
+}
 
 impl Drop for Ending {
     fn drop(&mut self) {
@@ -103,17 +119,16 @@ pub(in crate::services::discord) async fn row_end_pass(
     }
     let current = shared.restart.current_generation;
     for row in inflight::load_inflight_states(provider) {
-        let key = (provider.as_str().to_owned(), row.channel_id);
         let live = live::live_target(provider, &row, current).is_some();
-        if !(live || target(provider, &row, current))
-            || !ENDING
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(key.clone())
-        {
+        if !(live || target(provider, &row, current)) {
             continue;
         }
-        let ending = Ending(key);
+        let Some(ending) = Ending::claim(provider, row.channel_id) else {
+            if !live {
+                diagnostics::ending_busy(provider, &row);
+            }
+            continue;
+        };
         let (shared, provider) = (shared.clone(), provider.clone());
         if mutant("inline") {
             end_row(&shared, &provider, row).await;
@@ -129,12 +144,39 @@ pub(in crate::services::discord) async fn row_end_pass(
     }
 }
 
-/// How the row's execution was seen to end.
-enum Ended {
-    /// Retired here or before: the notice says the turn was cut off.
-    Gone,
-    /// The provider went idle; `body` is the turn's own completed reply when it read cleanly.
-    Idle { body: Option<String> },
+/// Asks for the channel's end task at once, as a hold on its queue found the row: the task waits
+/// for the asker's transition to drop, then reads the row as a pass would.
+pub(in crate::services::discord) fn request_row_end(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) {
+    let current = shared.restart.current_generation;
+    let picked = inflight::load_inflight_state_read_only(provider, channel.get());
+    let Some(picked) = picked.filter(|row| target(provider, row, current)) else {
+        return;
+    };
+    let Some(ending) = Ending::claim(provider, channel.get()) else {
+        return;
+    };
+    let (shared, provider) = (shared.clone(), provider.clone());
+    super::task_supervisor::spawn_observed("herdr_row_end_request", async move {
+        let _ending = ending;
+        let transition = shared.session_transition_lock(channel).lock_owned().await;
+        end_locked(&shared, &provider, picked, transition).await;
+    });
+}
+
+/// Why an end left the row this time, as its diagnostics name the gate.
+type Held = &'static str;
+
+/// What the end found: I's idle provider or E's ended execution, and the input's own turn.
+struct Seen {
+    idle: bool,
+    outcome: Outcome,
+    nonce: String,
+    /// The live execution an E retires.
+    retire: Option<(HostedObservation, HostedExecution)>,
 }
 
 async fn end_row(
@@ -144,70 +186,103 @@ async fn end_row(
 ) {
     let channel = ChannelId::new(picked.channel_id);
     // A held transition is another owner's turn change; the next pass reads the row again.
-    let Ok(transition) = shared.session_transition_lock(channel).try_lock_owned() else {
-        return;
-    };
+    match shared.session_transition_lock(channel).try_lock_owned() {
+        Ok(transition) => end_locked(shared, provider, picked, transition).await,
+        Err(_) => diagnostics::held(provider, &picked, "transition_busy"),
+    }
+}
+
+async fn end_locked(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    picked: inflight::InflightTurnState,
+    transition: tokio::sync::OwnedMutexGuard<()>,
+) {
+    if let Err(reason) = settle_row(shared, provider, &picked, transition).await {
+        diagnostics::held(provider, &picked, reason);
+    }
+}
+
+async fn settle_row(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    picked: &inflight::InflightTurnState,
+    transition: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<(), Held> {
+    let channel = ChannelId::new(picked.channel_id);
     let current = shared.restart.current_generation;
-    let fresh = inflight::load_inflight_state_read_only(provider, channel.get());
-    let Some(row) = fresh.filter(|row| {
-        row.turn_nonce == picked.turn_nonce
-            && row.save_generation == picked.save_generation
-            && target(provider, row, current)
-    }) else {
-        return;
+    let row = match inflight::load_inflight_state_read_only_result(provider, channel.get()) {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err("row_missing"),
+        Err(_) => return Err("row_read_error"),
     };
+    if row.turn_nonce != picked.turn_nonce || row.save_generation != picked.save_generation {
+        return Err("fresh_mismatch");
+    }
+    if !target(provider, &row, current) {
+        return Err("cleanup_owner_changed");
+    }
     // A prior process's turn has no actor here; one present now is another turn's.
-    if !mutant("actor") && actor_present(shared, provider, channel, &row).await {
-        return;
+    if !mutant("actor") {
+        actor_absent(shared, provider, channel, &row).await?;
     }
-    let Some(pool) = shared.pg_pool.as_ref() else {
-        return;
-    };
-    let Some(seen) = observe(pool, &shared.token_hash, provider, &row).await else {
-        return;
-    };
-    let Some(http) = shared.serenity_http_or_token_fallback() else {
-        return;
-    };
-    // Routing gates every write, as it gates boot restore's notice.
-    if !routed(&http, shared, provider, channel, &row).await {
-        return;
-    }
-    let Some(ended) = commit(pool, seen).await else {
-        return;
-    };
-    let text = match ended {
-        Ended::Idle { body: Some(body) } if !mutant("body") => {
-            super::formatting::format_for_discord_with_provider(&body, provider)
+    let pool = shared.pg_pool.as_ref().ok_or("pool_unavailable")?;
+    diagnostics::phase(provider, channel.get(), "observe");
+    let seen = observe(pool, &shared.token_hash, provider, &row).await?;
+    let o_owned = o_owns_output(&row).ok_or("o_owner_unreadable")?;
+    let settle = outcome::settle(provider, &row, &seen.outcome, seen.idle, o_owned);
+    let silent = settle == Settle::Silent;
+    if silent {
+        diagnostics::phase(provider, channel.get(), "commit");
+        commit(pool, &seen).await?;
+        // A silent clear stands on O owning the output; it never falls back to a notice.
+        match o_owns_output(&row) {
+            Some(true) => {}
+            Some(false) => return Err("o_owner_changed"),
+            None => return Err("o_owner_unreadable"),
         }
-        _ => interrupted_recovery_message(&row, &row.full_response),
-    };
-    let outcome = relay_recovery_body_notice(&http, shared, provider, &row, &text).await;
-    if outcome != RecoveryRelayOutcome::Delivered {
-        return kept(&row, "notice not delivered");
+    } else {
+        let http = shared
+            .serenity_http_or_token_fallback()
+            .ok_or("http_unavailable")?;
+        // Routing gates every write, as it gates boot restore's notice.
+        diagnostics::phase(provider, channel.get(), "routing");
+        if !routed(&http, shared, provider, channel, &row).await {
+            return Err("routed_false");
+        }
+        diagnostics::phase(provider, channel.get(), "commit");
+        commit(pool, &seen).await?;
+        diagnostics::phase(provider, channel.get(), "notice");
+        if notice(&http, shared, provider, &row, settle).await != RecoveryRelayOutcome::Delivered {
+            kept(&row, "notice not delivered");
+            return Err("notice_not_delivered");
+        }
     }
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
     tests::hook("before_clear").await;
+    diagnostics::phase(provider, channel.get(), "clear");
     let (snapshot, owner) = (row.clone(), provider.clone());
     let cleared =
         tokio::task::spawn_blocking(move || snapshot.clear_restarted_herdr_row(&owner, current))
             .await;
     if !matches!(cleared, Ok(inflight::GuardedClearOutcome::Cleared)) {
-        return kept(&row, "the fresh row is not this turn");
+        kept(&row, "the fresh row is not this turn");
+        return Err("clear_rejected");
     }
     super::restart_report::clear_loaded_restart_report(report.as_ref());
-    tracing::info!(
-        channel_id = row.channel_id,
-        "herdr row end settled a restarted turn"
-    );
+    diagnostics::settled(provider, &row);
     drop(transition);
-    super::schedule_deferred_idle_queue_kickoff(
+    super::schedule_deferred_idle_queue_kickoff_immediate(
         shared.clone(),
         provider.clone(),
         channel,
         "herdr_row_end",
     );
+    if silent {
+        placeholder::spawn_cleanup(shared, provider, &row);
+    }
+    Ok(())
 }
 
 fn kept(row: &inflight::InflightTurnState, why: &str) {
@@ -218,24 +293,58 @@ fn kept(row: &inflight::InflightTurnState, why: &str) {
     );
 }
 
+/// Whether O owns the row channel's output, for the kind the row recorded; `None` when unread.
+fn o_owns_output(row: &inflight::InflightTurnState) -> Option<bool> {
+    let peek = crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel;
+    peek(row.channel_id, row.runtime_kind).ok()
+}
+
+/// The recovery notice, or the neutral one through transport alone: on the turn's own card, else as
+/// a new message once that card is gone.
+async fn notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    row: &inflight::InflightTurnState,
+    settle: Settle,
+) -> RecoveryRelayOutcome {
+    let text = match settle {
+        Settle::Notice(text) => {
+            return relay_recovery_body_notice(http, shared, provider, row, &text).await;
+        }
+        Settle::Neutral(text) => text,
+        Settle::Silent => return RecoveryRelayOutcome::Delivered,
+    };
+    let channel = ChannelId::new(row.channel_id);
+    let card = inflight::opt_message_id(row.current_msg_id);
+    let relay = relay_recovered_terminal_text_to_placeholder;
+    match relay(http, shared, channel, card, &text, None).await {
+        RecoveryRelayOutcome::PermanentFailure if card.is_some() => {
+            relay(http, shared, channel, None, &text, None).await
+        }
+        outcome => outcome,
+    }
+}
+
 /// The channel's mailbox holds a turn, or a live Herdr turn holds this row's nonce.
-async fn actor_present(
+async fn actor_absent(
     shared: &SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
     row: &inflight::InflightTurnState,
-) -> bool {
+) -> Result<(), Held> {
     if let Some(mailbox) = shared.mailbox_peek(channel)
         && !matches!(mailbox.cancel_token().await, Ok(None))
     {
-        return true;
+        return Err("actor_mailbox");
     }
     let nonce = row.turn_nonce.as_deref().unwrap_or_default();
-    recovery_tmux_session_name(provider, row).is_none_or(|logical| {
-        crate::services::provider::cancel_token_claude_interrupt::herdr_turn_indexed(
-            &logical, nonce,
-        )
-    })
+    let logical = recovery_tmux_session_name(provider, row).ok_or("actor_unresolved")?;
+    let indexed = crate::services::provider::cancel_token_claude_interrupt::herdr_turn_indexed;
+    match indexed(&logical, nonce) {
+        true => Err("actor_herdr_index"),
+        false => Ok(()),
+    }
 }
 
 /// Boot restore's routing check, on the same inputs.
@@ -272,75 +381,125 @@ async fn routed(
     .is_ok()
 }
 
-/// What the reads showed; nothing is written before routing admits the row.
-struct Seen {
-    ended: Ended,
-    nonce: String,
-    /// The live execution an E retires.
-    retire: Option<(HostedObservation, HostedExecution)>,
-}
-
-/// E first, then I, from reads alone.
+/// E first, then I, from reads alone; after E the input's turn is read from its source without the
+/// composer.
 async fn observe(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
     row: &inflight::InflightTurnState,
-) -> Option<Seen> {
+) -> Result<Seen, Held> {
     let (observation, record) = hosted_record(pool, token_hash, provider, row).await?;
     let nonce = record.execution_nonce.clone();
-    if record.state == HostedState::Retired {
-        return Some(Seen {
-            ended: Ended::Gone,
-            nonce,
-            retire: None,
-        });
-    }
-    let target = herdr_endpoints().target(&record)?;
-    match execution_end(target.clone(), record.clone()).await {
-        ExecutionEnd::ProviderAlive if !mutant("exited-only") => return None,
-        ExecutionEnd::Ended | ExecutionEnd::ProviderAlive => {
-            let retire = Some((observation, record));
-            return Some(Seen {
-                ended: Ended::Gone,
-                nonce,
-                retire,
-            });
+    let logical = record.owner.logical_key.clone();
+    let retire = match record.state {
+        HostedState::Retired => None,
+        _ => {
+            let target = herdr_endpoints()
+                .target(&record)
+                .ok_or("endpoint_unavailable")?;
+            match execution_end(target.clone(), record.clone()).await {
+                ExecutionEnd::ProviderAlive if !mutant("exited-only") => {
+                    return Err("provider_alive_after_pane_exit");
+                }
+                ExecutionEnd::Ended | ExecutionEnd::ProviderAlive => Some((observation, record)),
+                ExecutionEnd::Unconfirmed => {
+                    let outcome = idle(provider, row, &record, target, &nonce).await?;
+                    return Ok(Seen {
+                        idle: true,
+                        outcome,
+                        nonce,
+                        retire: None,
+                    });
+                }
+            }
         }
-        ExecutionEnd::Unconfirmed => {}
-    }
-    let view = herdr_endpoints().view(&record)?;
-    let source = logged_source(row.channel_id, &record.owner.logical_key, &nonce)?;
-    if row
-        .session_id
-        .as_deref()
-        .is_some_and(|id| id != source.session_id)
-    {
-        return None;
-    }
-    let submitted = inflight::parse_started_at_unix(&row.started_at)
-        .and_then(|at| chrono::DateTime::from_timestamp(at, 0));
-    let expected = record.expected.clone()?;
-    let kind = provider.clone();
-    let read = move || idle_read(&kind, &view, &target, &expected, &source, submitted);
-    let body = tokio::task::spawn_blocking(read).await.ok()??;
-    let ended = Ended::Idle { body };
-    Some(Seen {
-        ended,
+    };
+    let source = logged_source(row.channel_id, &logical, &nonce).ok();
+    let source = source.filter(|source| same_session(row, source));
+    let (kind, submitted) = (provider.clone(), submitted_at(row));
+    let read = move || ended_read(&kind, source.as_ref(), submitted);
+    let outcome = tokio::task::spawn_blocking(read)
+        .await
+        .unwrap_or(Outcome::Unknown);
+    Ok(Seen {
+        idle: false,
+        outcome,
         nonce,
-        retire: None,
+        retire,
     })
 }
 
+/// I on the execution `record` pins.
+async fn idle(
+    provider: &ProviderKind,
+    row: &inflight::InflightTurnState,
+    record: &HostedExecution,
+    target: HerdrTarget,
+    nonce: &str,
+) -> Result<Outcome, Held> {
+    let view = herdr_endpoints()
+        .view(record)
+        .ok_or("endpoint_unavailable")?;
+    let source = logged_source(row.channel_id, &record.owner.logical_key, nonce)?;
+    if !same_session(row, &source) {
+        return Err("session_mismatch");
+    }
+    let expected = record.expected.clone().ok_or("execution_unpinned")?;
+    let (kind, submitted) = (provider.clone(), submitted_at(row));
+    let read = move || idle_read(&kind, &view, &target, &expected, &source, submitted);
+    tokio::task::spawn_blocking(read)
+        .await
+        .map_err(|_| "source_unreadable")?
+}
+
+fn same_session(row: &inflight::InflightTurnState, source: &SourceId) -> bool {
+    (row.session_id.as_deref()).is_none_or(|id| id == source.session_id)
+}
+
+fn submitted_at(row: &inflight::InflightTurnState) -> Option<chrono::DateTime<chrono::Utc>> {
+    inflight::parse_started_at_unix(&row.started_at)
+        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+}
+
+/// After E: the input's turn as the logged source shows it; only a Claude transcript with the
+/// input's time can name it.
+fn ended_read(
+    provider: &ProviderKind,
+    source: Option<&SourceId>,
+    submitted: Option<chrono::DateTime<chrono::Utc>>,
+) -> Outcome {
+    use crate::services::claude::herdr_turn::ended_turn_read;
+    let read = || {
+        let (source, submitted) = (source?, submitted?);
+        if *provider != ProviderKind::Claude {
+            return None;
+        }
+        let mut file = std::fs::File::open(&source.path).ok()?;
+        let meta = file.metadata().ok()?;
+        let same = (meta.dev(), meta.ino()) == (source.dev, source.ino);
+        let read = ended_turn_read(&mut file, submitted, meta.len());
+        same.then_some(read.ok()?.into())
+    };
+    read().unwrap_or(Outcome::Unknown)
+}
+
 /// Retires an E's execution by CAS, then releases the execution's input hold.
-async fn commit(pool: &sqlx::PgPool, seen: Seen) -> Option<Ended> {
+async fn commit(pool: &sqlx::PgPool, seen: &Seen) -> Result<(), Held> {
     if let Some((observation, record)) = &seen.retire {
         #[cfg(test)]
         tests::hook("before_retire").await;
-        retire_confirmed(pool, observation, record).await.ok()?;
+        let retired = retire_confirmed(pool, observation, record).await;
+        retired.map_err(|_| "retire_cas_failed")?;
     }
-    let keep_hold = matches!(seen.ended, Ended::Idle { .. }) && mutant("hold");
-    (keep_hold || release_hold(&seen.nonce) == HoldRelease::Released).then_some(seen.ended)
+    if seen.idle && mutant("hold") {
+        return Ok(());
+    }
+    match release_hold(&seen.nonce) {
+        HoldRelease::Released => Ok(()),
+        HoldRelease::NotDurable(_) => Err("hold_not_durable"),
+        HoldRelease::Kept(_) => Err("hold_kept"),
+    }
 }
 
 /// The channel's hosted record, pinned to the row's logical session and recorded execution.
@@ -349,7 +508,7 @@ async fn hosted_record(
     token_hash: &str,
     provider: &ProviderKind,
     row: &inflight::InflightTurnState,
-) -> Option<(HostedObservation, HostedExecution)> {
+) -> Result<(HostedObservation, HostedExecution), Held> {
     let channel = row.channel_id.to_string();
     let identity = CanonicalSessionIdentity {
         kind: SessionIdentityKind::DiscordChannel,
@@ -361,10 +520,10 @@ async fn hosted_record(
         identity,
     };
     let HostedLookup::Found(found) = hosted::load_hosted_execution_pg(pool, key).await else {
-        return None;
+        return Err("hosted_unavailable");
     };
     let HostedRecord::Known(record) = found.record.clone() else {
-        return None;
+        return Err("hosted_unavailable");
     };
     let pinned = recovery_tmux_session_name(provider, row).as_deref()
         == Some(record.owner.logical_key.as_str())
@@ -373,28 +532,31 @@ async fn hosted_record(
         && row
             .hosted_record_id
             .is_none_or(|id| id == found.session_id());
-    pinned.then_some((found, record))
+    pinned
+        .then_some((found, record))
+        .ok_or("execution_unpinned")
 }
 
 /// The pane's latest logged source when execution `nonce` logged it, as source reconnect reads it.
-fn logged_source(channel: u64, logical: &str, nonce: &str) -> Option<SourceId> {
-    let events = binding_events_since(channel, 0).ok()?;
+fn logged_source(channel: u64, logical: &str, nonce: &str) -> Result<SourceId, Held> {
+    let events = binding_events_since(channel, 0).map_err(|_| "source_unreadable")?;
     let last = events
         .into_iter()
         .filter(|event| event.tmux_session == logical)
         .filter(|event| !matches!(event.new, BindingTarget::Rejected { .. }))
-        .last()?;
+        .last()
+        .ok_or("source_none")?;
     if last.execution_nonce.as_deref() != Some(nonce) {
-        return None;
+        return Err("source_nonce_mismatch");
     }
     match last.new {
-        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Some(source),
-        _ => None,
+        BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => Ok(source),
+        _ => Err("source_pending"),
     }
 }
 
 /// I on one execution read before and after: its own provider runs, the composer is ready with no
-/// draft or modal, and the source's last turn closed. `Some(body)` names the turn's own reply.
+/// draft or modal, and the source's last turn closed; then the input's own turn as it reads.
 fn idle_read(
     provider: &ProviderKind,
     view: &HerdrPaneView,
@@ -402,51 +564,68 @@ fn idle_read(
     expected: &hosted::ExpectedExecution,
     source: &SourceId,
     submitted: Option<chrono::DateTime<chrono::Utc>>,
-) -> Option<Option<String>> {
+) -> Result<Outcome, Held> {
     let before = view.read_execution();
     let PaneReading::Present {
         root,
         provider: PaneProvider::Execution(running),
     } = &before
     else {
-        return None;
+        return Err("exec_changed");
     };
     if *root != expected.root || *running != expected.provider_process {
-        return None;
+        return Err("exec_changed");
     }
-    let screen = target.capture(-80)?;
-    let ready = match provider {
+    let screen = target.capture(-80).ok_or("composer_unreadable")?;
+    match provider {
         ProviderKind::Claude => {
             let input = InputTarget::Herdr(target.clone());
             let capture = HostCapture::Complete(screen);
-            let outcome = crate::services::claude_tui::host_input::classify(
-                &input,
-                SessionLiveness::Alive,
-                &capture,
-            );
-            outcome == HostInputOutcome::ReadySameExecution
+            let classify = crate::services::claude_tui::host_input::classify;
+            match classify(&input, SessionLiveness::Alive, &capture) {
+                HostInputOutcome::ReadySameExecution => {}
+                HostInputOutcome::Busy => return Err("composer_busy"),
+                HostInputOutcome::PersistentDraft => return Err("composer_draft"),
+                _ => return Err("composer_unreadable"),
+            }
         }
         ProviderKind::Codex => {
             use crate::services::codex_tui::input::{self as codex, ComposerContent};
-            codex::pane_looks_ready_for_codex_prompt(&screen)
-                && (mutant("no-empty-composer")
-                    || codex::active_composer_content_in_pane(&screen) == ComposerContent::Empty)
+            if !codex::pane_looks_ready_for_codex_prompt(&screen) {
+                return Err("composer_busy");
+            }
+            if !mutant("no-empty-composer")
+                && codex::active_composer_content_in_pane(&screen) != ComposerContent::Empty
+            {
+                return Err("composer_draft");
+            }
         }
-        _ => false,
-    };
-    let mut file = std::fs::File::open(&source.path).ok().filter(|_| ready)?;
-    let meta = file.metadata().ok()?;
+        _ => return Err("composer_unreadable"),
+    }
+    let mut file = std::fs::File::open(&source.path).map_err(|_| "source_unreadable")?;
+    let meta = file.metadata().map_err(|_| "source_unreadable")?;
     if (meta.dev(), meta.ino()) != (source.dev, source.ino) {
-        return None;
+        return Err("file_identity");
     }
     let len = meta.len();
-    let body = match provider {
-        ProviderKind::Claude => turn_body(crate::services::claude::herdr_turn::closed_turn(
-            &mut file, submitted, len,
-        )?),
-        _ => codex_last_turn_closed(&mut file, len)?.then_some(None)?,
+    let outcome = match provider {
+        ProviderKind::Claude => {
+            let read = crate::services::claude::herdr_turn::closed_turn_read;
+            read(&mut file, submitted, len)
+                .ok_or("transcript_open")?
+                .map_or(Outcome::Unknown, Outcome::from)
+        }
+        // A rollout shows its latest turn closed, never where the input's own turn began.
+        _ => match codex_last_turn_closed(&mut file, len) {
+            Some(true) => Outcome::Unknown,
+            Some(false) => return Err("transcript_open"),
+            None => return Err("source_unreadable"),
+        },
     };
-    (view.read_execution() == before).then_some(body)
+    match view.read_execution() == before {
+        true => Ok(outcome),
+        false => Err("exec_changed"),
+    }
 }
 
 /// A completed turn's reply: its explicit result, else its streamed text composed as the live bridge
@@ -522,8 +701,16 @@ fn mutant(name: &str) -> bool {
     cfg!(test) && std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
 }
 
+#[path = "herdr_row_end/diagnostics.rs"]
+mod diagnostics;
 #[path = "herdr_row_end_live.rs"]
 mod live;
+#[path = "herdr_row_end/outcome.rs"]
+mod outcome;
+#[path = "herdr_row_end/owner.rs"]
+pub(in crate::services::discord) mod owner;
+#[path = "herdr_row_end/placeholder.rs"]
+mod placeholder;
 
 #[cfg(test)]
 #[path = "herdr_row_end_tests.rs"]

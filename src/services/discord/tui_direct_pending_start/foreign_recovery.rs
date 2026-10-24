@@ -296,6 +296,16 @@ async fn demote_stale_foreign_inflight(
     else {
         return false;
     };
+    // A restarted Herdr row's end belongs to its dedicated owner, never to this sweep.
+    let owner = super::super::recovery_engine::herdr_row_end::owner::dedicated_cleanup_owner;
+    if owner(&provider, &state, shared.restart.current_generation) {
+        tracing::info!(
+            provider = %record.provider,
+            channel_id = record.channel_id,
+            "tui_direct_pending_start: left a restarted Herdr row to its dedicated owner"
+        );
+        return false;
+    }
     let capture_offset = output_capture_offset(&state);
     if committed_foreign_inflight_is_finalize_clearable(&state, record) {
         let mailbox_active_user_msg_id = super::super::mailbox_snapshot(shared, channel)
