@@ -324,6 +324,25 @@ fn personal_and_binary_paths_are_rejected_before_any_file_changes() {
     assert_eq!(fs::read(bin).unwrap(), b"personal binary");
 }
 
+/// A personal herdr directory that is itself a link to the managed home is that home.
+#[test]
+fn a_personal_herdr_link_to_the_managed_home_refuses_it() {
+    let f = Fixture::new();
+    f.config(b"[session]\nresume_agents_on_restore = true\n");
+    let config = f.personal.home.join(".config");
+    fs::create_dir_all(&config).unwrap();
+    std::os::unix::fs::symlink(&f.home, config.join("herdr")).unwrap();
+    let before = snapshot(&f.home);
+    let boot = f.boot(Some("local"), &[(&f.home, "local", "/tmp/isolated.sock")]);
+    let admitted =
+        local(&boot, &f.personal).map(|homes| homes.iter().map(ManagedHome::ensure).count());
+    assert!(
+        admitted.is_err(),
+        "the aliased home was admitted: {admitted:?}"
+    );
+    assert_eq!(snapshot(&f.home), before);
+}
+
 #[test]
 fn same_boot_home_with_two_sockets_is_rejected_before_writing() {
     let f = Fixture::new();

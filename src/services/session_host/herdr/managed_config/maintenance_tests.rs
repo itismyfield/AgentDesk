@@ -149,18 +149,17 @@ fn upkeep_repairs_missing_and_drifted_homes_and_leaves_canonical_bytes_untouched
         "canonical config is not rewritten"
     );
     let repaired = record("upkeep-drifted");
-    assert_eq!((repaired.config, repaired.reason), ("prepared", None));
+    assert_eq!((repaired.config, repaired.cause), ("prepared", None));
     assert!(repaired.backup.is_some() && repaired.earliest_start_after.is_some());
     let kept = record("upkeep-canonical");
     assert_eq!(
-        (kept.config, kept.reason, kept.last_e7.as_str()),
+        (kept.config, kept.cause, kept.last_e7.as_str()),
         ("unchanged", None, "never")
     );
     let at = kept.observed_at;
-    assert_eq!(kept.reason_at(at + chrono::Duration::seconds(89)), None);
-    assert_eq!(
-        kept.reason_at(at + chrono::Duration::seconds(91)),
-        Some("herdr_config_observation_stale"),
+    assert!(!kept.stale_at(at + chrono::Duration::seconds(89)));
+    assert!(
+        kept.stale_at(at + chrono::Duration::seconds(91)),
         "an upkeep that stopped reporting is not read as healthy"
     );
 }
@@ -236,10 +235,10 @@ fn a_refused_home_never_blocks_another_dedicated_home() {
         fs::read(good.join("config.toml")).unwrap(),
         CANONICAL_CONFIG
     );
-    assert_eq!(record("isolate-good").reason, None);
+    assert_eq!(record("isolate-good").cause, None);
     let refused = record("isolate-private");
     assert_eq!(
-        (refused.config, refused.reason),
+        (refused.config, refused.cause),
         ("refused", Some("herdr_managed_home_unsafe"))
     );
     assert_eq!(snapshot(&private), before);
@@ -268,7 +267,7 @@ fn a_personal_xdg_inside_a_managed_home_refuses_every_dedicated_home() {
         "personal boundary was not verifiable"
     );
     for key in ["xdg-first", "xdg-second"] {
-        assert_eq!(record(key).reason, Some("herdr_managed_home_unsafe"));
+        assert_eq!(record(key).cause, Some("herdr_managed_home_unsafe"));
     }
 }
 
@@ -298,7 +297,7 @@ fn a_busy_home_is_retried_without_a_new_health_reason() {
 
     let busy = record("busy");
     assert_eq!(busy.config, "busy");
-    assert_eq!(busy.reason, None, "busy is a retry, not a cause");
+    assert_eq!(busy.cause, None, "busy is a retry, not a cause");
     assert_eq!(busy.observed_at, settled.observed_at);
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), UNSAFE);
     lock.unlock().unwrap();
@@ -326,11 +325,11 @@ fn unreadable_records_and_unsafe_homes_get_their_own_stable_reasons() {
     for _ in 0..2 {
         pass(&boot, &f.personal, false);
         assert_eq!(
-            record("reason-record").reason,
+            record("reason-record").cause,
             Some("herdr_config_record_unreadable")
         );
         assert_eq!(
-            record("reason-open").reason,
+            record("reason-open").cause,
             Some("herdr_managed_home_unsafe")
         );
     }
@@ -364,36 +363,216 @@ fn a_running_server_on_the_old_config_stays_refused_and_is_never_restarted() {
     let boot = BootSessionHosts::from_config(&hosts).unwrap();
     let _registry = native_registry_on_this_thread(&boot);
 
-    pass(&boot, &f.personal, true);
+    let _ = pass(&boot, &f.personal, true);
 
     let repaired = record("native");
     assert_eq!(fs::read(&config).unwrap(), CANONICAL_CONFIG);
     assert_eq!(repaired.config, "prepared");
-    assert_eq!(repaired.last_e7, "unverified:ConfigChangedSinceStart");
-    assert_eq!(repaired.reason, Some("herdr_config_restart_required"));
-    let modified = fs::metadata(&config).unwrap().modified().unwrap();
-    pass(&boot, &f.personal, true);
-
-    let again = record("native");
-    assert_eq!(
-        (again.config, again.reason),
-        ("unchanged", Some("herdr_config_restart_required"))
-    );
-    assert_eq!(
-        again.last_e7, "unverified:ConfigChangedSinceStart",
-        "the same old server still answers"
-    );
-    assert_eq!(fs::metadata(&config).unwrap().modified().unwrap(), modified);
     assert_eq!(backups(&rig.home()), vec![UNSAFE.to_vec()]);
-    let methods: Vec<_> = rig
-        .requests()
-        .iter()
-        .map(|request| request["method"].as_str().unwrap_or("?").to_string())
-        .collect();
-    assert!(
-        !methods.is_empty() && methods.iter().all(|method| method == "ping"),
-        "{methods:?}"
+    let written = fs::metadata(&config).unwrap();
+    let only_pings = || {
+        let methods: Vec<_> = rig
+            .requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap_or("?").to_string())
+            .collect();
+        methods.iter().all(|method| method == "ping")
+    };
+    let mut first = Some(repaired.last_e7);
+    let reread = || {
+        first.take().unwrap_or_else(|| {
+            let _ = pass(&boot, &f.personal, true);
+            let again = record("native");
+            assert_eq!(again.config, "unchanged", "a later pass rewrote the config");
+            let meta = fs::metadata(&config).unwrap();
+            assert_eq!(
+                (meta.ino(), meta.modified().unwrap()),
+                (written.ino(), written.modified().unwrap())
+            );
+            assert_eq!(backups(&rig.home()).len(), 1);
+            assert!(only_pings(), "the server received more than pings");
+            again.last_e7
+        })
+    };
+    assert_eq!(
+        past_no_peer(PEER_SETTLE, reread).unwrap(),
+        "unverified:ConfigChangedSinceStart"
     );
+    let _ = pass(&boot, &f.personal, true);
+    let settled = record("native");
+    assert_eq!(
+        (settled.config, settled.cause),
+        ("unchanged", Some("herdr_config_restart_required")),
+        "the confirmed cause holds whatever this pass read"
+    );
+    assert_eq!(fs::metadata(&config).unwrap().ino(), written.ino());
+    assert_eq!(backups(&rig.home()).len(), 1);
+    assert!(!rig.requests().is_empty() && only_pings());
+}
+
+/// How long a rig test re-reads E7 while the peer read reports `NoPeer`.
+pub(crate) const PEER_SETTLE: Duration = Duration::from_secs(10);
+
+/// Re-reads while E7 says `NoPeer`, an intermittent peer read; any other reading ends the wait at
+/// once, and a `NoPeer` that outlasts `within` is a failure, never a pass.
+pub(crate) fn past_no_peer(
+    within: Duration,
+    mut read: impl FnMut() -> String,
+) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let reading = read();
+        if reading != "unverified:NoPeer" {
+            return Ok(reading);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("E7 still read NoPeer after {within:?}"));
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn a_no_peer_read_is_re_read_and_a_lasting_one_fails() {
+    let mut readings = [
+        "unverified:NoPeer",
+        "unverified:NoPeer",
+        "unverified:ConfigChangedSinceStart",
+    ]
+    .into_iter()
+    .map(String::from);
+    assert_eq!(
+        past_no_peer(PEER_SETTLE, || readings.next().unwrap()),
+        Ok("unverified:ConfigChangedSinceStart".into())
+    );
+    let mut reads = 0;
+    let off = past_no_peer(PEER_SETTLE, || {
+        reads += 1;
+        "off".into()
+    });
+    assert_eq!(
+        (off, reads),
+        (Ok("off".into()), 1),
+        "any other reading ends the wait at once"
+    );
+    let lasting = past_no_peer(Duration::from_millis(50), || "unverified:NoPeer".into());
+    assert!(lasting.is_err(), "a lasting NoPeer passed: {lasting:?}");
+}
+
+fn notified_boot(node: &str, key: &str, home: &Path, channels: &[u64]) -> BootSessionHosts {
+    let mut config: crate::config::Config = serde_yaml::from_str(
+        "agents:\n  - id: notice-fixture\n    name: Notice fixture\n    channels:\n      codex: {id: '7189042', runtime: tui}\n      claude: {id: '7189041', runtime: tui}\n",
+    )
+    .unwrap();
+    config.cluster.instance_id = Some(node.into());
+    let herdr = &mut config.session_hosts.herdr;
+    herdr.endpoints.insert(
+        key.into(),
+        endpoint(EndpointMode::LegacyDedicated, node, home),
+    );
+    for channel in channels {
+        herdr.channels.insert(channel.to_string(), key.into());
+    }
+    BootSessionHosts::from_config(&config).unwrap()
+}
+
+fn paused() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap()
+}
+
+/// `restart_required → NoPeer → stale → restart_required → Off`: the cause and its one notice hold
+/// through every unverifiable reading and only a fresh `Off` ends the episode.
+#[test]
+fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fresh_off() {
+    let f = Fixture::new();
+    let home = f.home("episode", Some(CANONICAL_CONFIG));
+    let boot = notified_boot("episode-node", "episode", &home, &[7_189_042, 7_189_041]);
+    let sent: std::sync::Arc<std::sync::Mutex<Vec<u64>>> = Default::default();
+    let _send = OperatorNotice::send_on_this_thread({
+        let sent = sent.clone();
+        move |channel, _| {
+            sent.lock().unwrap().push(channel);
+            Ok(())
+        }
+    });
+    let witness = crate::services::session_host::herdr::contract::ServerWitness {
+        socket: home.join("herdr.sock"),
+        pid: 1,
+        start: crate::services::session_host::herdr::provenance::StartIdentity::LinuxTicks(1),
+    };
+    let restart = RestoreResume::Unverified(RestoreUnverified::ConfigChangedSinceStart);
+    let unverified = RestoreResume::Unverified(RestoreUnverified::NoPeer);
+    let off = RestoreResume::Off { witness };
+    let sends = || sent.lock().unwrap().clone();
+    paused().block_on(async {
+        let tick =
+            |e7: &RestoreResume| notify(pass_with(&boot, &f.personal, &|_| Some(e7.clone())));
+        tick(&restart).await;
+        assert_eq!(record("episode").cause, Some(RESTART));
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tick(&restart).await;
+        assert_eq!(
+            sends(),
+            vec![7_189_041],
+            "one notice to the lowest mapped channel"
+        );
+        assert_eq!(record("episode").notice, "sent");
+
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tick(&unverified).await;
+        let unsure = record("episode");
+        assert_eq!(
+            (unsure.cause, unsure.last_e7.as_str()),
+            (Some(RESTART), "unverified:NoPeer")
+        );
+        assert!(unsure.stale_at(unsure.observed_at + chrono::Duration::seconds(91)));
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tick(&restart).await;
+        assert_eq!(record("episode").cause, Some(RESTART));
+        assert_eq!(
+            sends().len(),
+            1,
+            "uncertainty and staleness are not a new episode"
+        );
+
+        tick(&off).await;
+        let recovered = record("episode");
+        assert_eq!((recovered.cause, recovered.notice), (None, "none"));
+    });
+    assert_eq!(sends().len(), 1);
+}
+
+/// A cause with no BOOT channel mapped to its home stays pending: nothing is posted or counted.
+#[test]
+fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
+    let f = Fixture::new();
+    let home = f.home("unmapped", Some(CANONICAL_CONFIG));
+    let boot = boot("unmapped-node", &[("unmapped", &home)]);
+    let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _send = OperatorNotice::send_on_this_thread({
+        let posted = posted.clone();
+        move |_, _| {
+            posted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let restart = RestoreResume::Unverified(RestoreUnverified::ConfigChangedSinceStart);
+    paused().block_on(async {
+        for _ in 0..3 {
+            notify(pass_with(&boot, &f.personal, &|_| Some(restart.clone()))).await;
+            tokio::time::advance(Duration::from_secs(61)).await;
+        }
+    });
+    let unmapped = record("unmapped");
+    assert_eq!(
+        (unmapped.cause, unmapped.notice),
+        (Some(RESTART), "pending")
+    );
+    assert_eq!(posted.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 /// One process starts one upkeep task, and that task runs a pass on its first tick.

@@ -11,6 +11,9 @@ use crate::config::session_hosts::{
 use crate::services::session_host::herdr_socket_rig_tests::{
     NativeHerdrRig, native_registry_on_this_thread, native_server_child,
 };
+use crate::services::session_host::managed_config::maintenance::tests::{
+    PEER_SETTLE, past_no_peer,
+};
 use crate::services::session_host::managed_config::{maintenance, path::PersonalPaths};
 
 type Snapshot = BTreeMap<PathBuf, (Vec<u8>, u64, i64, i64)>;
@@ -60,7 +63,31 @@ fn health_shows_restart_required_without_touching_the_home_or_the_server() {
         xdg: None,
     };
     let registry = native_registry_on_this_thread(&boot);
-    maintenance::pass(&boot, &personal, true);
+    let last_e7 = || {
+        maintenance::records()["health-node-endpoint"]
+            .last_e7
+            .clone()
+    };
+    let _ = maintenance::pass(&boot, &personal, true);
+    let repaired = snapshot(&rig.home());
+    assert_eq!(
+        fs::read(rig.home().join("config.toml")).unwrap(),
+        b"[session]\nresume_agents_on_restore = false\n"
+    );
+    let mut first = Some(last_e7());
+    let settled = past_no_peer(PEER_SETTLE, || {
+        first.take().unwrap_or_else(|| {
+            let _ = maintenance::pass(&boot, &personal, true);
+            assert_eq!(
+                snapshot(&rig.home()),
+                repaired,
+                "a later pass touched the home"
+            );
+            assert!(rig.requests().iter().all(|r| r["method"] == "ping"));
+            last_e7()
+        })
+    });
+    assert_eq!(settled.unwrap(), "unverified:ConfigChangedSinceStart");
     drop(registry);
     let _hosts = force_for_test(Some("health-node"), &[(41, "health-node")]);
     let mut live = crate::config::Config::default();
@@ -72,7 +99,11 @@ fn health_shows_restart_required_without_touching_the_home_or_the_server() {
 
     let endpoint = &view["endpoints"]["health-node-endpoint"];
     assert_eq!(endpoint["last_e7"], "unverified:ConfigChangedSinceStart");
-    assert_eq!(endpoint["managed_config"]["config"], "prepared");
+    assert!(matches!(
+        endpoint["managed_config"]["config"].as_str(),
+        Some("prepared" | "unchanged")
+    ));
+    assert_eq!(endpoint["managed_config"]["observation_stale"], false);
     assert_eq!(
         endpoint["managed_config"]["reason"],
         "herdr_config_restart_required"

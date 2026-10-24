@@ -16,7 +16,9 @@ pub(super) fn endpoint(key: &str, entry: &mut Value) {
         entry["managed_config"] = json!({
             "config": record.config,
             "backup": record.backup,
-            "reason": record.reason_at(chrono::Utc::now()),
+            "reason": record.cause,
+            "observation_stale": record.stale_at(chrono::Utc::now()),
+            "notice": record.notice,
             "observed_at": record.observed_at,
             "earliest_start_after": record.earliest_start_after,
         });
@@ -25,7 +27,8 @@ pub(super) fn endpoint(key: &str, entry: &mut Value) {
     let _ = (key, entry);
 }
 
-/// The view's fixed upkeep reasons, only once some endpoint has an upkeep record.
+/// The view's fixed upkeep reasons, only once some endpoint has an upkeep record; a stale
+/// observation is listed beside the cause it keeps, never in its place.
 pub(super) fn summarize(view: &mut Value) {
     let Some(endpoints) = view["endpoints"].as_object() else {
         return;
@@ -39,7 +42,14 @@ pub(super) fn summarize(view: &mut Value) {
     }
     let mut reasons: Vec<&str> = upkept
         .iter()
-        .filter_map(|upkeep| upkeep["reason"].as_str())
+        .flat_map(|upkeep| {
+            let stale = upkeep["observation_stale"].as_bool() == Some(true);
+            [
+                upkeep["reason"].as_str(),
+                stale.then_some("herdr_config_observation_stale"),
+            ]
+        })
+        .flatten()
         .collect();
     reasons.sort_unstable();
     reasons.dedup();

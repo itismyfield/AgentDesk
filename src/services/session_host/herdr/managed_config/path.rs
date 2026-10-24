@@ -65,10 +65,16 @@ fn protect(path: &Path, personal: &PersonalPaths) -> io::Result<()> {
         return Err(invalid("home is not a dedicated managed herdr directory"));
     }
     for private in blocked {
-        if let Some(real) = private.parent().and_then(|p| fs::canonicalize(p).ok())
-            && private
-                .file_name()
-                .is_some_and(|name| overlaps(path, &real.join(name)))
+        let through_parent = private
+            .parent()
+            .and_then(|p| fs::canonicalize(p).ok())
+            .zip(private.file_name())
+            .map(|(real, name)| real.join(name));
+        // A personal herdr path that is itself a link resolves to whatever it aliases.
+        if through_parent
+            .into_iter()
+            .chain(fs::canonicalize(&private).ok())
+            .any(|real| overlaps(path, &real))
         {
             return Err(invalid("home aliases a personal herdr path"));
         }

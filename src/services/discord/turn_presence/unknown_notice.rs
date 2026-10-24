@@ -422,10 +422,15 @@ pub(super) fn snapshots() -> Vec<UnknownSnapshot> {
     let now = Instant::now();
     owners
         .into_iter()
+        .filter(|owner| owner.scope.provider != operator::HERDR_CONFIG)
         .filter(|owner| crate::services::tui_o::turn_mode::transcript_turns(owner.scope.channel))
         .filter_map(|owner| owner.snapshot(now))
         .collect()
 }
+
+/// Operator notices: the same owner, receipt and retry rules for causes outside any turn.
+#[path = "operator_notice.rs"]
+pub(super) mod operator;
 
 #[cfg(test)]
 #[path = "unknown_notice_tests.rs"]
