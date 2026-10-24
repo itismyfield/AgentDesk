@@ -27,9 +27,10 @@ top-level scan; fixture and known-gap counts are unchanged.
 as `--required-agent-mode real_live` and `--required-coverage-class live` checks
 the selected run's evidence; it does not arrange a run.
 
-CI job `relay_authority_targets` invokes the
-`services::discord::tui_prompt_relay::tests::scenario_census_e2e` filter in
-[`.github/workflows/ci-pr.yml:2357`](../../../../.github/workflows/ci-pr.yml#L2357).
+The `rust_tests` workers run
+`services::discord::tui_prompt_relay::tests::scenario_census_e2e` in the single nextest run, and
+`rust_build` requires it on that run's list
+([`.github/workflows/ci-pr.yml:718`](../../../../.github/workflows/ci-pr.yml#L718)).
 Its independent pins remain `CENSUS_FIXTURE=2`, `CENSUS_LIVE=36`, and
 `CENSUS_UNSUPPORTED=3`
 ([`scenario_census_e2e.rs:30`](../../../../src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs#L30)).
@@ -58,9 +59,9 @@ provision:
    cross-cell `E-11` refuses dispatch when foreign live mailbox/session state
    makes the run unsafe.
 6. A separate wall-clock budget. The original audit counted about 3.3 hours of
-   declared waits, not measured elapsed time. The current
-   `relay_authority_targets` census job has a 30-minute timeout
-   (`ci-pr.yml:2287`); it is not a live-matrix time budget.
+   declared waits, not measured elapsed time. The census runs inside the
+   `rust_tests` workers' 75-minute timeout
+   (`ci-pr.yml:741`); it is not a live-matrix time budget.
 7. A disposable environment for destructive cases, including pane termination
    and dcserver restart. These require explicit destructive opt-in.
 

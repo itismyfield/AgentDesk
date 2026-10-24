@@ -331,7 +331,7 @@ expected_closure_if = {
   "lint" => "needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'",
   "scripts" => "${{ !cancelled() }}", "scripts_guards" => nil, "scripts_contracts" => nil,
   "dashboard" => "needs.changes.outputs.dashboard == 'true'", "pg15_owner_proof" => rust_tests_gate,
-  "relay_authority_targets" => relay_gate, "relay_authority_mutations" => relay_gate,
+  "relay_authority_mutations" => relay_gate,
   "check_fast_cross_os" => cross_os_gate, "check_fast_cross_os_targets" => cross_os_gate,
   "required_contexts" => "${{ !cancelled() }}",
 }
@@ -394,7 +394,7 @@ end
 required_key_node = jobs_node.children.each_slice(2).find { |key_node, _| key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == "required_contexts" }&.first
 required_source = required_key_node && raw_job_source(path, required_key_node).gsub(/\b[0-9a-f]{64}\b/, "<sha256>")
 required_source_sha256 = required_source && Digest::SHA256.hexdigest(required_source)
-unless required_source_sha256 == "afb5b917922c663b20d5bc7a52d941751d6eee3bf7fdb7ee049b566c611db338"
+unless required_source_sha256 == "385a40ff89e00c08686c8e204b6bb8d62667a1160b8db4f2b4b93412bc767a65"
   warn "#{path}: required_contexts source bytes changed (scalar tags/styles and exact step surface are pinned); found #{required_source_sha256 || '<missing>'}"
   exit 1
 end
@@ -685,7 +685,7 @@ targets = {
   "rust_build" => {
     "label" => "nextest build and plan job", "name" => "Rust tests build and plan",
     "needs" => "changes", "if" => rust_tests_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 60, "job_sha256" => "3e3f3f388b2c7545aeb7719701a934cea3b8e1830046d5c9dac26c7e047354fe",
+    "job_timeout_minutes" => 60, "job_sha256" => "d22bbf9904832db7e73e446533625ebd8d17a0124a48d77f388050c2322ec65e",
     "cargo_steps" => {
       "Check Rust test source wiring" => {"commands" => ["python3 scripts/ci/rust_test_sources.py check"], "timeout_minutes" => nil, "env" => {"BASH_ENV" => "/dev/null"}},
       "Archive, list, compare and plan" => {
@@ -694,6 +694,7 @@ targets = {
           'cargo nextest archive --lib --archive-file "$NEXTEST_DIR/lib-tests.tar.zst"',
           'cargo nextest list --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" \\',
           '--ignore-default-filter --message-format json > "$NEXTEST_DIR/universe.json"',
+          'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"',
           'python3 scripts/ci/rust_test_sources.py compare --platform linux --list "$NEXTEST_DIR/universe.json" \\',
           '--json-out "$NEXTEST_DIR/compare.json"',
           'python3 scripts/ci/nextest_ci.py plan --universe "$NEXTEST_DIR/universe.json" \\',
@@ -710,7 +711,7 @@ targets = {
   "rust_tests" => {
     "label" => "nextest worker job", "name" => "Rust tests (worker ${{ matrix.worker }})",
     "needs" => %w[changes rust_build], "if" => built_gate, "runs_on" => "ubuntu-latest",
-    "job_timeout_minutes" => 75, "job_sha256" => "21923d4cd4da2637706768047ac08bbf24d190f1cc5b3545ab4b21f3bb82b982", "require_debug_env" => false,
+    "job_timeout_minutes" => 75, "job_sha256" => "8f3b3092e27904b1fa84db80039bf5da6a1da78cd7709b71199dd44e49453e7f", "require_debug_env" => false,
     "cargo_steps" => {
       "Verify archive and plan" => {
         "commands" => ['python3 scripts/ci/nextest_ci.py verify-archive --plan "$RUNNER_TEMP/nextest/plan/plan.json" --worker ${{ matrix.worker }} --archive "$RUNNER_TEMP/nextest/lib-tests.tar.zst" --config "$RUNNER_TEMP/nextest/plan/worker-${{ matrix.worker }}.toml" --sha "$GITHUB_SHA" --record "$RUNNER_TEMP/nextest-result"'],
@@ -769,12 +770,22 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "e2c2439d9eeeaf058608a9fbd26a44f5ce4d966a4c91e92123cbb1be2ba58cca",
+    "job_sha256" => "11465c82e34e913892d90f16e39f89aa48531342a9d426ed7421ba32872cb2e1",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
         "timeout_minutes" => 60,
         "if_condition" => "runner.os == 'Windows'",
+      },
+      "Compare Windows Rust test sources with the nextest list" => {
+        "commands" => [
+          "set -euo pipefail",
+          "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json",
+          "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json",
+        ],
+        "timeout_minutes" => 30,
+        "if_condition" => "runner.os == 'Windows'",
+        "env" => {"BASH_ENV" => "/dev/null"},
       },
     },
   },
@@ -791,37 +802,6 @@ targets = {
         "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
         "timeout_minutes" => 40,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact", "BASH_ENV" => "/dev/null"},
-      },
-    },
-  },
-  "relay_authority_targets" => {
-    "label" => "relay-authority targets job",
-    "name" => "Relay authority targets",
-    "needs" => "changes",
-    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}",
-    "runs_on" => "ubuntu-latest",
-    "job_sha256" => "7d6d570fdb08d032a674d5e3c15e9794bde554d2ae0270ab5e682d9415cb2b42",
-    "job_timeout_minutes" => 30,
-    "cargo_steps" => {
-      "Verify named relay-authority targets and selection floors" => {
-        "commands" => ["python3 scripts/check_relay_authority_contract.py"],
-        "timeout_minutes" => 30,
-      },
-      "Run named relay-authority contract targets" => {
-        "commands" => [
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1",
-        ],
-        "timeout_minutes" => 30,
       },
     },
   },
@@ -953,7 +933,6 @@ targets.each do |job_id, spec|
         errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
       end
       expected_env = step_spec.fetch("env", protected_step_env)
-      expected_env = expected_env.merge("ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact") if job_id == "relay_authority_targets"
       unless step_env == expected_env
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end

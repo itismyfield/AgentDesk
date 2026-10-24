@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the explicitly declared relay-authority contract lanes and enforce floors."""
+"""Enforce the declared relay-authority lane floors against the nextest list the CI run executes."""
 
 from __future__ import annotations
 
@@ -9,24 +9,25 @@ import importlib.util
 import os
 import re
 import shlex
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
 import yaml
 
 DEFAULT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
 PR_WORKFLOW = Path(".github/workflows/ci-pr.yml")
-RELAY_AUTHORITY_JOB = "relay-authority-contract"
-RELAY_AUTHORITY_TARGETS_JOB = "relay_authority_targets"
+RELAY_AUTHORITY_CONTEXT = "relay-authority-contract"
+JUDGE_JOB = "required_contexts"
+BUILD_JOB = "rust_build"
 RELAY_AUTHORITY_MUTATIONS_JOB = "relay_authority_mutations"
+# The judge reads these for the relay context: the single nextest run (N) and the mutation shards.
+JUDGE_NEEDS = ("changes", "rust_build", "rust_tests", "test_evidence", RELAY_AUTHORITY_MUTATIONS_JOB)
+FLOOR_COMMAND = 'python3 scripts/check_relay_authority_contract.py --nextest-list "$NEXTEST_DIR/universe.json"'
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
-RELAY_TARGET_STEP = "Run named relay-authority contract targets"
 RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
-RUST_REQUIRED_OUTPUT = "${{ needs.changes.outputs.rust_tests_skip != 'true' }}"
 VERIFIED_RUST_SKIP = ("${{ steps.comment_only.outcome == 'success' && "
                       "steps.comment_only.outputs.comment_only == 'true' && "
                       "steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}")
@@ -35,7 +36,6 @@ CONDITION3_MUTATION_IF = (
     "steps.mutation_paths.outputs.mutation_sources != 'false'"
     " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
 )
-TEST_ID_SUFFIX = ": test"
 LIB_TEST_INVENTORY = Path("scripts/lib_test_inventory_manifest.txt")
 MUTATION_FILTER_STEP_ID = "mutation_paths"
 SURFACE_GUARD_KINDS = ("mutation_row", "named_target", "entry_test", "known_gap")
@@ -58,15 +58,9 @@ class Lane:
 class LaneResult:
     lane: Lane
     selected: int
-    returncode: int
-    command: tuple[str, ...]
-    output: str
 
 
-def load_relay_authority_job(
-    repo_root: Path,
-    job_id: str = RELAY_AUTHORITY_TARGETS_JOB,
-) -> dict[str, object]:
+def load_relay_authority_job(repo_root: Path, job_id: str) -> dict[str, object]:
     workflow = repo_root / PR_WORKFLOW
     try:
         payload = yaml.safe_load(workflow.read_text(encoding="utf-8"))
@@ -81,11 +75,6 @@ def load_relay_authority_job(
     return job
 
 
-def expected_workflow_command(lane: Lane) -> str:
-    return ("env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- "
-            f"{shlex.join(lane.command)} -- --test-threads=1")
-
-
 def validate_workflow_contract(
     repo_root: Path,
     lanes: Sequence[Lane],
@@ -94,64 +83,32 @@ def validate_workflow_contract(
     changes = load_relay_authority_job(repo_root, "changes")
     if not isinstance(changes.get("outputs"), dict) or changes["outputs"].get("rust_tests_skip") != VERIFIED_RUST_SKIP:
         raise ManifestError("workflow verified Rust skip output must fail closed")
-    publisher = load_relay_authority_job(repo_root, RELAY_AUTHORITY_JOB)
+    judge = load_relay_authority_job(repo_root, JUDGE_JOB)
+    needs = judge.get("needs") if isinstance(judge.get("needs"), list) else []
+    contexts = ((judge.get("strategy") or {}).get("matrix") or {}).get("context") if isinstance(judge.get("strategy"), dict) else None
     if (
-        publisher.get("if") != "${{ !cancelled() }}"
-        or publisher.get("needs") != ["changes", RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB]
-        or "continue-on-error" in publisher
+        judge.get("if") != "${{ !cancelled() }}"
+        or "continue-on-error" in judge
+        or not set(JUDGE_NEEDS) <= set(needs)
+        or not isinstance(contexts, list) or contexts.count(RELAY_AUTHORITY_CONTEXT) != 1
     ):
         raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_JOB} must always publish both execution results"
+            f"workflow jobs.{JUDGE_JOB} must always judge {RELAY_AUTHORITY_CONTEXT} over the Rust tests and mutations"
         )
-    execution_jobs = (RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB)
-    mirrors = [step for step in publisher.get("steps", [])
-               if isinstance(step, dict) and step.get("run") == "./scripts/required-check-mirror.sh"]
-    if len(mirrors) != 2:
-        raise ManifestError("workflow publisher must mirror both execution results")
-    for job_id, mirror in zip(execution_jobs, mirrors):
-        expected = {"CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "relay_authority",
-                    "FILTER_OUTPUT": RUST_REQUIRED_OUTPUT, "UPSTREAM_JOB_NAME": job_id,
-                    "UPSTREAM_RESULT": "${{ needs." + job_id + ".result }}"}
-        env = mirror.get("env")
-        if (any(key in mirror for key in ("if", "continue-on-error")) or not isinstance(env, dict)
-            or any(env.get(key) != value for key, value in expected.items())):
-            raise ManifestError("workflow publisher must mirror actual changes and the shared Rust skip filter")
-        execution = load_relay_authority_job(repo_root, job_id)
-        needs = ["changes", "lib_test_prepare"] if job_id == RELAY_AUTHORITY_TARGETS_JOB else "changes"
-        if ("continue-on-error" in execution or execution.get("needs") != needs
-            or execution.get("if") != RUST_REQUIRED_IF):
-            raise ManifestError(f"workflow jobs.{job_id} must use the verified skip gate with exact preparation dependencies")
+    mutation_job = load_relay_authority_job(repo_root, RELAY_AUTHORITY_MUTATIONS_JOB)
+    if ("continue-on-error" in mutation_job or mutation_job.get("needs") != "changes"
+            or mutation_job.get("if") != RUST_REQUIRED_IF):
+        raise ManifestError(f"workflow jobs.{RELAY_AUTHORITY_MUTATIONS_JOB} must use the verified skip gate")
 
-    job = load_relay_authority_job(repo_root)
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB}.steps must be an array"
-        )
-
-    target_steps = [
-        step for step in steps
-        if isinstance(step, dict) and step.get("name") == RELAY_TARGET_STEP
+    # The named lanes run inside the single nextest run; the build job proves their floors on its list.
+    build = load_relay_authority_job(repo_root, BUILD_JOB)
+    floor_steps = [
+        step for step in build.get("steps") or []
+        if isinstance(step, dict) and FLOOR_COMMAND in [line.strip() for line in str(step.get("run", "")).splitlines()]
     ]
-    if len(target_steps) != 1:
+    if len(floor_steps) != 1 or any(key in floor_steps[0] for key in ("if", "continue-on-error")):
         raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB} must contain exactly one "
-            f"{RELAY_TARGET_STEP!r} step"
-        )
-    if any(key in target_steps[0] for key in ("if", "continue-on-error")):
-        raise ManifestError(f"workflow {RELAY_TARGET_STEP!r} step must be unconditional and fail closed")
-    run = target_steps[0].get("run")
-    actual_commands = (
-        [line.strip() for line in run.splitlines() if line.strip()]
-        if isinstance(run, str)
-        else []
-    )
-    expected_commands = [expected_workflow_command(lane) for lane in lanes]
-    if actual_commands != expected_commands:
-        raise ManifestError(
-            f"workflow jobs.{RELAY_AUTHORITY_TARGETS_JOB} target commands must exactly match "
-            "the manifest argv with AGENTDESK_ROOT_DIR unset and "
-            "-- --test-threads=1 appended"
+            f"workflow jobs.{BUILD_JOB} must run exactly one unconditional, fail-closed relay floor check on its nextest list"
         )
 
     if not mutations_present:
@@ -389,50 +346,36 @@ def validate_authority_surface(payload: dict[str, object], repo_root: Path) -> i
     return len(surface)
 
 
-def count_test_ids(output: str) -> int:
-    return sum(1 for line in output.splitlines() if line.strip().endswith(TEST_ID_SUFFIX))
-
-
-def list_command(lane: Lane) -> tuple[str, ...]:
-    return lane.command + ("--", "--list")
-
-
-def artifact_contract():
-    path = Path(__file__).parent / "ci/lib-test-artifact.py"
-    spec = importlib.util.spec_from_file_location("lib_test_artifact", path)
+def _nextest_ci():
+    path = Path(__file__).parent / "ci/nextest_ci.py"
+    spec = importlib.util.spec_from_file_location("nextest_ci", path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot import shared lib-test contract: {path}")
+        raise ImportError(f"cannot import the nextest list reader: {path}")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    sys.modules.setdefault(spec.name, module)
     spec.loader.exec_module(module)
     return module
 
 
-def run_lane(
-    lane: Lane,
-    repo_root: Path,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> LaneResult:
-    command = list_command(lane)
-    env = os.environ.copy()
-    env.pop("AGENTDESK_ROOT_DIR", None)
-    shared = None
-    if env.get("ADK_LIB_TEST_ARTIFACT") and lane.command[:3] == ("cargo", "test", "--lib") and len(lane.command) == 4:
-        shared = artifact_contract().validated_inventory(repo_root)
-    if shared is not None:
-        output = "\n".join(line for line in shared.splitlines()
-                           if line.endswith(TEST_ID_SUFFIX) and lane.command[3] in line[:-len(TEST_ID_SUFFIX)]) + "\n"
-        proc = subprocess.CompletedProcess(command, 0, output, "")
-    else:
-        proc = runner(command, cwd=repo_root, env=env, capture_output=True, text=True)
-    output = f"{proc.stdout}{proc.stderr}"
-    return LaneResult(lane, count_test_ids(proc.stdout), proc.returncode, command, output)
+def nextest_test_names(path: Path) -> list[str]:
+    """Runnable test names from an unfiltered `cargo nextest list --message-format json`."""
+    reader = _nextest_ci()
+    try:
+        runnable, _ignored = reader.load_universe(path)
+    except reader.PlanError as error:
+        raise ManifestError(str(error)) from error
+    return sorted(name for _binary, name in runnable)
+
+
+def select_lane(lane: Lane, names: Sequence[str]) -> LaneResult:
+    """libtest selection: a test runs when its name contains any positional filter."""
+    filters = [item for item in lane.command[2:] if not item.startswith("-")]
+    selected = [name for name in names if any(item in name for item in filters)]
+    return LaneResult(lane, len(selected))
 
 
 def failures_for(result: LaneResult) -> list[str]:
     failures: list[str] = []
-    if result.returncode != 0:
-        failures.append(f"cargo list command exited {result.returncode}")
     if result.selected == 0:
         failures.append("selected 0 tests")
     if result.selected < result.lane.minimum:
@@ -457,8 +400,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check-manifest",
         action="store_true",
-        help="validate declarations without invoking cargo",
+        help="validate declarations without a nextest list",
     )
+    parser.add_argument("--nextest-list", type=Path, help="unfiltered nextest list JSON of the executed run")
     return parser
 
 
@@ -487,15 +431,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.check_manifest:
         return 0
+    if args.nextest_list is None:
+        print("ERROR: --nextest-list is required unless --check-manifest", file=sys.stderr)
+        return 2
+    try:
+        names = nextest_test_names(args.nextest_list)
+    except ManifestError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
 
     failed = False
     for lane in lanes:
-        result = run_lane(lane, repo_root)
+        result = select_lane(lane, names)
         failures = failures_for(result)
         print(
             f"selection boundary={lane.boundary} lane={lane.name} "
             f"selected={result.selected} minimum={lane.minimum} "
-            f"rc={result.returncode} command={shell_join(result.command)}"
+            f"command={shell_join(lane.command)}"
         )
         if failures:
             failed = True
@@ -503,8 +455,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"ERROR: lane {lane.name}: {'; '.join(failures)}",
                 file=sys.stderr,
             )
-            if result.output:
-                print(result.output[-4000:], file=sys.stderr)
     return 1 if failed else 0
 
 

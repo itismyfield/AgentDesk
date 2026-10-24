@@ -38,14 +38,13 @@ SKIPPED_WHEN_COMMENT_ONLY = (
     "rust_tests",
     "test_evidence",
     "lint",
-    "relay_authority_targets",
     "relay_authority_mutations",
     "pg15_owner_proof",
     "check_fast_cross_os",
     "check_fast_cross_os_targets",
 )
 KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_contracts")
-KEPT_FOR_INCLUDED_RUST = {"rust_build", "rust_tests", "test_evidence", "lint", "relay_authority_targets",
+KEPT_FOR_INCLUDED_RUST = {"rust_build", "rust_tests", "test_evidence", "lint",
                           "relay_authority_mutations", "pg15_owner_proof"}
 REQUIRED_CONTEXTS = (
     "Lint",
@@ -726,7 +725,7 @@ CONTEXTS_OF = {
     "scripts": {"Script checks"}, "scripts_guards": {"Script checks"}, "scripts_contracts": {"Script checks"},
     "dashboard": {"Dashboard (Node 22)"},
     "pg15_owner_proof": {"Fast targeted tests (ubuntu-latest)"},
-    "relay_authority_targets": {"relay-authority-contract"}, "relay_authority_mutations": {"relay-authority-contract"},
+    "relay_authority_mutations": {"relay-authority-contract"},
     "check_fast_cross_os": {"Fast check cross OS required context (ubuntu-latest)"},
     "check_fast_cross_os_targets": {"Fast check cross OS required context (ubuntu-latest)"},
 }

@@ -383,8 +383,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         lint_verified = verified.replace("outputs.rust_tests_skip", "outputs.rust_lint_skip")
         for name in ("rust_or_policy", "rust_compile"):
             self.assertEqual(outputs[name], "${{ " + lint_verified + " && 'false' || steps.filter.outputs." + name + " }}")
-        for name, needs in (("relay_authority_targets", "changes"),
-                            ("relay_authority_mutations", "changes")):
+        for name, needs in (("relay_authority_mutations", "changes"),):
             with self.subTest(job=name):
                 self.assertEqual(jobs[name]["needs"], needs)
                 self.assertEqual(jobs[name]["if"], RUST_REQUIRED_IF)
@@ -454,7 +453,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             ("rust_tests", "-attempt-${{ github.run_attempt }}", "", "artifact uploads"),
             ("test_evidence", "python3 scripts/ci/nextest_ci.py collect-results", "python3 scripts/ci/nextest_ci.py --help", "exact cargo/test command list"),
             ("test_evidence", "    needs: [changes, rust_build, rust_tests]\n", "    needs: [changes, rust_build]\n", "exact needs"),
-            ("relay_authority_targets", "lib-test-artifact.py run -- cargo test --lib", "lib-test-artifact.py run -- cargo test --lib missing_test", "exact cargo/test command list"),
+            ("rust_build", "          python3 scripts/check_relay_authority_contract.py --nextest-list \"$NEXTEST_DIR/universe.json\"\n", "", "exact cargo/test command list"),
         )
         for job_id, old, new, reason in mutants:
             with self.subTest(job=job_id, mutation=old):
@@ -985,52 +984,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_relay_authority_contract_job_uses_pinned_recipe(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        jobs = yaml.safe_load(workflow)["jobs"]
-        job = job_block(workflow, "relay_authority_targets")
-        setup = []
-        for job_id, cap in (("relay_authority_targets", 30), ("relay_authority_mutations", 45)):
-            runner = jobs[job_id]
-            self.assertEqual(runner["if"], RUST_REQUIRED_IF)
-            self.assertEqual(runner["needs"], "changes")
-            self.assertEqual(runner["runs-on"], "ubuntu-latest")
-            self.assertEqual(runner["timeout-minutes"], cap)
-            self.assertEqual(runner["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
-            self.assertEqual(runner["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
-            setup.append([step for step in runner["steps"] if "uses" in step and step.get("id") != "mutation_paths" and step.get("name") != "Download shared lib tests"])
-        self.assertEqual(setup[1][0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
-        setup[1][0] = {"uses": "actions/checkout@v4"}
-        self.assertEqual(
-            setup[0],
-            [{key: value for key, value in step.items() if key != "if"} for step in setup[1]],
-        )
-        self.assertEqual(setup[0][0], {"uses": "actions/checkout@v4"})
-        self.assertEqual(setup[0][1]["with"]["toolchain"], "1.94.1")
-        mutation = jobs["relay_authority_mutations"]
+        mutation = yaml.safe_load(workflow)["jobs"]["relay_authority_mutations"]
+        self.assertEqual(mutation["if"], RUST_REQUIRED_IF)
+        self.assertEqual(mutation["needs"], "changes")
+        self.assertEqual(mutation["runs-on"], "ubuntu-latest")
+        self.assertEqual(mutation["timeout-minutes"], 45)
+        self.assertEqual(mutation["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
+        self.assertEqual(mutation["env"]["CARGO_PROFILE_TEST_DEBUG"], "0")
+        setup = [step for step in mutation["steps"] if "uses" in step and step.get("id") != "mutation_paths"]
+        self.assertEqual(setup[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
+        self.assertEqual(setup[1]["with"]["toolchain"], "1.94.1")
         self.assertEqual(mutation["strategy"], {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}})
         self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_INDEX"], "${{ matrix.shard }}")
         self.assertEqual(mutation["env"]["RELAY_AUTHORITY_MUTATION_SHARD_TOTAL"], "3")
-        self.assertRegex(
-            job,
-            r"(?m)^      - name: Run named relay-authority contract targets\n"
-            r"        env:\n"
-            r"          ADK_LIB_TEST_ARTIFACT: \$\{\{ runner\.temp \}\}/lib-test-artifact\n"
-            r"          BASH_ENV: /dev/null\n"
-            r'          CARGO_PROFILE_DEV_DEBUG: "0"\n'
-            r'          CARGO_PROFILE_TEST_DEBUG: "0"\n'
-            r"        shell: bash\n"
-            r"        timeout-minutes: 30\n"
-            r"        run: \|\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1\n"
-            r"          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact\.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
-        )
         self.assertRegex(
             job_block(workflow, "relay_authority_mutations"),
             r"(?m)^      - name: Require relay-authority mutations to be killed\n"
@@ -1416,7 +1382,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
     def test_required_needs_closure_rejects_fail_open_mutations(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         mutations = []
-        for job_id in ("rust_build", "rust_tests", "test_evidence", "pg15_owner_proof", "relay_authority_targets",
+        for job_id in ("rust_build", "rust_tests", "test_evidence", "pg15_owner_proof",
                        "relay_authority_mutations", "lint", "dashboard", "check_fast_cross_os_targets"):
             runner = job_block(workflow, job_id)
             mutations.append((job_id, runner, re.sub(r"(?m)^    if: .*\n", "    if: always()\n", runner, count=1)))
@@ -1470,7 +1436,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         expected_if = {
             "changes": None, "required_contexts": MIRROR_IF, "scripts": MIRROR_IF, "scripts_guards": None, "scripts_contracts": None,
             "rust_build": rust_gate, "pg15_owner_proof": rust_gate, "rust_tests": n_gate, "test_evidence": n_gate,
-            "relay_authority_targets": RUST_REQUIRED_IF, "relay_authority_mutations": RUST_REQUIRED_IF,
+            "relay_authority_mutations": RUST_REQUIRED_IF,
             "lint": _LINT_FILTER, "dashboard": "needs.changes.outputs.dashboard == 'true'",
             "check_fast_cross_os": cross_os, "check_fast_cross_os_targets": cross_os,
         }
@@ -1713,10 +1679,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_unregistered_target_step_forbidden_runtime_env_is_rejected(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        relay_job = job_block(workflow, "relay_authority_targets")
+        relay_job = job_block(workflow, "relay_authority_mutations")
         mutated_relay_job = relay_job.replace(
-            "      - uses: actions/checkout@v4\n\n",
-            "      - uses: actions/checkout@v4\n\n"
+            "          fetch-depth: 2\n\n",
+            "          fetch-depth: 2\n\n"
             "      - name: Unregistered forbidden env\n"
             "        env:\n"
             '          CARGO_PROFILE_DEV_DEBUG: "1"\n'
@@ -1730,7 +1696,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             REPO_ROOT / "scripts/check-ci-runner-hardening.sh"
         ).read_text(encoding="utf-8")
         repinned_hardening = self._repin_job_hash(
-            hardening, mutated_workflow, "relay_authority_targets"
+            hardening, mutated_workflow, "relay_authority_mutations"
         )
         repinned_gate_sha256 = hashlib.sha256(repinned_hardening.encode()).hexdigest()
         mutated_workflow = mutated_workflow.replace(
@@ -1754,15 +1720,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 ),
                 ("Run script checks", "must not continue on error"),
             ),
-            "relay_authority_targets": (
-                (
-                    "Verify named relay-authority targets and selection floors",
-                    "must retain exact continue-on-error policy",
-                ),
-                (
-                    "Run named relay-authority contract targets",
-                    "must retain exact continue-on-error policy",
-                ),
+            "rust_build": (
+                ("Archive, list, compare and plan", "must retain exact continue-on-error policy"),
             ),
             "relay_authority_mutations": (
                 (
@@ -2659,13 +2618,13 @@ jobs:
     def test_fixed_surfaces_use_raw_github_scalar_values(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         judge = job_block(workflow, "required_contexts")
-        targets = job_block(workflow, "relay_authority_targets")
+        mutations = job_block(workflow, "relay_authority_mutations")
         cases = (
             ("plain no is not the false boolean", judge, "      fail-fast: false\n", "      fail-fast: no\n"),
             ("quoted context changes the pinned scalar style", judge, "          - Lint\n", '          - "Lint"\n'),
             ("explicit str tag is not discarded", judge, "          BASH_ENV: /dev/null\n", "          BASH_ENV: !!str /dev/null\n"),
             ("judge timeout leading zero is not decimal 10", judge, "    timeout-minutes: 10\n", "    timeout-minutes: 010\n"),
-            ("job timeout leading zero is not decimal 30", targets, "    timeout-minutes: 30\n", "    timeout-minutes: 036\n"),
+            ("job timeout leading zero is not decimal 45", mutations, "    timeout-minutes: 45\n", "    timeout-minutes: 055\n"),
         )
         for label, job, old, new in cases:
             with self.subTest(case=label):

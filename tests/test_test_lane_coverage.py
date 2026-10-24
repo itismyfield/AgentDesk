@@ -809,16 +809,5 @@ class RatchetTests(unittest.TestCase):
             coverage.parse_baseline(baseline_text, "repository baseline"),
         )
 
-    def test_ci_script_checks_wires_guard(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            script,
-        )
-        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
-
-
 if __name__ == "__main__":
     unittest.main()

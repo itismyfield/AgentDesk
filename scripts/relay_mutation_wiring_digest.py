@@ -14,7 +14,8 @@ from pathlib import Path
 
 WORKFLOW = ".github/workflows/ci-pr.yml"
 MUTATION_JOB = "relay_authority_mutations"
-MIRROR_JOB = "relay-authority-contract"
+# The judge publishes relay-authority-contract from the mutation job result.
+JUDGE_JOB = "required_contexts"
 # Workflow-level keys every job inherits; absent on both sides compares equal.
 TOP_LEVEL_KEYS = ("env", "defaults", "permissions", "concurrency")
 _ABSENT = object()
@@ -82,7 +83,7 @@ def wiring_subtrees(document: dict) -> dict[str, object]:
     subtrees: dict[str, object] = {"on": trigger}
     for key in TOP_LEVEL_KEYS:
         subtrees[key] = document.get(key, _ABSENT)
-    for job in (MUTATION_JOB, MIRROR_JOB):
+    for job in (MUTATION_JOB, JUDGE_JOB):
         if not isinstance(jobs.get(job), dict):
             raise WiringUnknown(f"jobs.{job} is missing")
         subtrees[f"jobs.{job}"] = jobs[job]

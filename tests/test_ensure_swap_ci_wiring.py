@@ -31,7 +31,6 @@ EXPECTED_SWAP_JOBS = {
         "pg15_owner_proof",
         "lint",
         "scripts",
-        "relay_authority_targets",
         "relay_authority_mutations",
     },
     ".github/workflows/ci-main.yml": {

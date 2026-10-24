@@ -26,8 +26,7 @@ CONTEXTS = {
     "High-risk recovery": ((N_JOBS, ("rust_tests", "high_risk_recovery")),),
     "Dashboard (Node 22)": ((N_JOBS, ("rust_tests",)), (("dashboard",), ("dashboard",))),
     "Fast targeted tests (ubuntu-latest)": ((N_JOBS, ("rust_tests",)), (("pg15_owner_proof",), ("rust_tests",))),
-    "relay-authority-contract": ((N_JOBS, ("rust_tests",)),
-                                 (("relay_authority_targets", "relay_authority_mutations"), ("!rust_tests_skip",))),
+    "relay-authority-contract": ((N_JOBS, ("rust_tests",)), (("relay_authority_mutations",), ("!rust_tests_skip",))),
     "Library test sweep (ubuntu-latest)": ((N_JOBS, ("rust_tests",)),),
     "Fast check cross OS required context (ubuntu-latest)": (
         (N_JOBS, ("rust_tests",)), (("check_fast_cross_os", "check_fast_cross_os_targets"), ("cross_os_rust",))),

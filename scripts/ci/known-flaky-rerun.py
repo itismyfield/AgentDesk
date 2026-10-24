@@ -9,6 +9,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from nextest_required import CONTEXTS
 from pr_head_current import pr_head_is_current
 
 
@@ -25,41 +26,23 @@ OTHER_FAILURE = re.compile(
     r"yaml\.(?:scanner|parser|composer|constructor)\.\w+Error:|"
     r"(?:^|[\s/])ld: cannot find "
 )
-# Only these trusted workflow steps can fail solely because a test job failed.
-# Match matrix job display names against their source, never against log prose.
+# The judge's only step fails solely because a judged job failed. Match job display names
+# against their source, never against log prose; nextest worker logs never parse as known flaky.
+JUDGE_STEP = "Judge required context"
+JOB_NAMES = {
+    "rust_build": r"Rust tests build and plan", "rust_tests": r"Rust tests \(worker \d+\)",
+    "test_evidence": r"Rust tests evidence", "lint": r"Lint runner",
+    "dashboard": r"Dashboard \(Node 22\) runner", "pg15_owner_proof": r"PostgreSQL 15 owner proof",
+    "scripts": r"Script checks runner", "scripts_guards": r"Script checks runner \(guards\)",
+    "scripts_contracts": r"Script checks runner \(contracts\)",
+    "relay_authority_mutations": r"Relay authority mutations \(\d+\)",
+    "check_fast_cross_os": r"Fast check \+ non-PG tests \(windows-latest\)",
+    "check_fast_cross_os_targets": r"Windows exact targets \(windows-latest\)",
+}
+# Contexts outside the judge still mirror one upstream through required-check-mirror.sh.
 MIRRORS = {
-    ("Fast check (ubuntu-latest)", "Mirror fast check result for branch protection"):
-        ("rust_or_policy", "lint", r"Lint runner"),
-    ("Fast check (ubuntu-latest)", "Relay-contract fast check mirror (always,"):
-        ("relay_contract", "lint", r"Lint runner"),
-    ("Fast targeted tests (ubuntu-latest)", "Mirror targeted test result for branch protection"):
-        ("pg_db", "test_fast", r"PostgreSQL tests \(shard \d+\)"),
-    ("Fast targeted tests (ubuntu-latest)", "Mirror PostgreSQL 15 owner proof result for branch protection"):
-        ("pg_db", "pg15_owner_proof", r"PostgreSQL 15 owner proof"),
-    ("Dashboard (Node 22)", "Mirror dashboard result for branch protection"):
-        ("dashboard", "dashboard", r"Dashboard \(Node 22\) runner"),
-    ("High-risk recovery", "Mirror high-risk recovery result across path-filter skips"):
-        ("high_risk_recovery", "high-risk-recovery", r"High-risk recovery runner"),
-    ("Library test sweep (ubuntu-latest)", "Mirror library sweep result across path-filter skips"):
-        ("rust_tests", "library_sweep", r"Library test sweep \(shard \d+\)"),
-    ("Lint", "Mirror lint result for branch protection"):
-        ("rust_or_policy_or_relay_contract", "lint", r"Lint runner"),
-    ("Fast check cross OS required context (ubuntu-latest)", "Mirror check_fast_cross_os result for branch protection"):
-        ("cross_os_rust", "check_fast_cross_os", r"Fast check \+ non-PG tests \(windows-latest\)"),
-    ("Fast check cross OS required context (ubuntu-latest)", "Mirror check_fast_cross_os_targets result for branch protection"):
-        ("cross_os_rust", "check_fast_cross_os_targets", r"Windows exact targets \(windows-latest\)"),
     ("Win32 build-token required context", "Run ./scripts/required-check-mirror.sh"):
         ("win32_build_token", "win32_build_token", r"win32_build_token"),
-    ("Script checks", "Mirror script checks result for branch protection"):
-        ("scripts", "scripts", r"Script checks runner"),
-    ("Script checks", "Mirror script checks guards shard result for branch protection"):
-        ("scripts", "scripts_guards", r"Script checks runner \(guards\)"),
-    ("Script checks", "Mirror script checks contracts shard result for branch protection"):
-        ("scripts", "scripts_contracts", r"Script checks runner \(contracts\)"),
-    ("relay-authority-contract", "Mirror relay authority targets result for branch protection"):
-        ("relay_authority", "relay_authority_targets", r"Relay authority targets"),
-    ("relay-authority-contract", "Mirror relay authority mutations result for branch protection"):
-        ("relay_authority", "relay_authority_mutations", r"Relay authority mutations \(\d+\)"),
 }
 
 
@@ -124,22 +107,44 @@ def failed_tests(log: str) -> set[str] | None:
     return names if names and failures == named_failures else None
 
 
+def judged_failure(context: str, errors: list[str], sources: list[dict]) -> bool:
+    """Every judged job passed or skipped as gated, and each failed one is a classified source."""
+    names = [job for group, _ in CONTEXTS[context] for job in group]
+    if len(errors) != len(names) + 1 or errors[-1] != "Process completed with exit code 1.":
+        return False
+    failed = 0
+    for job, error in zip(names, errors):
+        verdict = error.removeprefix(f"{context}: {job}: ")
+        if verdict in ("success (expected to run: true)", "success (expected to run: false)",
+                       "skipped (expected to run: false)") and verdict != error:
+            continue
+        if verdict != "'failure' but expected to run: true" or not any(
+                re.fullmatch(JOB_NAMES[job], source.get("name", "")) for source in sources):
+            return False
+        failed += 1
+    return failed > 0
+
+
 def derived_mirror(job: dict, log: str, sources: list[dict], jobs: list[dict]) -> bool:
     failed_step = next(step for step in job["steps"] if step.get("conclusion") == "failure")
+    judged = job.get("name") in CONTEXTS and failed_step.get("name") == JUDGE_STEP
     contract = MIRRORS.get((job.get("name"), failed_step.get("name")))
-    if not contract:
+    if not judged and not contract:
         return False
-    filter_name, upstream, source_pattern = contract
     changes = [item for item in jobs if item.get("name") == "Changed paths"]
     if len(changes) != 1 or changes[0].get("conclusion") != "success":
         return False
-    if not any(re.fullmatch(source_pattern, source.get("name", "")) for source in sources):
-        return False
     lines = log_lines(log)
     errors = [line.removeprefix("##[error]") for line in lines if line.startswith("##[error]")]
+    if any(OTHER_FAILURE.search(line) or line.startswith("::error") for line in lines):
+        return False
+    if judged:
+        return judged_failure(job["name"], errors, sources)
+    filter_name, upstream, source_pattern = contract
+    if not any(re.fullmatch(source_pattern, source.get("name", "")) for source in sources):
+        return False
     expected = f"{filter_name}=true requires {upstream} to succeed; result was 'failure'"
-    return errors == [expected, "Process completed with exit code 1."] and not any(
-        OTHER_FAILURE.search(line) or line.startswith("::error") for line in lines)
+    return errors == [expected, "Process completed with exit code 1."]
 
 
 def gh(*args: str) -> str:
@@ -170,7 +175,7 @@ def classify_run(repo: str, run_id: str, attempt: int, known: set[str]) -> tuple
     if not failures or any(job.get("conclusion") not in {"failure", "success", "skipped"} for job in jobs):
         return False, "no-op:incomplete-jobs"
     sources, mirrors = [], []
-    mirror_jobs = {name for name, _ in MIRRORS}
+    mirror_jobs = {name for name, _ in MIRRORS} | set(CONTEXTS)
     for job in failures:
         steps = job.get("steps") or []
         if sum(step.get("conclusion") == "failure" for step in steps) != 1:

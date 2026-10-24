@@ -749,15 +749,6 @@ class ExitCodeContract(unittest.TestCase):
                 ])
         self.assertEqual(rc, 2)
 
-    def test_ci_wiring_has_exact_standalone_enforce_call(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text("utf-8")
-        exact = '"$PYTHON" scripts/check_test_target_integrity.py --enforce'
-        self.assertEqual(
-            [line for line in script.splitlines() if line == exact], [exact],
-            "mutation self-assert: removing --enforce must fail this test",
-        )
-
-
 class AllowlistContract(unittest.TestCase):
     def test_allowlist_cannot_excuse_target_mismatch(self) -> None:
         # A target-mismatch means the command itself is wrong; the allowlist
@@ -2454,34 +2445,6 @@ mod after_string_brace {
         )
         self.assertEqual(verify_rc, 0, output.getvalue())
         self.assertIn("manifest=match", output.getvalue())
-
-    def test_ci_script_runs_one_timed_verifier_after_unittests(self) -> None:
-        # This is deliberately source-only: asserting CI wiring must not start
-        # the Cargo-backed verifier from the cargo-free unittest lane.
-        lines = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
-            "utf-8"
-        ).splitlines()
-        unittest_line = (
-            '"$PYTHON" -m unittest tests.test_check_test_target_integrity'
-        )
-        verifier_line = (
-            'AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh '
-            'lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 '
-            '"$PYTHON" scripts/check_test_target_integrity.py '
-            '--verify-lib-inventory'
-        )
-        verifier_lines = [
-            line for line in lines
-            if "--verify-lib-inventory" in line
-        ]
-        self.assertEqual(
-            verifier_lines,
-            [verifier_line],
-            "the Cargo verifier must have one exact, timed CI invocation",
-        )
-        self.assertEqual(lines.count(unittest_line), 1)
-        self.assertLess(lines.index(unittest_line), lines.index(verifier_line))
-
 
 class ExecutionEvidenceSummaryContract(unittest.TestCase):
     def _summary_fields(self, rendered: str) -> dict[str, int]:

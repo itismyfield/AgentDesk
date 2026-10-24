@@ -241,8 +241,7 @@ time for diagnostics; neither is a stored approval value.
   | `lint` | `changes` | `needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'` |
   | `pg15_owner_proof` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `relay_authority_mutations` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `relay_authority_targets` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `required_contexts` | `changes`, `rust_build`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_targets`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ !cancelled() }}` |
+  | `required_contexts` | `changes`, `rust_build`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ !cancelled() }}` |
   | `rust_build` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `rust_tests` | `changes`, `rust_build` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
   | `scripts` | `changes` | `${{ !cancelled() }}` |

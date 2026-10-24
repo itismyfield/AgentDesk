@@ -10,18 +10,17 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` matrix → `full_non_pg_required_context` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` matrix → required mirror (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | Main은 push·dispatch에서 같은 전체 sweep 집합을 네 샤드로 나눈다. `full_non_pg`는 `sweep_shards`·`lib_test_prepare`를 필요로 하고 `!cancelled()`일 때 실행한다. `always()` 집계 잡이 모든 샤드의 success만 받아 기존 `Full tests (ubuntu-latest)` 컨텍스트를 보존한다. PR은 `rust_tests` 또는 selector의 `force_full`이 true일 때 선택 집합을 실행한다. 각 샤드는 자기 PostgreSQL 서비스를 시작한다. |
-| **PostgreSQL tests** | `postgres` (numeric ID shards + `continuity`) | `test_fast`의 같은 matrix와 PG 서비스 | `postgres_full` | Main/nightly는 항상 실행. numeric 샤드 수는 `PG_SHARD_COUNT`(현재 8)를 따르고 `continuity` leg가 추가 targeted recipe를 한 번 실행한다. Main은 전체 numeric 집합, PR은 선택 ID가 있는 numeric 샤드만 실행하며 양쪽 모두 continuity를 포함한다. PR의 `test_fast`는 `pg_db` 또는 selector의 `force_full`이 true일 때 실행하며, 닫힌 gate는 required mirror가 green으로 게시한다. |
-| **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
+| **Full tests** | `full_non_pg` matrix → `full_non_pg_required_context` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `rust_build` → `rust_tests` 6 worker → `test_evidence`, 판정은 `required_contexts` (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | Main은 push·dispatch에서 같은 전체 sweep 집합을 네 샤드로 나눈다. `full_non_pg`는 `sweep_shards`·`lib_test_prepare`를 필요로 하고 `!cancelled()`일 때 실행한다. `always()` 집계 잡이 모든 샤드의 success만 받아 기존 `Full tests (ubuntu-latest)` 컨텍스트를 보존한다. PR은 `rust_tests`가 true일 때 모든 lib 시험을 nextest 한 번으로 실행하고, 각 worker는 자기 PostgreSQL 서비스를 시작한다. |
+| **PostgreSQL tests** | `postgres` (numeric ID shards + `continuity`) | 같은 nextest 실행(N)의 PG 시험 | `postgres_full` | Main/nightly는 항상 실행. numeric 샤드 수는 `PG_SHARD_COUNT`(현재 8)를 따르고 `continuity` leg가 추가 targeted recipe를 한 번 실행한다. Main은 전체 numeric 집합과 continuity를 실행한다. PR은 PG 시험도 N에 들어 있고 `pg15_owner_proof`가 PostgreSQL 15를 따로 확인한다. |
+| **High-risk recovery** | `high-risk-recovery` | N (선택자는 `scripts/ci/targeted-test-selectors.txt`) | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR은 `rust_tests`와 `high_risk_recovery` 중 하나라도 켜지면 N을 요구한다. |
 
 **주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
 PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인지 판정한다. 참이면
-`pg_db`·`high_risk_recovery`·`cross_os_rust`·`rust_tests` 출력을 `false`로 내보내
-`test_fast`·`high-risk-recovery`·Windows 두 job·`library_sweep`이 skip되고, 같은 출력을
-읽는 required mirror가 green을 게시한다. 단 base·head 트리의 `include!`·`include_str!`·
+`high_risk_recovery`·`cross_os_rust`·`rust_tests` 출력을 `false`로 내보내
+nextest job·Windows 두 job이 skip되고, 같은 출력을 읽는 `required_contexts` 판정이 green을 게시한다. 단 base·head 트리의 `include!`·`include_str!`·
 `include_bytes!` 호출이 바뀐 파일을 읽거나 인자를 해석할 수 없어 읽을 수도 있으면
 (`scripts/ci/rust_include_reads.py`) 시험이 그 주석을 보므로 `rust_tests`는 원래 값을 유지해
-`library_sweep`만 돈다. `lint`·Script checks·relay authority·
+nextest job이 돈다. `lint`·Script checks·relay authority·
 dashboard는 원래 조건 그대로 돈다. 바뀐 `.rs`의 어느 쪽에든 LF·CRLF 외의 줄 경계 문자
 (`\r` 단독, U+2028 등)가 있으면 판정기가 리터럴 안의 차이를 지우므로 주석 전용으로 보지 않는다.
 판정 오류·include 스캔 실패·gate step 실패·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
@@ -35,7 +34,9 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 **참인지**만 검사하며 관측이 충분한지는 검사하지 않는다. invocation 하한을
 제거했으므로 truthful all-zero summary도 통과한다.
 
-### PR 측 library sweep (#5185)
+### Main 측 library sweep (#5185)
+
+PR은 이 sweep 대신 nextest 한 번으로 모든 lib 시험을 돌린다. 아래는 아직 이 구조를 쓰는 main 설명이다.
 
 `library_sweep`은 `scripts/ci/test-selection.py plan`이 고른 PR sweep 집합을
 최대 네 샤드로 나눈다. full 모드의 집합은 기존 `--lib` 하네스에서

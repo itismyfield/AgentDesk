@@ -505,6 +505,18 @@ if run_check contracts "Nested libtest declarations"; then
 "$PYTHON" -m unittest tests.test_nested_libtest
 fi
 
+# Main still runs the retired lane tooling until it moves to the nextest jobs; keep its unit tests.
+if run_check contracts "Retired PR lane tooling still used by main"; then
+"$PYTHON" -m unittest tests.test_test_lane_coverage tests.test_lane_source_parity tests.test_lane_activation
+"$PYTHON" -m unittest tests.test_required_id_exception_fragments tests.test_test_selection tests.test_non_pg_test_filter
+"$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
+fi
+
+if run_check cargo "Shared lib test artifact and inventory tooling"; then
+"$PYTHON" -m unittest tests.test_check_test_target_integrity
+"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
+fi
+
 if run_check contracts "Rust test source wiring and PG classification"; then
 # Every reached test is in the single nextest run; an unlinked test file, unknown cfg or unreadable include fails.
 "$PYTHON" scripts/ci/rust_test_sources.py check

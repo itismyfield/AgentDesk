@@ -598,26 +598,6 @@ class SweepShardTests(unittest.TestCase):
         self.assertEqual(invoke([child, other], without_parent + child_ignored
                                 + f"test {other} ... ok\n" + primary), 1)
 
-    def test_workflows_parallelize_sweep_and_preserve_required_contexts(self):
-        main, pr = (yaml.safe_load(path.read_text())["jobs"]
-                    for path in (MAIN_WORKFLOW, PR_WORKFLOW))
-        for jobs, name, matrix in ((main, "full_non_pg", "sweep_shards.outputs.matrix"),
-                                   (pr, "library_sweep", "pg_shards.outputs.sweep_matrix")):
-            self.assertIn("strategy", jobs[name], "sweep must execute parallel shards")
-            self.assertEqual(jobs[name]["strategy"], {
-                "fail-fast": False, "matrix": "${{ fromJSON(needs." + matrix + ") }}"})
-        aggregate = main["full_non_pg_required_context"]
-        self.assertEqual(aggregate["name"], "Full tests (ubuntu-latest)")
-        self.assertEqual(aggregate["needs"], "full_non_pg")
-        self.assertEqual(aggregate["if"], "always()")
-        step = aggregate["steps"][0]
-        for result in ("success", "failure", "cancelled", "skipped", ""):
-            rc = subprocess.run(["bash", "-c", step["run"]],
-                                env={**os.environ, "SWEEP_RESULT": result}).returncode
-            self.assertEqual(rc == 0, result == "success")
-        self.assertEqual(pr["library_sweep_required_context"]["name"],
-                         "Library test sweep (ubuntu-latest)")
-
     def test_full_and_selected_sweep_shards_execute_the_original_set_once(self):
         for full in (False, True):
             with self.subTest(full=full):
@@ -972,51 +952,6 @@ class WorkflowGateTests(unittest.TestCase):
         self.text = PR_WORKFLOW.read_text("utf-8")
         self.workflow = yaml.safe_load(self.text)
         self.jobs = self.workflow["jobs"]
-
-    def test_full_triggers_enter_both_lanes_and_mirrors_read_the_same_gate(self) -> None:
-        block = self.text.split("            rust_or_policy:\n", 1)[1].split("            # ", 1)[0]
-        patterns = re.findall(r"- '([^']+)'", block)
-        outputs = self.jobs["changes"]["outputs"]
-        self.assertIn("steps.filter.outputs.rust_or_policy == 'true'", outputs["pg_db"])
-        for path in (".cargo/config.toml", ".github/actions/ensure-swap/action.yml",
-                     "scripts/ci/test-selection.py", "tests/fixtures/pg_lane/x.json",
-                     "scripts/pg_test_lane_manifest.txt", "scripts/known_test_failures.txt",
-                     "scripts/lib_test_inventory_manifest.txt"):
-            with self.subTest(path=path):
-                self.assertTrue(any(glob_regex(p).match(path) for p in patterns), path)
-        for mirror, (upstream, name) in {
-                "fast_targeted_tests_required_context": ("test_fast", "pg_db"),
-                "library_sweep_required_context": ("library_sweep", "rust_tests")}.items():
-            env = next(step["env"] for step in self.jobs[mirror]["steps"]
-                       if step.get("env", {}).get("UPSTREAM_JOB_NAME") == upstream)
-            self.assertEqual((env["FILTER_NAME"], env["FILTER_OUTPUT"]),
-                             (name, f"${{{{ needs.changes.outputs.{name} }}}}"))
-
-    def test_force_full_opens_both_lanes_whatever_their_path_gates_say(self) -> None:
-        self.assertNotIn("if", self.jobs["pg_shards"])  # Every PR plans.
-        self.assertEqual(self.jobs["pg_shards"]["outputs"]["force_full"],
-                         "${{ steps.plan.outputs.force_full }}")
-        for gates in ({"pg_db": "false", "rust_tests": "false"},   # comment-only, docs
-                      {"pg_db": "true", "rust_tests": "false"},    # sqlx-data.json
-                      {"pg_db": "false", "rust_tests": "true"}):
-            for job, own in (("test_fast", "pg_db"), ("library_sweep", "rust_tests")):
-                with self.subTest(job=job, gates=gates):
-                    condition = self.jobs[job]["if"]
-                    self.assertTrue(runs(condition, {**gates, "force_full": "true"}))
-                    self.assertEqual(runs(condition, {**gates, "force_full": "false"}),
-                                     gates[own] == "true")
-
-    def test_a_label_starts_no_run_and_the_kill_switch_is_read_once(self) -> None:
-        # A `labeled` run would re-post skipped required checks on the same head SHA.
-        self.assertIsNone(self.workflow[True]["pull_request"])
-        step = self.jobs["pg_shards"]["steps"][1]
-        self.assertEqual(step["env"], {"ADK_CI_SELECT": "${{ vars.ADK_CI_SELECT }}"})
-        comment = self.text.split("      - id: plan\n", 1)[0].rsplit("\n", 2)[1]
-        self.assertIn("ci-full label from the next push or reopen", comment)
-        self.assertEqual(self.text.count("vars.ADK_CI_SELECT"), 1)
-        main = MAIN_WORKFLOW.read_text("utf-8")
-        self.assertNotIn(ts.PLAN_ENV, main)
-
 
 if __name__ == "__main__":
     unittest.main()

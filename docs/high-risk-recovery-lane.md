@@ -51,5 +51,5 @@
 
 ## Notes
 
-- `cargo test --all-targets`는 여전히 전체 회귀 gate다. recovery lane은 이를 대체하지 않고, restart/reconcile/outbox 계열을 별도 required job으로 승격한다.
+- PR은 모든 lib 시험을 nextest 한 번으로 돌리고 `High-risk recovery` context는 그 실행의 판정이다. 이 lane의 선택자는 `scripts/ci/targeted-test-selectors.txt`의 `High-risk recovery` 절에 두며, 계획된 시험과 맞지 않으면 build·evidence job이 실패한다. main은 아직 별도 `high-risk-recovery` job을 돌린다.
 - inventory는 현재 "existing vs missing"을 분리해 기록한다. missing 항목은 lane 밖으로 숨기지 않고 문서에 남겨 다음 테스트 투자 우선순위를 고정한다.

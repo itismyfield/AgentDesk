@@ -2263,47 +2263,9 @@ class PgDbCiWiring(unittest.TestCase):
         cls.script_checks = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text("utf-8")
         cls.justfile = (REPO_ROOT / "justfile").read_text("utf-8")
 
-    def test_the_shipped_filter_selects_every_file_the_shipped_manifest_names(self) -> None:
-        # The repaired state of (a), measured on the tree rather than a
-        # fixture: no file with a live PG test is outside the filter, and the
-        # region the filter carries is the one the manifest derives.
-        manifest = REPO_ROOT / membership.MANIFEST_REL
-        files = membership.load_manifest_files(manifest.read_text("utf-8"), str(manifest))
-        patterns = membership.parse_pg_db_patterns(self.PR_WORKFLOW)
-        self.assertEqual(
-            [path for path in files if not membership.path_selected(path, patterns)], []
-        )
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc = membership.check_pg_db_generated_block(self.PR_WORKFLOW, manifest)
-        self.assertEqual(rc, 0)
-
-    def test_repost_production_only_changes_select_the_required_pg_job(self) -> None:
-        patterns = membership.parse_pg_db_patterns(self.PR_WORKFLOW)
-        files = (
-            "src/services/tui_o/repost/provenance.rs",
-            "src/services/tui_o/repost/admission.rs",
-            "src/services/tui_o/repost/runner.rs",
-            "src/services/tui_o/repost/config.rs",
-            "src/services/tui_o/repost/projection.rs",
-            "src/services/tui_o/writer/deliver.rs",
-            "src/services/tui_o/writer/actor.rs",
-            "src/services/tui_o/writer/host.rs",
-            "src/services/tui_o/store/ledger.rs",
-            "src/services/discord/outbound/o_writer_repost_io.rs",
-            "src/services/discord/outbound/o_writer_discord_port.rs",
-            "src/services/discord/runtime_bootstrap/o_writer_host.rs",
-        )
-        for path in files:
-            with self.subTest(path=path):
-                self.assertTrue(membership.path_selected(path, patterns), path)
-        job = self.workflow["jobs"]["test_fast"]
-        self.assertIn("needs.changes.outputs.pg_db", job["if"])
-        self.assertEqual(str(job["env"]["AGENTDESK_REQUIRE_PG"]), "1")
-        self.assertTrue(any(PG_SELECTOR_RUN == step.get("run", "") for step in job["steps"]))
-
     def test_repost_test_consumers_install_and_preflight_ripgrep(self) -> None:
         consumers = {
-            "ci-pr.yml": ("test_fast", "library_sweep"),
+            "ci-pr.yml": ("rust_tests",),
             "ci-main.yml": ("full_non_pg", "postgres"),
             "ci-nightly.yml": ("full_macos", "full_windows", "postgres_full"),
         }
@@ -2324,7 +2286,8 @@ class PgDbCiWiring(unittest.TestCase):
                     tests = [index for index, step in enumerate(steps)
                              if "cargo test" in step.get("run", "")
                              or "just test-postgres" in step.get("run", "")
-                             or "test-selection.py run" in step.get("run", "")]
+                             or "test-selection.py run" in step.get("run", "")
+                             or "cargo nextest run" in step.get("run", "")]
                     self.assertTrue(tests, "the consumer must still execute its test suite")
                     self.assertLess(min(installs), min(preflights))
                     self.assertLess(min(preflights), min(tests))
@@ -2346,46 +2309,6 @@ class PgDbCiWiring(unittest.TestCase):
              + block.partition("\nfi\n")[0] + "\nfi\n"],
             cwd=tempfile.gettempdir(), capture_output=True, text=True)
         return done.returncode, done.stdout.splitlines()
-
-    def test_script_checks_runs_the_gate_and_demands_a_clean_regeneration(self) -> None:
-        # Unconditional on purpose: were the job path-filtered, a PR adding a
-        # PG test to an unselected file could skip the very check for it.
-        job = self.workflow["jobs"]["scripts"]
-        self.assertEqual((job.get("if"), job["needs"]), ("${{ !cancelled() }}", ["changes", "lib_test_prepare"]))
-        self.assertTrue(
-            any("ci-script-checks.sh" in str(step.get("run", "")) for step in job["steps"]),
-            "the scripts job must run scripts/ci-script-checks.sh",
-        )
-        checker = "py scripts/check_pg_test_lane_membership.py"
-        self.assertEqual(self.run_pg_gate_section(), (0, [
-            f"{checker} --baseline-ref fixture-ref",
-            f"{checker} --write-pg-db-paths",
-            "git diff --exit-code HEAD -- .github/workflows/ci-pr.yml",
-            "py -m unittest tests.test_check_pg_test_lane_membership",
-        ]))
-        # Neither half is advisory: whichever goes red stops the job right
-        # there, so a dirty regeneration cannot be merged past a green check.
-        for rcs, ran in ((dict(py_rc=1), 1), (dict(git_rc=1), 3)):
-            with self.subTest(**rcs):
-                rc, calls = self.run_pg_gate_section(**rcs)
-                self.assertEqual((rc != 0, len(calls)), (True, ran))
-
-    def test_the_pg_job_keys_off_pg_db_and_still_runs_the_pg_recipe(self) -> None:
-        # paths-filter -> job condition -> recipe -> selector. The condition
-        # itself is also asserted by tests/test_fast_check_ci_wiring.py; the
-        # link on to the recipe that runs the PG tests is asserted here.
-        job = self.workflow["jobs"]["test_fast"]
-        self.assertIn("needs.changes.outputs.pg_db", job["if"])
-        # The PR runs the selector, whose full mode is main's `just test-postgres-shard`.
-        self.assertTrue(
-            any(PG_SELECTOR_RUN == str(step.get("run", "")) for step in job["steps"]),
-            "the pg_db-gated job must invoke the PG selector",
-        )
-        self.assertIn('FULL_PG = ("just", "test-postgres-shard")', SELECTOR.read_text("utf-8"))
-        recipe = self.justfile.partition("\ntest-postgres:")[2].partition("\n\n")[0]
-        for marker in ("source scripts/ci/non-pg-test-filter.sh", "cargo test", '"${PG_INCLUDE_ARGS[@]}"'):
-            self.assertIn(marker, recipe, f"just test-postgres must select {marker}")
-
 
 if __name__ == "__main__":
     unittest.main()

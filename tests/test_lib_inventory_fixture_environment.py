@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import test_check_relay_authority_contract as relay_fixture
 from tests import test_check_test_target_integrity as fixture
 from tests import test_non_pg_test_filter as non_pg_fixture
 
@@ -22,13 +21,6 @@ NON_PG_SHELL_CARGO_CASES = (
     "test_static_pg_restoration_is_what_bash_sources",
     "test_main_pg_shards_run_each_test_postgres_command_once",
 )
-RELAY_FIXTURE_CASES = (
-    ("SelectionContract", "test_run_lane_appends_list_and_removes_agentdesk_root"),
-    ("FloorGateEndToEnd", "test_listing_below_the_declared_floor_makes_the_gate_red"),
-    ("FloorGateEndToEnd", "test_listing_that_meets_the_declared_floor_stays_green"),
-    ("FloorGateEndToEnd", "test_an_empty_listing_is_red_even_though_cargo_exits_zero"),
-)
-
 
 class LibInventoryFixtureEnvironment(unittest.TestCase):
     def test_cargo_backstop_is_hermetic_under_inherited_artifact_input(self):
@@ -92,8 +84,7 @@ class ShellCargoFixtureEnvironment(unittest.TestCase):
             artifact = str(directory / "artifact")
             env = {"ADK_LIB_TEST_ARTIFACT": artifact, "PATH": f"{cargo.parent}{os.pathsep}{os.environ['PATH']}"}
             results = []
-            with mock.patch.dict(os.environ, env), \
-                 mock.patch.object(relay_fixture.contract, "artifact_contract", side_effect=AssertionError("relay fixture must not probe the runner artifact")):
+            with mock.patch.dict(os.environ, env):
                 for case in cases:
                     result = unittest.TestResult()
                     case.run(result)
@@ -103,7 +94,6 @@ class ShellCargoFixtureEnvironment(unittest.TestCase):
 
     def test_shell_cargo_stubs_are_hermetic_under_inherited_artifact_input(self):
         cases = [non_pg_fixture.NonPgTestFilter(name) for name in NON_PG_SHELL_CARGO_CASES]
-        cases += [getattr(relay_fixture, owner)(name) for owner, name in RELAY_FIXTURE_CASES]
         results, calls = self.run_cases(cases)
         for case, result in zip(cases, results):
             with self.subTest(case=case.id()):

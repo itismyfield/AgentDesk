@@ -23,8 +23,7 @@ EXPECTED = {
     "High-risk recovery": (["rust_tests", "high_risk_recovery"], {}),
     "Dashboard (Node 22)": (["rust_tests"], {"dashboard": ["dashboard"]}),
     "Fast targeted tests (ubuntu-latest)": (["rust_tests"], {"pg15_owner_proof": ["rust_tests"]}),
-    "relay-authority-contract": (["rust_tests"], {"relay_authority_targets": ["!rust_tests_skip"],
-                                                  "relay_authority_mutations": ["!rust_tests_skip"]}),
+    "relay-authority-contract": (["rust_tests"], {"relay_authority_mutations": ["!rust_tests_skip"]}),
     "Library test sweep (ubuntu-latest)": (["rust_tests"], {}),
     "Fast check cross OS required context (ubuntu-latest)": (
         ["rust_tests"], {"check_fast_cross_os": ["cross_os_rust"], "check_fast_cross_os_targets": ["cross_os_rust"]}),

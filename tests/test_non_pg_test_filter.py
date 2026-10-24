@@ -116,25 +116,6 @@ bash -euo pipefail -c "$PROGRAM"
                 self.assertEqual(set().union(*(set(args[1:]) for args in after)), old | {"suite::new_pg_case"})
                 self.assertEqual(sum(len(args) - 1 for args in after), len(old) + 1)
 
-    def test_both_workflows_use_the_shared_matrix_and_existing_mirror(self) -> None:
-        for filename, job_id in (("ci-main.yml", "postgres"), ("ci-pr.yml", "test_fast")):
-            jobs = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text("utf-8"))["jobs"]
-            self.assertEqual(jobs[job_id]["strategy"], {
-                "fail-fast": False, "matrix": "${{ fromJSON(needs.pg_shards.outputs.matrix) }}"})
-            self.assertNotIn("PG_INCLUDE_SHARD", jobs[job_id]["env"])
-            pg_step = next(step for step in jobs[job_id]["steps"] if step.get("name") == ("just test-postgres-shard" if filename == "ci-main.yml" else "PostgreSQL shard tests"))
-            self.assertEqual(pg_step["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
-            plan = jobs["pg_shards"]["steps"][1]["run"]
-            # The PR plan's full matrix is main's: every shard of the shared partition.
-            self.assertIn("--pg-shard-matrix" if filename == "ci-main.yml" else "test-selection.py plan", plan)
-        result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
-                                check=True, capture_output=True, text=True)
-        import json
-        self.assertEqual({"shard": load_selector().shards([], True)}, json.loads(result.stdout))
-        mirror = jobs["fast_targeted_tests_required_context"]
-        self.assertEqual(mirror["name"], "Fast targeted tests (ubuntu-latest)")
-        self.assertEqual(mirror["steps"][1]["env"]["UPSTREAM_RESULT"], "${{ needs.test_fast.result }}")
-
     def test_source_exports_filter_and_replays_the_generated_selection(self) -> None:
         script = r'''
 cargo() {
