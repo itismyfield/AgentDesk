@@ -114,6 +114,23 @@ fn codex_observation_fresh_holds_all_visits_but_not_the_initial_predecessor() {
     assert_eq!(observed.current, source(1));
     assert_eq!(observed.held, vec![source(1), source(2)]);
     assert!(!observed.held.contains(&source(9)));
+
+    let mut input = inputs("fresh");
+    input.events[0].seq = 2;
+    input
+        .events
+        .insert(0, event(1, PRIOR, None, BindingTarget::Source(source(9))));
+    input.tail = 2;
+    let events = input.events.clone();
+    assert_eq!(complete(input).held, [source(1)]);
+    let mut input = inputs("fresh");
+    input.events = events;
+    input
+        .events
+        .push(event(3, NONCE, None, BindingTarget::Source(source(2))));
+    input.current = source(2);
+    input.tail = 3;
+    unknown(input);
 }
 
 #[test]

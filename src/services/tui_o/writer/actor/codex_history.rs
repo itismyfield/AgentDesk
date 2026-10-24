@@ -158,9 +158,14 @@ fn checked(mut inputs: Inputs) -> Result<Snapshot, String> {
         };
         if let Some(source) = source {
             if own {
-                if latest
-                    .as_ref()
-                    .is_some_and(|prior| event.old.as_ref() != Some(prior))
+                // A fresh typed claim has no prior-nonce predecessor; later visits must link.
+                let linked = visited || context.launch_mode == "resume" || event.old.is_some();
+                #[cfg(test)]
+                let linked = linked || mutant("fresh_predecessor");
+                if linked
+                    && latest
+                        .as_ref()
+                        .is_some_and(|prior| event.old.as_ref() != Some(prior))
                 {
                     return Err("current execution source chain conflicts".into());
                 }

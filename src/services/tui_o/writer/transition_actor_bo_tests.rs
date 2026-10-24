@@ -46,12 +46,13 @@ where
     use crate::services::tui_o::writer::binding::ChannelBindingLog;
     use sha2::{Digest, Sha256};
 
-    let harness = Harness::build_channel(channel, |_| {
-        vec![InitSource {
+    let harness = Harness::build_channel(channel, |_| match provider {
+        ShadowProvider::Codex => vec![InitSource {
             source_id: source.clone(),
             delivery_start: 0,
             prefix_hash: hex::encode(Sha256::digest([])),
-        }]
+        }],
+        ShadowProvider::Claude => Vec::new(),
     });
     harness.gate.acquired();
     let (host, stopping) = watch::channel(false);
@@ -96,6 +97,10 @@ where
         .join(channel.to_string());
     let before = files(&directory);
     let result = run(ready).await;
+    assert!(
+        !task.is_finished(),
+        "the real provider actor stayed available"
+    );
     assert_eq!(
         files(&directory),
         before,
