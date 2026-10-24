@@ -1955,6 +1955,14 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
         // Operator transition context: checks the row sits on a registered endpoint, never a host.
         ("src/services/discord/health/o_transition.rs", 0),
+        (
+            "src/services/discord/health/o_transition/codex_context.rs",
+            0,
+        ),
+        (
+            "src/services/discord/health/o_transition/codex_census.rs",
+            0,
+        ),
         // Consent reads the registered launch adapter; it never constructs or routes to a host.
         ("src/services/discord/router/herdr_consent.rs", 0),
     ];
