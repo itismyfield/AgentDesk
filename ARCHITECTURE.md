@@ -1640,19 +1640,6 @@ src/
 │   │   │   ├── permit.rs
 │   │   │   ├── permit_tests.rs
 │   │   │   └── policy_tests.rs
-│   │   ├── restart_mode/
-│   │   │   └── protocol_v2/
-│   │   │       ├── fs/
-│   │   │       │   ├── unix.rs
-│   │   │       │   └── unsupported.rs
-│   │   │       ├── phase/
-│   │   │       │   ├── codec.rs
-│   │   │       │   └── reducer.rs
-│   │   │       ├── disposition.rs
-│   │   │       ├── fs.rs
-│   │   │       ├── mod.rs
-│   │   │       ├── phase.rs
-│   │   │       └── values.rs
 │   │   ├── restart_report/
 │   │   │   ├── model/
 │   │   │   │   ├── entry_tests.rs
