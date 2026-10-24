@@ -234,21 +234,8 @@ async fn render_channel_monitoring_from_registry(
     let Some(registry) = health_registry else {
         return Ok(());
     };
-    let http = resolve_status_http(registry).await?;
+    let http = super::session_notice_delivery::channel_http(registry, channel_id).await?;
     render_channel_monitoring_from_store(&http, monitoring, None, channel_id).await
-}
-
-async fn resolve_status_http(
-    registry: &Arc<health::HealthRegistry>,
-) -> Result<Arc<serenity::Http>, String> {
-    use super::bot_role::UtilityBotRole;
-
-    if let Ok(http) = health::resolve_utility_bot_http(registry, UtilityBotRole::Notify).await {
-        return Ok(http);
-    }
-    health::resolve_utility_bot_http(registry, UtilityBotRole::Announce)
-        .await
-        .map_err(|(_, body)| body)
 }
 
 async fn render_channel_monitoring_from_store(
@@ -280,7 +267,6 @@ async fn render_channel_monitoring_from_store(
                     error
                 );
             }
-            // #3607: monitoring status messages are not provider-scoped.
             crate::services::observability::emit_relay_delete_result(
                 "",
                 channel_id.get(),
@@ -350,34 +336,25 @@ async fn wait_if_shared(shared: Option<&Arc<SharedData>>, channel_id: ChannelId)
     }
 }
 
-/// Hint line appended to monitoring banners so users know which slash
-/// commands address the underlying turn. Kept as a constant so the
-/// single-entry and multi-entry branches stay in sync.
-const MONITORING_ACTION_HINT: &str = "   ⤷ /stop 으로 턴 취소, /restart 로 에이전트 재시작";
-
 pub(crate) fn format_monitoring_message(entries: &[MonitoringEntry]) -> Option<String> {
-    match entries {
-        [] => None,
-        [entry] => Some(format!(
-            "👀 모니터링 중: {} (시작 {})\n{}",
-            entry.description,
-            format_kst_hhmm(entry.started_at),
-            MONITORING_ACTION_HINT,
-        )),
-        entries => {
-            let mut lines = Vec::with_capacity(entries.len() + 2);
-            lines.push(format!("👀 모니터링 중 ({}건):", entries.len()));
-            lines.extend(entries.iter().map(|entry| {
-                format!(
-                    "- {} ({})",
-                    entry.description,
-                    format_kst_hhmm(entry.started_at)
-                )
-            }));
-            lines.push(MONITORING_ACTION_HINT.to_string());
-            Some(lines.join("\n"))
-        }
+    if entries.is_empty() {
+        return None;
     }
+    let details = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} (시작 {})",
+                super::session_notice::preview(&entry.description),
+                format_kst_hhmm(entry.started_at)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(super::session_notice::finish(format!(
+        "-# 👀 모니터링 중 ({}건): {details}",
+        entries.len()
+    )))
 }
 
 fn format_kst_hhmm(value: DateTime<Utc>) -> String {
@@ -386,3 +363,7 @@ fn format_kst_hhmm(value: DateTime<Utc>) -> String {
         .format("%H:%M")
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "monitoring_status_inline_tests.rs"]
+mod inline_tests;

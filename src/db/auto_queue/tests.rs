@@ -577,6 +577,31 @@ mod dispatch_terminal_sync_pg_tests {
             RunCompletionOutcome::AlreadyTerminal
         );
         assert_eq!(count_message_outbox(&pool).await, 1);
+        let (bot, source, original, display): (String, String, String, Option<serde_json::Value>) =
+            sqlx::query_as("SELECT bot,source,content,session_notice FROM message_outbox")
+                .fetch_one(&pool)
+                .await
+                .expect("load actual run-completion outbox row");
+        assert_eq!(
+            bot, "notify",
+            "autoqueue row identity must remain unchanged"
+        );
+        assert_eq!(
+            source, "system",
+            "autoqueue dedup source must remain unchanged"
+        );
+        assert!(original.starts_with("자동큐 완료:"));
+        let display =
+            display.expect("the actual run completion entrypoint must freeze its provider display");
+        assert_eq!(display["version"], 1);
+        assert_eq!(display["provider_hint"], "claude");
+        let content = display["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("-# ✅ "),
+            "actual autoqueue completion must use one provider success subtext line: {content:?}"
+        );
+        assert!(crate::services::discord::session_notice::is_inline(content));
+        assert!(content.encode_utf16().count() <= 2_000);
 
         pool.close().await;
         pg_db.drop().await;

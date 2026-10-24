@@ -146,7 +146,7 @@ def is_our_send(message: dict[str, Any]) -> bool:
 
 
 # The direct-input notice quotes the injected text, so it is never a provider body.
-DIRECT_INPUT_NOTICE = re.compile(r"^터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):")
+DIRECT_INPUT_NOTICE = re.compile(r"^(?:터미널에 직접 주입된 입력 \(tmux : `[^`]+`\):|-# ⌨️ )")
 
 
 def provider_bot_id(provider: str) -> str:
@@ -190,7 +190,7 @@ def relay_body(message: dict[str, Any]) -> str | None:
     answer markers; preserve arbitrary prose and interior card examples.
     """
 
-    if not is_relay_response(message):
+    if not is_relay_response(message) or DIRECT_INPUT_NOTICE.match(message.get("content") or ""):
         return None
     content = message.get("content") or ""
     prefix = _SESSION_BANNER_PREFIX_PATTERN.match(content)

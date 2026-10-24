@@ -1108,7 +1108,7 @@ class PostScenarioIdle(unittest.TestCase):
         window.add(
             {
                 "id": "2",
-                "content": "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\nfinal prompt\n```",
+                "content": "-# ⌨️ final prompt",
                 "author": {"id": "agentdesk", "bot": True},
                 "type": 0,
             }

@@ -664,20 +664,24 @@ fn clock() -> String {
 }
 
 fn unknown_notice(reason: &str) -> String {
-    format!(
-        "⚠ {} 터미널 턴 상태를 확인하지 못해 진행 표시를 멈췄습니다 (사유: {reason}). 그 동안 들어온 외부 입력은 대기열에 보관됩니다.",
-        clock()
+    crate::services::discord::session_notice::subtext(
+        "⚠️",
+        &format!(
+            "{} 터미널 턴 상태를 확인하지 못해 진행 표시를 멈췄습니다 (사유: {reason}). 그 동안 들어온 외부 입력은 대기열에 보관됩니다.",
+            clock()
+        ),
     )
 }
 
 fn held_notice(reason: &str) -> String {
-    match reason {
+    let text = match reason {
         "legacy_tui_gate" => format!(
-            "⚠ {} 진행 표시는 끝났지만 대기열이 Legacy TUI 판정에 막혀 있습니다.",
+            "{} 진행 표시는 끝났지만 대기열이 Legacy TUI 판정에 막혀 있습니다.",
             clock()
         ),
-        _ => format!("⚠ {} 대기열이 진행되지 않아 확인이 필요합니다.", clock()),
-    }
+        _ => format!("{} 대기열이 진행되지 않아 확인이 필요합니다.", clock()),
+    };
+    crate::services::discord::session_notice::subtext("⚠️", &text)
 }
 
 /// The mailbox token and the oldest waiting input: queue head, in-memory reservation, then the

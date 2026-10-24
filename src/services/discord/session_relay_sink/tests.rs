@@ -1,4 +1,5 @@
 use super::super::placeholder_controller::PlaceholderLifecycle;
+use super::idle_jsonl::idle_jsonl_payload_contains_init_event;
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};

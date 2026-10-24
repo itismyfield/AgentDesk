@@ -51,6 +51,14 @@ impl CardDeliveryClients {
         Self { bots: unique }
     }
 
+    pub(super) fn for_event(&self, event: &super::TaskCardEvent) -> Option<&CardBot> {
+        if event.payload.is_completion_card() {
+            self.preferred()
+        } else {
+            self.by_key(&super::provider_bot_key(&event.scope.provider))
+        }
+    }
+
     pub(in crate::services::discord) fn preferred(&self) -> Option<&CardBot> {
         self.bots.first()
     }

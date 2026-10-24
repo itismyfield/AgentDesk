@@ -8,6 +8,7 @@ mod card_post;
 mod card_render;
 mod footer_only_marker;
 mod gateway;
+mod inline_delivery;
 mod response_chunks;
 mod retired_metadata;
 mod store;
@@ -15,6 +16,8 @@ mod terminal_identity;
 
 #[cfg(test)]
 mod footer_retirement_tests;
+#[cfg(test)]
+mod inline_contract_tests;
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +28,7 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::session_backend::{StreamLineState, classify_task_notification_kind};
 
 use self::card_post::deliver_card_post_claim;
+use self::inline_delivery::deliver_claim;
 pub(in crate::services::discord) use self::terminal_identity::footer_background_marker_session_key;
 pub(super) use gateway::{
     CardBot, CardDeliveryClients, CardPostReconcile, DiscordTaskCardTransport, TaskCardTransport,
@@ -161,7 +165,13 @@ impl TaskNotificationContext {
             task_id: self.task_id.clone(),
             tool_use_id: self.tool_use_id.clone(),
             status: clean_optional(Some(&self.status)),
-            summary: clean_optional(Some(&self.summary)),
+            summary: clean_optional(Some(&self.summary)).map(|summary| {
+                if self.kind == "monitor_auto_turn" && !summary.starts_with("Monitor event") {
+                    format!("Monitor event: \"{summary}\"")
+                } else {
+                    summary
+                }
+            }),
             ..Default::default()
         };
         TaskCardEvent {
@@ -393,6 +403,7 @@ pub(in crate::services::discord) fn response_chunk_nonce_for_generation(
     format!("adktr{}", &digest[..20])
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn claim_task_response_delivery(
     pool: Option<&PgPool>,
@@ -422,6 +433,7 @@ pub(in crate::services::discord) async fn claim_task_response_delivery(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn claim_task_response_delivery_with_recovery_key(
     pool: Option<&PgPool>,
@@ -699,24 +711,28 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
     intent: EnsureIntent,
     metadata: Option<&super::completion_footer_metadata::CompletionFooterMetadata>,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
-    let preferred = clients.preferred().ok_or_else(|| {
-        CardEnsureError::Transient("no notify/provider Discord bot is available".to_string())
+    let restored;
+    let event = if intent == EnsureIntent::Promotion {
+        restored = store::restore_completion_event(pool, event)
+            .await
+            .map_err(CardEnsureError::Store)?;
+        &restored
+    } else {
+        event
+    };
+    let preferred = clients.for_event(event).ok_or_else(|| {
+        CardEnsureError::Transient("required task surface bot is unavailable".to_string())
     })?;
-    let seed_content = metadata.map_or_else(
-        || event.payload.render(1),
-        |metadata| event.payload.render_with_completion_metadata(1, metadata),
-    );
     for attempt in 0..20 {
-        let claim = store::claim_card(
+        let claim = store::claim_event(
             pool,
-            &event.scope,
+            event,
             &preferred.key,
-            &seed_content,
-            &content_hash(&seed_content),
             match intent {
                 EnsureIntent::Observation => StoreIntent::Observation,
                 EnsureIntent::Promotion => StoreIntent::Promotion,
             },
+            metadata,
         )
         .await
         .map_err(CardEnsureError::Store)?;
@@ -732,8 +748,16 @@ async fn ensure_card_with_metadata_inner<T: TaskCardTransport>(
                 });
             }
             CardClaim::Owned(claimed) => {
-                return deliver_claim(pool, clients, transport, event, intent, claimed, metadata)
-                    .await;
+                let pending_other_monitor = event.payload.is_monitor()
+                    && intent == EnsureIntent::Observation
+                    && claimed.monitor.is_none();
+                let outcome =
+                    deliver_claim(pool, clients, transport, event, intent, *claimed, metadata)
+                        .await?;
+                if pending_other_monitor {
+                    continue;
+                }
+                return Ok(outcome);
             }
             CardClaim::Busy { .. } if attempt < 19 => {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -789,6 +813,17 @@ async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
                 )));
             }
             store::MissingCardReplacementClaim::Owned(claimed) => {
+                let mut claimed = *claimed;
+                if event.payload.is_monitor() {
+                    claimed.monitor = Some(store::monitor::Observation {
+                        payload: event.payload.monitor_fingerprint(),
+                        source: event.scope.terminal_delivery_fingerprint.clone(),
+                    });
+                }
+                if inline_delivery::needs_reconciliation(event, clients, &claimed) {
+                    return inline_delivery::reconcile_legacy(pool, clients, transport, &claimed)
+                        .await;
+                }
                 let Some(bot) = clients.by_key(&claimed.bot_key) else {
                     let error = format!(
                         "the replacement card's pinned bot {} is unavailable",
@@ -813,101 +848,6 @@ async fn replace_confirmed_missing_card_inner<T: TaskCardTransport>(
         }
     }
     unreachable!("bounded missing-card replacement loop returns on its last attempt")
-}
-
-async fn deliver_claim<T: TaskCardTransport>(
-    pool: Option<&PgPool>,
-    clients: &CardDeliveryClients,
-    transport: &T,
-    event: &TaskCardEvent,
-    _intent: EnsureIntent,
-    claimed: ClaimedCard,
-    metadata: Option<&super::completion_footer_metadata::CompletionFooterMetadata>,
-) -> Result<CardEnsureOutcome, CardEnsureError> {
-    let Some(bot) = clients.by_key(&claimed.bot_key) else {
-        let error = format!("the card's pinned bot {} is unavailable", claimed.bot_key);
-        match claimed.action {
-            store::ClaimAction::Post => store::mark_post_failure(pool, &claimed, &error).await,
-            store::ClaimAction::Edit { message_id } => {
-                store::mark_edit_failure(pool, &claimed, message_id, &error).await
-            }
-        }
-        .map_err(CardEnsureError::Store)?;
-        return Err(CardEnsureError::Permanent(error));
-    };
-    let content = match &claimed.action {
-        store::ClaimAction::Post if !claimed.rendered_content.is_empty() => {
-            claimed.rendered_content.clone()
-        }
-        _ => metadata.map_or_else(
-            || event.payload.render(claimed.update_count),
-            |metadata| {
-                event
-                    .payload
-                    .render_with_completion_metadata(claimed.update_count, metadata)
-            },
-        ),
-    };
-    let hash = content_hash(&content);
-
-    match claimed.action {
-        store::ClaimAction::Post => {
-            let message_id =
-                deliver_card_post_claim(pool, transport, bot, &claimed, &content, &hash).await?;
-            Ok(CardEnsureOutcome {
-                message_id,
-                bot_key: claimed.bot_key,
-                disposition: if claimed.revision > 1 && !claimed.new_terminal_completion {
-                    CardDisposition::Replaced
-                } else {
-                    CardDisposition::Created
-                },
-            })
-        }
-        store::ClaimAction::Edit { message_id } => {
-            match transport
-                .edit_card(bot, event.scope.channel_id, message_id, &content)
-                .await
-            {
-                Ok(()) => {
-                    store::mark_edited(pool, &claimed, message_id, &content, &hash)
-                        .await
-                        .map_err(CardEnsureError::Store)?;
-                    Ok(CardEnsureOutcome {
-                        message_id,
-                        bot_key: claimed.bot_key,
-                        disposition: CardDisposition::Edited,
-                    })
-                }
-                Err(TaskCardTransportError::ConfirmedMissing(_error)) => {
-                    let replacement =
-                        store::prepare_replacement(pool, &claimed, message_id, &content, &hash)
-                            .await
-                            .map_err(CardEnsureError::Store)?;
-                    let replacement_id = deliver_card_post_claim(
-                        pool,
-                        transport,
-                        bot,
-                        &replacement,
-                        &content,
-                        &hash,
-                    )
-                    .await?;
-                    Ok(CardEnsureOutcome {
-                        message_id: replacement_id,
-                        bot_key: replacement.bot_key,
-                        disposition: CardDisposition::Replaced,
-                    })
-                }
-                Err(error) => {
-                    store::mark_edit_failure(pool, &claimed, message_id, &error.to_string())
-                        .await
-                        .map_err(CardEnsureError::Store)?;
-                    Err(map_transport_error(error))
-                }
-            }
-        }
-    }
 }
 
 fn map_transport_error(error: TaskCardTransportError) -> CardEnsureError {

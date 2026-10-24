@@ -3,9 +3,11 @@
 use super::*;
 
 #[cfg(test)]
-static NEW_TERMINAL_CLAIM_RACE_HOOK: LazyLock<
-    Mutex<Option<(String, std::sync::Arc<tokio::sync::Barrier>)>>,
-> = LazyLock::new(|| Mutex::new(None));
+type TerminalClaimRaceHook = Option<(String, std::sync::Arc<tokio::sync::Barrier>)>;
+
+#[cfg(test)]
+static NEW_TERMINAL_CLAIM_RACE_HOOK: LazyLock<Mutex<TerminalClaimRaceHook>> =
+    LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 pub(in crate::services::discord::task_notification_delivery) fn install_new_terminal_claim_race_hook(
@@ -67,7 +69,7 @@ pub(super) async fn claim_card_pg(
          VALUES ($1, $2, $3, $4, 'card', 'posting', $5, $6, 1, 1, $7, $8,
                  $9, NOW() + make_interval(secs => $10), $11)
          ON CONFLICT DO NOTHING
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(channel_id)
     .bind(&scope.provider)
@@ -84,12 +86,12 @@ pub(super) async fn claim_card_pg(
     .await
     .map_err(|error| format!("insert task card lease: {error}"))?
     {
-        return Ok(CardClaim::Owned(claimed_from_row(
+        return Ok(CardClaim::Owned(Box::new(claimed_from_row(
             scope,
             lease_owner,
             &row,
             ClaimAction::Post,
-        )?));
+        )?)));
     }
 
     let current = sqlx::query(
@@ -201,7 +203,7 @@ pub(super) async fn claim_card_pg(
                AND revision = $12
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -229,7 +231,7 @@ pub(super) async fn claim_card_pg(
                AND delivery_state = 'card_posted'
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -273,7 +275,7 @@ pub(super) async fn claim_card_pg(
                AND delivery_state IN ('footer_only', 'posting')
                AND (lease_owner IS NULL OR lease_expires_at <= NOW())
              RETURNING bot_key, discord_nonce, discord_message_id, revision,
-                       update_count, rendered_content",
+                       update_count, rendered_content, post_started_at",
         )
         .bind(channel_id)
         .bind(&scope.provider)
@@ -306,7 +308,7 @@ pub(super) async fn claim_card_pg(
     };
     let mut claimed = claimed_from_row(&current_scope, lease_owner, &row, action)?;
     claimed.new_terminal_completion = new_terminal_completion;
-    Ok(CardClaim::Owned(claimed))
+    Ok(CardClaim::Owned(Box::new(claimed)))
 }
 
 pub(super) async fn find_terminal_delivery_pg(

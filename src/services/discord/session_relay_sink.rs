@@ -60,12 +60,10 @@ use supervision::{LegacySessionRelayConsumer, run_idle_jsonl_relay_loop};
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
 mod relay_format;
-mod task_notification_context;
+pub(in crate::services::discord) mod task_notification_context;
 mod terminal_handoff;
 pub(in crate::services::discord) mod turn_parser;
 use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
-#[cfg(test)]
-use self::idle_jsonl::idle_jsonl_payload_contains_init_event;
 use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
@@ -549,10 +547,7 @@ impl SessionBoundDiscordRelaySink {
                     provider.clone(),
                     None,
                 );
-                #[cfg(test)]
-                let controller_gateway = gateway.unwrap_or(&live_gateway);
-                #[cfg(not(test))]
-                let controller_gateway: &dyn super::gateway::TurnGateway = &live_gateway;
+                let controller_gateway = short_controller::choose_gateway(gateway, &live_gateway);
                 return short_controller::deliver_short_replace_via_controller(
                     controller_gateway,
                     short_controller::SinkShortReplaceCtx {

@@ -15,9 +15,9 @@ steps:
     timeout_s: 240
   - wait_idle_s: 3
   - send_keys: "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK"
-  - wait_for_raw_discord_text: "터미널에 직접 주입된 입력"
+  - wait_for_raw_discord_text: "-# ⌨️ direct-input-echo (E-4)"
     timeout_s: 60
-  # The notify bot's direct-input notice quotes DIRECT_E4_OK; only the response bot's body counts.
+  # The provider's input subtext quotes DIRECT_E4_OK; only its response body counts.
   - wait_for_discord_text: "DIRECT_E4_OK"
     relay_author: provider
     timeout_s: 240
@@ -27,7 +27,7 @@ assertions:
       max: 24
   - relay_latency_within:
       max_seconds: 240
-  - raw_text_present: "터미널에 직접 주입된 입력"
+  - raw_text_present: "-# ⌨️ direct-input-echo (E-4)"
   - provider_text_present: "DIRECT_E4_OK"
   - no_duplicate_content: true
   - no_control_chars: true

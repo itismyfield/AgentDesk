@@ -212,7 +212,6 @@ pub(in crate::services::discord) use self::claude_source::{
 #[cfg(unix)]
 use self::session_rotation_settle::settle_claude_session_rotations;
 
-const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
 const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
