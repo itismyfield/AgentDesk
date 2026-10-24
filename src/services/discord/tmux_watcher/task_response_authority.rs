@@ -261,12 +261,10 @@ async fn watcher_card_clients(
                 .to_string(),
         ));
     }
-    if persisted_bot_key.is_none() || persisted_bot_key == Some(provider_key.as_str()) {
-        bots.push(task_delivery::CardBot::new(
-            provider_key.clone(),
-            provider_http.clone(),
-        ));
-    }
+    bots.push(task_delivery::CardBot::new(
+        provider_key.clone(),
+        provider_http.clone(),
+    ));
     if let Some(persisted) = persisted_bot_key
         && persisted != notify_alias
         && persisted != provider_key

@@ -12,7 +12,6 @@ use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
 pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
-use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 
@@ -58,12 +57,8 @@ pub(crate) struct Context {
     /// The pane and spawn nonce of the execution the request was checked against.
     pub tmux: String,
     pub nonce: String,
-    /// The epoch of the registered home the request was admitted under; `None` without one.
-    pub home_epoch: Option<i64>,
     /// The channel's session transition lock, taken only around each retirement.
     pub lock: Arc<tokio::sync::Mutex<()>>,
-    /// The home's command admission, kept until the job ends however the requester left.
-    pub permit: Option<CommandPermit>,
 }
 
 pub(crate) struct Envelope {
@@ -219,7 +214,7 @@ pub(crate) struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Envelope>,
-    /// The writer's gate, which owns a channel without a registered home.
+    /// The writer's channel ownership gate.
     pub(super) gate: Arc<OwnershipGate>,
     pub(super) wall: Wall,
     /// The host's stop, raised before the actor's own stop reaches it.
@@ -274,7 +269,7 @@ impl TransitionPort {
     }
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
-    /// runs to its end with the permit, and only the reply is lost.
+    /// runs to its end, and only the reply is lost.
     pub(crate) async fn request(
         &self,
         operation: Operation,

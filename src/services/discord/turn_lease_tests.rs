@@ -350,7 +350,6 @@ async fn operator_release_cas_then_successor_keeps_new_turn_and_row() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request: request.clone(),
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -454,7 +453,7 @@ async fn operator_release_strict_clear_preserves_nonce_less_successor() {
     with_isolated_runtime_root(|| async {
         let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let channel = ChannelId::new(575404);
-        let mailbox = shared.mailbox(channel);
+        let _mailbox = shared.mailbox(channel);
         let request = seed(&shared, channel).await;
         let mut row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
         let expected = inflight::InflightTurnIdentity::from_state(&row);
@@ -624,7 +623,6 @@ async fn restart_mode_row_still_refuses_operator_inspect_and_release() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -682,7 +680,6 @@ async fn rebind_origin_row_still_refuses_operator_inspect_and_release() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -744,7 +741,6 @@ async fn restart_mode_pinned_token_still_refuses_release_without_any_row() {
         )
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -872,7 +868,6 @@ async fn claim_refuses_unbound_message_id_without_panic() {
         let key = TurnKey::new(channel, 0, expected.generation)
             .with_episode_nonce(Some(&expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request: ReleaseRequest {
                 expected,
                 reason: "operator verified the provider finished".into(),
@@ -952,7 +947,6 @@ async fn operator_release_follow_up_never_latches_a_successor_recovery() {
         let key = TurnKey::new(channel, 123, request.expected.generation)
             .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
-            _permit: None,
             request,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
@@ -1038,25 +1032,42 @@ async fn act7_operator_release_reports_manual_settlement_and_preserves_herdr_inp
     }).await;
 }
 
+type ClaimPause = Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+
+thread_local! {
+    static OPERATOR_CLAIM_PAUSE: std::cell::RefCell<Option<ClaimPause>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) async fn pause_operator_claim() {
+    let pause = OPERATOR_CLAIM_PAUSE.with(|slot| slot.borrow().clone());
+    if let Some(pause) = pause {
+        pause.0.notify_one();
+        pause.1.notified().await;
+    }
+}
+
+struct OperatorClaimPause;
+impl Drop for OperatorClaimPause {
+    fn drop(&mut self) {
+        OPERATOR_CLAIM_PAUSE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn d2b_operator_event_keeps_recovery_after_caller_abort_until_actor_ack() {
+async fn operator_release_settles_after_caller_abort_without_home_fence() {
     with_isolated_runtime_root(|| async {
-        use crate::db::o_channel_homes::HomeState;
-        use crate::services::cluster::channel_home;
-        use crate::services::discord::commands::control::home_fence::PAUSE;
         let shared = super::super::make_shared_data_for_tests_with_storage(None);
         let channel = ChannelId::new(575499);
         let request = seed(&shared, channel).await;
-        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
         let barrier = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
-        PAUSE.with(|slot| *slot.borrow_mut() = Some(("release_claim", barrier.clone())));
-        let owner = shared.clone();
+        OPERATOR_CLAIM_PAUSE.with(|slot| *slot.borrow_mut() = Some(barrier.clone()));
+        let _pause = OperatorClaimPause;
+        let owner = Arc::clone(&shared);
         let caller =
             tokio::spawn(async move { release_on(&owner, &PROVIDER, channel, request).await });
         tokio::time::timeout(std::time::Duration::from_secs(10), barrier.0.notified())
             .await
-            .expect("effect boundary reached");
-        assert_eq!(home.commands_in_flight(), 1, "claim reached actual actor");
+            .expect("operator claim reached its actual actor boundary");
         assert!(
             shared
                 .mailbox(channel)
@@ -1066,40 +1077,36 @@ async fn d2b_operator_event_keeps_recovery_after_caller_abort_until_actor_ack() 
                 .is_none(),
             "exact CAS already ran"
         );
+        assert!(
+            inflight::load_inflight_state_read_only(&PROVIDER, channel.get()).is_none(),
+            "claim cleared its captured inflight row"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Acquire),
+            1,
+            "actor settlement still pending"
+        );
         caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-        assert_eq!(home.commands_in_flight(), 1, "actor event outlives caller");
+        let cancelled = caller.await.is_err_and(|error| error.is_cancelled());
         barrier.1.notify_one();
-        for _ in 0..100 {
-            if home.commands_in_flight() == 0 {
-                break;
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while shared.restart.global_active.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            home.commands_in_flight(),
-            0,
-            "actor effects and ack completed"
-        );
-        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
-        assert!(inflight::load_inflight_state(&PROVIDER, channel.get()).is_none());
-        PAUSE.with(|slot| *slot.borrow_mut() = None);
-        home.close();
-        let successor = seed(&shared, channel).await;
-        assert_eq!(
-            release_on(&shared, &PROVIDER, channel, successor)
-                .await
-                .unwrap_err(),
-            "home_not_held"
-        );
+        })
+        .await
+        .is_ok();
+        assert!(cancelled && settled, "actor settled after caller abort");
         assert!(
             shared
                 .mailbox(channel)
                 .snapshot()
                 .await
                 .cancel_token
-                .is_some()
+                .is_none()
         );
+        assert!(inflight::load_inflight_state_read_only(&PROVIDER, channel.get()).is_none());
+        assert_eq!(shared.restart.global_active.load(Ordering::Acquire), 0);
     })
     .await;
 }

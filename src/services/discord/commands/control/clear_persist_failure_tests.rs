@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-use super::{ClearReport, clear_channel_session_state, clear_channel_session_state_fenced};
+use super::{
+    ClearReport, clear_channel_session_state, clear_channel_session_state_with_session_key,
+};
 use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
@@ -84,7 +86,10 @@ async fn clear(
     channel_id: ChannelId,
 ) -> anyhow::Result<ClearReport> {
     let http = Arc::new(serenity::Http::new(""));
-    clear_channel_session_state_fenced(&http, shared, provider, channel_id, "/clear", None).await
+    clear_channel_session_state_with_session_key(
+        &http, shared, provider, channel_id, "/clear", None,
+    )
+    .await
 }
 
 pub(super) async fn session_state(

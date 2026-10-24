@@ -1,5 +1,4 @@
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, atomic::Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -85,20 +84,18 @@ use overflow::drain_head_overflow;
 use pending_queue_persistence::channel_queue_files_present;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
 #[cfg(test)]
 pub(crate) use pending_queue_persistence::save_channel_queue;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
-    load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
-    remove_channel_pending_queue_files_all_tokens, warn_legacy_pending_queue_files,
+    load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
+    load_channel_pending_queue_checked, load_pending_dispatch_markers, load_pending_queues,
+    remove_channel_pending_queue_files_all_tokens, save_channel_pending_dispatch_marker,
+    warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
-};
-pub(crate) use pending_queue_persistence::{
-    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };
 use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
@@ -2626,67 +2623,8 @@ fn input_mailbox_step(
 // All env-touching test modules below now share THIS one lock, so any two such
 // tests are mutually exclusive regardless of which module they live in.
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::sync::{MutexGuard, PoisonError};
-
-    pub(crate) const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-
-    /// The SINGLE crate-wide env lock. `.lock()` delegates to
-    /// `crate::config::shared_test_env_lock()` so EVERY turn_orchestrator env
-    /// test serializes against every OTHER env-mutating test in the crate
-    /// (config / tmux_watcher / turn_finalizer / standby_relay). A module-local
-    /// `Mutex` (the previous impl) only serialized within turn_orchestrator and
-    /// let a concurrent root-mutating test on the config lock (e.g. tmux_watcher)
-    /// stomp the tempdir `AGENTDESK_ROOT_DIR` env mid-test. This zero-sized type
-    /// keeps the `TEST_ENV_LOCK.lock()` call shape so all existing callers are
-    /// unchanged while routing through the one shared mutex.
-    pub(crate) struct SharedEnvLock;
-
-    impl SharedEnvLock {
-        pub(crate) fn lock(
-            &self,
-        ) -> Result<MutexGuard<'static, ()>, PoisonError<MutexGuard<'static, ()>>> {
-            crate::config::shared_test_env_lock().lock()
-        }
-    }
-
-    pub(crate) static TEST_ENV_LOCK: SharedEnvLock = SharedEnvLock;
-
-    pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
-        TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Fails the channel's next `count` queue saves.
-    pub(crate) fn fail_queue_saves(channel: super::ChannelId, count: usize) {
-        for _ in 0..count {
-            super::pending_queue_persistence::save_fault::fail_next(channel);
-        }
-    }
-
-    /// Queue-save faults not yet consumed; disarms them when `clear`.
-    pub(crate) fn queue_save_faults(channel: super::ChannelId, clear: bool) -> usize {
-        super::pending_queue_persistence::save_fault::armed(channel, clear)
-    }
-
-    static INJECTION_ABANDONS: std::sync::Mutex<Vec<super::ChannelId>> =
-        std::sync::Mutex::new(Vec::new());
-
-    pub(crate) fn note_injection_abandon(channel: super::ChannelId) {
-        let mut abandons = INJECTION_ABANDONS.lock().unwrap_or_else(|e| e.into_inner());
-        abandons.push(channel);
-    }
-
-    /// Injection reservations the channel abandoned after its handback attempts ran out.
-    pub(crate) fn injection_abandons(channel: super::ChannelId) -> usize {
-        let abandons = INJECTION_ABANDONS.lock().unwrap_or_else(|e| e.into_inner());
-        abandons
-            .iter()
-            .filter(|abandoned| **abandoned == channel)
-            .count()
-    }
-}
+#[path = "turn_orchestrator/test_support_tests.rs"]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod guarded_finish_cutoff_tests {

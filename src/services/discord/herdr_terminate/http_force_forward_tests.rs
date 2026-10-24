@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use super::super::super::Node;
 use super::*;
 use crate::config::ClusterNodeConfig;
-use crate::services::session_forwarding::home_stop::tests::loopback_seam;
+use crate::services::session_forwarding::loopback_seam;
 
 const ORIGIN: &str = "origin-node";
 const THIRD: &str = "UPDATE sessions SET instance_id = 'third-node' WHERE session_key = $1";
@@ -105,7 +105,7 @@ impl Forwarding {
         };
         config.cluster.nodes.insert(herdr::NODE.into(), trusted);
         let (pool, registry) = (Some(node.pool.clone()), Some(node.registry.clone()));
-        let origin = crate::server::routes::home_stop_test_app(config, pool, registry, ORIGIN);
+        let origin = crate::server::routes::cancel_route_test_app(config, pool, registry, ORIGIN);
         Self {
             origin,
             received,
@@ -119,7 +119,7 @@ impl Forwarding {
     async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
         let bearer = format!("Bearer {AUTH}");
         let headers = [("authorization", bearer.as_str()), JSON];
-        let post = crate::server::routes::home_stop_test_post;
+        let post = crate::server::routes::cancel_route_test_post;
         post(&self.origin, uri, &headers, &body.to_string()).await
     }
 

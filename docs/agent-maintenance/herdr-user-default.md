@@ -40,6 +40,7 @@ config는 socket peer의 실제 HOME/XDG/config 환경과 실행 파일 identity
 2. 실행 노드의 사용자 서버 존재,0.9.3/protocol22, 실제 socket peer와 loaded-image identity, 경로/권한을 확인한다. pathname/version만 있는 관측은 준비 완료가 아니다. macOS에서는 위 identity 제한을 먼저 해소해야 한다.
 3. 새 설정을 배포하기 전 live row와 unresolved consent hold가 이동 대상에 없는지 확인한다. migration 거부와 restart_required를 구별하고 old applied mapping이 유지되는지 확인한다.
 4. owner가 동의 카드의 경로·preview를 확인한 뒤 예를 선택한다. 원본 backup과 false 전체 config 검증을 확인한다. 첫 입력과 다음 FIFO 입력을 확인하고 draft/modal/busy 상태에서 paste/Enter가 없는지 확인한다.
+   실제 Claude cold start 한 번에서 SessionStart hook 수신부터 빈 ready composer marker 관측까지의 지연을 기록한다.
 5. 실패 시 원 입력을 지우거나 서버를 재시작하지 않는다. `reason/action` 및 row id를 보존한다. 정리되지 않은 참조는 clear 성공으로 가정하지 않는다.
 
 E 구현 레인의 읽기 전용 전제 조사는 보고서에 남긴다. 해당 관측에서 사용자 기본 socket은 있었지만 `~/.local/bin/herdr`는 없었다. Homebrew 설치 경로의0.9.3 문자열은 peer 증명이 아니다. 실제 사용자 서버나 운영 설정을 시험 대상으로 사용하지 않았다. T19는 고정 SHA 사본과 fake provider만 사용하는 별도 scratch에서 수행한다.

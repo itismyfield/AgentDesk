@@ -39,7 +39,6 @@ pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot, save_actual_episode_for_tests,
 };
 mod inflight_heartbeat_sweeper;
-mod ingress_shadow;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
@@ -122,8 +121,7 @@ mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
-// dedicated inherent impls). See `shared_state::QueuedPlaceholderState` and
-// `shared_state::SessionOverrideState`.
+// dedicated inherent impls). See `shared_state::{QueuedPlaceholderState, SessionOverrideState}`.
 mod shared_state;
 mod single_message_panel;
 mod stall_recovery;
@@ -131,6 +129,8 @@ mod startup_reclaim;
 mod status_panel_orphan_store;
 mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
+pub(crate) mod session_notice;
+pub(crate) mod session_notice_delivery;
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod synthetic_headless_message_id;
@@ -154,7 +154,6 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
 }
 mod turn_completion_events;
 mod turn_end_summary;
-
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]
 pub(crate) use tmux::stamp_spawn_markers;
@@ -1292,7 +1291,6 @@ pub(super) fn make_shared_data_for_tests_with_storage(
         // preserved — the three members hoisted above the spawn calls are
         // side-effect-free constructors; see run_bot_build_shared_data).
         restart: RestartLifecycle {
-            _home_availability: None,
             recovering_channels: dashmap::DashMap::new(),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             intake_worker_lifecycle: Default::default(),
@@ -2570,7 +2568,6 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
     pub(super) voice_config: crate::voice::VoiceConfig,
     pub(super) voice_receiver: crate::voice::VoiceReceiver,
-    pub(in crate::services::discord) ingress_shadow: Option<ingress_shadow::IngressShadow>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

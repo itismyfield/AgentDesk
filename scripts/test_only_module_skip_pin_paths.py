@@ -42,7 +42,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/relay_recovery/tests/orphan_token_finish.rs",
         "src/services/discord/relay_recovery/tests/unread_tail_seed.rs",
         "src/services/cluster/intake_worker/test_executor.rs",
-        "src/services/cluster/intake_worker/s3_real_tests/mod.rs",
         "src/services/discord/session_relay_sink/fixtures/o_writer.rs",
         "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",

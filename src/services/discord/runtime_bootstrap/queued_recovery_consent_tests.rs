@@ -1,6 +1,27 @@
 //! The actual queue recovery junction keeps Legacy queues independent of consent storage.
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
+use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+
+fn item(id: u64) -> Intervention {
+    Intervention {
+        author_id: UserId::new(7),
+        author_is_bot: false,
+        message_id: MessageId::new(id),
+        queued_generation: 1,
+        source_message_ids: vec![MessageId::new(id)],
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: format!("input {id}"),
+        mode: InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn queued_recovery_legacy_preserves_fifo_and_never_reads_consent() {
@@ -19,10 +40,7 @@ async fn queued_recovery_legacy_preserves_fifo_and_never_reads_consent() {
     let provider = ProviderKind::Claude;
     let shared = make_shared_data_for_tests();
     let before = crate::services::discord::router::herdr_consent::startup::store_reads_for_test();
-    let items = [
-        boot_restore_tests::item(channel + 1),
-        boot_restore_tests::item(channel + 2),
-    ];
+    let items = [item(channel + 1), item(channel + 2)];
     crate::services::turn_orchestrator::save_channel_queue(
         &provider,
         &shared.token_hash,

@@ -188,12 +188,12 @@ async fn tmux_hook_prompt_registry_miss_still_warns_and_drops() {
 
 /// What the relay can reach when the hook arrives; either can be restored later.
 struct Setup {
-    notify_timeout: Option<Duration>,
+    provider_timeout: Option<Duration>,
     owner: bool,
 }
 
 const READY: Setup = Setup {
-    notify_timeout: Some(WAIT),
+    provider_timeout: Some(WAIT),
     owner: true,
 };
 
@@ -218,8 +218,8 @@ async fn start_with_probe(
     let harness = RelayE2eHarness::start_with_health_registry().await;
     harness.cache_relay_transport();
     harness.answer_placeholders_immediately();
-    if let Some(timeout) = setup.notify_timeout {
-        harness.use_mock_notify_bot(timeout).await;
+    if let Some(timeout) = setup.provider_timeout {
+        harness.use_mock_provider_bot(timeout).await;
     }
     if setup.owner {
         harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
@@ -576,7 +576,7 @@ async fn an_http_alias_survives_an_explicit_primary_discard() {
     let harness = RelayE2eHarness::start_with_health_registry().await;
     harness.cache_relay_transport();
     harness.answer_placeholders_immediately();
-    harness.use_mock_notify_bot(WAIT).await;
+    harness.use_mock_provider_bot(WAIT).await;
     harness.attach_tmux_watcher(tmux, "primary-discard.jsonl");
     dedupe::register_provider_session(PROVIDER_KEY, command, tmux);
     dedupe::register_provider_session(PROVIDER_KEY, payload, tmux);
@@ -677,7 +677,7 @@ async fn a_timed_out_announcement_keeps_the_scanner_row_suppressed() {
     let session = "5845e2e0-0000-0000-0000-0000000000c5";
     let (hook_tx, hook_rx) = broadcast::channel(8);
     let setup = Setup {
-        notify_timeout: Some(Duration::from_millis(300)),
+        provider_timeout: Some(Duration::from_millis(300)),
         ..READY
     };
     let (harness, _) = start(tmux, &[session], hook_rx, setup).await;
@@ -737,7 +737,7 @@ async fn a_row_queued_behind_an_open_announcement(tmux: &str, session: &str, ans
     // A stalled POST outlives the client's timeout, so its result stays unknown.
     let setup = match answer {
         NoteAnswer::Stall => Setup {
-            notify_timeout: Some(Duration::from_secs(2)),
+            provider_timeout: Some(Duration::from_secs(2)),
             ..READY
         },
         _ => READY,
@@ -819,7 +819,7 @@ async fn a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
     session: &str,
     setup: Setup,
 ) {
-    let (restore_bot, restore_owner) = (setup.notify_timeout.is_none(), !setup.owner);
+    let (restore_bot, restore_owner) = (setup.provider_timeout.is_none(), !setup.owner);
     let (hook_tx, hook_rx) = broadcast::channel(8);
     let (harness, relayed) = start(tmux, &[session], hook_rx, setup).await;
     hook_tx
@@ -829,7 +829,7 @@ async fn a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
     assert_eq!(harness.local_note_posts(), 0);
 
     if restore_bot {
-        harness.use_mock_notify_bot(WAIT).await;
+        harness.use_mock_provider_bot(WAIT).await;
     }
     if restore_owner {
         harness.attach_tmux_watcher(tmux, "prompt-identity.jsonl");
@@ -857,10 +857,11 @@ async fn a_prompt_without_an_owner_channel_is_announced_once_the_owner_returns()
     .await;
 }
 
+/// The historical test ID now covers the provider notice bot being unavailable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prompt_without_a_notify_bot_is_announced_once_the_bot_returns() {
     let setup = Setup {
-        notify_timeout: None,
+        provider_timeout: None,
         ..READY
     };
     a_prompt_unsent_before_its_post_is_announced_by_the_scanner(
@@ -967,7 +968,7 @@ async fn bound_live_hook_without_watcher(
     let pool = h.shared.pg_pool.clone().unwrap();
     h.answer_placeholders_immediately();
     h.cache_relay_transport();
-    h.use_mock_notify_bot(WAIT).await;
+    h.use_mock_provider_bot(WAIT).await;
     let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
     let logical = "herdr-prompt-registry-miss";
     let nonce = "00112233445566778899aabbccddee13";

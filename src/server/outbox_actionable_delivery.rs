@@ -14,6 +14,9 @@ use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
+#[path = "outbox_actionable_delivery/session_notice.rs"]
+mod session_notice;
+
 fn should_fallback_to_notify(
     status: &str,
     primary_bot: &str,
@@ -92,6 +95,9 @@ pub(super) async fn deliver(
 ) -> (String, String) {
     if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
         return ("retired_source".into(), "retired_source".into());
+    }
+    if let Some(result) = session_notice::deliver(registry, pg_pool, row).await {
+        return result;
     }
     let primary_bot = crate::services::message_outbox::delivery_bot_for_target_session(
         &row.target,

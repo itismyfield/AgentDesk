@@ -1,6 +1,6 @@
 //! Lifecycle cleanup through the production managed-host entry, including an unpolled future.
 
-use super::late_delegated::{Legacy, closed, seed};
+use super::late_host::{Legacy, closed, seed};
 use super::*;
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, start_managed};
@@ -166,21 +166,6 @@ async fn cleanup_root_and_home_failures_leave_no_reserved_host() {
             .halted()
             .iter()
             .any(|(_, detail)| detail.contains("runtime root unresolved"))
-    );
-    f.assert_no_publication();
-
-    let f = Fixture::new();
-    use crate::services::cluster::home_availability::{self, Unavailable};
-    let _registration =
-        home_availability::install("claude", Err(Unavailable::MissingPool), || [CHANNEL].into());
-    assert!(f.start_with(Some(root(&f.harness))).is_empty());
-    assert_eq!(adoption(CHANNEL), Adoption::Released);
-    assert!(!f.ready.is_hosted(CHANNEL));
-    assert!(
-        f.io.alarms
-            .halted()
-            .iter()
-            .any(|(_, detail)| detail.contains("missing_pool"))
     );
     f.assert_no_publication();
 }

@@ -1,6 +1,11 @@
 //! PostgreSQL-backed task-card state and lease authority (#4055).
 
 mod card_claim;
+mod memory_claim;
+use memory_claim::claim_card_memory;
+mod inline_claim;
+pub(super) mod monitor;
+pub(super) use inline_claim::{claim_event, restore_completion_event};
 mod retired_metadata;
 pub(super) use retired_metadata::claim_retired_metadata;
 mod missing_card_replacement;
@@ -81,12 +86,14 @@ pub(super) struct ClaimedCard {
     pub(super) rendered_content: String,
     pub(super) action: ClaimAction,
     pub(super) new_terminal_completion: bool,
+    pub(super) monitor: Option<monitor::Observation>,
+    pub(super) post_started: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum CardClaim {
     Existing { message_id: u64, bot_key: String },
-    Owned(ClaimedCard),
+    Owned(Box<ClaimedCard>),
     Busy { bot_key: String },
 }
 
@@ -231,7 +238,7 @@ pub(super) async fn prepare_replacement(
     content: &str,
     content_hash: &str,
 ) -> Result<ClaimedCard, String> {
-    match pool {
+    let mut replacement = match pool {
         Some(pool) => {
             prepare_replacement_pg(pool, claimed, missing_message_id, content, content_hash).await
         }
@@ -239,7 +246,12 @@ pub(super) async fn prepare_replacement(
             prepare_replacement_memory(claimed, missing_message_id, content, content_hash)
         }
         None => Err(memory_fallback_unavailable()),
-    }
+    }?;
+    replacement.monitor = claimed.monitor.clone();
+    replacement.update_count = claimed.update_count;
+    replacement.scope.terminal_delivery_fingerprint =
+        claimed.scope.terminal_delivery_fingerprint.clone();
+    Ok(replacement)
 }
 
 fn claimed_from_row(
@@ -260,6 +272,10 @@ fn claimed_from_row(
         rendered_content: row.get("rendered_content"),
         action,
         new_terminal_completion: false,
+        monitor: None,
+        post_started: row
+            .get::<Option<DateTime<Utc>>, _>("post_started_at")
+            .is_some(),
     })
 }
 
@@ -344,6 +360,12 @@ async fn mark_posted_pg(
     .map_err(|error| format!("commit posted task card: {error}"))?
     .rows_affected();
     exact_change(changed, "commit posted task card")?;
+    if claimed.monitor.is_some() {
+        sqlx::query("UPDATE task_notification_card_state SET update_count=$2, terminal_delivery_fingerprint=$3 WHERE channel_id=$1 AND provider=$4 AND session_key=$5 AND event_key=$6")
+            .bind(claimed.scope.channel_id as i64).bind(claimed.update_count as i64).bind(&claimed.scope.terminal_delivery_fingerprint)
+            .bind(&claimed.scope.provider).bind(&claimed.scope.session_key).bind(&claimed.scope.event_key)
+            .execute(&mut *transaction).await.map_err(|e|e.to_string())?;
+    }
     let journal = if claimed.scope.terminal_delivery_fingerprint.is_some() {
         sqlx::query(
             "INSERT INTO task_notification_terminal_delivery
@@ -393,6 +415,9 @@ async fn mark_posted_pg(
         .await
     };
     journal.map_err(|error| format!("journal terminal card delivery: {error}"))?;
+    monitor::record(&mut transaction, claimed, message_id)
+        .await
+        .map_err(|e| e.to_string())?;
     transaction
         .commit()
         .await
@@ -408,6 +433,9 @@ async fn mark_edited_pg(
     content: &str,
     content_hash: &str,
 ) -> Result<(), String> {
+    if claimed.monitor.is_some() {
+        return monitor::mark_edited(pool, claimed, message_id, content, content_hash).await;
+    }
     let changed = sqlx::query(
         "UPDATE task_notification_card_state
          SET rendered_content = $7, content_hash = $8,
@@ -482,7 +510,7 @@ async fn prepare_replacement_pg(
          WHERE channel_id = $1 AND provider = $2 AND session_key = $3 AND event_key = $4
            AND lease_owner = $5 AND delivery_state = 'card_posted'
            AND discord_message_id = $6
-         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content",
+         RETURNING bot_key, discord_nonce, revision, update_count, rendered_content, post_started_at",
     )
     .bind(db_id(claimed.scope.channel_id, "channel_id")?)
     .bind(&claimed.scope.provider)
@@ -698,118 +726,6 @@ fn record_footer_only_memory(
     Ok(())
 }
 
-fn claim_card_memory(
-    scope: &TaskCardScope,
-    preferred_bot_key: &str,
-    seed_content: &str,
-    seed_hash: &str,
-    intent: StoreIntent,
-) -> Result<CardClaim, String> {
-    if let Some((message_id, bot_key)) = find_terminal_delivery_memory(scope, seed_hash)? {
-        return Ok(CardClaim::Existing {
-            message_id,
-            bot_key,
-        });
-    }
-    let mut rows = MEMORY_STORE
-        .lock()
-        .map_err(|_| "task card memory store poisoned".to_string())?;
-    let lease_owner = uuid::Uuid::new_v4().to_string();
-    let now = Instant::now();
-    let lease_expires_at = now + Duration::from_secs(LEASE_SECONDS as u64);
-    let row = rows.entry(scope.clone()).or_insert_with(|| MemoryRow {
-        state: MemoryState::Posting,
-        bot_key: preferred_bot_key.to_string(),
-        nonce: stable_nonce(scope, 1),
-        message_id: None,
-        revision: 1,
-        update_count: 1,
-        rendered_content: seed_content.to_string(),
-        content_hash: seed_hash.to_string(),
-        terminal_delivery_fingerprint: scope.terminal_delivery_fingerprint.clone(),
-        lease_owner: Some(lease_owner.clone()),
-        lease_expires_at: Some(lease_expires_at),
-        post_started_at: None,
-        last_error: None,
-    });
-    if row.lease_owner.as_deref() == Some(lease_owner.as_str()) {
-        return Ok(CardClaim::Owned(memory_claim(
-            scope,
-            &lease_owner,
-            row,
-            ClaimAction::Post,
-        )));
-    }
-    let lease_active = row
-        .lease_expires_at
-        .is_some_and(|expires_at| expires_at > now)
-        && row.lease_owner.is_some();
-    if lease_active {
-        return Ok(CardClaim::Busy {
-            bot_key: row.bot_key.clone(),
-        });
-    }
-    let exact_terminal_replay = scope.terminal_delivery_fingerprint.is_some()
-        && row.terminal_delivery_fingerprint == scope.terminal_delivery_fingerprint;
-    if row.state == MemoryState::CardPosted
-        && (intent == StoreIntent::Promotion || exact_terminal_replay)
-    {
-        return Ok(CardClaim::Existing {
-            message_id: row
-                .message_id
-                .ok_or_else(|| "memory card row omitted message id".to_string())?,
-            bot_key: row.bot_key.clone(),
-        });
-    }
-    row.lease_owner = Some(lease_owner.clone());
-    row.lease_expires_at = Some(lease_expires_at);
-    row.last_error = None;
-    let new_terminal_completion = row.state == MemoryState::CardPosted
-        && intent == StoreIntent::Observation
-        && scope.terminal_delivery_fingerprint.is_some()
-        && !exact_terminal_replay;
-    let action = if new_terminal_completion {
-        row.state = MemoryState::Posting;
-        row.message_id = None;
-        row.revision = row.revision.saturating_add(1);
-        row.update_count = 1;
-        row.rendered_content = seed_content.to_string();
-        row.content_hash = seed_hash.to_string();
-        row.terminal_delivery_fingerprint = scope.terminal_delivery_fingerprint.clone();
-        row.nonce = stable_nonce(scope, row.revision);
-        row.post_started_at = None;
-        ClaimAction::Post
-    } else if row.state == MemoryState::CardPosted {
-        row.update_count = row.update_count.saturating_add(1);
-        ClaimAction::Edit {
-            message_id: row
-                .message_id
-                .ok_or_else(|| "memory card row omitted message id".to_string())?,
-        }
-    } else {
-        let was_footer_only = row.state == MemoryState::FooterOnly;
-        row.state = MemoryState::Posting;
-        if was_footer_only {
-            row.post_started_at = None;
-        }
-        if row.bot_key.is_empty() {
-            row.bot_key = preferred_bot_key.to_string();
-            row.nonce = stable_nonce(scope, row.revision);
-        }
-        if row.terminal_delivery_fingerprint.is_none() {
-            row.terminal_delivery_fingerprint = scope.terminal_delivery_fingerprint.clone();
-        }
-        if intent == StoreIntent::Observation && row.post_started_at.is_none() {
-            row.rendered_content = seed_content.to_string();
-            row.content_hash = seed_hash.to_string();
-        }
-        ClaimAction::Post
-    };
-    let mut claimed = memory_claim(scope, &lease_owner, row, action);
-    claimed.new_terminal_completion = new_terminal_completion;
-    Ok(CardClaim::Owned(claimed))
-}
-
 fn begin_card_post_memory(claimed: &ClaimedCard) -> Result<CardPostAttempt, String> {
     let mut rows = MEMORY_STORE
         .lock()
@@ -854,6 +770,8 @@ fn memory_claim(
         rendered_content: row.rendered_content.clone(),
         action,
         new_terminal_completion: false,
+        monitor: None,
+        post_started: row.post_started_at.is_some(),
     }
 }
 
@@ -877,7 +795,8 @@ fn mark_posted_memory(
         row.last_error = None;
         Ok(())
     })?;
-    record_terminal_delivery_memory(claimed, message_id, content_hash)
+    record_terminal_delivery_memory(claimed, message_id, content_hash)?;
+    monitor::record_memory(claimed, message_id)
 }
 
 fn mark_edited_memory(
@@ -890,13 +809,18 @@ fn mark_edited_memory(
         if row.state != MemoryState::CardPosted || row.message_id != Some(message_id) {
             return Err("memory task card edit lost exact message".to_string());
         }
+        if claimed.monitor.is_some() {
+            row.update_count = claimed.update_count;
+            row.terminal_delivery_fingerprint = claimed.scope.terminal_delivery_fingerprint.clone();
+        }
         row.rendered_content = content.to_string();
         row.content_hash = content_hash.to_string();
         row.lease_owner = None;
         row.lease_expires_at = None;
         row.last_error = None;
         Ok(())
-    })
+    })?;
+    monitor::record_memory(claimed, message_id)
 }
 
 fn mark_failure_memory(

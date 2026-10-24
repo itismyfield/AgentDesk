@@ -153,10 +153,20 @@ fn filtered_checks(report: &Value, status: &str) -> Value {
                     .iter()
                     .filter(|check| check.get("status").and_then(Value::as_str) == Some(status))
                     .cloned()
+                    .map(without_checker_evidence)
                     .collect(),
             )
         })
         .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+fn without_checker_evidence(mut check: Value) -> Value {
+    if check.get("id").and_then(Value::as_str) == Some("herdr_user_default")
+        && let Some(evidence) = check.get_mut("evidence").and_then(Value::as_object_mut)
+    {
+        evidence.remove("checker_evidence");
+    }
+    check
 }
 
 pub(crate) fn is_provider_deferred_hooks_backlog_reason(raw: &str) -> bool {
@@ -339,6 +349,16 @@ pub(crate) fn latest_startup_doctor_health_json(detailed: bool) -> Value {
             "artifact_path": if detailed { path_json(path.as_ref()) } else { Value::Null },
         }),
     }
+}
+
+/// The protected doctor response alone carries the retained checker streams.
+pub(crate) fn doctor_json(config: &crate::config::Config) -> Value {
+    let mut response = latest_startup_doctor_response_json();
+    let evidence = crate::services::session_host::policy::diagnostics::doctor_evidence(config);
+    if evidence.as_object().is_some_and(|value| !value.is_empty()) {
+        response["herdr_checker"] = evidence;
+    }
+    response
 }
 
 pub(crate) fn latest_startup_doctor_response_json() -> Value {
@@ -713,3 +733,7 @@ mod tests {
         assert_eq!(preserved["summary"]["failed"], 0);
     }
 }
+
+#[cfg(test)]
+#[path = "startup/herdr_checker_tests.rs"]
+mod herdr_checker_tests;

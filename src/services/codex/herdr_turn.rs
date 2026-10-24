@@ -19,7 +19,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind, StreamMessage};
 use crate::services::claude::herdr_turn::{
-    HoldRelease, gate, hold, launched, load, not_held, release_hold,
+    HoldRelease, composer, gate, hold, launched, load, not_held, release_hold,
 };
 use crate::services::codex_tui::host_input::{InputRun, PlanRun, legacy_result, run_herdr};
 use crate::services::codex_tui::input::{
@@ -37,7 +37,7 @@ use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrSubmission, HerdrTurnStart, herdr_stop_settlement_available,
 };
 use crate::services::provider::{
-    CancelToken, ProviderKind, ReadOutputResult, cancel_requested, is_readonly_tool_policy,
+    CancelToken, ProviderKind, ReadOutputResult, is_readonly_tool_policy,
 };
 use crate::services::session_host::HerdrTarget;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
@@ -286,24 +286,24 @@ fn current_record(
 /// Polls the pane until Codex's composer is ready and returns that screen. A modal waits on a
 /// person, so it stops the turn at once; a cancel or the deadline stops it too, nothing written.
 fn composer_ready(target: &HerdrTarget, cancel: Option<&CancelToken>) -> Result<String, String> {
-    let deadline = Instant::now() + COMPOSER_READY_WAIT;
-    loop {
-        if cancel_requested(cancel) {
-            return Err(PROMPT_READY_CANCELLED_ERROR.to_string());
+    use std::ops::ControlFlow;
+    composer::wait_for(cancel, COMPOSER_READY_WAIT, || match target.capture(-80) {
+        Some(screen) if pane_looks_ready_for_codex_prompt(&screen) => {
+            ControlFlow::Break(Ok(screen))
         }
-        let screen = target.capture(-80);
-        match screen {
-            Some(screen) if pane_looks_ready_for_codex_prompt(&screen) => return Ok(screen),
-            Some(screen) if pane_shows_codex_interactive_modal(&screen) => {
-                return Err("herdr turn: a codex modal holds the composer".into());
+        Some(screen) if pane_shows_codex_interactive_modal(&screen) => {
+            ControlFlow::Break(Err("herdr turn: a codex modal holds the composer".into()))
+        }
+        _ => ControlFlow::Continue(()),
+    })
+    .unwrap_or_else(|stop| {
+        Err(match stop {
+            composer::WaitStop::Cancelled => PROMPT_READY_CANCELLED_ERROR.to_string(),
+            composer::WaitStop::TimedOut => {
+                "herdr turn: the codex composer did not become ready".into()
             }
-            _ => {}
-        }
-        if Instant::now() >= deadline {
-            return Err("herdr turn: the codex composer did not become ready".into());
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+        })
+    })
 }
 
 /// A ready composer shown empty; a draft, or a composer the reader cannot read, is left as it is

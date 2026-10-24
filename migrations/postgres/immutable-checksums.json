@@ -740,6 +740,16 @@
       "path": "migrations/postgres/0145_scheduled_image_consumer_guards.sql",
       "sha256": "6d58674a9e52ff2ff9505076be6aee77205b8e3f6fe31764d9238ca00935727c",
       "version": 145
+    },
+    {
+      "path": "migrations/postgres/0146_task_notification_monitor_receipt.sql",
+      "sha256": "407e865e6670b7683435f0bf2aba368eaeb8d5b885899685de88abdb8dbbc792",
+      "version": 146
+    },
+    {
+      "path": "migrations/postgres/0147_message_outbox_session_notice.sql",
+      "sha256": "b2512e0365293562433b7f3c130a10bc9b1df899f225f358b02121f86d0c5a1c",
+      "version": 147
     }
   ],
   "version": 1

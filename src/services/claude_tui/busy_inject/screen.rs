@@ -1,6 +1,8 @@
 //! Reads the active Claude composer and the status row right above its top border from one
 //! `capture-pane -e` capture. Anything outside the recognised layout reads as Unknown.
 
+mod paste_footer;
+
 use unicode_width::UnicodeWidthChar;
 
 use crate::services::tui_input::actor::gate::{
@@ -168,11 +170,11 @@ fn status_line(row: &str) -> bool {
         && first.is_some_and(|c| c != '❯' && !('\u{2500}'..='\u{257f}').contains(&c))
 }
 
-/// The bypass-mode footer and its cycle hint, then the busy hint or the pill counting background
-/// work; a footer cut at the edge is not.
+/// The bypass-mode footer with a measured suffix, or the folded-paste hint; a footer cut at
+/// the edge or carrying an unmeasured suffix is not.
 fn footer(row: &str) -> bool {
     let Some(rest) = row.strip_prefix(FOOTER) else {
-        return false;
+        return paste_footer::recognized(row);
     };
     let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
     match rest.strip_prefix(" \u{b7} ") {

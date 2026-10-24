@@ -926,4 +926,4 @@ mod coldstop_input_tests;
 #[cfg(all(test, unix))]
 mod boot_host_tests;
 
-mod composer;
+pub(crate) mod composer;

@@ -43,7 +43,6 @@ async fn open_intake(pool: &PgPool, channel: u64, provider: &str) -> i64 {
         preserve_on_cancel: false,
         agent_id: "agent".into(),
         provider: provider.into(),
-        home_epoch: None,
     };
     insert_pending(pool, &payload, 1, None).await.unwrap()
 }

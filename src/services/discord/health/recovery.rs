@@ -3576,6 +3576,7 @@ mod stall_watchdog_auto_heal_tests {
     /// fail because the page is incorrectly suppressed.
     #[tokio::test(flavor = "current_thread")]
     async fn pre_backstop_flat_capture_pages_genuine_stall_pg() {
+        use crate::services::message_outbox::delivery_bot_for_target_session;
         // Lock hierarchy `W -> E -> P`: the watcher-absence test lock, then the env
         // lock, then the postgres lifecycle lock that `try_create` parks in `pg_db`.
         let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
@@ -3642,7 +3643,6 @@ mod stall_watchdog_auto_heal_tests {
             watcher_handle(tmux, &output, watcher_cancel.clone()),
         );
         let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
-
         for pass in 1..=2 {
             let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
             assert_eq!(cleaned, 0, "pass {pass} must never force-clean branch 4");
@@ -3662,8 +3662,8 @@ mod stall_watchdog_auto_heal_tests {
             );
         }
 
-        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT target, bot, source, reason_code, session_key, content
+        let rows: Vec<(String, String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT target, bot, source, reason_code, session_key, content, session_notice->>'content'
                FROM message_outbox
               WHERE source = 'stall_watchdog'",
         )
@@ -3677,11 +3677,11 @@ mod stall_watchdog_auto_heal_tests {
         assert_eq!(row.2, "stall_watchdog");
         assert_eq!(row.3, "stall_watchdog_suspected_stall");
         assert!(row.5.contains("<@343742347365974026>"));
-        let delivery_bot = crate::services::message_outbox::delivery_bot_for_target_session(
-            &row.0,
-            &row.1,
-            Some(&row.4),
+        assert!(
+            row.6.contains("<@343742347365974026>") && !row.6.contains("‹@"),
+            "genuine stall display must preserve the requester user mention without escaping"
         );
+        let delivery_bot = delivery_bot_for_target_session(&row.0, &row.1, Some(&row.4));
         assert_eq!(delivery_bot.as_ref(), "codex");
     }
 

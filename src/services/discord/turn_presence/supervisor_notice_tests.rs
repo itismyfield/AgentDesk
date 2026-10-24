@@ -11,6 +11,15 @@ async fn constant_unknown_is_successfully_noticed_once_through_3661_seconds() {
     assert!(lock(&fake.notice_ok).is_empty());
     wait(2).await;
     assert_eq!(lock(&fake.notice_ok).len(), 1);
+    let notices = fake.notices();
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].1.starts_with("-# ⚠️ ")
+            && crate::services::discord::session_notice::is_inline(&notices[0].1),
+        "the supervisor Unknown notice must reach the provider effect as one subtext line: {}",
+        notices[0].1
+    );
+    assert!(notices[0].1.contains("facts\\_halted"));
     wait(3600).await;
     run.abort();
     assert_eq!(

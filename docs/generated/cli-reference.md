@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 56
-- Commands including nested subcommands: 106
+- Top-level commands: 55
+- Commands including nested subcommands: 100
 
 ## Global options
 
@@ -126,12 +126,6 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
 | [`agentdesk herdr terminate`](#agentdesk-herdr-terminate) | Ask the local server to close one execution's pane and retire it; needs the live switch |  |
-| [`agentdesk channel-home`](#agentdesk-channel-home) | Delegated channel homes: status, and the switched delegate, reclaim and force |  |
-| [`agentdesk channel-home status`](#agentdesk-channel-home-status) | Each home row and its open intake by routed epoch; changes nothing |  |
-| [`agentdesk channel-home delegate`](#agentdesk-channel-home-delegate) | Start releasing a gateway-owned channel from this node to `--to` |  |
-| [`agentdesk channel-home reclaim`](#agentdesk-channel-home-reclaim) | Start draining a worker-owned channel back to this node |  |
-| [`agentdesk channel-home force`](#agentdesk-channel-home-force) | Orphan a holder whose lease has been silent past F; nothing adopts the channel after |  |
-| [`agentdesk channel-home abort-release`](#agentdesk-channel-home-abort-release) | On the gateway, drop a released or held releasing row at that epoch with no open intake |  |
 
 ## Commands
 
@@ -1287,66 +1281,3 @@ Usage: `agentdesk herdr terminate [OPTIONS]`
 | `--session-key <SESSION_KEY>` (required) | `String` |  | Session key of the execution's row |
 | `--execution-nonce <EXECUTION_NONCE>` (required) | `String` |  | Execution nonce the row must still record |
 | `--reason <REASON>` (required) | `String` |  | Why it is terminated, kept in the server's result log |
-
-## `agentdesk channel-home`
-
-Delegated channel homes: status, and the switched delegate, reclaim and force
-
-Usage: `agentdesk channel-home <COMMAND>`
-
-Subcommands:
-
-- `status` — Each home row and its open intake by routed epoch; changes nothing
-- `delegate` — Start releasing a gateway-owned channel from this node to `--to`
-- `reclaim` — Start draining a worker-owned channel back to this node
-- `force` — Orphan a holder whose lease has been silent past F; nothing adopts the channel after
-- `abort-release` — On the gateway, drop a released or held releasing row at that epoch with no open intake
-
-### `agentdesk channel-home status`
-
-Each home row and its open intake by routed epoch; changes nothing
-
-Usage: `agentdesk channel-home status`
-
-### `agentdesk channel-home delegate`
-
-Start releasing a gateway-owned channel from this node to `--to`
-
-Usage: `agentdesk channel-home delegate [OPTIONS] <CHANNEL>`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `<CHANNEL>` | `u64` |  |  |
-| `--provider <PROVIDER>` (required) | `String` |  | claude or codex |
-| `--to <TO>` (required) | `String` |  |  |
-
-### `agentdesk channel-home reclaim`
-
-Start draining a worker-owned channel back to this node
-
-Usage: `agentdesk channel-home reclaim <CHANNEL>`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `<CHANNEL>` | `u64` |  |  |
-
-### `agentdesk channel-home force`
-
-Orphan a holder whose lease has been silent past F; nothing adopts the channel after
-
-Usage: `agentdesk channel-home force <CHANNEL>`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `<CHANNEL>` | `u64` |  |  |
-
-### `agentdesk channel-home abort-release`
-
-On the gateway, drop a released or held releasing row at that epoch with no open intake
-
-Usage: `agentdesk channel-home abort-release [OPTIONS] <CHANNEL>`
-
-| Argument | Value | Default | Description |
-|---|---|---|---|
-| `<CHANNEL>` | `u64` |  |  |
-| `--expected-epoch <EXPECTED_EPOCH>` (required) | `i64` |  |  |

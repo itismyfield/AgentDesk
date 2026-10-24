@@ -8,6 +8,36 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 const PREFIX: &str = "herdr-consent-custody:v1:";
+const REARM_PREFIX: &str = "herdr-consent-rearm:v1:";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RearmMarker {
+    row: i64,
+    payload: String,
+    owner: Option<String>,
+    generation: Option<i64>,
+    count: u8,
+    rearmed_at: i64,
+}
+
+fn permits_custody(error: Option<&str>, row: &IntakeOutboxRow) -> Result<bool, String> {
+    let Some(error) = error else {
+        return Ok(true);
+    };
+    let Some(encoded) = error.strip_prefix(REARM_PREFIX) else {
+        return Ok(false);
+    };
+    let Ok(marker) = serde_json::from_str::<RearmMarker>(encoded) else {
+        return Ok(false);
+    };
+    Ok(marker.row == row.id
+        && marker.payload == payload(row)?
+        && marker.owner == row.owner_instance_id
+        && marker.generation == row.owner_generation
+        && marker.count == 1
+        && marker.rearmed_at > 0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,7 +88,8 @@ fn payload(row: &IntakeOutboxRow) -> Result<String, String> {
         row.attempt_no,
         row.parent_outbox_id,
         row.admission_kind,
-        row.home_epoch
+        // Preserve the null slot in existing consent custody digests.
+        serde_json::Value::Null
     ]);
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(&fields).map_err(|e| e.to_string())?,
@@ -149,7 +180,7 @@ pub(crate) async fn release(
     tx.commit().await.map_err(|e| e.to_string())
 }
 
-/// Consumes exact pre-effects authority only when no consent record was attempted.
+/// Rearms the exact pre-effects row once; its marker survives later claims without a TTL reset.
 pub(crate) async fn return_before_record(
     pool: &PgPool,
     proof: crate::services::cluster::intake_worker::BeforeEffects,
@@ -194,8 +225,20 @@ pub(crate) async fn return_before_record(
     if !owner_valid {
         return Ok(false);
     }
-    let changed = sqlx::query("UPDATE intake_outbox SET status='pending', claim_owner=NULL, claimed_at=NULL, accepted_at=NULL, spawned_at=NULL WHERE id=$1 AND status='spawned' AND claim_owner=$2 AND last_error IS NULL")
-        .bind(row.id).bind(&row.claim_owner).execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
+    let marker = RearmMarker {
+        row: row.id,
+        payload: payload(&row)?,
+        owner: row.owner_instance_id.clone(),
+        generation: row.owner_generation,
+        count: 1,
+        rearmed_at: chrono::Utc::now().timestamp_millis(),
+    };
+    let encoded = format!(
+        "{REARM_PREFIX}{}",
+        serde_json::to_string(&marker).map_err(|e| e.to_string())?
+    );
+    let changed = sqlx::query("UPDATE intake_outbox SET status='pending', claim_owner=NULL, claimed_at=NULL, accepted_at=NULL, spawned_at=NULL, last_error=$3 WHERE id=$1 AND status='spawned' AND claim_owner=$2 AND last_error IS NOT DISTINCT FROM $4")
+        .bind(row.id).bind(&row.claim_owner).bind(encoded).bind(last_error).execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(changed == 1)
 }
@@ -234,14 +277,19 @@ pub(crate) async fn hold_before_effects(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    let current_row: IntakeOutboxRow =
-        sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
-            .bind(row.id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let Snapshot {
+        row: current_row,
+        last_error,
+    } = sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1 FOR UPDATE")
+        .bind(row.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     if payload(&current_row)? != payload(row)? {
         return Err("worker payload changed before custody handoff".into());
+    }
+    if !permits_custody(last_error.as_deref(), &current_row)? {
+        return Err("worker error marker changed before consent custody handoff".into());
     }
     let marker = Marker {
         nonce: String::new(),
@@ -257,8 +305,8 @@ pub(crate) async fn hold_before_effects(
         "{PREFIX}{}",
         serde_json::to_string(&marker).map_err(|e| e.to_string())?
     );
-    let changed = sqlx::query("UPDATE intake_outbox SET last_error=$2 WHERE id=$1 AND status='spawned' AND claim_owner=$3 AND owner_instance_id IS NOT DISTINCT FROM $4 AND owner_generation IS NOT DISTINCT FROM $5 AND last_error IS NULL")
-        .bind(row.id).bind(encoded).bind(&row.claim_owner).bind(&row.owner_instance_id).bind(row.owner_generation)
+    let changed = sqlx::query("UPDATE intake_outbox SET last_error=$2 WHERE id=$1 AND status='spawned' AND claim_owner=$3 AND owner_instance_id IS NOT DISTINCT FROM $4 AND owner_generation IS NOT DISTINCT FROM $5 AND last_error IS NOT DISTINCT FROM $6")
+        .bind(row.id).bind(encoded).bind(&row.claim_owner).bind(&row.owner_instance_id).bind(row.owner_generation).bind(last_error)
         .execute(&mut *tx).await.map_err(|e| e.to_string())?.rows_affected();
     if changed == 1 {
         tx.commit().await.map_err(|e| e.to_string())
