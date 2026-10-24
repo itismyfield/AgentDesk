@@ -1325,13 +1325,27 @@ class WaitTimeoutClassification(unittest.TestCase):
             self.classify(*messages, health=(200, _health_detail(_e51_mailbox(), status="degraded"))),
             "turn_not_started_queue_blocked",
         )
-        # Each piece of queue evidence is sufficient on its own.
+        # The watcher_unbound notice and the health snapshot each suffice without the other.
         self.assertEqual(
             self.classify(messages[0], health=(200, _health_detail(_e51_mailbox(), status="degraded"))),
             "turn_not_started_queue_blocked",
         )
         self.assertEqual(
             self.classify(*messages, health=self.idle_health()), "turn_not_started_queue_blocked"
+        )
+
+    def test_stall_state_alone_marks_queue_blocked(self):
+        mailbox = _e51_mailbox(queue_depth=0)
+        self.assertEqual(
+            self.classify(_e51_message(self.PROMPT), health=(200, _health_detail(mailbox))),
+            "turn_not_started_queue_blocked",
+        )
+
+    def test_idle_queue_depth_alone_marks_queue_blocked(self):
+        mailbox = _e51_mailbox(relay_stall_state="healthy")
+        self.assertEqual(
+            self.classify(_e51_message(self.PROMPT), health=(200, _health_detail(mailbox))),
+            "turn_not_started_queue_blocked",
         )
 
     def test_unreadable_health_is_not_reported_as_no_queue_hold(self):
