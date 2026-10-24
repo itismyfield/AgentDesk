@@ -150,7 +150,7 @@ class Inventory:
     # Test ID -> every (site, cfg chain) that declares it; cfg-disjoint duplicates keep one entry each.
     tests: dict = field(default_factory=dict)
     reached: set = field(default_factory=set)
-    # Reached file -> the module path its items live in, from the first walk that reached it.
+    # Reached file -> every module path its items live in; more than one means one file, several modules.
     modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     unreadable: list = field(default_factory=list)
@@ -179,7 +179,7 @@ def walk(root, repo_root, inventory=None):
             continue
         seen.add(identity)
         inv.reached.add(source.resolve())
-        inv.modules.setdefault(source.resolve(), outer)
+        inv.modules.setdefault(source.resolve(), set()).add(outer)
         tokens = rust_tokens(source.read_text("utf-8"))
         rel = source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]

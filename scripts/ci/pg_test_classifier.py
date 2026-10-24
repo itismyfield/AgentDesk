@@ -492,11 +492,9 @@ def discover_pg_inventory(
             pattern.search(body) for pattern in CONNECT_SEED_PATTERNS
         )
 
-    for path in sorted(src_root.rglob("*.rs")):
-        reached_base = inventory.modules.get(path.resolve())
-        if reached_base is None:
-            # Files the lib does not compile must not lend items to the call graph.
-            continue
+    # Files the lib does not compile lend nothing; a file reached as several modules is read once per module.
+    reached = sorted((path, base) for path in src_root.rglob("*.rs") for base in inventory.modules.get(path.resolve(), ()))
+    for path, reached_base in reached:
         source = path.read_text("utf-8")
         clean = strip_rust(source)
         ranges = _module_ranges(source, clean, brace_counter)

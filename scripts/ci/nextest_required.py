@@ -2,7 +2,8 @@
 
   required-context  one branch-protection context from `toJSON(needs)`: N AND its own checks
   comparison-base   the SHA a plan is compared with: merge ref -> HEAD^1, PR head -> merge-base
-  classify-worker   infra / test / unknown / pass for one worker attempt; only infra may be retried
+  classify-worker   infra / test / unknown / pass per worker attempt; a run is retryable only when
+                    every failed worker is infra, and infra needs the caller's log evidence
 
 nextest_ci.py registers these subcommands; this module holds no state of its own.
 """
@@ -136,11 +137,12 @@ def cmd_comparison_base(ci, args):
     return 0
 
 
-def classify_worker(ci, plan, artifacts, worker, attempt):
-    """(class, reason) for one worker attempt; only the infra class is a retry candidate."""
+def classify_worker(ci, plan, artifacts, worker, attempt, infra_evidence=False):
+    """(class, reason) for one worker attempt. Missing results are infra only with the caller's log evidence."""
     wdir = Path(artifacts) / artifact_name(worker, attempt)
+    absent = "infra" if infra_evidence else "unknown"
     if not wdir.is_dir():
-        return "infra", f"no {wdir.name} artifact: the runner ended before the upload"
+        return absent, f"no {wdir.name} artifact; infra log evidence: {str(infra_evidence).lower()}"
     try:
         meta = json.loads((wdir / "worker.json").read_text())
     except (OSError, ValueError):
@@ -152,7 +154,7 @@ def classify_worker(ci, plan, artifacts, worker, attempt):
         return "unknown", f"worker.json does not belong to worker {worker} attempt {attempt} of this plan"
     has_exit, has_junit = (wdir / "exit-code").is_file(), (wdir / "junit.xml").is_file()
     if not has_exit and not has_junit:
-        return "infra", "preflight passed but nextest left no exit code or JUnit: killed or timed out"
+        return absent, f"preflight passed but no exit code or JUnit; infra log evidence: {str(infra_evidence).lower()}"
     try:
         root = ci._junit_root(wdir / "junit.xml")
     except ci.PlanError as exc:
@@ -172,9 +174,16 @@ def classify_worker(ci, plan, artifacts, worker, attempt):
 def cmd_classify_worker(ci, args):
     plan = ci.load_plan(args.plan)
     attempt = int(args.run_attempt)
-    cls, reason = classify_worker(ci, plan, args.artifacts, args.worker, attempt)
+    evidence = set(args.infra_evidence or [])
+    classes = []
+    for worker in args.worker:
+        cls, reason = classify_worker(ci, plan, args.artifacts, worker, attempt, worker in evidence)
+        classes.append(cls)
+        print(f"worker {worker} attempt {attempt}: {cls} ({reason})")
+    # The worst class decides: one test or unknown worker vetoes the retry of every other worker.
+    cls = next(c for c in ("test", "unknown", "infra", "pass") if c in classes)
     retryable = cls == "infra" and attempt < MAX_ATTEMPTS
-    print(f"worker {args.worker} attempt {attempt}: {cls} ({reason}); retryable={str(retryable).lower()}")
+    print(f"run attempt {attempt}: {cls}; retryable={str(retryable).lower()}")
     if args.github_output:
         with open(args.github_output, "a") as out:
             out.write(f"class={cls}\nretryable={str(retryable).lower()}\n")
@@ -197,7 +206,9 @@ def register(sub):
     w = sub.add_parser("classify-worker")
     w.add_argument("--plan", required=True)
     w.add_argument("--artifacts", required=True, help=f"directory holding {artifact_name('<i>', '<attempt>')}/")
-    w.add_argument("--worker", type=int, required=True)
+    w.add_argument("--worker", type=int, action="append", required=True, help="a failed worker (repeatable)")
+    w.add_argument("--infra-evidence", type=int, action="append",
+                   help="a worker whose job log the caller's classifier proved infra (repeatable)")
     w.add_argument("--run-attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
     w.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     return {"required-context": cmd_required_context, "comparison-base": cmd_comparison_base,
