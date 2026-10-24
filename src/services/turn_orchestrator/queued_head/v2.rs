@@ -52,7 +52,7 @@ impl Owner {
         Ok(owner)
     }
 
-    pub(crate) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
+    pub(super) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
         if self.pending.is_some() {
             return Err(AdmitError::NotCommitted("owner recovery required".into()));
         }
@@ -66,6 +66,11 @@ impl Owner {
         next.items.push(item.clone());
         self.admit_commit(next)?;
         Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue_fixture(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
+        self.enqueue(item)
     }
 
     pub(crate) fn reserve(

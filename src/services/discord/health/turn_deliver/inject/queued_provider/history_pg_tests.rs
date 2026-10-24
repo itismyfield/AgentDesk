@@ -282,7 +282,7 @@ async fn exact_history_adapter_pastes_once_and_reconciles_after_restart_pg() {
         let key = mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().unwrap();
-                assert!(owner.enqueue(&original)?);
+                assert!(owner.enqueue_fixture(&original)?);
                 let key = owner.reserve(
                     serde_json::from_value(attempt).unwrap(),
                     serde_json::from_value(

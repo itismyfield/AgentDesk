@@ -18,7 +18,8 @@ pub(super) async fn resolve_intake_voice_announcement(
 ) {
     let mut voice_announcement_already_accepted = false;
     let voice_announcement = if let Some(resolved) = gate_resolved_voice_announcement {
-        // The gate authorized this payload; the per-message durable claim still deduplicates it.
+        // Re-reading the live row can lose to a sibling gateway that already consumed it.
+        // Keep the gate-authorized payload; the per-message durable claim still deduplicates it.
         Some(resolved)
     } else if announce_bot_id == Some(request_owner.get()) {
         if let Some((announcement, accepted_replay)) = stored_voice_announcement {

@@ -90,6 +90,12 @@ fn fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
         carrier.retry_prompt_context_is_empty(),
         "actual B empty-carrier eligibility remains unchanged"
     );
+    let mut legacy = original.clone();
+    legacy.reply_context = Some("existing legacy reply".into());
+    assert!(
+        fresh_source(&legacy, &context).is_err(),
+        "existing reply custody must not be overwritten"
+    );
     let mut mixed = original;
     mixed.source_message_ids.push(200);
     assert!(
@@ -100,3 +106,31 @@ fn fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
 
 #[cfg(unix)]
 mod pg_tests;
+
+#[test]
+fn raw_admission_apis_stay_inside_the_owner_boundary() {
+    use crate::services::discord::router::source_guard_support::Lexed;
+    let owner = Lexed::new(include_str!(
+        "../../../../turn_orchestrator/queued_head/v2.rs"
+    ));
+    let migration = Lexed::new(include_str!(
+        "../../../../turn_orchestrator/queued_head/v2/sources.rs"
+    ));
+    assert_eq!(
+        owner.find_all("pub(super) fn enqueue(").len(),
+        1,
+        "raw enqueue must stay inside owner scope"
+    );
+    assert_eq!(
+        migration.find_all("pub(super) fn migrate_parked(").len(),
+        1,
+        "raw migration must stay inside owner scope"
+    );
+    assert!(
+        owner
+            .find_all("#[cfg(test)]\n    pub(crate) fn enqueue_fixture(")
+            .len()
+            == 1,
+        "external fixture entry must remain test only"
+    );
+}

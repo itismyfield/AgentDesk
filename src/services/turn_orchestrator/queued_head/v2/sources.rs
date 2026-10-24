@@ -130,7 +130,7 @@ pub(super) fn restore(raw: &str, namespace: &str) -> Result<SnapshotV2, String> 
 }
 
 /// Parked without positive evidence of no attempt is retained, never rejected or retried.
-pub(crate) fn migrate_parked(
+pub(super) fn migrate_parked(
     owner: &mut Owner,
     item: &PendingQueueItem,
     proven_unattempted: bool,

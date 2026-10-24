@@ -77,8 +77,16 @@ pub(in crate::services::discord) fn fresh_source(
     {
         return Err("fresh source requires one explicit original".into());
     }
+    let encoded = context.encode().ok_or("raw context serialization failed")?;
+    if original
+        .reply_context
+        .as_ref()
+        .is_some_and(|old| old != &encoded)
+    {
+        return Err("fresh source cannot replace existing reply context".into());
+    }
     let mut original = original.clone();
-    original.reply_context = Some(context.encode().ok_or("raw context serialization failed")?);
+    original.reply_context = Some(encoded);
     Ok(original)
 }
 
