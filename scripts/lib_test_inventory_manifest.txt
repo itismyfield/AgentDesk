@@ -4019,6 +4019,7 @@ services::discord::health::o_transition::automatic_idle::tests::automatic_idle_k
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_missing_closed_and_unanswered_mailboxes
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_queued_input_or_recovery
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_reads_the_live_runtime_snapshot
+services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
 services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
 services::discord::health::o_transition::codex_context::tests::legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed
 services::discord::health::o_transition::codex_context::tests::pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown
@@ -13550,6 +13551,7 @@ services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::sh
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::startup_pending_resolved_anchor_survives_later_same_nonce_warm_proof
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::new_root_waiting_alarm_clears_once_after_transition_job_finishes
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::obligations::durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_and_unretired_denied_sources_stay_untouched_while_fresh_work_posts
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_source_with_an_actual_owed_piece_cannot_enter_suspension
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::same_actor_scopes_two_fresh_incarnations_without_clear_or_restart

@@ -59,7 +59,7 @@ pub(crate) async fn resolve_codex_context(
     registry: &HealthRegistry,
     shared: std::sync::Arc<crate::services::discord::SharedData>,
     channel: u64,
-) -> Result<Context, String> {
+) -> Result<Context, codex_context::Unavailable> {
     let prepared = codex_context::prepare(registry, shared.clone(), channel).await?;
     Ok(Context {
         lock: shared.session_transition_lock(ChannelId::new(channel)),

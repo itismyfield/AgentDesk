@@ -205,9 +205,26 @@ async fn channel_sweep(
         .await
         .ok_or("runtime_unavailable")?;
     if expected == ShadowProvider::Codex {
-        let context = resolve_codex_context(registry, shared, channel)
-            .await
-            .map_err(|_| "codex_context_unavailable")?;
+        let context = match resolve_codex_context(registry, shared, channel).await {
+            Ok(context) => context,
+            Err(unavailable) => {
+                #[cfg(test)]
+                if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "prepare_reason") {
+                    stats.skip("codex_context_unavailable");
+                    return Ok(());
+                }
+                let component = unavailable.component.as_str();
+                let reason = unavailable.reason;
+                tracing::info!(
+                    channel,
+                    component,
+                    reason,
+                    "[tui_o] Codex retention observation unknown"
+                );
+                stats.skip(format!("codex_context_unavailable:{component}"));
+                return Ok(());
+            }
+        };
         let request = Request {
             channel,
             cutoff: u64::MAX,

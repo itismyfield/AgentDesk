@@ -28,29 +28,92 @@ struct Read {
     log: String,
 }
 
+#[derive(Debug)]
+pub(crate) enum Component {
+    WatcherBinding,
+    WatcherOwnership,
+    NonceMarker,
+    LaunchContext,
+    HostIdentity,
+    HostedExecution,
+    HostInventory,
+    RuntimeBinding,
+    NativeSource,
+    BindingLog,
+    PaneCensus,
+    PrepareWorker,
+}
+impl Component {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::WatcherBinding => "watcher_binding",
+            Self::WatcherOwnership => "watcher_ownership",
+            Self::NonceMarker => "nonce_marker",
+            Self::LaunchContext => "launch_context",
+            Self::HostIdentity => "host_identity",
+            Self::HostedExecution => "hosted_execution",
+            Self::HostInventory => "host_inventory",
+            Self::RuntimeBinding => "runtime_binding",
+            Self::NativeSource => "native_source",
+            Self::BindingLog => "binding_log",
+            Self::PaneCensus => "pane_census",
+            Self::PrepareWorker => "prepare_worker",
+        }
+    }
+}
+#[derive(Debug)]
+pub(crate) struct Unavailable {
+    pub component: Component,
+    pub reason: String,
+}
+impl Unavailable {
+    fn new(component: Component, reason: impl Into<String>) -> Self {
+        Self {
+            component,
+            reason: reason.into(),
+        }
+    }
+}
+
 pub(super) async fn prepare(
     _registry: &HealthRegistry,
     shared: Arc<SharedData>,
     channel: u64,
-) -> Result<Prepared, String> {
+) -> Result<Prepared, Unavailable> {
     let binding = shared
         .tmux_watchers
         .channel_binding(&ChannelId::new(channel))
-        .ok_or("current authoritative watcher binding unavailable")?;
+        .ok_or_else(|| {
+            Unavailable::new(
+                Component::WatcherBinding,
+                "current authoritative watcher binding unavailable",
+            )
+        })?;
     let tmux = binding.tmux_session_name;
     if binding.owner_channel_id.get() != channel
         || shared.tmux_watchers.owner_channel_for_tmux_session(&tmux)
             != Some(ChannelId::new(channel))
     {
-        return Err("current watcher ownership mismatch".into());
+        return Err(Unavailable::new(
+            Component::WatcherOwnership,
+            "current watcher ownership mismatch",
+        ));
     }
     let SpawnNonceMarker::Known(nonce) = context::observe_spawn_nonce_marker(&tmux) else {
-        return Err("current spawn nonce unavailable".into());
+        return Err(Unavailable::new(
+            Component::NonceMarker,
+            "current spawn nonce unavailable",
+        ));
     };
-    let launch = context::execution_context("codex", &nonce)?;
-    let host = context::stable_host_identity().ok_or("local host identity unavailable")?;
+    let launch = context::execution_context("codex", &nonce)
+        .map_err(|reason| Unavailable::new(Component::LaunchContext, reason))?;
+    let host = context::stable_host_identity().ok_or_else(|| {
+        Unavailable::new(Component::HostIdentity, "local host identity unavailable")
+    })?;
     let (host_path, physical) = if launch.source_policy.is_none() {
-        hosted(&shared, channel, &tmux, &nonce).await?
+        hosted(&shared, channel, &tmux, &nonce)
+            .await
+            .map_err(|reason| Unavailable::new(Component::HostedExecution, reason))?
     } else {
         (model::HostPath::Legacy, None)
     };
@@ -62,10 +125,12 @@ pub(super) async fn prepare(
         owner_runtime_root: tc::current_tmux_owner_marker(),
         host_path,
     };
-    let host = census::host_inventory(physical.as_deref(), &tmux)?;
+    let host = census::host_inventory(physical.as_deref(), &tmux)
+        .map_err(|reason| Unavailable::new(Component::HostInventory, reason))?;
     let reader = tokio::task::spawn_blocking(move || {
-        let binding = tc::with_tmux_source_authority(&tmux, current_binding)?;
-        let current = {
+        let binding = tc::with_tmux_source_authority(&tmux, current_binding)
+            .map_err(|reason| Unavailable::new(Component::RuntimeBinding, reason))?;
+        let current = (|| {
             let root = launch
                 .provider_root
                 .as_deref()
@@ -92,16 +157,19 @@ pub(super) async fn prepare(
                 }
                 _ => return Err("native descriptor unavailable".into()),
             };
-            crate::services::tui_o::shadow::SourceId {
+            Ok::<_, String>(crate::services::tui_o::shadow::SourceId {
                 session_id: verified.session_id,
                 path: verified.rollout_path,
                 dev,
                 ino,
-            }
-        };
-        let log = codex::observe_channel(channel, census::LIMIT)?;
-        let (_, census) = census::read(&shared, &target, &launch, &log.events, &host)?;
-        Ok::<_, String>(Read {
+            })
+        })()
+        .map_err(|reason| Unavailable::new(Component::NativeSource, reason))?;
+        let log = codex::observe_channel(channel, census::LIMIT)
+            .map_err(|reason| Unavailable::new(Component::BindingLog, reason))?;
+        let (_, census) = census::read(&shared, &target, &launch, &log.events, &host)
+            .map_err(|reason| Unavailable::new(Component::PaneCensus, reason))?;
+        Ok::<_, Unavailable>(Read {
             shared,
             target,
             context: launch,
@@ -114,7 +182,7 @@ pub(super) async fn prepare(
         })
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|reason| Unavailable::new(Component::PrepareWorker, reason.to_string()))??;
     Ok(Prepared {
         tmux: reader.target.tmux.clone(),
         nonce,

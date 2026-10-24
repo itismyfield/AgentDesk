@@ -45,8 +45,17 @@ pub(super) struct Transitions {
 }
 
 impl Transitions {
+    #[cfg(all(test, unix))]
     pub(super) fn has_job(&self) -> bool {
         self.job.is_some()
+    }
+
+    pub(super) fn has_apply_job(&self) -> bool {
+        #[cfg(test)]
+        if super::super::deliver::bo_mutant("inspect_rescope") {
+            return self.job.is_some();
+        }
+        self.job.as_ref().is_some_and(|job| job.apply)
     }
     pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
         let job = None;
