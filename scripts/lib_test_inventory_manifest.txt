@@ -33,6 +33,8 @@ cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
 cli::args::tests::turn_lease_cli_parses_read_and_exact_release
 cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
+cli::build_info::tests::build_info_is_a_subcommand
+cli::build_info::tests::build_info_reports_the_compiled_switches
 cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
 cli::client::activity_tests::parse_duration_suffix_handles_each_unit

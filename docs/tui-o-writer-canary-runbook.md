@@ -242,9 +242,11 @@ verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 - Deleting `o_store`, `o_era` or a channel directory. A fully deleted store cannot be told apart
   from a first install; restore it from an external backup instead.
 - Running nodes with different lists.
-- Deploying an external binary (`AGENTDESK_DEPLOY_BINARY`) while the source switch is `true`, or
-  rolling back to a build whose manifest does not record `o_tui_writer` as `true`. The deploy
-  script refuses both.
+- Deploying an external binary (`AGENTDESK_DEPLOY_BINARY`) whose `agentdesk build-info` reports
+  `o_tui_writer` or `o_ledger_operator_resume` as `true` or unknown (no `build-info`, missing
+  field), or rolling back to a build whose manifest does not record `o_tui_writer` as `true`
+  while the installed binary reports `o_tui_writer` as `true` or unknown. The deploy script
+  refuses both. An artifact that reports both switches as `false` is deployed as before.
 
 ## 7. Recover a piece Discord refused
 
