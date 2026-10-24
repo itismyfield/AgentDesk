@@ -60,7 +60,7 @@ pub(super) fn raise_fd_soft_limit(desired: u64) {
 #[cfg(not(unix))]
 pub(super) fn raise_fd_soft_limit(_desired: u64) {}
 
-pub(super) fn spawn_skill_manifest_audit(config: &crate::config::Config, pool: &sqlx::PgPool) {
+pub(crate) fn spawn_skill_manifest_audit(config: &crate::config::Config, pool: &sqlx::PgPool) {
     static STARTED: std::sync::Once = std::sync::Once::new();
     let config = config.clone();
     let pool = pool.clone();
