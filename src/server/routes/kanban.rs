@@ -287,7 +287,7 @@ fn execute_transition_intent_pg(
     execute_transition_intents_pg(state, std::slice::from_ref(intent))
 }
 
-/// PM decisions still answer after a secondary review-state write fails; leave a trace (#7347 L4).
+/// PM decisions still answer after a secondary review-state write fails; leave a trace.
 fn warn_side_write<'a>(card_id: &'a str, write: &'a str) -> impl FnOnce(&anyhow::Error) + 'a {
     move |error| tracing::warn!(card_id = %card_id, "[pm-decision] {write} failed: {error:#}")
 }

@@ -568,8 +568,8 @@ pub(crate) async fn try_reuse_thread(
         .bind(dispatch_id)
         .fetch_one(pool)
         .await;
-        // Fail closed (#7347 L3): when the guard cannot see the thread's dispatches,
-        // a fresh thread is the only answer that cannot reopen #1968.
+        // Fail closed: if the guard cannot read the thread's dispatches, only a fresh
+        // thread is sure not to be shared with another active dispatch.
         let active_count = match active_count {
             Ok(count) => count,
             Err(error) => {
@@ -784,7 +784,7 @@ pub(crate) async fn try_reuse_thread(
 
 #[cfg(test)]
 mod fail_closed_tests {
-    // #7347 L3: an unreadable #1968 guard must force a fresh thread before any Discord call.
+    // An unreadable active-dispatch guard must force a fresh thread before any Discord call.
     #[tokio::test]
     async fn reuse_is_refused_when_the_active_dispatch_check_fails() {
         let pool = sqlx::postgres::PgPoolOptions::new()
