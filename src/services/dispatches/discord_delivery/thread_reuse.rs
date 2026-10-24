@@ -567,8 +567,18 @@ pub(crate) async fn try_reuse_thread(
         .bind(thread_id)
         .bind(dispatch_id)
         .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+        .await;
+        // Fail closed (#7347 L3): when the guard cannot see the thread's dispatches,
+        // a fresh thread is the only answer that cannot reopen #1968.
+        let active_count = match active_count {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(
+                    "[dispatch] Thread {thread_id} active-dispatch check failed for {dispatch_id}: {error}; forcing fresh thread"
+                );
+                return Ok(None);
+            }
+        };
         if active_count > 0 {
             tracing::info!(
                 "[dispatch] Thread {thread_id} has {active_count} active dispatch(es); refusing reuse for {dispatch_id} and forcing fresh thread"
@@ -769,5 +779,35 @@ pub(crate) async fn try_reuse_thread(
             }
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    // #7347 L3: an unreadable #1968 guard must force a fresh thread before any Discord call.
+    #[tokio::test]
+    async fn reuse_is_refused_when_the_active_dispatch_check_fails() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .unwrap();
+        pool.close().await;
+
+        let outcome = super::try_reuse_thread(
+            &reqwest::Client::new(),
+            "token",
+            "http://127.0.0.1:1",
+            "thread-1",
+            1,
+            "thread name",
+            "message",
+            "minimal message",
+            "dispatch-1",
+            "card-1",
+            Some(&pool),
+        )
+        .await
+        .expect("a failed guard query refuses reuse instead of probing Discord");
+
+        assert!(outcome.is_none());
     }
 }

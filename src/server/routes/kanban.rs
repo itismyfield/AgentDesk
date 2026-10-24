@@ -287,6 +287,33 @@ fn execute_transition_intent_pg(
     execute_transition_intents_pg(state, std::slice::from_ref(intent))
 }
 
+/// PM decisions still answer after a secondary review-state write fails; leave a trace (#7347 L4).
+fn warn_side_write<'a>(card_id: &'a str, write: &'a str) -> impl FnOnce(&anyhow::Error) + 'a {
+    move |error| tracing::warn!(card_id = %card_id, "[pm-decision] {write} failed: {error:#}")
+}
+
+/// Completes the card's pending pm-decision dispatches; a failed completion is logged.
+async fn complete_pending_pm_decisions(
+    pool: &sqlx::PgPool,
+    card_id: &str,
+    result: &serde_json::Value,
+) -> Result<(), String> {
+    for dispatch_id in kanban_db::pending_pm_decision_dispatch_ids_pg(pool, card_id).await? {
+        if let Err(error) = crate::dispatch::set_dispatch_status_with_backends(
+            Some(pool),
+            &dispatch_id,
+            "completed",
+            Some(result),
+            "mark_dispatch_completed",
+            Some(&["pending", "dispatched"]),
+            true,
+        ) {
+            tracing::warn!(card_id, dispatch_id, "[pm-decision] completion: {error:#}");
+        }
+    }
+    Ok(())
+}
+
 fn review_state_sync_pg(state: &AppState, payload: serde_json::Value) -> anyhow::Result<String> {
     let pool = state.pg_pool_ref().ok_or_else(pg_pool_required_anyhow)?;
     let result =
@@ -1283,27 +1310,9 @@ pub async fn pm_decision(
     // Complete any pending pm-decision dispatches (rework handles its own completion after dispatch success)
     if body.decision != "rework" {
         let completion_result = json!({"decision": body.decision, "comment": body.comment});
-        let pending_dispatch_ids =
-            match kanban_db::pending_pm_decision_dispatch_ids_pg(transition_pool, &body.card_id)
-                .await
-            {
-                Ok(ids) => ids,
-                Err(error) => {
-                    return Err(database_error(error));
-                }
-            };
-        for dispatch_id in pending_dispatch_ids {
-            crate::dispatch::set_dispatch_status_with_backends(
-                Some(transition_pool),
-                &dispatch_id,
-                "completed",
-                Some(&completion_result),
-                "mark_dispatch_completed",
-                Some(&["pending", "dispatched"]),
-                true,
-            )
-            .ok();
-        }
+        complete_pending_pm_decisions(transition_pool, &body.card_id, &completion_result)
+            .await
+            .map_err(database_error)?;
     }
     // Clear manual-intervention markers before applying the selected decision.
     if let Err(error) =
@@ -1319,6 +1328,7 @@ pub async fn pm_decision(
                 review_status: None,
             },
         )
+        .inspect_err(warn_side_write(&body.card_id, "clear review_status"))
         .ok();
         execute_transition_intent_pg(
             &state,
@@ -1327,6 +1337,7 @@ pub async fn pm_decision(
                 state: "idle".to_string(),
             },
         )
+        .inspect_err(warn_side_write(&body.card_id, "sync review state idle"))
         .ok();
     }
 
@@ -1392,29 +1403,13 @@ pub async fn pm_decision(
                 Ok(_) => {
                     // Dispatch succeeded — now complete pm-decision dispatch + transition
                     let completion_result = json!({"decision": "rework", "comment": body.comment});
-                    let pending_dispatch_ids = match kanban_db::pending_pm_decision_dispatch_ids_pg(
+                    complete_pending_pm_decisions(
                         transition_pool,
                         &body.card_id,
+                        &completion_result,
                     )
                     .await
-                    {
-                        Ok(ids) => ids,
-                        Err(error) => {
-                            return Err(database_error(error));
-                        }
-                    };
-                    for dispatch_id in pending_dispatch_ids {
-                        crate::dispatch::set_dispatch_status_with_backends(
-                            Some(transition_pool),
-                            &dispatch_id,
-                            "completed",
-                            Some(&completion_result),
-                            "mark_dispatch_completed",
-                            Some(&["pending", "dispatched"]),
-                            true,
-                        )
-                        .ok();
-                    }
+                    .map_err(database_error)?;
                     // Pipeline-driven: rework target from current state's review_rework gate
                     let rework_status: String =
                         match kanban_db::card_status_pg(transition_pool, &body.card_id).await {
@@ -1459,12 +1454,17 @@ pub async fn pm_decision(
                             review_status: Some("rework_pending".to_string()),
                         },
                     )
+                    .inspect_err(warn_side_write(
+                        &body.card_id,
+                        "set review_status rework_pending",
+                    ))
                     .ok();
                     // #117/#158: sync canonical review state via unified entrypoint.
                     review_state_sync_pg(
                         &state,
                         serde_json::json!({"card_id": body.card_id.clone(), "state": "rework_pending", "last_decision": "pm_rework"}),
                     )
+                    .inspect_err(warn_side_write(&body.card_id, "sync review state rework_pending"))
                     .ok();
                     "Rework dispatch created"
                 }
