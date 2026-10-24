@@ -40,6 +40,7 @@ pub(super) use stream_loop::types::PinnedTerminalTransport;
 
 mod busy_followup_retry;
 mod cancel_prompt_replace;
+mod completion_proof;
 mod contracts;
 mod delivery_epilogue;
 #[cfg(test)]
@@ -66,7 +67,7 @@ pub(super) async fn run_terminal_outcome_delivery(
             &state.provider,
             state.inflight_state.runtime_kind,
             ctx.tui_error_classification,
-        );
+        ) || completion_proof::waiting(&state.inflight_state).is_some();
     let (receipt_disposition, mut preserve_inflight_for_cleanup_retry, mut terminal_outcome) =
         foreign_terminal_handoff::prepare_receipt_disposition(
             &ctx,
@@ -388,9 +389,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
         let answerless =
             o_notice || no_answer(&full_response, response_sent_offset, &delivery_response);
-        let body_claim =
-            (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
-        if o_body_cut.is_err() || silent_turn_handled {
+        let preparation_wait = completion_proof::waiting(&inflight_state).is_some();
+        let body_claim = (!answerless && !preparation_wait)
+            .then(|| bridge_body_claim(channel_id, &inflight_state, direct));
+        if preparation_wait {
+            // The non-turn outbox owns the waiting notice; it commits no answer or footer.
+        } else if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
@@ -842,7 +846,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     }
     // A terminal answer without a busy requeue unties the card so no later turn edits it; any
     // spent retries stay with the input.
-    if busy_requeue_outcome.is_none() {
+    if busy_requeue_outcome.is_none() && completion_proof::waiting(&inflight_state).is_none() {
         super::busy_followup_retry_store::release_notice(&provider, channel_id, &inflight_state);
     }
     TerminalOutcomeDeliveryOutput {

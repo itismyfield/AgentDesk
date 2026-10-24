@@ -1,7 +1,6 @@
 //! Completion projection, bookkeeping, and retry-preserving cleanup for a bridge attempt.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use super::guards::{CompletionGuard, InflightCleanupGuard};
 use super::memory_lifecycle::note_memento_context_from_turn;
@@ -11,6 +10,7 @@ mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
 mod legacy_summary;
+mod prelude_lifecycle;
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
 pub(super) async fn run_completion_postlude(
@@ -18,6 +18,7 @@ pub(super) async fn run_completion_postlude(
     state: CompletionPostludeState,
 ) {
     let summary = legacy_summary::Completion::capture(&ctx, &state);
+    let prelude_completed = prelude_lifecycle::completed(&state);
     let shared_owned = ctx.shared_owned;
     let gateway = ctx.gateway;
     let channel_id = ctx.channel_id;
@@ -60,7 +61,7 @@ pub(super) async fn run_completion_postlude(
     let preserve_inflight_for_cleanup_retry = state.preserve_inflight_for_cleanup_retry;
     let tmux_last_offset = state.tmux_last_offset;
     let watcher_delivery_pin = state.watcher_delivery_pin;
-    let watcher_owner_channel_id = state.watcher_owner_channel_id;
+    let _watcher_owner_channel_id = state.watcher_owner_channel_id;
     let bridge_relay_delegated_to_watcher = state.bridge_relay_delegated_to_watcher;
     let is_prompt_too_long = state.is_prompt_too_long;
     let resume_failure_detected = state.resume_failure_detected;
@@ -372,7 +373,17 @@ pub(super) async fn run_completion_postlude(
         } else {
             None
         };
-    if let Some(analysis) = recall_feedback_analysis.as_ref()
+    let reminders_allowed = !channel_effects_suppressed
+        && prelude_completed
+        && prelude_lifecycle::settle(
+            shared_owned.pg_pool.as_ref(),
+            &provider,
+            &inflight_state,
+            &turn_id,
+        )
+        .await;
+    if reminders_allowed
+        && let Some(analysis) = recall_feedback_analysis.as_ref()
         && let Some(reminder) = channel_writeback::feedback_reminder_to_stash(
             channel_effects_suppressed,
             build_voluntary_feedback_reminder(analysis),
@@ -406,7 +417,7 @@ pub(super) async fn run_completion_postlude(
     // #4196: stash an uncommitted-worktree warning for the next intake using
     // the existing #3792 detector. Only the channel owner may affect the session.
     // A clean worktree returns None; a failed stash leaves the channel-post backstop.
-    if !channel_effects_suppressed
+    if reminders_allowed
         && let Some(wip_warning) =
             super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
         && let Err(error) = super::recovery_text::store_turn_end_wip_warning(

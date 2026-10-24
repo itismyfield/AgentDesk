@@ -59,6 +59,6 @@ pub(crate) fn eligible(item: &Intervention) -> bool {
         && !NOT_TYPED_LEAD.iter().any(|prefix| lead.starts_with(prefix))
         && item.pending_uploads.is_empty()
         && item.voice_announcement.is_none()
-        && item.reply_context.is_none()
+        && item.retry_prompt_context_is_empty()
         && !item.has_reply_boundary
 }
