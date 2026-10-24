@@ -30,7 +30,6 @@ ONE_HOP_IMPORTS = """defaults.json policies/default-pipeline.yaml src/config.rs
     src/services/dispatches/outbox_queue.rs src/services/observability/mod.rs
     src/services/git/commit_resolver.rs src/services/platform/mod.rs
     src/config_live_reload.rs src/services/dispatch_gate.rs
-    src/services/health_active_session_audit.rs
     src/services/session_activity.rs""".split()
 SUPPORTED_SEGMENT = re.compile(r"^[A-Za-z0-9._-]*\*?[A-Za-z0-9._-]*$")
 

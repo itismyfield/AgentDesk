@@ -10,6 +10,8 @@ pub(crate) struct SourceMessageQueuedGeneration {
     pub(crate) preserve_on_cancel: bool,
     /// The route a lost claim resolved; travels with the source through merges and restores.
     pub(crate) route: Option<super::QueuedRoute>,
+    /// Original intake origin; queue replay retains each source independently.
+    pub(crate) origin: Option<String>,
 }
 
 impl SourceMessageQueuedGeneration {
@@ -23,6 +25,7 @@ impl SourceMessageQueuedGeneration {
                 .and_then(|since| u64::try_from(since.as_micros()).ok()),
             preserve_on_cancel: false,
             route: None,
+            origin: None,
         }
     }
 
@@ -51,4 +54,10 @@ pub(crate) struct PendingQueueSourceGeneration {
     /// Files written before routes were kept read as `None`, and that item resolves again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) route: Option<super::QueuedRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) origin: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "source_generation_origin_tests.rs"]
+mod origin_tests;

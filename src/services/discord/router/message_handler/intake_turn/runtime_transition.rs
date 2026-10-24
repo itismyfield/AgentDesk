@@ -38,26 +38,9 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     ) = requeue;
     // Busy queued drains return their already owned uploads to the restore owner.
     // Fresh input keeps the durable tail enqueue and slow wake policy.
-    let admits = crate::services::discord::commands::native_clear_admits;
-    let admitted = match try_intake_runtime_transition_after_redirect(
-        shared,
-        channel_id,
-        fallback_state,
-    )
-    .await
-    {
-        Ok(mut t) => admits(
-            http,
-            shared,
-            provider,
-            channel_id,
-            &mut t.state,
-            &mut t.recovered_fresh,
-        )
+    let admitted = try_intake_runtime_transition_after_redirect(shared, channel_id, fallback_state)
         .await
-        .then_some(t),
-        Err(_) => None,
-    };
+        .ok();
     match admitted {
         Some(transition) => Ok(Some(transition)),
         None => {
@@ -102,9 +85,6 @@ pub(super) async fn acquire_after_redirect_or_requeue(
         }
     }
 }
-
-#[cfg(all(test, unix))]
-mod native_hold_tests;
 
 #[cfg(test)]
 mod tests {

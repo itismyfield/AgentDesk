@@ -334,7 +334,6 @@ impl PromptKey {
 mod extract;
 mod handoff;
 mod injected_steer;
-pub(crate) mod native_clear;
 mod observation;
 mod prompt_identity;
 mod runtime_binding;

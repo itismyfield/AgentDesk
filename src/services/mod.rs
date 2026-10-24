@@ -42,7 +42,6 @@ pub mod gemini;
 pub mod git;
 pub mod github_issue_creation;
 pub(crate) mod hang_forensics;
-pub mod health_active_session_audit;
 pub mod health_diagnostics;
 pub(crate) mod herdr_admission;
 pub(crate) mod herdr_launch;
@@ -142,8 +141,6 @@ pub mod tmux_diagnostics;
 pub(crate) mod tmux_turn_liveness;
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
-#[allow(dead_code)]
-pub(crate) mod writer_protocol;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 #[allow(dead_code)]
 pub(crate) mod tui_o {

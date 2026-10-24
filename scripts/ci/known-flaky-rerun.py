@@ -9,6 +9,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from pr_head_current import pr_head_is_current
+
 
 MANIFEST = Path(__file__).with_name("known-flaky-tests.json")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -188,6 +190,8 @@ def classify_run(repo: str, run_id: str, attempt: int, known: set[str]) -> tuple
         "status": "completed", "conclusion": "failure", "run_attempt": attempt,
     }.items()):
         return False, "no-op:stale-attempt"
+    if not pr_head_is_current(repo, run):
+        return False, "no-op:stale-head"
     if os.environ.get("RERUN_DRY_RUN") == "1":
         return True, "would-rerun:known-flaky"
     gh("run", "rerun", run_id, "--repo", repo, "--failed")

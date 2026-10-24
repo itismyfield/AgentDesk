@@ -116,6 +116,84 @@ impl ClearReport {
         });
     }
 
+    /// Only exact, durably removed mailbox sources settle consent custody.
+    #[cfg(unix)]
+    pub(super) async fn settle_consents(
+        &mut self,
+        shared: &std::sync::Arc<super::SharedData>,
+        provider: &crate::services::provider::ProviderKind,
+        channel: poise::serenity_prelude::ChannelId,
+        cleared: &ClearChannelResult,
+    ) {
+        use crate::services::discord::router::herdr_consent;
+        use crate::services::turn_orchestrator as queue;
+        if herdr_consent::endpoint(channel.get()).is_none() || !self.failed.is_empty() {
+            return;
+        }
+        let Some(discarded) = &self.discarded else {
+            return;
+        };
+        let exact: BTreeSet<_> = cleared
+            .queue_exit_events
+            .iter()
+            .flat_map(|event| event.intervention.source_message_queued_generations())
+            .filter(|source| discarded.contains(&source.message_id))
+            .map(|source| (source.message_id.get(), source.queued_generation))
+            .collect();
+        if exact.is_empty() {
+            return;
+        }
+        let result = async {
+            let snapshot = shared
+                .mailbox(channel)
+                .try_snapshot()
+                .await
+                .map_err(|error| format!("mailbox clear settlement: {error:?}"))?;
+            let (disk, _) =
+                queue::load_channel_pending_queue_checked(provider, &shared.token_hash, channel)?;
+            let marker = queue::load_channel_pending_dispatch_marker_checked(
+                provider,
+                &shared.token_hash,
+                channel,
+            )?;
+            let mut present: BTreeSet<_> = snapshot
+                .intervention_queue
+                .iter()
+                .chain(disk.iter())
+                .chain(marker.iter().map(|(item, _)| item))
+                .flat_map(|item| {
+                    item.source_message_ids
+                        .iter()
+                        .copied()
+                        .chain([item.message_id])
+                })
+                .collect();
+            present.extend(snapshot.active_user_message_id);
+            present.extend(snapshot.active_absorbed_source_ids);
+            present.extend(snapshot.pending_user_dispatch);
+            present.extend(snapshot.pending_user_dispatch_source_ids);
+            let store = herdr_consent::store();
+            for (mut consent, intents) in store.unresolved()? {
+                for intent in intents {
+                    if intent.store == "mailbox"
+                        && intent.provider == provider.as_str()
+                        && intent.channel == channel.get()
+                        && intent.id == format!("{}:{}", intent.source_message, intent.fifo)
+                        && exact.contains(&(intent.source_message, intent.fifo))
+                        && !present.contains(&MessageId::new(intent.source_message))
+                    {
+                        consent = store.acknowledge_discard(&consent, &intent)?;
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = result {
+            self.fail("consent_discard", &error);
+        }
+    }
+
     /// The command message that asked for this clear was never waiting input.
     pub(in crate::services::discord) fn excluding(mut self, command: MessageId) -> Self {
         if let Some(ids) = self.discarded.as_mut() {
@@ -178,3 +256,7 @@ mod read_only_tests {
         assert!(report.reply().contains(STOP_UNCONFIRMED));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "consent_clear_tests.rs"]
+mod consent_clear_tests;

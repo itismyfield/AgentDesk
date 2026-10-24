@@ -46,6 +46,9 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 mod claude_boundary;
 #[path = "rotation/clear_end.rs"]
 mod clear_end;
+#[cfg(unix)]
+#[path = "rotation/codex_end.rs"]
+mod codex_end;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
@@ -405,7 +408,7 @@ impl<B: BindingEvents> Sources<B> {
             },
         };
         if *self.notice.borrow() <= checkpoint {
-            return self.settle_cleared(writer);
+            return self.settle_ends(writer);
         }
         if self.legacy_hops_unread {
             self.restore_legacy_hops(writer)?;
@@ -483,7 +486,17 @@ impl<B: BindingEvents> Sources<B> {
             self.checkpoint = Some(event.seq);
             expected += 1;
         }
-        self.settle_cleared(writer)
+        self.settle_ends(writer)
+    }
+
+    fn settle_ends<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+    ) -> Result<(), WriterAlarm> {
+        self.settle_cleared(writer)?;
+        #[cfg(unix)]
+        self.settle_codex_ends(writer)?;
+        Ok(())
     }
 
     /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.

@@ -10,7 +10,7 @@ use super::*;
 /// parameters of the legacy `handle_text_message` signature; the row primary
 /// key is carried separately as `intake_outbox_id`.
 /// Adding a column to `intake_outbox` means adding a field here.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IntakeRequest {
     /// Worker rows carry their claimed `intake_outbox` primary key. Every other
     /// producer carries `None`: a leader-local request is admitted only after any
@@ -53,6 +53,24 @@ pub(crate) async fn execute_intake_turn_core(
     request: IntakeRequest,
     uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(unix)]
+    {
+        let proof = crate::services::cluster::intake_worker::take_before_effects(&request);
+        let deps = IntakeDeps {
+            http,
+            cache: None,
+            ctx_for_chained_dispatch: None,
+            shared,
+            token,
+        };
+        if crate::services::discord::router::herdr_consent::admission::worker(
+            &deps, &request, proof,
+        )
+        .await
+        {
+            return Ok(IntakeExecution::Deferred);
+        }
+    }
     if let Some(stopped) = worker_replay_admission(shared, &request).await {
         return Ok(stopped);
     }

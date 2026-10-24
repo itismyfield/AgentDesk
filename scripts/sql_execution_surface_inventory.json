@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cd85f9f8525c7a8418ddd7819fb8edae568b7af8",
+  "measured_at_sha": "caaf7d57cc81999ba86c66fe0e152a14bbb22c20",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2674,6 +2674,51 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:34b4e076fd092e4c92798a789a7122d75db5fd2b9746ab3d2718516781717c31"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:350d2d30a430a9a7950ccefa1367340771b4b648df5ab3b69905f118de32d279"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9dc0ba8c8a0fb56581c72ae37e8bffdd898429ad98587a9294af9beb6f24ef73"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a13d3589997ba6ac597863a97cf82c508b2ccb6add79dd73a11ecf28fe4f8f3c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/boot_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f655d8425f801d73775b8ad28c9979109a64c5b293bb213a53e21b36b67c0c72"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/config/session_hosts/migration.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6e289876c9d260503480a1c78e5b62937979d3ac77fcb1f6b666191de672e3ab"
     },
     {
       "root": "src",
@@ -10463,6 +10508,186 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1ce608b0aa23ba79494268704fb312e66e593acf1536e3ec5b2e8fd2b87c296c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4055a0013b6c53ab059fe9e05c572b8827a6e2e7d935365aec968427ab5554f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c2f67cecc4ea3f8ecc9462418e2e421b7ab317fdb1e41c40050ca21f4b1606e3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d190a670abdabf7512ef40fc8bc20afdf8c5a9efc5cff4b8818f6870c4700162"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e4dc41ae4b790333065f8a53aa7d1c9fd2f098b772cb79b8d63576fa19a41bd0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fefcac3fa35fab3cea75a2323f3df25987ca7431ace82d0c4c0760955c320e47"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6ab0595d87e7eedf731a8252069f3bcf3587d9b69d8e0ee62f3688a59a6f2f53"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:94b2aae197e722f95d9125eee4ebd20ad75ff8c4a9c697adf93834a1ffc398ca"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f39b0d2c6143b0c80fe20707bbfd80f97d7f557051a41e1122b91397393de64f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:303193bc05dd4cc242e5e6fabd5850c063f587182c334b4d89253aa8befd4d89"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:417d7df1eddc638be5a75568425db3e36b2db130c2940d20d72995680adc89a8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0221c62b104b6b992e925156404b022a730238eb3f735d9069c77ff1a558add1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0cedbd640f8791d62aa4add55b30a48218726b48ee8636912a83267c036f1f84"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:17c9463d4a0f0215450ecdf4176cef4e686068bad76266e5204c79d53e7889a8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7f77df893bf03e42f7a18b3443d7598be47f66d75ff8bee6367daba8ee3490e6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ea67ec44bc11a8d282861d77ef806dd63d723748f604093e8fd8c862376c7fda"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:561c83c12fef913e85485f79f0a7a8a132ec19a15fc569d4c1dffa1e1f635fe2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:fdc42d6a22ba10130eefadd318bd399755b0513d4b997081a25e8644afb46784"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d73c50c2d37faa3a36fe484b9eb52e42aa6f456070107b17165df865e2297bf1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox/consent_handoff_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:bdf7a568c9fe29d3ab49a91dbfeda59b0829d5cc63007056cd2677a62361d13c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/db/intake_outbox/owner_fence_pg_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -11481,15 +11706,6 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/db/intake_outbox_delivery_proof.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:bc9d81c8eeb887509349cb2d351a2634dde0755321a92764f69e626470a956a3"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox_delivery_proof.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
@@ -11580,28 +11796,10 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/db/intake_outbox_dispatch_stamp.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:1dce74c8ac000f5175a13854515b22d4fd029d38f7dc2e500b1ad50dedd95625"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox_dispatch_stamp.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:301cd1cddf2d4b57db3a217daa67ee4694b77e6b575e68d63b220907f804e65e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox_dispatch_stamp/tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:28d18bddd0fc4b9560ba61704f134747efe2570524b94f2f1ed24f8af5563ac7"
     },
     {
       "root": "src",
@@ -11629,15 +11827,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:cfc5a7703e9668d0547b3a6ef89c250b3699d60233d388dc3d6a16d3031c26ff"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox_dispatch_stamp/tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:2fe68a19466870c960682e4eab661c50a3c796e4df76a4bbbd707e0e1456b608"
     },
     {
       "root": "src",
@@ -14598,6 +14787,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:754c267bc947d587b42ffead1f155e63b92b9f92d2f362d9a0653c32da3d06e5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/replay_disposition_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:9c6414ec5c865b52d08f240ef209811fcfa77cddb8c6efafd5fc5dcb0f1162f2"
     },
     {
@@ -16515,15 +16713,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:302b894f93340c0ee4a6da9be3bb3d50e1d6f8e22ce419b0e360ee2b7dd0ea00"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:4e89146915982a908c52824ec2c8adb5dddf8fd77ee3674cdcc2c7cf5a904064"
     },
     {
@@ -16647,15 +16836,6 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/db/session_transcripts.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:a3dc3a07eb33bd0270ed6a483d328562ee1e54e52d75fd66a4c7bb5ccd0fa9cd"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -16727,56 +16907,38 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_seed.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:f0a1b9e970273566b567a9c5efcebd653892c1cd6d4fdce1100cf46892375447"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:e270c45cd0eb9ebc9c2993369073e73c72b352b94bc58b58b1bf2c73a1c55705"
+      "classification": "STATIC",
+      "fingerprint": "sha256:c89d98306b7cfd1ea8aacb9aff8a558a5fe16a7780c0aca14d9553e469f31269"
     },
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_tests.rs",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:da62f762b9076d196458531ae6197bc0d909c29cb9b1fcc852c96d71bf6f20b8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fca2787dcd926b8d30f1ce27d599acc3e5f8cf33f4e094fd076bbe8bdefd83f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/session_transcripts_retired_boundary_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:478afb4fd0965f81499b0a780fac98d0150089fc134cb145f73d335391fdd64c"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:9da30a8a3d4d1aa7d4c2040b10e93bae7e0fd36ea904c58b5cd3d32945564bb8"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c2f8af3b879290ab18507f9bf2c7ad1c0c6b207efa629c34f5f5da6f76c8bbc6"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/session_transcripts_native_clear_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:d6b6436767f88a7e2f3793d99a6f569de5645a80068d7c21da0fb30f4c3bb9fe"
+      "fingerprint": "sha256:b98a5118f82b883351472df3fa49cf475b685904d0960134230786c268b77da3"
     },
     {
       "root": "src",
@@ -31622,6 +31784,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/commands/control/consent_clear_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0f47f76dc7aed4732827fcdea7ee8170e0b06b5b2b89e6d1197508e81b8bb1e3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/commands/inspect/query.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -32594,6 +32765,60 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6a17f0f772c63ec2cbb007900a955801f9ec1631b5597816f625a115d6fb25f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8741ddb62553af7b5f2f056d7777c991b55bafc14d37e1556da24e329a235107"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b047f63e12a7d6b266a861a0722361421dbe88505eb0589bd8c9597ecfccc823"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/admission_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0bc8a1568d76a7ed2b8ae6654cc138bc57ac574ffbbca8de38655a98f0b548e6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/custody_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d333e741ddc85b61482627e72df67b96807f6143cd39c0f24a123f5437076dbb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/herdr_consent/custody_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ff0509524b7e19ddce0454be9ffd1276a29d3d47010609f9949e81cd25f5b93c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/router/intake_dispatch/home_order_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -33251,33 +33476,6 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:6b9887c347076eb1b992385801245d904e51c43402947bb38a39dba71825d325"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:cc29b2403de5b9391a8203c71797e7afff85f9eb30edd45986273d9bedda8c03"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e9e3f7fe279a3dbd66cf56af1301ddf0a6ddb34bebcaf23bbb3de816c327887e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
       "path": "src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -33665,6 +33863,24 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/router/message_handler/provider_dispatch_codex_t14_actual_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a07a3e5456e2ba2fe7fbf9eefc7a9c0c62267b3d671eca3fb44c9750c8fc9a86"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/message_handler/provider_dispatch_codex_t14_composed_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7af057ce736d14b1bc5b4618e65c3bd3113cbcd28362bda9b08dc7ce4824429d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -33895,357 +34111,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:dc6d61499d4c8394a9d9ecdb71c7cf1e4310a0b79029d33b50d4777cf3373d50"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:15cad6766f79232356a0eba5e4a9485fdb98dbf02f93753fbb0aefa2a75b7147"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:1c7bdaf7a56be1531a8e230fe7a0fa5660a78a6bd60e70d8d4724be8e38df617"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:54ae0b6868682b080b6b51197168208bc0970acfd32ef4a3182553731467d28e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:6ea9b749c318ba8e9af35d8965568ad5d0e89e21fa6187c412ec15e66b52349a"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:922b050a4286144f4d354eb91da759ada94f421434a36815caab964d293b6441"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:97a9e847d11d07bd9572f305a78a548469846b3fd895eea212e91a5b14380762"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f23f216c8b934eea8bea2311ff9aeda0f4e2a0a913ce0177decd1dddf68ec25a"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:f3cec7bfb846f568304302baceb189137e670bdb2bb2d57c10abce587bb307e2"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:27b6061850f0ba3fe94c2cedd693af6bfbb0b99b6f498899b021579c55969847"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:29329dc95fa63d0a6164ea47c3e14f9f5dfa5e77f302b2d375e62c233d46285c"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:4cab854cda6dcab3c5df58360c8200490b540cf48dffab1857d2ec69ef908a69"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:7e58c0d57625678233465c47a5dc22b6cc9443778a920a88c450e2c8b9d2de62"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:95d72bcd00baf80dc06f18e9e0f13eddff37b1584ff5a51b3bdc3eb7f1226da9"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:bd76822907157e80845975a7b9c29ce6e7eeae11a4996c9037641502a10c7c0d"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:c2eeeee553925bbe2f17c0d70725da87b5dcbb14c5026523c1cd7bd000f10248"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:e292568e77e2311b1faaf0e505c4746790c16bcf2863ecda5a1f7252a0f238c0"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:003fa6319ca36faa6f31819eee1eb6b0088e1341d60419bf41b8e13be49e85ec"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:01c30e43c6d11ab78dcd3bef728d94f96951a5d721165b0595a97220e9017f04"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:9d6bceb5d302f3da8f8695077f911f373ee28e32eb43913b5e14327bc7c9b58d"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:d8906f8ef4d2800a4e02250e94a54388caa1bc43b3dd6d102807f4809641422a"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:0729b589551369fa50c1f48e566635b938433956c5f912b38dc413caf5706dab"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:15a100f8dfd858ae8919dd44e57f042203c72cc1c6feadb3ddec5f6f25696516"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:2faaa13525a6a84df42ff6860cb2aae1561fb23381503c0853e3846ca8a56d36"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:5d61a0311ec134077f19aa87a41459123b5cd2ff62466a988c9b7b5cb5314cbd"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:5edf29a4da7ddfe0363805ebf81d942f9d3f9099bc92147c0f8f3fbded74b158"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:68a177232e74a9ba68a0726de8563064efe05b4891b18366bf7a861d5772d757"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:7599160b4f82ad2b0ba1e24b66ccb2fa76cc887e0fc6f6b5906a3e27a6526fdb"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:01e5aacbb47318bc2041be86ec8d12fd7b94619d84c15ce5998bb7f7e79cec68"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:0e975dcacbae2368fd6e6703dbeea079000390fca3ea8fc2e135bf3c66980604"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:d73f8c6fc9b476ad10b68c086a55f606a379413363a0d5326c79120234ea8e1b"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:e858080db8ed28d9e93af42eb63a2f58e8d6868cb10ded3a2b83abe4894c4c1e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "STATIC",
-      "fingerprint": "sha256:630bd2f34fdeced58135a9b1ca20f11b5eac571d9da8ac2fcb16e3ecc92ec033"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:2ce7e79e02ed364db40373d2d4c952354a9f01fccbbd8012841923a0bc5af471"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:300a956ceeb06e1102fac3a405ab0f3680a4afefd547437614067ac9de91d9f0"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:709ddc627342ad79473ed734ee8f5c3921e7be08b9b10bc40b1e773f1b2844a3"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:a98a8b532b1d1ce0f2a14704dbd527ae368c4afc8d45064fe249191870bdd179"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:acb6bfbed6f2110929f51c847e7e171d5faadae9cda7fd0b5bd20bcf12c501cd"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:c43720b5fac5c37f2ede553b7efee534799b67ba5a4b43072e0d780e50acdc56"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/intake_delivery_capability.rs",
-      "api": "sqlx::raw_sql",
-      "symbol": "raw_sql",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:c61a0fec54257f8961b6223166b848bbb77a10350ee8c466a9ad63d96d553b65"
     },
     {
       "root": "src",
@@ -36239,6 +36104,33 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:529fc1bffaa23dbdfac96dd6768485a49b61311a4095b4579ec566ef99dce8ec"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_actual_client_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:264abc19db6070857bc9994f0e95495982a8e306736093fa5bbb26949e6e383a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/prompt_identity_e2e_tests/herdr_direct_roundtrip_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6c291616858c20878f06ff6af1ac69dd466f99da8e8a9bd0bed4312dde56098a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -36923,51 +36815,6 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/intake_settlement.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:52ee12dcf612b8cda95fef56305eb0fd9053e35bb8bf2e6ef6339dd01efb225a"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/intake_settlement/tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:1193c543a429ca79625ff03a325c3e721539e190ba0eb5c2643a4292909b0a06"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/intake_settlement/tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c25fc4465d5e3852053cc9e745194342fa13d02cea01d36ed325850c0409cab6"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/intake_settlement/tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:5490c0c7a716d516e51230e490c5c0c9d679c248de6ca1609c571d7c3e8b5664"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/intake_settlement/tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:d25d10347ab4eef4bdfe6d347d1602417171f4d1385ebe4c6532160ccab50fca"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
       "path": "src/services/discord/turn_bridge/panel_lifecycle.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -37284,6 +37131,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f65996203102d83fbf34f4063f3f5cdb75a80c47754313008e1c498200baaa76"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -37342,6 +37198,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ea18784f6e0320c363e4aac421d08dec80c6065ec073d926f45bad028b708e0a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/rowless_receipt_tests/pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f3126471cea849175995819ab5101b869cf39ba2a69860b323d826046bf61c88"
     },
     {
       "root": "src",
@@ -39003,15 +38868,6 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/health_diagnostics.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:fcc27f3e078e55b8ef45b4e2280aaa9b56c48800cb515d68b054c2f1ce0fcc27"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/health_diagnostics.rs",
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
@@ -39106,6 +38962,60 @@
       "symbol": "query_scalar",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:9819ce8b2f04ec0c77267e8bedda56d9fcf4012ced3e3182ba3f1707034c09c9"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4fb6878cbed871517c6107fd28375f7d9852ce5e69f164c12b174a0954fad861"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6fa8226cd2d133a2009f9db207b5dcede4acee6b103fca623c780455453c1686"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:75138adeb064e352d0d5dcb9c8f25118bcd2dbf673469321ba4aa40875e6a5c8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:81181472a7926290b6c881e79ba6d8823d949b77fd9379dfb2ab97e3030b08f7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:be885276ce0659b487a2546d51df7b0709dc394980666d851ae63a7365168779"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/herdr_launch/policy_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:dfd55f4fcfc7d9c67df5c29cec9a0a5fbcedc8f24bba0b790930183ac59ce6aa"
     },
     {
       "root": "src",
@@ -43246,15 +43156,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:be8a4e0958c009d795203aaaca50dca67a90b2396f9f6ef5f358d437d079f06c"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/session_host/herdr_clear_adapter_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:52b1efa6b9e2eb90854a9717c6207b2ee4ea03e68a8d7a4721b3af02ec996478"
     },
     {
       "root": "src",

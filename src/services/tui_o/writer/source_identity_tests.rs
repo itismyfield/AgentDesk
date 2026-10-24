@@ -5,7 +5,7 @@ use std::io::{Seek, SeekFrom};
 
 use super::*;
 use crate::services::tui_o::shadow::capture::renumber;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, SourceLink};
+use crate::services::tui_o::store::rotation::{Boundary, SourceLink};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::rotation::{Sources, probe};
 
@@ -270,11 +270,7 @@ async fn a_resolved_copy_keeps_its_exact_name_and_the_empty_one_its_own_after_an
         bindings.commit(resume(2, &w, &d));
         stored_apart(&harness, &w, &d, false);
         let eof = std::fs::metadata(&path).unwrap().len();
-        let from = ResolveFrom::Offset(eof);
-        let key = source_key(&d);
-        let resolved = harness
-            .store
-            .record_boundary_resolved(CHANNEL, &key, &from, "operator");
+        let resolved = harness.store.seed_boundary_resolved(CHANNEL, &d, eof);
         assert_eq!(resolved.unwrap(), (d.clone(), eof));
         drop(reboot);
         let _again = renumber::shift(&path, SECOND_REBOOT);

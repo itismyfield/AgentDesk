@@ -307,17 +307,9 @@ async fn receipt_transitions_old_writers_and_delivery_settlement_preserve_author
         .unwrap();
     sqlx::query("UPDATE intake_outbox SET replay_disposition='withheld', replay_source_message_ids=ARRAY[user_msg_id] WHERE id=$1")
         .bind(normal).execute(&pool).await.expect("test seeds held normal receipt");
-    let mut connection = pool.acquire().await.unwrap();
-    assert!(
-        crate::db::intake_outbox_delivery_proof::settle_intake_done_from_receipt(
-            &mut connection,
-            normal,
-            crate::db::intake_outbox_delivery_proof::IntakeSettlementSource::Committed
-        )
-        .await
-        .unwrap()
-    );
-    drop(connection);
+    let settled = sqlx::query("UPDATE public.intake_outbox SET status='done', completed_at=NOW() WHERE id=$1 AND status IN ('spawned', 'dispatched')")
+        .bind(normal).execute(&pool).await.expect("ordinary receipt remains settleable");
+    assert_eq!(settled.rows_affected(), 1);
     assert_eq!(
         receipt_disposition(&pool, normal).await.unwrap().as_deref(),
         Some("withheld")

@@ -295,11 +295,7 @@ fn health_timeout_consumers_keep_existing_gates() {
             "{refused}"
         );
         assert_eq!(refused["degraded"], true, "{refused}");
-        for key in [
-            "mailboxes",
-            "mailbox_observation_failures",
-            "queue_park_observation_failures",
-        ] {
+        for key in ["mailboxes", "mailbox_observation_failures"] {
             assert!(
                 refused.get(key).is_none(),
                 "public body carries {key}: {refused}"

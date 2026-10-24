@@ -78,7 +78,7 @@ fn refresh_owned_delivery_rewind_state(
     {
         return false;
     }
-    reloaded.preserve_intake_settlement_authority_from(inflight_state);
+    reloaded.preserve_intake_outbox_identity_from(inflight_state);
     *inflight_state = reloaded;
     true
 }

@@ -1265,7 +1265,6 @@ mod tests {
                 active_meetings: std::collections::HashMap::new(),
             }),
             mailboxes: crate::services::turn_orchestrator::ChannelMailboxRegistry::default(),
-            queue_park_ledger: Default::default(),
             session_transition_locks: dashmap::DashMap::new(),
             settings: tokio::sync::RwLock::new(super::super::DiscordBotSettings::default()),
             api_timestamps: dashmap::DashMap::new(),
@@ -1357,9 +1356,6 @@ mod tests {
             provider: ProviderKind::Claude,
             api_port: 9,
             pg_pool,
-            intake_delivery_capabilities: Arc::new(
-                super::super::runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache::default(),
-            ),
             policy: super::super::PolicyRuntime { engine: None },
             health_registry: std::sync::Weak::new(),
             known_slash_commands: tokio::sync::OnceCell::new(),

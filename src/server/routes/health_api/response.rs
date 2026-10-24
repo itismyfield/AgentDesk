@@ -7,8 +7,7 @@ use super::*;
 pub(super) async fn health_response(state: &AppState, detailed: bool) -> Response {
     let deadline = db_collection::deadline();
     let Some(registry) = state.health_registry.as_ref() else {
-        let (initial, ()) =
-            db_collection::read_initial_alongside(state, detailed, deadline, async {}).await;
+        let (initial, ()) = db_collection::read_initial_alongside(state, deadline, async {}).await;
         return assemble(state, detailed, initial, None).await;
     };
     let snapshot = async {
@@ -38,7 +37,7 @@ pub(super) async fn registry_response(
         (status, json, late)
     };
     let (initial, snapshot) =
-        db_collection::read_initial_alongside(state, detailed, deadline, alongside).await;
+        db_collection::read_initial_alongside(state, deadline, alongside).await;
     assemble(state, detailed, initial, Some((registry, snapshot))).await
 }
 
@@ -103,19 +102,9 @@ async fn assemble(
     let kv = initial.kv.ok();
     let config_audit_report = kv.as_ref().and_then(|kv| kv.config_audit.clone());
     let pipeline_override_report = kv.as_ref().and_then(|kv| kv.pipeline_overrides.clone());
-    // A cut audit leaves its block out rather than reporting an empty candidate set.
-    let active_session_audit = match initial.audit {
-        Some(Ok(audit)) => Some(audit.to_json()),
-        _ => None,
-    };
-
     if let Some((registry, (mut status, mut json, late))) = snapshot {
         if let Some(lookups) = &late.sessions {
             health_diagnostics::enrich_mailbox_sessions(&mut json, lookups).await;
-        }
-        // Read-only DB active-session mismatch audit; detail-only, mutates nothing.
-        if let Some(audit) = active_session_audit {
-            json["active_session_audit"] = audit;
         }
         let mut degraded_reasons = json["degraded_reasons"]
             .as_array()
@@ -348,9 +337,6 @@ async fn assemble(
         }
         if let Some(report) = pipeline_override_report {
             json["pipeline_overrides"] = report;
-        }
-        if let Some(audit) = active_session_audit {
-            json["active_session_audit"] = audit;
         }
         if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
             json["opencode"] = opencode_block;
