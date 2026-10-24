@@ -1,5 +1,4 @@
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, atomic::Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -85,20 +84,18 @@ use overflow::drain_head_overflow;
 use pending_queue_persistence::channel_queue_files_present;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-pub(crate) use pending_queue_persistence::save_channel_pending_dispatch_marker;
 #[cfg(test)]
 pub(crate) use pending_queue_persistence::save_channel_queue;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
-    load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
-    remove_channel_pending_queue_files_all_tokens, warn_legacy_pending_queue_files,
+    load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
+    load_channel_pending_queue_checked, load_pending_dispatch_markers, load_pending_queues,
+    remove_channel_pending_queue_files_all_tokens, save_channel_pending_dispatch_marker,
+    warn_legacy_pending_queue_files,
 };
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
-};
-pub(crate) use pending_queue_persistence::{
-    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };
 use pending_queue_persistence::{log_queue_persistence_rollback, persist_queue};
 #[cfg(test)]
