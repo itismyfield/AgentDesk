@@ -1,4 +1,5 @@
 //! Test-only cold effect boundary; the owner retains settlement and observer custody.
+use crate::services::tui_input::human_frame::history::v2 as history;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
 pub(super) struct Completion<K, O> {
@@ -11,7 +12,7 @@ pub(super) async fn submit<O: Send + 'static>(
     now: u64,
     effect: impl FnOnce(String) -> Result<O, String> + Send + 'static,
 ) -> Result<Completion<impl serde::Serialize + Send, O>, String> {
-    let (attempt, permit, frame) = mailbox
+    let (attempt, permit, frame, registry, namespace) = mailbox
         .v2_request(move |slot| {
             let owner = slot.as_mut().ok_or("V2 not adopted")?;
             let key = owner.active_attempt()?;
@@ -32,12 +33,15 @@ pub(super) async fn submit<O: Send + 'static>(
                 crate::services::tui_input::human_frame::history::v2::Registry::runtime()?;
             owner.prepare_history(&history)?;
             let permit = owner.arm(&key, now)?;
-            Ok((key, permit, frame))
+            Ok((key, permit, frame, registry, namespace))
         })
         .await?;
     let fallback = attempt.clone();
     Ok(tokio::task::spawn_blocking(move || {
-        let outcome = permit.consume(&attempt).and_then(|_writer| effect(frame));
+        let outcome = permit.consume(&attempt).and_then(|_writer| {
+            let identity = serde_json::to_value(&attempt).map_err(|error| error.to_string())?;
+            history::with_attempt(&registry, &namespace, &identity, || effect(frame))?
+        });
         Completion { attempt, outcome }
     })
     .await
