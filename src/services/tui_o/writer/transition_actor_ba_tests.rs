@@ -451,9 +451,8 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
     );
     settle(&chain).await;
     let (request, digest) = targeted(&chain, &actor, &observer).await;
-    halt(actor.stop, actor.task).await;
 
-    // A real uncertain POST is settled NotFound and leaves the existing single local retry.
+    // The running actor captures and delivers this body, then retains its genuine local retry.
     chain.harness.port.say(BOT + 1, "history readable");
     chain
         .harness
@@ -462,24 +461,43 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
         .lock()
         .unwrap()
         .push_back(crate::services::tui_o::writer::tests::Reply::Unsent);
-    let mut writer = chain.harness.writer();
-    assert_eq!(
-        writer.deliver(&piece("ba-retry", "owed BA retry")).await,
-        crate::services::tui_o::writer::deliver::Step::Done
+    let started = tokio::time::Instant::now();
+    append(
+        &chain.paths[2],
+        &regrowth_row("ba-retry-native", "owed BA retry"),
     );
-    assert!(writer.has_local_retry());
-    let (root_serial, original) = writer
-        .store()
-        .ledger()
-        .latest_piece(&unit("ba-retry"), 0)
-        .unwrap();
+    let mut pending = None;
+    for _ in 0..5 {
+        polls(1).await;
+        let mut read = chain.harness.writer();
+        pending = crate::services::tui_o::writer::local_retry::pending(read.store().ledger());
+        if pending.is_some() {
+            break;
+        }
+    }
+    let pending = pending.expect("actual capture -> Unsent -> Budget/NotFound leaves a retry");
+    let root_serial = pending.root_serial;
+    let piece = pending.piece;
+    let mut read = chain.harness.writer();
+    let original = read.store().ledger().piece(root_serial).unwrap().clone();
     assert_eq!(original.local_retry, Some(LocalRetryMark::Budget));
     assert_eq!(original.outcome, Some(PieceOutcome::NotFound));
-    assert_eq!(writer.store().ledger().unresolved(), None);
+    assert_eq!(read.store().ledger().unresolved(), None);
     let before = chain.harness.port.posts().len();
-    let started = tokio::time::Instant::now();
-    let actor = run_writer(&chain, None, Arc::default(), writer, ShadowProvider::Codex);
-    polls(2).await;
+    let mut census_request = request.clone();
+    census_request.job_id = "ba-retry-census".into();
+    census_request.termination = None;
+    let census = ask(
+        &actor,
+        Operation::Inspect(census_request),
+        context(&chain, &observer),
+    )
+    .await;
+    assert_eq!(
+        census.summary.unwrap().obligations.unwrap().owed,
+        1,
+        "queue0 local retry remains owed"
+    );
     let held = ask(
         &actor,
         Operation::AutomaticApply(
@@ -497,18 +515,7 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
     assert_eq!(
         chain.harness.port.posts().len(),
         before,
-        "retry has not posted before its 30-second due"
-    );
-    assert_eq!(
-        held.summary
-            .as_ref()
-            .unwrap()
-            .obligations
-            .as_ref()
-            .unwrap()
-            .owed,
-        1,
-        "queue0 local retry remains owed"
+        "retry has not posted before its due"
     );
     let candidate = held
         .hops
@@ -520,12 +527,8 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
         Verdict::Refused(Refusal::OutputOwed(Owed::Queue))
     );
     assert!(
-        !chain.cursor(1).retired,
-        "pending local retry must retain old native source"
-    );
-    assert!(
-        chain.cursor(1).transition_cleanup.is_none(),
-        "hold writes no audit"
+        !chain.cursor(1).retired && chain.cursor(1).transition_cleanup.is_none(),
+        "pending retry writes no retirement or audit"
     );
 
     tokio::time::advance(std::time::Duration::from_secs(30)).await;
@@ -533,13 +536,14 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
     assert_eq!(
         chain.harness.port.posts().len(),
         before + 1,
-        "existing retry is actually posted once at due"
+        "actual retry posts once at due"
     );
-    let mut restored = chain.harness.writer();
-    let (attempt_serial, attempt) = restored
+    let mut read = chain.harness.writer();
+    let (attempt_serial, attempt) = read
         .store()
         .ledger()
-        .latest_piece(&unit("ba-retry"), 0)
+        .latest_piece(&piece.unit_key, piece.index)
+        .map(|(serial, record)| (serial, record.clone()))
         .unwrap();
     assert!(attempt_serial > root_serial);
     assert_eq!(
@@ -547,7 +551,7 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
         Some(LocalRetryMark::Attempt { root_serial })
     );
     assert!(matches!(attempt.outcome, Some(PieceOutcome::Posted(_))));
-    assert!(!restored.has_local_retry());
+    assert!(!read.has_local_retry());
     let (request, digest) = targeted(&chain, &actor, &observer).await;
     let applied = ask(
         &actor,
@@ -561,7 +565,7 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
     .await;
     assert!(
         chain.cursor(1).retired,
-        "after actual retry Posted, reinspection permits retirement: {:?}",
+        "Posted retry permits fresh scoped retention: {:?}",
         applied.hops
     );
     assert!(
@@ -575,7 +579,7 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
     assert_eq!(
         chain.harness.port.posts().len(),
         before + 1,
-        "retirement adds no delivery retry"
+        "retention adds no retry"
     );
     halt(actor.stop, actor.task).await;
 }
