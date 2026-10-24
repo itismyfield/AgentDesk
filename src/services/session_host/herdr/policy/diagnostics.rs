@@ -25,7 +25,10 @@ pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
         };
         observed.checker.insert(
             socket.into(),
-            json!({"stdout": capped(stdout), "stderr": capped(stderr)}),
+            json!({"stdout": capped(stdout), "stderr": capped(stderr),
+                "last_error_line": String::from_utf8_lossy(stderr).lines()
+                    .rfind(|line| !line.trim().is_empty()).unwrap_or("")
+                    .chars().rev().take(256).collect::<String>().chars().rev().collect::<String>()}),
         );
     }
 }
@@ -100,25 +103,62 @@ pub(crate) fn snapshot(socket: &Path) -> Value {
         "action": "On the execution node, inspect the consent/launch refusal and retry; health performs no server or config IO."
     }));
     if let Some(checker) = observed.checker.get(socket) {
-        value["checker"] = checker.clone();
+        value["checker"] = checker_excerpt(checker).into();
     }
     value
 }
 
+fn checker_excerpt(checker: &Value) -> String {
+    let tail = checker["last_error_line"].as_str().unwrap_or("");
+    let suffix = if tail.is_empty() {
+        String::new()
+    } else {
+        format!("\nlast error: {tail}")
+    };
+    let prefix = format!(
+        "stdout={}; stderr={}",
+        checker["stdout"].as_str().unwrap_or(""),
+        checker["stderr"].as_str().unwrap_or("")
+    );
+    let remaining = 512usize.saturating_sub(suffix.chars().count());
+    prefix
+        .chars()
+        .take(remaining)
+        .chain(suffix.chars())
+        .collect()
+}
+
+pub(crate) fn doctor_evidence(config: &crate::config::Config) -> Value {
+    use crate::config::session_hosts::EndpointMode;
+    let endpoints: Vec<_> = config
+        .session_hosts
+        .herdr
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| endpoint.mode == EndpointMode::UserDefault)
+        .collect();
+    if endpoints.is_empty() {
+        return json!({});
+    }
+    let Ok(observed) = OBSERVED.get_or_init(Mutex::default).lock() else {
+        return json!({"reason": "policy_cache_unavailable"});
+    };
+    let mut evidence = serde_json::Map::new();
+    for (key, endpoint) in endpoints {
+        if let Some(checker) = observed.checker.get(&endpoint.socket_path) {
+            evidence.insert(key.clone(), checker.clone());
+        }
+    }
+    Value::Object(evidence)
+}
+
 pub(crate) fn checker_detail(socket: &Path) -> String {
     let value = snapshot(socket);
-    let excerpt = |key| {
-        value["checker"][key]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(512)
-            .collect::<String>()
-    };
     format!(
-        "stdout={:?}; stderr={:?}; repair the full user config and retry",
-        excerpt("stdout"),
-        excerpt("stderr")
+        "{}; repair the full user config and retry",
+        value["checker"]
+            .as_str()
+            .unwrap_or("checker output unavailable")
     )
 }
 

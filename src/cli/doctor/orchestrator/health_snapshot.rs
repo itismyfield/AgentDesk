@@ -36,11 +36,19 @@ pub(super) fn fetch_health_snapshot(options: &DoctorOptions) -> HealthSnapshot {
             Err(detail_error)
         }
     }) {
-        Ok(body) => HealthSnapshot {
-            base,
-            body: Some(body),
-            error: None,
-        },
+        Ok(mut body) => {
+            attach_checker_evidence(&cfg, &mut body, || {
+                crate::cli::client::get_json_at(
+                    &base,
+                    crate::cli::doctor::startup::LATEST_STARTUP_DOCTOR_ENDPOINT,
+                )
+            });
+            HealthSnapshot {
+                base,
+                body: Some(body),
+                error: None,
+            }
+        }
         Err(e) => HealthSnapshot {
             base,
             body: None,
@@ -48,3 +56,28 @@ pub(super) fn fetch_health_snapshot(options: &DoctorOptions) -> HealthSnapshot {
         },
     }
 }
+
+fn attach_checker_evidence(
+    cfg: &config::Config,
+    body: &mut Value,
+    fetch: impl FnOnce() -> Result<Value, String>,
+) {
+    if !cfg
+        .session_hosts
+        .herdr
+        .endpoints
+        .values()
+        .any(|endpoint| endpoint.mode == crate::config::session_hosts::EndpointMode::UserDefault)
+    {
+        return;
+    }
+    if let Ok(doctor) = fetch()
+        && let Some(evidence) = doctor.get("herdr_checker")
+    {
+        body["herdr_checker"] = evidence.clone();
+    }
+}
+
+#[cfg(test)]
+#[path = "health_snapshot_tests.rs"]
+mod tests;
