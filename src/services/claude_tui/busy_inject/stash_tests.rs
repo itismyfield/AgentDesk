@@ -71,6 +71,7 @@ mod environment_tests {
     }
 }
 mod hold_tests;
+mod paste_footer_tests;
 
 thread_local! {
     pub(super) static USE_PRODUCTION_CHANNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

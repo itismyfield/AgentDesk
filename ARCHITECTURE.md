@@ -689,8 +689,11 @@ src/
 │   │   └── tui_session_launch_geometry_tests.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
+│   │   │   ├── screen/
+│   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
-│   │   │   │   └── hold_tests.rs
+│   │   │   │   ├── hold_tests.rs
+│   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_interleave_tests.rs
