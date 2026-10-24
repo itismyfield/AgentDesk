@@ -9,17 +9,17 @@ use std::path::PathBuf;
 
 const CHANNEL: u64 = 7;
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
-pub(crate) struct Fixture {
+struct Fixture {
     _root: crate::config::TestRuntimeRootGuard,
     _host: crate::config::TestEnvVarGuard,
     _p5: crate::config::TestEnvVarGuard,
     _path: crate::config::TestEnvVarGuard,
     bin: tempfile::TempDir,
-    pub(crate) context: BindingContext,
-    pub(crate) source: crate::services::tui_o::shadow::SourceId,
+    context: BindingContext,
+    source: crate::services::tui_o::shadow::SourceId,
 }
 impl Fixture {
-    pub(crate) fn new(herdr: bool) -> Self {
+    fn new(herdr: bool) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
@@ -47,6 +47,7 @@ impl Fixture {
             crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(bin.path());
         let native = runtime_root.join("native");
         std::fs::create_dir_all(&native).unwrap();
+        let native = native.canonicalize().unwrap();
         let context = BindingContext {
             schema: 1,
             provider: "codex".into(),
@@ -125,7 +126,7 @@ impl Fixture {
             source,
         }
     }
-    pub(crate) fn shared(&self, pool: Option<sqlx::PgPool>) -> Arc<SharedData> {
+    fn shared(&self, pool: Option<sqlx::PgPool>) -> Arc<SharedData> {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         let pane = self.context.tmux_session.clone();
         shared.tmux_watchers.insert(
@@ -226,7 +227,7 @@ fn existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence()
         crate::services::tui_o::writer::tests::with_ready_codex(
             fixture.source.clone(),
             CHANNEL,
-            |ready| async {
+            |ready| async move {
                 let reply =
                     super::super::automatic::codex_sweep_for_test(&registry, &ready, CHANNEL)
                         .await
@@ -283,7 +284,7 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
         shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
         let health = HealthRegistry::new();
         health.register("codex".into(), shared.clone()).await;
-        crate::services::tui_o::writer::tests::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async {
+        crate::services::tui_o::writer::tests::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async move {
             let reply = super::super::automatic::codex_sweep_for_test(&health, &ready, CHANNEL).await.unwrap();
             assert!(reply.refused.is_none(), "{reply:?}");
             let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
