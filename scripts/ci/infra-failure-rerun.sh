@@ -183,13 +183,8 @@ INFRA_ACTION_TIMEOUT_REGEX="the action '.+' has timed out after [0-9]+ minutes"
 #     zero-step path. The retry decision is bit-identical; only the summary
 #     label moves, `infra-shutdown` -> `infra-no-steps`. Do NOT re-add this
 #     alternation on the belief that 429 would otherwise go unclassified.
-#     The r3 `F5` comment argued the
-#     alternation was "kept, deliberately" and reasoned about rate-limit
-#     containment; that premise was false — the state it protected cannot occur.
-#     Containment itself is unaffected and never depended on it: at most two
-#     automatic attempts (`ci-pr-infra-retry.yml` gates on `run_attempt < 3`,
-#     `run_classifier` returns `no-op:attempt-cap` at `RUN_ATTEMPT >= 3`), one
-#     job per rerun.
+#     The removed rate-limit alternation never constrained retries on this path.
+#     Only attempt 1 may request one retry per failed shard; attempt 2 is capped.
 INFRA_ACTION_DOWNLOAD_REGEX='failed to resolve action download info.*(service unavailable|bad gateway|gateway time-?out|internal server error)'
 
 # #5207 (F1): repo-configuration faults that kill a job before any repo step.
@@ -277,7 +272,7 @@ INFRA_ACTION_DOWNLOAD_REGEX='failed to resolve action download info.*(service un
 # unknown job dependency), missing hosted-runner images, Docker login and
 # container init all reach `infra-no-steps` today. Bounded cost, measured: one
 # wasted rerun plus a wrong label in the summary table. A DETERMINISTIC config
-# fault fails again on the retry and then hits the `run_attempt >= 3` cap, so
+# fault fails again on the retry and then hits the `run_attempt >= 2` cap, so
 # no deterministically broken repo is auto-retried into a pass.
 #
 # #5207 (r4): that conclusion is deliberately NOT stated as a universal. A
@@ -682,6 +677,11 @@ run_classifier() {
   fi
 
   for job_id in ${pg_job_ids[@]+"${pg_job_ids[@]}"}; do
+    if ! python3 "$SCRIPT_DIR/pr_head_current.py" "$repo" "$attempt_payload"; then
+      write_summary "$run_id" "$run_attempt" "no-op:stale-head"
+      echo "decision=no-op:stale-head"
+      return 0
+    fi
     if ! gh run rerun "$run_id" --repo "$repo" --job "$job_id"; then
       decision="no-op:rerun-request-failed"
       write_summary "$run_id" "$run_attempt" "$decision"
