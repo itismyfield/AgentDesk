@@ -1134,6 +1134,74 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a2_release_survives_sid_rehydration_between_polls() {
+        use crate::services::discord::busy_followup_retry_store as retries;
+        use crate::services::tui_prompt_dedupe;
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(100_000_007_314_281);
+        let input = channel.get() + 1;
+        let session = format!("a2-release-sid-{}", uuid::Uuid::new_v4());
+        bind_watch_session(&session, &_root._temp.path().join("watch.jsonl"));
+        let mut binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(&session).unwrap();
+        binding.session_id = None;
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding.clone());
+        retries::record_attempt(
+            &provider,
+            (channel.get(), input, input + 100),
+            &[],
+            std::time::Duration::ZERO,
+            Some(&session),
+        )
+        .unwrap();
+        let row = inflight(channel, MessageId::new(input));
+        assert!(
+            retries::requeue_inflight_for_followup_retry(&shared, &provider, channel, &row)
+                .await
+                .enqueued
+        );
+        let kicks = Arc::new(std::sync::Mutex::new(0));
+        let record = kicks.clone();
+        let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
+            Arc::new(move |_, _, _, _| {
+                let record = record.clone();
+                Box::pin(async move {
+                    *record.lock().unwrap() += 1;
+                    Some(crate::services::discord::IdleQueueKickoffChannelOutcome {
+                        started: false,
+                    })
+                })
+            }),
+        );
+        crate::services::claude_tui::composer_lock::guard_draft(
+            &session,
+            crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
+        );
+        watch_draft_release(shared, provider.clone(), channel, session.clone());
+        tokio::task::yield_now().await;
+        binding.session_id = Some("rehydrated-sid".into());
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+        assert_eq!(
+            crate::services::claude_tui::composer_lock::composer_admission(&session, || {
+                Some(crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view("", false))
+            }),
+            crate::services::claude_tui::composer_lock::ComposerAdmission::Any
+        );
+        tokio::time::sleep(DRAFT_RELEASE_POLL + std::time::Duration::from_millis(1)).await;
+        assert!(
+            !retries::load(&provider, channel.get(), input)
+                .unwrap()
+                .draft_hold,
+            "same pane SID rehydration must release exactly one held input"
+        );
+        assert!(!draft_release_watches().contains(&(channel.get(), session.clone())));
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert_eq!(*kicks.lock().unwrap(), 1, "one release gives one kickoff");
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    }
+
     /// A release pass that fails a step keeps the watch, and the next clean pass resets every held
     /// input with its notice kept and kicks the queue once.
     #[tokio::test(flavor = "current_thread", start_paused = true)]

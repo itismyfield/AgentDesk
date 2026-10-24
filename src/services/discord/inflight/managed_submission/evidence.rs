@@ -92,7 +92,12 @@ pub(super) fn receipt(attempt: &Attempt, receipt: UserReceipt) {
         .evidence
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if evidence.hold.is_none() && !evidence.ended {
+    if evidence
+        .hold
+        .as_ref()
+        .is_none_or(PreparationHold::may_requeue)
+        && !evidence.ended
+    {
         evidence.receipt = Some(receipt);
     }
 }
@@ -108,5 +113,20 @@ pub(super) fn finish_receipt(attempt: &Attempt, session: &str) {
     evidence.ended = true;
     if let Some(receipt) = evidence.receipt.as_mut() {
         receipt.seal();
+    }
+}
+
+/// An accepted payload supersedes a transient admission refusal, never an uncertain send.
+pub(super) fn admit_payload(attempt: &Attempt) {
+    let mut evidence = attempt
+        .evidence
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if evidence
+        .hold
+        .as_ref()
+        .is_some_and(PreparationHold::may_requeue)
+    {
+        evidence.hold = None;
     }
 }

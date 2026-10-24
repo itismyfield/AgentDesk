@@ -19,7 +19,7 @@ mod user_receipt;
 use literal_chunks::split_literal_chunks;
 pub(crate) use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
-pub(crate) use user_receipt::UserReceipt;
+pub(crate) use user_receipt::{PaneIdentity, UserReceipt};
 
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
@@ -2841,7 +2841,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_prompt_left_unconfirmed_in_the_composer_preserves_its_first_enter() {
+    fn fresh_prompt_left_unsubmitted_in_the_composer_gets_enter_again() {
         use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
@@ -2851,7 +2851,9 @@ mod tests {
                       [E2E:E50:run:AFTER_CLEAR] 만 출력해줘.";
         let rule = "─".repeat(80);
         let banner = " ▐▛███▛█   Claude Code v2.1.289\n~/.adk/release/workspaces/e2e\n\n";
-        let footer = format!("{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  MCP: 2");
+        let footer = format!(
+            "{rule}\n  ⏱ 0m │ ░░░░░░░░░░ │ 0% │ 0/1.0M │ $0.00\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+        );
         let empty = format!("{banner}{rule}\n\u{276f} \n{footer}");
         // The swallowed-Enter pane seen in production after `!clear`.
         let stuck = format!(
@@ -2862,6 +2864,10 @@ mod tests {
             "{banner}\u{276f} [User: 명령봇 (ID: 1479017284805722200)] 응답에 정확히 한 줄로\n  \
              [E2E:E50:run:AFTER_CLEAR] 만\n  출력해줘.\n\n\u{2733} Architecting\u{2026} (esc to interrupt)\n\n\
              {rule}\n\u{276f} \n{footer}"
+        );
+        assert_eq!(
+            crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &stuck),
+            crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
         );
         let token = CancelToken::new();
         let enters_after = |tail: &[&str], succeeds: bool| {
@@ -2879,13 +2885,19 @@ mod tests {
             assert!(calls.contains(&format!("literal:{prompt}")), "{calls:?}");
             calls.iter().filter(|call| *call == "keys:Enter").count()
         };
-        assert_eq!(enters_after(&[&stuck, &submitted], false), 1);
+        assert_eq!(enters_after(&[&stuck, &stuck, &submitted], true), 2);
         assert_eq!(
             enters_after(&[&submitted], true),
             1,
             "a landed submit gets no extra Enter"
         );
-        assert_eq!(enters_after(&[&stuck, &stuck, &stuck], false), 1);
+        assert_eq!(
+            enters_after(
+                &[&stuck, &stuck, &stuck, &stuck, &stuck, &stuck, &stuck],
+                true
+            ),
+            PROMPT_SUBMIT_CONFIRM_RETRIES + 1
+        );
     }
 
     #[test]

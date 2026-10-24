@@ -72,7 +72,7 @@ pub(super) fn watch_draft_release(
             .remove(&key);
     }
     tokio::spawn(async move {
-        let binding_key = super::super::super::queue_io::queued_head_inject::binding_key;
+        let binding_key = crate::services::claude_tui::input::PaneIdentity::capture;
         let mut binding = binding_key(&session);
         let started = tokio::time::Instant::now();
         let mut any_released = false;

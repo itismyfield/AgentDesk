@@ -315,7 +315,7 @@ async fn a2_may_have_submitted_and_old_or_contaminated_records_never_confirm_com
         );
         crate::services::discord::inflight::save_inflight_state_create_new(row).unwrap();
         capability.observer().receipt(
-            crate::services::claude_tui::input::UserReceipt::before(&session, frame).unwrap(),
+            crate::services::claude_tui::input::UserReceipt::before(&session, frame, None).unwrap(),
         );
         if fenced {
             capability.fence().before_first_payload().unwrap();
@@ -460,13 +460,15 @@ fn a2_owner_cannot_restart_a_finished_receipt_window() {
     crate::services::discord::inflight::save_inflight_state_create_new(&row).unwrap();
     cap.fence().before_first_payload().unwrap();
     cap.observer().receipt(
-        crate::services::claude_tui::input::UserReceipt::before(&session, "same input").unwrap(),
+        crate::services::claude_tui::input::UserReceipt::before(&session, "same input", None)
+            .unwrap(),
     );
     guarded_outcome::with_owner(Some(cap.observer()), || {
         let _end = guarded_outcome::seal_on_exit(&session);
     });
     cap.observer().receipt(
-        crate::services::claude_tui::input::UserReceipt::before(&session, "same input").unwrap(),
+        crate::services::claude_tui::input::UserReceipt::before(&session, "same input", None)
+            .unwrap(),
     );
     writeln!(
         std::fs::OpenOptions::new()
@@ -513,4 +515,187 @@ fn a2_owner_cannot_restart_a_finished_receipt_window() {
         );
     }
     tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let path = driver._temp.path().join("transient.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let session = format!("a2-transient-{}", uuid::Uuid::new_v4());
+    let frame = "[User: test]\ntransient admission";
+    driver.inflight.tmux_session_name = Some(session.clone());
+    driver.inflight.session_id = Some("transient-sid".into());
+    driver.inflight.output_path = Some(path.display().to_string());
+    driver.inflight.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    driver.inflight.user_text = frame.into();
+    let cap = inflight::install_managed_submission_boundary(
+        &mut driver.inflight,
+        &crate::services::turn_host::TurnHost::Tmux,
+    )
+    .unwrap();
+    inflight::clear_inflight_state(&ProviderKind::Claude, driver.inflight.channel_id);
+    inflight::save_inflight_state_create_new(&driver.inflight).unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        &session,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let view = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view;
+    let empty = view("", false);
+    let mut captures = std::collections::VecDeque::from([Some(view("person draft", false))]);
+    captures.extend(std::iter::repeat_n(Some(empty.clone()), 40));
+    let record_path = path.clone();
+    let spy = SpyGuard::install(SpyState {
+        captures,
+        captures_after_send: Some(std::iter::repeat_n(Some(empty), 10).collect()),
+        on_send: Some(Box::new(move |call| {
+            if call == "keys:Enter" {
+                writeln!(std::fs::OpenOptions::new().append(true).open(&record_path).unwrap(), "{}",
+                serde_json::json!({"type":"user", "sessionId":"transient-sid", "message":{"content":frame}})).unwrap();
+            }
+        })),
+        ..SpyState::default()
+    });
+    crate::services::claude_tui::composer_lock::guard_draft(
+        &session,
+        crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
+    );
+    guarded_outcome::with_owner(Some(cap.observer()), || {
+        crate::services::claude_tui::submission_fence::with_scope(Some(cap.fence()), || {
+            assert!(
+                crate::services::claude_tui::input::with_composer_cleanup_lock(
+                    &session,
+                    || panic!("protected cleanup must not run")
+                )
+                .is_none()
+            );
+            assert!(
+                cap.preparation_hold().is_some(),
+                "the ignored cleanup rejection is recorded"
+            );
+            crate::services::claude_tui::input::send_prompt_with_readiness(
+                &session,
+                frame,
+                crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
+                Some(&crate::services::provider::CancelToken::new()),
+            )
+            .unwrap();
+            let (sender, _rx) = std::sync::mpsc::channel();
+            crate::services::claude::emit_claude_tui_watcher_handoff(
+                &sender,
+                path.to_str().unwrap(),
+                &session,
+                &path,
+            );
+            cap.observer().receipt_finished(&session);
+        });
+    });
+    assert!(
+        cap.preparation_hold().is_none(),
+        "successful submit clears a transient admission refusal"
+    );
+    assert!(cap.exact_user_receipt());
+    assert_eq!(
+        spy.calls()
+            .iter()
+            .filter(|c| c.as_str() == "keys:Enter")
+            .count(),
+        1
+    );
+    drop(spy);
+    let (mut ctx, mut state) = driver.parts();
+    ctx.watcher_delivery_pin = None;
+    state.user_text_owned = frame.into();
+    let output = run_terminal_outcome_delivery(ctx, state).await;
+    assert!(output.bridge_should_emit_completion && output.status_panel_terminal_committed);
+    assert_eq!(
+        driver.completed_publications(),
+        1,
+        "one accepted attempt delivers once"
+    );
+    assert!(
+        crate::services::discord::mailbox_snapshot(
+            &driver.shared,
+            ChannelId::new(driver.inflight.channel_id)
+        )
+        .await
+        .intervention_queue
+        .is_empty(),
+        "accepted input is not requeued"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_dispatch_settles_without_tui_receipt_but_completion_stays_gated() {
+    use axum::{Json, Router, extract::State, http::Method, routing::any};
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let patches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = Router::new().route("/api/dispatches/{id}", any(
+        |State(count): State<Arc<std::sync::atomic::AtomicUsize>>, method: Method| async move {
+            if method == Method::GET {
+                Json(serde_json::json!({"dispatch":{"dispatch_type":"implementation", "status":"dispatched"}}))
+            } else {
+                assert_eq!(method, Method::PATCH);
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(serde_json::json!({}))
+            }
+        })).with_state(patches.clone());
+    let listener = tokio::net::TcpListener::bind((crate::config::loopback().as_str(), 0))
+        .await
+        .unwrap();
+    crate::services::discord::internal_api::init(listener.local_addr().unwrap().port(), None);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    driver.inflight.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    let (mut ctx, mut state) = driver.parts();
+    ctx.should_complete_work_dispatch_after_delivery = true;
+    ctx.watcher_delivery_pin = None;
+    state.dispatch_id = Some("receipt-independent-work".into());
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_terminal_outcome_delivery(ctx, state),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        patches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "ordinary completed work settles its dispatch without a TUI receipt"
+    );
+    assert!(
+        !output.bridge_should_emit_completion && !output.status_panel_terminal_committed,
+        "the dispatch fallback grants no completion proof"
+    );
+    let (mut ctx, mut state) = driver.parts();
+    let cap = inflight::install_managed_submission_boundary(
+        &mut state.inflight_state,
+        &crate::services::turn_host::TurnHost::Tmux,
+    )
+    .unwrap();
+    inflight::clear_inflight_state(&ProviderKind::Claude, state.inflight_state.channel_id);
+    inflight::save_inflight_state_create_new(&state.inflight_state).unwrap();
+    let session = state.inflight_state.tmux_session_name.as_deref().unwrap();
+    cap.observer().preparation_held(
+        &crate::services::claude_tui::input::PreparationHold::uncertain(session, "lost ACK".into()),
+    );
+    ctx.should_complete_work_dispatch_after_delivery = true;
+    ctx.watcher_delivery_pin = None;
+    state.dispatch_id = Some("still-waiting-work".into());
+    let _ = run_terminal_outcome_delivery(ctx, state).await;
+    server.abort();
+    assert_eq!(
+        patches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an uncertain waiting turn does not settle work"
+    );
 }

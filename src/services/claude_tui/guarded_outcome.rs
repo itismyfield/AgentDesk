@@ -50,6 +50,9 @@ pub(crate) trait Owner: Send + Sync {
     fn finished(&self, run: &InputRun);
     fn preparation_held(&self, _hold: &PreparationHold) {}
     fn receipt(&self, _receipt: UserReceipt) {}
+    fn native_session_id(&self) -> Option<String> {
+        None
+    }
     fn receipt_finished(&self, _session: &str) {}
 }
 
@@ -79,6 +82,7 @@ struct Scope {
     owner: Option<Arc<dyn Owner>>,
     result: Option<InputRun>,
     preparation: Option<PreparationHold>,
+    receipt_sid: Option<String>,
 }
 thread_local! { static OWNER: RefCell<Option<Scope>> = const { RefCell::new(None) }; }
 struct Restore(Option<Scope>);
@@ -115,10 +119,22 @@ pub(crate) fn capture_preparation(
 }
 fn scoped<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> (R, Scope) {
     let previous = OWNER.with(|slot| {
+        let receipt_sid = slot
+            .borrow()
+            .as_ref()
+            .filter(|scope| {
+                scope
+                    .owner
+                    .as_ref()
+                    .zip(owner.as_ref())
+                    .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+            })
+            .and_then(|scope| scope.receipt_sid.clone());
         slot.replace(Some(Scope {
             owner,
             result: None,
             preparation: None,
+            receipt_sid,
         }))
     });
     let _restore = Restore(previous);
@@ -147,16 +163,36 @@ pub(crate) fn preparation_held(hold: &PreparationHold) {
         owner.preparation_held(hold);
     }
 }
+/// The provider's resolved SID stays authoritative through nested submission adapters.
+#[cfg(unix)]
+pub(crate) fn set_receipt_session_id(sid: &str) {
+    OWNER.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.receipt_sid = Some(sid.into());
+        }
+    });
+}
 pub(crate) fn receipt(session: &str, prompt: &str) {
-    let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
+    let (owner, sid) = OWNER.with(|slot| {
+        let scope = slot.borrow();
+        (
+            scope.as_ref().and_then(|s| s.owner.clone()),
+            scope.as_ref().and_then(|s| s.receipt_sid.clone()),
+        )
+    });
     if let Some(owner) = owner
-        && let Some(receipt) = UserReceipt::before(session, prompt)
+        && let Some(receipt) = UserReceipt::before(
+            session,
+            prompt,
+            sid.or_else(|| owner.native_session_id()).as_deref(),
+        )
     {
         owner.receipt(receipt);
     }
 }
 #[cfg(unix)]
 pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
+    set_receipt_session_id(sid);
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner
         && let Some(receipt) = UserReceipt::before_fresh(session, prompt, path, sid)

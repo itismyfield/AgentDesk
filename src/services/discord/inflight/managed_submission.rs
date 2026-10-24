@@ -116,6 +116,7 @@ struct Attempt {
     channel_id: u64,
     birth: InflightEpisodePin,
     target: String,
+    native_session_id: Option<String>,
     gate: Mutex<Gate>,
     guarded: Mutex<GuardedState>,
     evidence: Mutex<evidence::Evidence>,
@@ -202,6 +203,9 @@ impl ManagedSubmission {
 }
 
 impl Owner for Attempt {
+    fn native_session_id(&self) -> Option<String> {
+        self.native_session_id.clone()
+    }
     fn receipt_finished(&self, session: &str) {
         evidence::finish_receipt(self, session);
     }
@@ -293,6 +297,7 @@ impl SubmissionFence for Attempt {
         match mark_may_have_submitted(&self.provider, self.channel_id, &self.birth, Some(target)) {
             Ok(()) => {
                 *gate = Gate::IdleStashFenced;
+                evidence::admit_payload(self);
                 Ok(())
             }
             Err(reason) => {
@@ -305,13 +310,17 @@ impl SubmissionFence for Attempt {
     fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
         let mut gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
         match &*gate {
-            Gate::Fenced | Gate::IdleStashFenced => return Ok(()),
+            Gate::Fenced | Gate::IdleStashFenced => {
+                evidence::admit_payload(self);
+                return Ok(());
+            }
             Gate::Refused(refused) => return Err(refused.clone()),
             Gate::Open => {}
         }
         match mark_may_have_submitted(&self.provider, self.channel_id, &self.birth, None) {
             Ok(()) => {
                 *gate = Gate::Fenced;
+                evidence::admit_payload(self);
                 Ok(())
             }
             Err(reason) => {
@@ -399,6 +408,7 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
         channel_id: state.channel_id,
         birth: InflightEpisodePin::from_state(state),
         target: state.tmux_session_name.clone().unwrap(),
+        native_session_id: state.session_id.clone(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
         evidence: Mutex::new(evidence::Evidence::default()),

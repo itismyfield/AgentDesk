@@ -80,7 +80,22 @@ pub(super) fn confirm_prompt_submission_left_editor(
                 attempt += 1;
             }
             PromptSubmitConfirmationDecision::RetryEnter => {
-                return Err("claude tui prompt submit remains unconfirmed; preserving composer without another Enter".into());
+                let capture = host_input::observe_draft(session_name);
+                let owned_prompt = submitted_prompt.zip(capture.as_deref()).is_some_and(
+                    |(prompt, pane)| {
+                        crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
+                            pane, prompt,
+                        ) && crate::services::claude_tui::busy_inject::composer_owner_in_session(
+                            session_name,
+                            pane,
+                        ) == crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
+                    },
+                );
+                if !owned_prompt {
+                    return Err("claude tui prompt retry held: composer no longer proves the submitted prompt is ours".into());
+                }
+                run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
+                attempt += 1;
             }
         }
     }

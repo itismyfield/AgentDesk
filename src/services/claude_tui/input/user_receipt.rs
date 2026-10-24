@@ -5,12 +5,39 @@ use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
+/// A pane stays the same across handoff and SID rehydration, but not a respawn.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PaneIdentity {
+    runtime_kind: RuntimeHandoffKind,
+    output_path: String,
+    nonce: SpawnNonceMarker,
+}
+impl PaneIdentity {
+    fn from_binding(session: &str, binding: &TuiRuntimeBinding) -> Option<Self> {
+        let nonce = binding_context::observe_spawn_nonce_marker(session);
+        (nonce != SpawnNonceMarker::Unreadable).then(|| Self {
+            runtime_kind: binding.runtime_kind,
+            output_path: binding.output_path.clone(),
+            nonce,
+        })
+    }
+    pub(crate) fn capture(session: &str) -> Option<Self> {
+        crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
+            let binding =
+                tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                    authority,
+                )?;
+            Self::from_binding(session, &binding)
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct UserReceipt {
     session: String,
-    binding: TuiRuntimeBinding,
+    pane: PaneIdentity,
+    sid: String,
     file: Option<File>,
-    nonce: SpawnNonceMarker,
     offset: u64,
     end: Option<u64>,
     ended: bool,
@@ -18,12 +45,13 @@ pub(crate) struct UserReceipt {
 }
 
 impl UserReceipt {
-    pub(crate) fn before(session: &str, prompt: &str) -> Option<Self> {
+    pub(crate) fn before(session: &str, prompt: &str, sid: Option<&str>) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
-            let binding =
+            let mut binding =
                 tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
                     authority,
                 )?;
+            binding.session_id = sid.map(str::to_owned).or(binding.session_id);
             if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui
                 || binding.session_id.as_deref().is_none_or(str::is_empty)
             {
@@ -60,10 +88,8 @@ impl UserReceipt {
         binding: TuiRuntimeBinding,
         allow_missing: bool,
     ) -> Option<Self> {
-        let nonce = binding_context::observe_spawn_nonce_marker(session);
-        if nonce == SpawnNonceMarker::Unreadable {
-            return None;
-        }
+        let pane = PaneIdentity::from_binding(session, &binding)?;
+        let sid = binding.session_id.clone()?;
         let (file, offset) = match open(&binding.output_path) {
             Ok(mut file) => {
                 let offset = file.seek(SeekFrom::End(0)).ok()?;
@@ -76,9 +102,9 @@ impl UserReceipt {
         };
         Some(Self {
             session: session.into(),
-            binding,
+            pane,
+            sid,
             file,
-            nonce,
             offset,
             end: None,
             ended: false,
@@ -99,9 +125,7 @@ impl UserReceipt {
             else {
                 return;
             };
-            if !same_binding(&self.binding, &current)
-                || binding_context::observe_spawn_nonce_marker(&self.session) != self.nonce
-            {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
                 return;
             }
             if self.file.is_none() {
@@ -132,9 +156,7 @@ impl UserReceipt {
             else {
                 return false;
             };
-            if !same_binding(&self.binding, &current)
-                || binding_context::observe_spawn_nonce_marker(&self.session) != self.nonce
-            {
+            if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
                 return false;
             }
             let Some(file) = self.file.as_mut() else {
@@ -164,7 +186,7 @@ impl UserReceipt {
                 let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
                     return false;
                 };
-                if record["sessionId"].as_str() == current.session_id.as_deref()
+                if record["sessionId"].as_str() == Some(self.sid.as_str())
                     && let Some(text) = user_text(&record)
                     && super::super::busy_inject::exact_receipt(&text, &self.frame)
                 {
@@ -190,11 +212,6 @@ fn open(path: &str) -> std::io::Result<File> {
         return Err(std::io::Error::other("transcript is not a regular file"));
     }
     Ok(file)
-}
-
-fn same_binding(a: &TuiRuntimeBinding, b: &TuiRuntimeBinding) -> bool {
-    (a.runtime_kind, &a.output_path, &a.session_id)
-        == (b.runtime_kind, &b.output_path, &b.session_id)
 }
 
 fn same_file(file: &File, path: &str) -> bool {
@@ -234,6 +251,57 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    #[test]
+    #[cfg(unix)]
+    fn a2_receipt_survives_real_handoff_and_rehydration() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handoff.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let session = format!("a2-handoff-{}", uuid::Uuid::new_v4());
+        let binding = TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("receipt-sid".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding.clone());
+        let mut receipt = UserReceipt::before(&session, "my input", None).unwrap();
+        writeln!(
+            OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            json!({"type":"user", "sessionId":"receipt-sid", "message":{"content":"my input"}})
+        )
+        .unwrap();
+        let (sender, _rx) = std::sync::mpsc::channel();
+        crate::services::claude::emit_claude_tui_watcher_handoff(
+            &sender,
+            path.to_str().unwrap(),
+            &session,
+            &path,
+        );
+        assert!(
+            tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
+                .unwrap()
+                .session_id
+                .is_none()
+        );
+        receipt.seal();
+        assert!(
+            receipt.confirmed(),
+            "same pane receipt survives actual handoff before seal"
+        );
+        tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+        assert!(
+            receipt.confirmed(),
+            "same pane receipt survives SID rehydration"
+        );
+        tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
+    }
 
     #[test]
     #[cfg(unix)]
@@ -335,7 +403,7 @@ mod tests {
                 relay_last_offset: None,
             };
             tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding.clone());
-            let mut receipt = UserReceipt::before(&session, frame).expect("bound transcript");
+            let mut receipt = UserReceipt::before(&session, frame, None).expect("bound transcript");
             OpenOptions::new()
                 .append(true)
                 .open(&path)
@@ -385,7 +453,7 @@ mod tests {
                 relay_last_offset: None,
             },
         );
-        let mut receipt = UserReceipt::before(&session, "same input").unwrap();
+        let mut receipt = UserReceipt::before(&session, "same input", None).unwrap();
         receipt.seal();
         std::fs::write(
             &path,

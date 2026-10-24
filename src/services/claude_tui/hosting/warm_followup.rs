@@ -370,6 +370,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         );
         return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(result);
     }
+    guarded_outcome::set_receipt_session_id(resolved_session_id);
     let turn_started_at = chrono::Utc::now();
     if let Err(error) =
         crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript_owned(

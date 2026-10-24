@@ -87,7 +87,6 @@ fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
     );
     binding.runtime_kind = RuntimeHandoffKind::ClaudeTui;
     binding.output_path = path.clone();
-    binding.session_id = Some(sid.clone());
     tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
     let capability = inflight::install_managed_submission_boundary(
         row,
@@ -97,7 +96,12 @@ fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
     inflight::clear_inflight_state(&ProviderKind::Claude, row.channel_id);
     inflight::save_inflight_state_create_new(row).unwrap();
     capability.observer().receipt(
-        crate::services::claude_tui::input::UserReceipt::before(&session, &row.user_text).unwrap(),
+        crate::services::claude_tui::input::UserReceipt::before(
+            &session,
+            &row.user_text,
+            Some(&sid),
+        )
+        .unwrap(),
     );
     capability.fence().before_first_payload().unwrap();
     tui_prompt_dedupe::record_discord_originated_prompt("claude", &session, &row.user_text);
@@ -108,6 +112,16 @@ fn prove_claude_input(root: &std::path::Path, row: &mut InflightTurnState) {
         serde_json::json!({"type":"user", "sessionId":sid, "message":{"content":row.user_text}})
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        let (sender, _rx) = std::sync::mpsc::channel();
+        crate::services::claude::emit_claude_tui_watcher_handoff(
+            &sender,
+            &row.output_path.clone().unwrap(),
+            &session,
+            std::path::Path::new(row.output_path.as_ref().unwrap()),
+        );
+    }
     capability.observer().receipt_finished(&session);
 }
 

@@ -323,7 +323,7 @@ pub(super) async fn handle_delivery_epilogue(
 
         settle_terminal_dispatch(TerminalDispatchSettlement {
             shared: &shared_owned, dispatch_id: dispatch_id.as_deref(), adk_cwd: adk_cwd.as_deref(),
-            full_response: &full_response, should_complete: should_complete_work_dispatch_after_delivery && input_confirmed,
+            full_response: &full_response, should_complete: should_complete_work_dispatch_after_delivery && !waiting,
             should_fail: should_fail_dispatch_after_delivery && !waiting, committed: terminal_delivery_committed,
             preserve: preserve_inflight_for_cleanup_retry, resume_failure: resume_failure_detected, recovery_retry,
         }).await;
