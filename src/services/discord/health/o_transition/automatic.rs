@@ -358,10 +358,7 @@ async fn ended(pane: String) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) use test_support::codex_sweep_for_test;
-
-#[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
     use super::*;
 
     thread_local! {

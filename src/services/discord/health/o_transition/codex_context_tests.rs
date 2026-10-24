@@ -237,10 +237,11 @@ fn existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence()
             fixture.source.clone(),
             CHANNEL,
             |ready| async move {
-                let reply =
-                    super::super::automatic::codex_sweep_for_test(&registry, &ready, CHANNEL)
-                        .await
-                        .unwrap();
+                let reply = super::super::automatic::test_support::codex_sweep_for_test(
+                    &registry, &ready, CHANNEL,
+                )
+                .await
+                .unwrap();
                 assert!(reply.refused.is_none(), "{reply:?}");
                 let diagnostics =
                     serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
@@ -294,7 +295,7 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
         let health = HealthRegistry::new();
         health.register("codex".into(), shared.clone()).await;
         crate::services::tui_o::writer::tests::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async move {
-            let reply = super::super::automatic::codex_sweep_for_test(&health, &ready, CHANNEL).await.unwrap();
+            let reply = super::super::automatic::test_support::codex_sweep_for_test(&health, &ready, CHANNEL).await.unwrap();
             assert!(reply.refused.is_none(), "{reply:?}");
             let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
             assert!(diagnostics["codex"]["Complete"].is_object(), "{diagnostics}");
@@ -317,9 +318,11 @@ async fn assert_actual_codex_sweep(fixture: &Fixture) {
         fixture.source.clone(),
         CHANNEL,
         |ready| async move {
-            let reply = super::super::automatic::codex_sweep_for_test(&registry, &ready, CHANNEL)
-                .await
-                .unwrap();
+            let reply = super::super::automatic::test_support::codex_sweep_for_test(
+                &registry, &ready, CHANNEL,
+            )
+            .await
+            .unwrap();
             assert!(reply.refused.is_none(), "{reply:?}");
             let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
             assert!(
