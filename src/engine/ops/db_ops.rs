@@ -1412,13 +1412,12 @@ where
 }
 
 #[cfg(test)]
-mod policy_sql_schema_tests;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use sqlx::Row;
+
+    mod policy_sql_schema_tests;
 
     struct TestDatabase {
         admin_url: String,
@@ -1897,7 +1896,7 @@ mod tests {
     /// missing table or column used to reach production unnoticed (#7347 L1).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn policy_sql_prepares_against_migrated_schema_pg() {
-        use super::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};
+        use self::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};
 
         let calls =
             extract_policy_sql(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"));

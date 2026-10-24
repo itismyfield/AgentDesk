@@ -7,7 +7,7 @@
 //! `xs.map(() => "?").join`, local variables (nearest declaration before the
 //! use plus later `=`/`+=`), global literal constants, and helper functions
 //! whose top-level `return`s expand. Anything else becomes a `/*DYN:name*/`
-//! marker; `db_ops::tests` prepares only the variants without one.
+//! marker; the PG test in `db_ops::tests` prepares only the variants without one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1346,173 +1346,168 @@ pub(super) fn extract_policy_sql(policies_root: &Path) -> Vec<PolicySqlCall> {
     calls
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn extract_from(sources: &[(&str, &str)]) -> Vec<PolicySqlCall> {
-        let root = std::env::temp_dir().join(format!(
-            "agentdesk_policy_sql_extract_{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let policies = root.join("policies");
-        for (rel, source) in sources {
-            let path = policies.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, source).unwrap();
-        }
-        let calls = extract_policy_sql(&policies);
-        std::fs::remove_dir_all(&root).unwrap();
-        calls
+fn extract_from(sources: &[(&str, &str)]) -> Vec<PolicySqlCall> {
+    let root = std::env::temp_dir().join(format!(
+        "agentdesk_policy_sql_extract_{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let policies = root.join("policies");
+    for (rel, source) in sources {
+        let path = policies.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
     }
+    let calls = extract_policy_sql(&policies);
+    std::fs::remove_dir_all(&root).unwrap();
+    calls
+}
 
-    #[test]
-    fn expands_concatenation_ternaries_templates_and_placeholder_joins() {
-        let calls = extract_from(&[(
-            "a.js",
+#[test]
+fn expands_concatenation_ternaries_templates_and_placeholder_joins() {
+    let calls = extract_from(&[(
+        "a.js",
+        r#"
+        var TABLE = "kanban_cards";
+        function f(ids, live) {
+          var clause = live ? "status = 'a'" : "status = 'b'";
+          var placeholders = ids.map(function() { return "?"; }).join(",");
+          // a comment with agentdesk.db.query("ignored")
+          var re = /\/db\//g;
+          return agentdesk.db.query(
+            "SELECT id FROM " + TABLE + ` WHERE ${clause} AND id IN (` + placeholders + ")",
+            ids
+          );
+        }
+        "#,
+    )]);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].file, "policies/a.js");
+    assert_eq!(calls[0].method, "query");
+    assert_eq!(
+        calls[0].variants,
+        vec![
+            "SELECT id FROM kanban_cards WHERE status = 'a' AND id IN (?)".to_string(),
+            "SELECT id FROM kanban_cards WHERE status = 'b' AND id IN (?)".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn follows_appends_and_cross_module_helpers() {
+    let calls = extract_from(&[
+        (
+            "lib/helpers.js",
             r#"
-            var TABLE = "kanban_cards";
-            function f(ids, live) {
-              var clause = live ? "status = 'a'" : "status = 'b'";
-              var placeholders = ids.map(function() { return "?"; }).join(",");
-              // a comment with agentdesk.db.query("ignored")
-              var re = /\/db\//g;
-              return agentdesk.db.query(
-                "SELECT id FROM " + TABLE + ` WHERE ${clause} AND id IN (` + placeholders + ")",
-                ids
-              );
+            var LIMIT = 50;
+            function activityExpr(alias) {
+              return "GREATEST(" + alias + ".created_at, " + alias + ".updated_at)";
+            }
+            function interval(key, fallback) {
+              var val = parseInt(agentdesk.config.get(key), 10);
+              if (!val) val = fallback;
+              return "-" + val + " minutes";
+            }
+            module.exports = { activityExpr: activityExpr, interval: interval, LIMIT: LIMIT };
+            "#,
+        ),
+        (
+            "b.js",
+            r#"
+            var helpers = require("./lib/helpers");
+            var activityExpr = helpers.activityExpr;
+            var interval = helpers.interval;
+            function g(where) {
+              var sql = "SELECT * FROM t";
+              if (where) sql += " WHERE " + activityExpr("t") + " < datetime('now', '" + interval("k", 5) + "')";
+              agentdesk.db.execute(sql + " LIMIT " + helpers.LIMIT);
             }
             "#,
-        )]);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].file, "policies/a.js");
-        assert_eq!(calls[0].method, "query");
-        assert_eq!(
-            calls[0].variants,
-            vec![
-                "SELECT id FROM kanban_cards WHERE status = 'a' AND id IN (?)".to_string(),
-                "SELECT id FROM kanban_cards WHERE status = 'b' AND id IN (?)".to_string(),
-            ]
-        );
-    }
+        ),
+    ]);
+    let call = calls
+        .iter()
+        .find(|call| call.file == "policies/b.js")
+        .unwrap();
+    assert_eq!(call.method, "execute");
+    assert!(
+        call.variants
+            .contains(&"SELECT * FROM t LIMIT 50".to_string()),
+        "{:?}",
+        call.variants
+    );
+    assert!(
+        call.variants.contains(
+            &"SELECT * FROM t WHERE GREATEST(t.created_at, t.updated_at) < datetime('now', '-5 minutes') LIMIT 50"
+                .to_string()
+        ),
+        "{:?}",
+        call.variants
+    );
+}
 
-    #[test]
-    fn follows_appends_and_cross_module_helpers() {
-        let calls = extract_from(&[
-            (
-                "lib/helpers.js",
-                r#"
-                var LIMIT = 50;
-                function activityExpr(alias) {
-                  return "GREATEST(" + alias + ".created_at, " + alias + ".updated_at)";
-                }
-                function interval(key, fallback) {
-                  var val = parseInt(agentdesk.config.get(key), 10);
-                  if (!val) val = fallback;
-                  return "-" + val + " minutes";
-                }
-                module.exports = { activityExpr: activityExpr, interval: interval, LIMIT: LIMIT };
-                "#,
-            ),
-            (
-                "b.js",
-                r#"
-                var helpers = require("./lib/helpers");
-                var activityExpr = helpers.activityExpr;
-                var interval = helpers.interval;
-                function g(where) {
-                  var sql = "SELECT * FROM t";
-                  if (where) sql += " WHERE " + activityExpr("t") + " < datetime('now', '" + interval("k", 5) + "')";
-                  agentdesk.db.execute(sql + " LIMIT " + helpers.LIMIT);
-                }
-                "#,
-            ),
-        ]);
-        let call = calls
-            .iter()
-            .find(|call| call.file == "policies/b.js")
-            .unwrap();
-        assert_eq!(call.method, "execute");
-        assert!(
-            call.variants
-                .contains(&"SELECT * FROM t LIMIT 50".to_string()),
-            "{:?}",
-            call.variants
-        );
-        assert!(
-            call.variants.contains(
-                &"SELECT * FROM t WHERE GREATEST(t.created_at, t.updated_at) < datetime('now', '-5 minutes') LIMIT 50"
-                    .to_string()
-            ),
-            "{:?}",
-            call.variants
-        );
-    }
+#[test]
+fn parameters_shadow_same_named_variables_of_other_functions() {
+    let calls = extract_from(&[(
+        "d.js",
+        r#"
+        function a() { var where = "id = 1"; return where; }
+        function b(where) { return agentdesk.db.query("SELECT 1 FROM t WHERE " + where); }
+        function c() { var where = "id = 2"; return agentdesk.db.query("SELECT 1 FROM t WHERE " + where); }
+        "#,
+    )]);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].variants,
+        vec![format!("SELECT 1 FROM t WHERE {DYN_MARKER}where*/")]
+    );
+    assert_eq!(
+        calls[1].variants,
+        vec!["SELECT 1 FROM t WHERE id = 2".to_string()]
+    );
+}
 
-    #[test]
-    fn parameters_shadow_same_named_variables_of_other_functions() {
-        let calls = extract_from(&[(
-            "d.js",
-            r#"
-            function a() { var where = "id = 1"; return where; }
-            function b(where) { return agentdesk.db.query("SELECT 1 FROM t WHERE " + where); }
-            function c() { var where = "id = 2"; return agentdesk.db.query("SELECT 1 FROM t WHERE " + where); }
-            "#,
-        )]);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(
-            calls[0].variants,
-            vec![format!("SELECT 1 FROM t WHERE {DYN_MARKER}where*/")]
-        );
-        assert_eq!(
-            calls[1].variants,
-            vec!["SELECT 1 FROM t WHERE id = 2".to_string()]
-        );
-    }
+#[test]
+fn reports_dynamic_pieces_and_unsupported_access() {
+    let calls = extract_from(&[(
+        "c.js",
+        r#"
+        function h(sql) { return agentdesk.db.query(sql, []); }
+        var db = agentdesk.db;
+        agentdesk.db["execute"]("DELETE FROM t");
+        "#,
+    )]);
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].variants, vec![format!("{DYN_MARKER}sql*/")]);
+    assert!(calls[1].unsupported.is_some());
+    assert!(calls[2].unsupported.is_some());
+}
 
-    #[test]
-    fn reports_dynamic_pieces_and_unsupported_access() {
-        let calls = extract_from(&[(
-            "c.js",
-            r#"
-            function h(sql) { return agentdesk.db.query(sql, []); }
-            var db = agentdesk.db;
-            agentdesk.db["execute"]("DELETE FROM t");
-            "#,
-        )]);
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0].variants, vec![format!("{DYN_MARKER}sql*/")]);
-        assert!(calls[1].unsupported.is_some());
-        assert!(calls[2].unsupported.is_some());
-    }
-
-    #[test]
-    fn every_policy_db_call_expands_to_concrete_sql() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies");
-        let calls = extract_policy_sql(&root);
-        assert!(
-            calls.len() >= 100,
-            "found only {} policy db calls",
-            calls.len()
-        );
-        let problems: Vec<String> = calls
-            .iter()
-            .filter_map(|call| {
-                let site = format!("{}:{}", call.file, call.line);
-                if let Some(reason) = &call.unsupported {
-                    return Some(format!("{site}: {reason}"));
-                }
-                if call.variants.iter().all(|sql| sql.contains(DYN_MARKER)) {
-                    return Some(format!("{site}: no concrete variant {:?}", call.variants));
-                }
-                None
-            })
-            .collect();
-        assert!(
-            problems.is_empty(),
-            "policy SQL the schema check cannot expand; make the SQL static or \
-             teach policy_sql_schema_tests.rs the pattern:\n{}",
-            problems.join("\n")
-        );
-    }
+#[test]
+fn every_policy_db_call_expands_to_concrete_sql() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies");
+    let calls = extract_policy_sql(&root);
+    assert!(
+        calls.len() >= 100,
+        "found only {} policy db calls",
+        calls.len()
+    );
+    let problems: Vec<String> = calls
+        .iter()
+        .filter_map(|call| {
+            let site = format!("{}:{}", call.file, call.line);
+            if let Some(reason) = &call.unsupported {
+                return Some(format!("{site}: {reason}"));
+            }
+            if call.variants.iter().all(|sql| sql.contains(DYN_MARKER)) {
+                return Some(format!("{site}: no concrete variant {:?}", call.variants));
+            }
+            None
+        })
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "policy SQL the schema check cannot expand; make the SQL static or \
+         teach policy_sql_schema_tests.rs the pattern:\n{}",
+        problems.join("\n")
+    );
 }
