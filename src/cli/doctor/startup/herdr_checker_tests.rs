@@ -9,8 +9,11 @@ fn startup_health_strips_raw_checker_evidence_without_changing_the_doctor_artifa
             "checker_evidence": {"user": {"stderr": raw}}}
     }, {"id": "other_check", "status": "fail", "evidence": {"raw": "unrelated"}}]});
     let before = report.clone();
-    let health =
-        startup_doctor_summary_json(std::path::Path::new("/fixture/doctor.json"), &report, true);
+    let health = startup_doctor_summary_json(
+        &std::path::PathBuf::from("/fixture/doctor.json"),
+        &report,
+        true,
+    );
     assert!(
         !health["warned_checks"][0]["evidence"]
             .as_object()
