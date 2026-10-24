@@ -1,4 +1,4 @@
-"""Exercise scripts/ci/nextest_ci.py on fixture nextest lists and JUnit reports, without nextest."""
+"""Exercise the nextest CI helpers on fixture lists, JUnit reports and Rust trees, without nextest or cargo."""
 
 import contextlib
 import importlib.util
@@ -17,6 +17,9 @@ SCRIPT = ROOT / "scripts/ci/nextest_ci.py"
 spec = importlib.util.spec_from_file_location("nextest_ci", SCRIPT)
 nci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nci)
+spec = importlib.util.spec_from_file_location("rust_test_sources", ROOT / "scripts/ci/rust_test_sources.py")
+rts = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rts)
 BASE_CONFIG = (ROOT / ".config/nextest.toml").read_text()
 SHA = "a" * 40
 BIN = "agentdesk"
@@ -42,6 +45,7 @@ def junit(cases):
     return f'<testsuites name="nextest-run"><testsuite name="{BIN}">{rows}</testsuite></testsuites>'
 
 
+BUILD = {"--rust-version": "1.94.1", "--nextest-version": "0.9.149", "--target": "x86_64-unknown-linux-gnu"}
 POLICY = f"""version = 1
 [[flaky]]
 scope = "linux-lib"
@@ -71,19 +75,25 @@ class Fixture(unittest.TestCase):
         return path
 
     def run_cli(self, *argv):
+        """rc and stderr; an uncaught exception is reported as rc "crash" so contracts fail by assertion."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-            rc = nci.main([str(a) for a in argv])
+            try:
+                rc = nci.main([str(a) for a in argv])
+            except Exception as exc:  # noqa: BLE001
+                return "crash", f"{err.getvalue()}{type(exc).__name__}: {exc}"
         return rc, err.getvalue()
 
     def plan(self, names, workers=2, ignored=(), timings=None, out="plan", policy=None,
-             order=None, today="2026-10-24", base="base.toml"):
+             order=None, today="2026-10-24", base="base.toml", build=None):
         self.write("list.json", nextest_list(names, ignored, order))
         policy = policy or ("policy.toml" if FLAKY in names else "empty.toml")
         argv = ["plan", "--universe", self.dir / "list.json", "--archive", self.archive,
                 "--workers", workers, "--sha", SHA, "--scope", "linux-lib", "--run-id", "7",
                 "--base-config", self.dir / base, "--retry-policy", self.dir / policy,
                 "--today", today, "--output", self.dir / out]
+        build = BUILD if build is None else build
+        argv += [x for key, value in build.items() for x in ([key, value] if value is not None else [])]
         for n, path in enumerate(timings or []):
             argv += ["--timings", self.write(f"t{n}.xml", path)]
         rc, err = self.run_cli(*argv)
@@ -166,13 +176,42 @@ class Plan(Fixture):
         plan = self.plan_ok(names, workers=3, timings=[junit([(n, "", 0) for n in names])])
         self.assertEqual(sorted(len(w["tests"]) for w in plan["workers"]), [2, 2, 3])
 
-    def test_worker_count_bounds(self):
+    def test_single_worker_takes_every_test(self):
         one = self.plan_ok(self.NAMES, workers=1)
         self.assertEqual(len(one["workers"][0]["tests"]), len(self.NAMES))
-        for workers, needle in [(0, "between 1"), (33, "between 1"), (11, "every worker needs a test")]:
+
+    def test_worker_count_below_one_is_refused(self):
+        for workers in (0, -1):
             plan, err = self.plan(self.NAMES, workers=workers)
             self.assertIsNone(plan)
-            self.assertIn(needle, err)
+            self.assertIn("between 1 and 32", err)
+
+    def test_worker_count_above_cap_is_refused_even_with_enough_tests(self):
+        names = [f"m::t{i}" for i in range(40)]
+        self.assertIsNotNone(self.plan(names, workers=32)[0])
+        plan, err = self.plan(names, workers=33)
+        self.assertIsNone(plan)
+        self.assertIn("between 1 and 32", err)
+
+    def test_more_workers_than_tests_is_refused(self):
+        plan, err = self.plan(self.NAMES, workers=11)
+        self.assertIsNone(plan)
+        self.assertIn("every worker needs a test", err)
+
+    def test_build_identity_is_required_and_normalized(self):
+        for missing in ("--rust-version", "--nextest-version", "--target"):
+            with self.subTest(missing):
+                plan, err = self.plan(self.NAMES, build={**BUILD, missing: ""})
+                self.assertIsNone(plan)
+                self.assertIn(f"needs {missing[2:].replace('-version', '')}", err)
+        plan = self.plan_ok(self.NAMES, build={**BUILD, "--features": "b, a,b",
+                                               "--build-option": "RUSTFLAGS="})
+        self.assertEqual(plan["identity"]["build"], {
+            "target": "x86_64-unknown-linux-gnu", "features": ["a", "b"], "cargo_profile": "test",
+            "nextest_profile": "ci", "options": ["RUSTFLAGS="]})
+        self.assertEqual((plan["identity"]["rust"], plan["identity"]["nextest"]), ("1.94.1", "0.9.149"))
+        plan, err = self.plan(self.NAMES, build={**BUILD, "--build-option": "RUSTFLAGS=-C x"})
+        self.assertIn("KEY=VALUE", err)
 
     def test_empty_or_ignored_only_universe_is_rejected(self):
         plan, err = self.plan([], ignored=["m::manual"])
@@ -332,6 +371,35 @@ class Audit(Fixture):
         self.assertIn("run_id='6'", details)
         self.assertIn("archive_sha256='000", details)
 
+    def test_null_or_non_object_worker_identity_is_red(self):
+        for text in ("null", "[]", '"worker"'):
+            with self.subTest(text):
+                self.worker_artifacts(self.p)
+                self.write("results/worker-0/worker.json", text)
+                rc, verdict, _ = self.audit()
+                self.assertEqual((rc, self.kinds(verdict)), (1, {"bad-identity"}))
+
+    def test_retry_time_is_summed_apart_from_wall_time(self):
+        i = self.flaky_worker
+        cases = [(n, '<flakyFailure time="120"/>' if n == FLAKY else "", 1 if n == FLAKY else 0.5)
+                 for n in self.worker_tests(self.p, i)]
+        self.worker_artifacts(self.p, overrides={i: cases})
+        rc, verdict, _ = self.audit()
+        self.assertEqual(rc, 0)
+        self.assertEqual((verdict["retry_pass"][0]["seconds"], verdict["retry_pass"][0]["total_attempt_seconds"]),
+                         (1.0, 121.0))
+        row = verdict["workers"][i]
+        self.assertEqual(row["total_attempt_seconds"] - row["seconds"], 120.0)
+        timings, invalid = nci.load_timings([self.write("t.xml", junit(cases))])
+        self.assertEqual((timings[(BIN, FLAKY)], invalid), (121.0, 0))
+
+    def test_unreadable_retry_time_is_red(self):
+        i = self.flaky_worker
+        cases = [(n, '<flakyFailure time="x"/>' if n == FLAKY else "", 0.5) for n in self.worker_tests(self.p, i)]
+        self.worker_artifacts(self.p, overrides={i: cases})
+        rc, verdict, _ = self.audit()
+        self.assertEqual((rc, self.kinds(verdict)), (1, {"bad-time"}))
+
     def test_tampered_plan_is_rejected(self):
         plan_path = self.dir / "plan/plan.json"
         plan = json.loads(plan_path.read_text())
@@ -343,16 +411,17 @@ class Audit(Fixture):
 
     def test_allowlisted_retry_pass_is_green_and_named_in_summary(self):
         i = self.flaky_worker
-        self.worker_artifacts(self.p, overrides={i: self.cases_for(i, **{FLAKY: "<flakyFailure/>"})})
+        self.worker_artifacts(self.p, overrides={i: self.cases_for(i, **{FLAKY: '<flakyFailure time="0.1"/>'})})
         rc, verdict, _ = self.audit()
         self.assertEqual((rc, verdict["verdict"]), (0, "pass"))
         self.assertEqual(verdict["retry_pass"], [{"id": f"{BIN} {FLAKY}", "worker": i, "attempts": 2,
-                                                  "seconds": 0.5, "issue": "#1", "expires": "2026-12-31"}])
-        self.assertIn(f"| `{BIN} {FLAKY}` | 2 | 0.5 | #1 |", (self.dir / "summary.md").read_text())
+                                                  "seconds": 0.5, "total_attempt_seconds": 0.6,
+                                                  "issue": "#1", "expires": "2026-12-31"}])
+        self.assertIn(f"| `{BIN} {FLAKY}` | 2 | 0.5 | 0.6 | #1 |", (self.dir / "summary.md").read_text())
 
     def test_exhausted_retry_is_red(self):
         i = self.flaky_worker
-        body = "<failure/><rerunFailure/>"
+        body = '<failure/><rerunFailure time="0.1"/>'
         self.worker_artifacts(self.p, overrides={i: self.cases_for(i, **{FLAKY: body})})
         rc, verdict, _ = self.audit()
         self.assertEqual((rc, self.kinds(verdict)), (1, {"retry-exhausted"}))
@@ -360,13 +429,13 @@ class Audit(Fixture):
 
     def test_retry_outside_allowlist_is_red_even_when_it_passed(self):
         name = next(t[1] for t in self.p["workers"][0]["tests"] if t[1] != FLAKY)
-        self.worker_artifacts(self.p, overrides={0: self.cases_for(0, **{name: "<flakyFailure/>"})})
+        self.worker_artifacts(self.p, overrides={0: self.cases_for(0, **{name: '<flakyFailure time="0.1"/>'})})
         rc, verdict, _ = self.audit()
         self.assertEqual((rc, self.kinds(verdict)), (1, {"retry-not-allowed"}))
 
     def test_more_than_one_retry_is_red_even_when_allowlisted(self):
         i = self.flaky_worker
-        body = "<flakyFailure/><flakyFailure/>"
+        body = '<flakyFailure time="0.1"/><flakyFailure time="0.1"/>'
         self.worker_artifacts(self.p, overrides={i: self.cases_for(i, **{FLAKY: body})})
         rc, verdict, _ = self.audit()
         self.assertEqual((rc, self.kinds(verdict)), (1, {"retry-over-limit"}))
@@ -426,6 +495,15 @@ class BaseDiff(Fixture):
         self.assertEqual(rc, 2)
         self.assertIn("no baseline plan", err)
 
+    def test_baseline_with_other_build_under_same_scope_is_refused(self):
+        self.plan_ok(["m::a", "m::b"], workers=1, out="base", build={**BUILD, "--features": "default,extra"})
+        self.plan_ok(["m::a", "m::b"], workers=1)
+        rc, err = self.diff(SHA)
+        self.assertEqual(rc, 2)
+        self.assertIn("under the same scope", err)
+        self.plan_ok(["m::a", "m::b"], workers=1, out="base", build={**BUILD, "--rust-version": "1.95.0"})
+        self.assertEqual(self.diff(SHA)[0], 0)
+
     def test_removed_and_newly_ignored_tests_fail_unless_report_only(self):
         self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
         self.plan_ok(["m::a", "m::new"], ignored=["m::b"], workers=1)
@@ -440,6 +518,142 @@ class BaseDiff(Fixture):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a", "m::b"], workers=1)
         self.assertEqual(self.diff(SHA)[0], 0)
+
+
+class RustSources(unittest.TestCase):
+    """The source walker: what a crate root reaches and on which platform each test compiles."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="rust-sources-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.tree({"Cargo.toml": '[package]\nname = "x"\n[features]\ndefault = ["voice"]\nvoice = []\nextra = []\n'})
+
+    def tree(self, files):
+        for rel, text in files.items():
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def cli(self, *argv):
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            try:
+                rc = rts.main(["--repo-root", str(self.root), *map(str, argv)])
+            except Exception as exc:  # noqa: BLE001
+                return "crash", f"{type(exc).__name__}: {exc}"
+        return rc, err.getvalue()
+
+    def split(self, os_name):
+        inv = rts.lib_inventory(self.root)
+        return rts.platform_split(inv, os_name, rts.default_features(self.root))
+
+    def test_mod_path_and_include_name_tests_by_their_module(self):
+        self.tree({
+            "src/lib.rs": "mod a;\n#[path = \"elsewhere/b_impl.rs\"]\nmod b;\n",
+            "src/a.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn one() {}\n    include!(\"a/inc.rs\");\n}\n",
+            "src/a/inc.rs": "#[tokio::test]\nasync fn included() {}\n",
+            "src/elsewhere/b_impl.rs": "mod pinned {\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/fixtures/up.rs\"));\n}\n",
+            "fixtures/up.rs": "#[test]\nfn upstream() {}\n",
+        })
+        inv = rts.lib_inventory(self.root)
+        self.assertEqual(sorted(inv.tests), ["a::tests::included", "a::tests::one", "b::pinned::upstream"])
+        self.assertEqual((inv.errors, inv.unreadable), ([], []))
+
+    def test_unreached_test_file_is_an_orphan(self):
+        self.tree({"src/lib.rs": "mod used;\n", "src/used.rs": "#[test]\nfn ok() {}\n",
+                   "src/forgotten.rs": "#[test]\nfn never_compiled() {}\n",
+                   "src/plain.rs": "fn helper() {}\n",
+                   "src/main.rs": "mod bin_only;\n", "src/bin_only.rs": "#[test]\nfn bin_test() {}\n"})
+        rc, err = self.cli("check")
+        self.assertEqual(rc, 1)
+        self.assertIn("orphan test file: src/forgotten.rs", err)
+        self.assertNotIn("plain.rs", err)
+        self.assertNotIn("bin_only.rs", err)
+
+    def test_missing_module_or_include_file_fails_the_check(self):
+        self.tree({"src/lib.rs": "#[cfg(windows)]\nmod gone;\nmod t {\n    include!(\"nowhere.rs\");\n}\n"})
+        rc, err = self.cli("check")
+        self.assertEqual(rc, 1)
+        self.assertIn("mod gone: no file at src/gone.rs, src/gone/mod.rs", err)
+        self.assertIn("include! names missing file", err)
+
+    def test_non_literal_include_and_gating_cfg_attr_are_unreadable(self):
+        self.tree({"src/lib.rs": "mod t {\n    include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n}\n"
+                                 "#[cfg_attr(unix, path = \"u.rs\")]\nmod u;\n"
+                                 "#[cfg_attr(not(test), allow(dead_code))]\nfn quiet() {}\n",
+                   "src/u.rs": ""})
+        rc, err = self.cli("check")
+        self.assertEqual(rc, 1)
+        self.assertIn("include! with a non-literal path", err)
+        self.assertIn("src/lib.rs:4 cfg_attr can change compilation", err)
+        self.assertNotIn("src/lib.rs:6", err)
+
+    def test_cfg_chain_decides_the_platform(self):
+        self.tree({
+            "src/lib.rs": "#[cfg(windows)]\nmod win;\nmod unixy;\nmod feat;\n",
+            "src/win.rs": "#[test]\nfn w() {}\n",
+            "src/unixy.rs": "#![cfg(unix)]\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn u() {}\n"
+                            "    #[test]\n    #[cfg(target_os = \"macos\")]\n    fn mac() {}\n}\n",
+            "src/feat.rs": "#[cfg(all(test, feature = \"voice\"))]\nmod on {\n    #[test]\n    fn v() {}\n}\n"
+                           "#[cfg(any(feature = \"extra\", not(test)))]\nmod off {\n    #[test]\n    fn e() {}\n}\n",
+        })
+        self.assertEqual(self.split("linux")[0], {"unixy::tests::u", "feat::on::v"})
+        self.assertEqual(self.split("macos")[0], {"unixy::tests::u", "unixy::tests::mac", "feat::on::v"})
+        self.assertEqual(self.split("windows")[0], {"win::w", "feat::on::v"})
+
+    def test_tail_expression_cfg_does_not_leak_into_the_next_item(self):
+        self.tree({"src/lib.rs": "fn pick() -> u8 {\n    #[cfg(not(unix))]\n    1\n}\n"
+                                 "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runs() {}\n}\n"})
+        self.assertEqual(self.split("linux")[0], {"tests::runs"})
+
+    def test_unknown_cfg_is_reported_not_guessed(self):
+        self.tree({"src/lib.rs": "#[cfg(target_arch = \"x86_64\")]\n#[test]\nfn arch() {}\n"})
+        compiled, excluded, unknown = self.split("linux")
+        self.assertEqual((compiled, excluded, list(unknown)), (set(), set(), ["arch"]))
+        rc, err = self.cli("check")
+        self.assertEqual(rc, 1)
+        self.assertIn("cfg unknown on linux: arch", err)
+
+    def test_cfg_disjoint_duplicates_compile_where_either_holds(self):
+        self.tree({"src/lib.rs": "#[cfg(unix)]\n#[path = \"a.rs\"]\nmod imp;\n"
+                                 "#[cfg(windows)]\n#[path = \"b.rs\"]\nmod imp;\n",
+                   "src/a.rs": "#[test]\nfn same() {}\n", "src/b.rs": "#[test]\nfn same() {}\n"})
+        for os_name in ("linux", "windows"):
+            self.assertEqual(self.split(os_name)[0], {"imp::same"})
+
+    def compare(self, doc, platform="linux"):
+        listed = self.root / "list.json"
+        listed.write_text(json.dumps(doc))
+        return self.cli("compare", "--platform", platform, "--list", listed, "--json-out", self.root / "cmp.json")
+
+    def test_compare_fails_when_a_compiled_source_test_is_missing_from_the_list(self):
+        self.tree({"src/lib.rs": "#[test]\nfn a() {}\n#[test]\nfn b() {}\n#[cfg(windows)]\n#[test]\nfn w() {}\n"})
+        suite = {"binary-id": "x", "kind": "lib", "testcases": {"a": {"ignored": False}, "gen": {"ignored": True}}}
+        rc, _ = self.compare({"rust-suites": {"x": suite}})
+        result = json.loads((self.root / "cmp.json").read_text())
+        self.assertEqual((rc, result["static_only"], result["cargo_only"]), (1, ["b"], ["gen"]))
+        suite["testcases"]["b"] = {"ignored": False}
+        self.assertEqual(self.compare({"rust-suites": {"x": suite}})[0], 0)
+
+    def test_compare_rejects_lists_without_one_lib_suite(self):
+        self.tree({"src/lib.rs": "#[test]\nfn a() {}\n"})
+        for doc in ({"rust-binaries": {}}, {"rust-suites": {}},
+                    {"rust-suites": {"x": {"kind": "lib", "testcases": {}}}}):
+            with self.subTest(doc):
+                rc, err = self.compare(doc)
+                self.assertEqual(rc, 1)
+                self.assertIn("ERROR", err)
+
+    def test_cfg_evaluator_operators(self):
+        cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),
+                 ("( any ( windows target_os = macos ) )", "macos", True),
+                 ("( all ( test target_family = unix ) )", "windows", False),
+                 ("( feature = voice )", "linux", True), ("( any ( windows target_pointer_width = 64 ) )", "linux", None),
+                 ("( all ( test sanitize ) )", "linux", None), ("( not ( unix windows ) )", "linux", None)]
+        for text, os_name, want in cases:
+            with self.subTest(text):
+                self.assertIs(rts.cfg_holds(tuple(text.split()), os_name, frozenset({"voice"})), want)
 
 
 if __name__ == "__main__":

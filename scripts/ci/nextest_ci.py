@@ -25,7 +25,7 @@ import xml.etree.ElementTree as ET
 
 
 PLAN_KIND = "agentdesk-nextest-plan"
-PLAN_VERSION = 1
+PLAN_VERSION = 2
 WORKER_VERSION = 1
 VERDICT_VERSION = 1
 POLICY_VERSION = 1
@@ -37,6 +37,7 @@ FALLBACK_PERCENTILE = 0.9
 # IDs outside this alphabet would need filterset escaping that has not been verified.
 ID_RE = re.compile(r"^[A-Za-z0-9_:.\-]+$")
 ISSUE_RE = re.compile(r"^#\d+$")
+BUILD_OPTION_RE = re.compile(r"^[A-Z_][A-Z0-9_]*=[^\s]*$")
 DEFAULT_FILTER_LINE = 'default-filter = "all()"'
 POLICY_KEYS = {"scope", "binary-id", "test", "issue", "expires", "reason"}
 # CLI/env settings outrank the config file and would bypass the generated policy.
@@ -122,21 +123,34 @@ def _cases(root):
             yield suite.get("name"), case
 
 
+def _seconds(element):
+    try:
+        value = float(element.get("time"))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def case_seconds(case):
+    """(wall seconds of the reported attempt, seconds summed over every attempt); None when unreadable."""
+    wall = _seconds(case)
+    retries = [_seconds(child) for tag in RETRY_TAGS for child in case.findall(tag)]
+    if wall is None or None in retries:
+        return None, None
+    return wall, wall + sum(retries)
+
+
 def load_timings(paths):
-    """Per-ID seconds from earlier nextest JUnit reports; the slowest observation wins."""
+    """Per-ID seconds over all attempts from earlier nextest JUnit reports; the slowest observation wins."""
     timings, invalid = {}, 0
     for path in paths:
         for binary_id, case in _cases(_junit_root(path)):
-            try:
-                seconds = float(case.get("time"))
-            except (TypeError, ValueError):
-                invalid += 1
-                continue
-            if not math.isfinite(seconds) or seconds < 0:
+            _, total = case_seconds(case)
+            if total is None:
                 invalid += 1
                 continue
             key = (binary_id, case.get("name"))
-            timings[key] = max(seconds, timings.get(key, 0.0))
+            timings[key] = max(total, timings.get(key, 0.0))
     return timings, invalid
 
 
@@ -253,11 +267,31 @@ def worker_config(base_text, tests, policy):
     return text
 
 
+def build_identity(args):
+    """Normalized build scope: the parts that must match before two plans are compared."""
+    required = {"rust": args.rust_version, "nextest": args.nextest_version, "target": args.target,
+                "cargo_profile": args.cargo_profile, "nextest_profile": args.nextest_profile}
+    missing = sorted(key for key, value in required.items() if not (value or "").strip())
+    if missing:
+        raise PlanError(f"plan identity needs {', '.join(missing)}")
+    options = sorted(set(args.build_option or []))
+    bad = [o for o in options if not BUILD_OPTION_RE.match(o)]
+    if bad:
+        raise PlanError(f"build options must be KEY=VALUE without spaces: {bad}")
+    features = sorted({f.strip() for f in args.features.split(",") if f.strip()})
+    if not features:
+        raise PlanError("plan identity needs at least one feature (use default)")
+    return {"rust": required["rust"], "nextest": required["nextest"], "build": {
+        "target": args.target, "features": features, "cargo_profile": args.cargo_profile,
+        "nextest_profile": args.nextest_profile, "options": options}}
+
+
 def _plan_digest(plan):
     return _digest({k: v for k, v in plan.items() if k != "plan_digest"})
 
 
 def cmd_plan(args):
+    build = build_identity(args)
     universe, ignored = load_universe(args.universe)
     timings, invalid = load_timings(args.timings or [])
     weights, timing = weights_for(universe, timings)
@@ -280,7 +314,7 @@ def cmd_plan(args):
                         "config_sha256": hashlib.sha256(text.encode()).hexdigest()})
     plan = {"kind": PLAN_KIND, "version": PLAN_VERSION,
             "identity": {"sha": args.sha, "archive_sha256": _sha256_file(archive), "scope": args.scope,
-                         "run_id": args.run_id, "rust": args.rust_version, "nextest": args.nextest_version},
+                         "run_id": args.run_id, **build},
             "universe_count": len(universe), "universe_digest": _digest(sorted(list(t) for t in universe)),
             "ignored": sorted(list(t) for t in ignored), "retry_policy": policy,
             "timing": timing, "workers": workers}
@@ -355,7 +389,8 @@ def classify(case):
 def audit_worker(plan, index, wdir, policy_ids):
     """Problems, executed-case details and summary row for one planned worker."""
     problems, planned = [], {tuple(t) for t in plan["workers"][index]["tests"]}
-    row = {"index": index, "planned": len(planned), "executed": 0, "exit_code": None, "seconds": 0.0}
+    row = {"index": index, "planned": len(planned), "executed": 0, "exit_code": None, "seconds": 0.0,
+           "total_attempt_seconds": 0.0}
 
     def bad(kind, detail, test_id=None):
         problems.append({"worker": index, "kind": kind, "detail": detail,
@@ -366,6 +401,9 @@ def audit_worker(plan, index, wdir, policy_ids):
         return problems, [], row
     try:
         meta = json.loads((wdir / "worker.json").read_text())
+        if not isinstance(meta, dict):
+            bad("bad-identity", f"worker.json is {type(meta).__name__}, expected an object")
+            meta = None
     except (OSError, ValueError) as exc:
         bad("bad-identity", f"worker.json unreadable: {exc}")
         meta = None
@@ -398,12 +436,14 @@ def audit_worker(plan, index, wdir, policy_ids):
             bad("duplicate", "testcase reported twice", test_id)
             continue
         executed.add(test_id)
-        try:
-            seconds = float(case.get("time") or 0)
-        except ValueError:
-            seconds = 0.0
+        seconds, total = case_seconds(case)
+        if total is None:
+            bad("bad-time", "testcase or retry time is missing or invalid", test_id)
+            seconds = total = 0.0
         row["seconds"] += seconds
-        cases.append({"id": test_id, "outcome": outcome, "attempts": attempts, "seconds": seconds})
+        row["total_attempt_seconds"] += total
+        cases.append({"id": test_id, "outcome": outcome, "attempts": attempts, "seconds": seconds,
+                      "total_attempt_seconds": total})
         if outcome == "failed":
             bad("failed" if attempts == 1 else "retry-exhausted",
                 f"failed after {attempts} attempt(s)", test_id)
@@ -419,6 +459,7 @@ def audit_worker(plan, index, wdir, policy_ids):
     for test_id in sorted(executed - planned):
         bad("extra", "executed but not planned for this worker", test_id)
     row["seconds"] = round(row["seconds"], 3)
+    row["total_attempt_seconds"] = round(row["total_attempt_seconds"], 3)
     return problems, cases, row
 
 
@@ -442,6 +483,7 @@ def audit(plan, results):
                 entry = policy[case["id"]]
                 retry_pass.append({"id": _id_text(case["id"]), "worker": worker["index"],
                                    "attempts": case["attempts"], "seconds": case["seconds"],
+                                   "total_attempt_seconds": case["total_attempt_seconds"],
                                    "issue": entry["issue"], "expires": entry["expires"]})
     totals["retry_pass"] = len(retry_pass)
     if totals["executed"] == 0 and not any(p["kind"] == "zero-tests" for p in problems):
@@ -456,13 +498,15 @@ def render_summary(verdict, limit=50):
     lines = [f"## nextest {ident['scope']}: {verdict['verdict'].upper()}", "",
              f"SHA `{ident['sha']}` · plan `{verdict['plan_digest'][:12]}` · "
              f"executed {t['executed']}/{t['planned']} · failed {t['failed']} · retry-pass {t['retry_pass']}", "",
-             "| worker | planned | executed | exit | seconds |", "|---|---|---|---|---|"]
-    lines += [f"| {r['index']} | {r['planned']} | {r['executed']} | {r['exit_code']} | {r['seconds']} |"
+             "| worker | planned | executed | exit | seconds | all attempts |", "|---|---|---|---|---|---|"]
+    lines += [f"| {r['index']} | {r['planned']} | {r['executed']} | {r['exit_code']} | {r['seconds']} "
+              f"| {r['total_attempt_seconds']} |"
               for r in verdict["workers"]]
     if verdict["retry_pass"]:
-        lines += ["", "### Passed only on retry", "", "| test | attempts | seconds | issue | expires |",
-                  "|---|---|---|---|---|"]
-        lines += [f"| `{r['id']}` | {r['attempts']} | {r['seconds']} | {r['issue']} | {r['expires']} |"
+        lines += ["", "### Passed only on retry", "", "| test | attempts | seconds | all attempts | issue | expires |",
+                  "|---|---|---|---|---|---|"]
+        lines += [f"| `{r['id']}` | {r['attempts']} | {r['seconds']} | {r['total_attempt_seconds']} "
+                  f"| {r['issue']} | {r['expires']} |"
                   for r in verdict["retry_pass"]]
     if verdict["problems"]:
         lines += ["", f"### Problems ({len(verdict['problems'])})", ""]
@@ -499,6 +543,10 @@ def cmd_base_diff(args):
         print(f"ERROR baseline is {base['identity']['sha']} {base['identity']['scope']}, need "
               f"{args.comparison_base_sha} {plan['identity']['scope']}; regenerate it", file=sys.stderr)
         return 2
+    if base["identity"]["build"] != plan["identity"]["build"]:
+        print(f"ERROR baseline build {_canonical(base['identity']['build'])} differs from "
+              f"{_canonical(plan['identity']['build'])} under the same scope; regenerate it", file=sys.stderr)
+        return 2
 
     def sets(p):
         run = {tuple(t) for w in p["workers"] for t in w["tests"]}
@@ -528,8 +576,13 @@ def main(argv=None):
     p.add_argument("--sha", required=True)
     p.add_argument("--scope", required=True)
     p.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", "local"))
-    p.add_argument("--rust-version")
-    p.add_argument("--nextest-version")
+    p.add_argument("--rust-version", required=True)
+    p.add_argument("--nextest-version", required=True)
+    p.add_argument("--target", required=True, help="target triple the archive was built for")
+    p.add_argument("--features", default="default", help="comma-separated cargo features of the build")
+    p.add_argument("--cargo-profile", default="test")
+    p.add_argument("--nextest-profile", default="ci")
+    p.add_argument("--build-option", action="append", help="KEY=VALUE build env such as RUSTFLAGS= (repeatable)")
     p.add_argument("--timings", action="append", help="nextest JUnit from an earlier run (repeatable)")
     p.add_argument("--base-config", default=".config/nextest.toml")
     p.add_argument("--retry-policy", default="scripts/ci/nextest-retry-policy.toml")
