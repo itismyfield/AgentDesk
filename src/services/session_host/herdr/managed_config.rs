@@ -5,9 +5,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::super::observe::CANONICAL_CONFIG;
+use super::observe::CANONICAL_CONFIG;
 use crate::services::discord::runtime_store::fsync_parent_dir;
 
+#[path = "managed_config/maintenance.rs"]
+pub(crate) mod maintenance;
 #[path = "managed_config/path.rs"]
 pub(crate) mod path;
 #[path = "managed_config/publication.rs"]
@@ -20,6 +22,17 @@ pub(crate) enum EnsureResult {
     Unchanged,
     Prepared { backup: Option<PathBuf> },
     Recovered,
+}
+
+/// What a read-only look at a managed home found; it takes no lock and writes nothing.
+#[derive(Debug)]
+pub(crate) enum Inspection {
+    Canonical { committed: Option<SystemTime> },
+    Missing,
+    Different,
+    Preparing,
+    Unreadable(io::Error),
+    RecordUnreadable(io::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +161,24 @@ impl Drop for HomeLock {
 impl ManagedHome {
     pub(crate) fn ensure(&self) -> io::Result<EnsureResult> {
         self.ensure_with(|_| Ok(()))
+    }
+
+    pub(crate) fn inspect(&self) -> Inspection {
+        let config = self.path.join("config.toml");
+        let record = match publication::state(&config) {
+            Ok(record) => record,
+            Err(error) => return Inspection::RecordUnreadable(error),
+        };
+        match (source(&config), record) {
+            (Err(error), _) => Inspection::Unreadable(error),
+            (Ok(_), Some(publication::State::Preparing)) => Inspection::Preparing,
+            (Ok(None), _) => Inspection::Missing,
+            (Ok(Some((_, _, false))), _) => Inspection::Different,
+            (Ok(Some(_)), Some(publication::State::Committed(at))) => Inspection::Canonical {
+                committed: Some(at),
+            },
+            (Ok(Some(_)), None) => Inspection::Canonical { committed: None },
+        }
     }
 
     fn lock(&self) -> io::Result<HomeLock> {

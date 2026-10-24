@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::path::PersonalPaths;
 use super::*;
-use crate::config::session_hosts::{BootSessionHosts, EndpointConfig};
+use crate::config::session_hosts::{BootSessionHosts, EndpointConfig, EndpointMode};
 use crate::services::session_host::herdr::contract::{
     HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed,
 };
@@ -55,6 +55,7 @@ impl Fixture {
                 (
                     format!("ep-{i}"),
                     EndpointConfig {
+                        mode: EndpointMode::LegacyDedicated,
                         execution_node: node.to_string(),
                         socket_path: PathBuf::from(socket),
                         herdr_home: home.to_path_buf(),
@@ -71,7 +72,7 @@ impl Fixture {
             Some("local"),
             &[(&self.home, "local", "/tmp/isolated.sock")],
         );
-        ManagedHome::local(&boot, &self.personal).unwrap().remove(0)
+        local(&boot, &self.personal).unwrap().remove(0)
     }
 
     fn config(&self, bytes: &[u8]) -> PathBuf {
@@ -168,6 +169,14 @@ impl ServerProvenance for FileProof {
 
 type FileSnapshot = Vec<(PathBuf, Vec<u8>, u64, SystemTime, u32)>;
 
+/// Every home, or the first refusal among them.
+fn local(boot: &BootSessionHosts, personal: &PersonalPaths) -> io::Result<Vec<ManagedHome>> {
+    ManagedHome::local(boot, personal)
+        .into_iter()
+        .map(|target| target.home)
+        .collect()
+}
+
 #[test]
 fn relative_personal_boundaries_cannot_authorize_a_managed_home() {
     let f = Fixture::new();
@@ -179,13 +188,13 @@ fn relative_personal_boundaries_cannot_authorize_a_managed_home() {
         home: ".".into(),
         xdg: None,
     };
-    assert!(ManagedHome::local(&boot, &relative_home).is_err());
+    assert!(local(&boot, &relative_home).is_err());
     let boot = f.boot(Some("local"), &[(&f.home, "local", "/tmp/isolated.sock")]);
     let relative_xdg = PersonalPaths {
         home: f.personal.home.clone(),
         xdg: Some(".".into()),
     };
-    assert!(ManagedHome::local(&boot, &relative_xdg).is_err());
+    assert!(local(&boot, &relative_xdg).is_err());
     assert_eq!(fs::read(private.join("config.toml")).unwrap(), b"personal");
 }
 
@@ -290,7 +299,7 @@ fn remote_and_missing_node_do_not_even_resolve_a_home() {
     let unreachable = f.home.join("does-not-exist/child");
     for (node, owner) in [(None, "local"), (Some("local"), "remote")] {
         let boot = f.boot(node, &[(&unreachable, owner, "/tmp/isolated.sock")]);
-        assert!(ManagedHome::local(&boot, &f.personal).unwrap().is_empty());
+        assert!(local(&boot, &f.personal).unwrap().is_empty());
         assert!(!unreachable.parent().unwrap().exists());
     }
     assert!(fs::read_dir(&f.home).unwrap().next().is_none());
@@ -308,7 +317,7 @@ fn personal_and_binary_paths_are_rejected_before_any_file_changes() {
     let before = snapshot(&private);
     for path in [&private, &bin, Path::new("/opt/homebrew/bin/herdr")] {
         let boot = f.boot(Some("local"), &[(path, "local", "/tmp/isolated.sock")]);
-        let result = ManagedHome::local(&boot, &f.personal);
+        let result = local(&boot, &f.personal);
         assert!(result.is_err(), "private target was admitted: {path:?}");
     }
     assert_eq!(snapshot(&private), before);
@@ -327,7 +336,7 @@ fn same_boot_home_with_two_sockets_is_rejected_before_writing() {
             (&f.home, "local", "/tmp/two.sock"),
         ],
     );
-    assert!(ManagedHome::local(&boot, &f.personal).is_err());
+    assert!(local(&boot, &f.personal).is_err());
     assert_eq!(snapshot(&f.home), before);
 }
 
@@ -399,7 +408,7 @@ fn symlinks_hardlinks_and_writable_homes_cannot_be_repaired() {
     let alias = f.home.with_file_name("alias");
     symlink(&f.home, &alias).unwrap();
     let boot = f.boot(Some("local"), &[(&alias, "local", "/tmp/isolated.sock")]);
-    assert!(ManagedHome::local(&boot, &f.personal).is_err());
+    assert!(local(&boot, &f.personal).is_err());
     let linked = f.home.with_file_name("linked");
     fs::hard_link(&config, &linked).unwrap();
     assert!(f.target().ensure().is_err());
@@ -411,7 +420,7 @@ fn symlinks_hardlinks_and_writable_homes_cannot_be_repaired() {
     assert!(!linked.exists());
     fs::set_permissions(&f.home, fs::Permissions::from_mode(0o777)).unwrap();
     assert!(
-        ManagedHome::local(
+        local(
             &f.boot(Some("local"), &[(&f.home, "local", "/tmp/isolated.sock")]),
             &f.personal
         )
@@ -428,7 +437,7 @@ fn custom_xdg_and_parent_escape_are_rejected_and_duplicate_targets_are_folded() 
     let escape = f.home.join("../user/.config/herdr");
     for path in [&xdg, &escape] {
         let boot = f.boot(Some("local"), &[(path, "local", "/tmp/isolated.sock")]);
-        assert!(ManagedHome::local(&boot, &f.personal).is_err());
+        assert!(local(&boot, &f.personal).is_err());
     }
     let boot = f.boot(
         Some("local"),
@@ -437,7 +446,7 @@ fn custom_xdg_and_parent_escape_are_rejected_and_duplicate_targets_are_folded() 
             (&f.home, "local", "/tmp/one.sock"),
         ],
     );
-    assert_eq!(ManagedHome::local(&boot, &f.personal).unwrap().len(), 1);
+    assert_eq!(local(&boot, &f.personal).unwrap().len(), 1);
 }
 
 #[test]
@@ -497,8 +506,7 @@ fn committed_is_not_published_before_config_sync_and_backup() {
         .unwrap();
 }
 
-const CHILD: &str =
-    "services::session_host::herdr::provenance::managed_config::tests::writer_child";
+const CHILD: &str = "services::session_host::herdr::managed_config::tests::writer_child";
 
 fn child(f: &Fixture, mode: &str) -> std::process::Command {
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -534,6 +542,7 @@ fn writer_child() {
     config.session_hosts.herdr.endpoints.insert(
         "local".into(),
         EndpointConfig {
+            mode: EndpointMode::LegacyDedicated,
             execution_node: "local".into(),
             socket_path: "/tmp/isolated.sock".into(),
             herdr_home: PathBuf::from(home),
@@ -541,7 +550,7 @@ fn writer_child() {
         },
     );
     let boot = BootSessionHosts::from_config(&config).unwrap();
-    let home = ManagedHome::local(
+    let home = local(
         &boot,
         &PersonalPaths {
             home: user,

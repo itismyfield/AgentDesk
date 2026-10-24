@@ -5,13 +5,33 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 
 use super::invalid;
-use crate::config::session_hosts::BootSessionHosts;
+use crate::config::session_hosts::{BootSessionHosts, EndpointMode, SessionHostsConfig};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 
 #[derive(Debug)]
 pub(crate) struct PersonalPaths {
     pub home: PathBuf,
     pub xdg: Option<PathBuf>,
+}
+
+impl PersonalPaths {
+    /// The executing account's home and XDG config home; an unknown home authorizes nothing.
+    pub(crate) fn current() -> Self {
+        Self {
+            home: dirs::home_dir().unwrap_or_default(),
+            xdg: std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|xdg| !xdg.is_empty())
+                .map(PathBuf::from),
+        }
+    }
+}
+
+/// The endpoints that share one managed home, or why they may not be written.
+#[derive(Debug)]
+pub(crate) struct Target {
+    pub keys: Vec<String>,
+    pub declared: PathBuf,
+    pub home: io::Result<ManagedHome>,
 }
 
 #[derive(Debug)]
@@ -86,45 +106,111 @@ fn resolve(path: &Path, personal: &PersonalPaths) -> io::Result<PathBuf> {
     Ok(real)
 }
 
+/// A personal boundary inside a managed home would leave the real personal config unguarded.
+fn personal_boundary<'a>(
+    personal: &PersonalPaths,
+    homes: impl Iterator<Item = &'a Path>,
+) -> io::Result<()> {
+    let boundaries: Vec<_> = std::iter::once(&personal.home)
+        .chain(personal.xdg.as_ref())
+        .flat_map(|path| [Some(path.clone()), fs::canonicalize(path).ok()])
+        .flatten()
+        .collect();
+    for home in homes {
+        let homes = [Some(home.to_path_buf()), fs::canonicalize(home).ok()];
+        if homes
+            .iter()
+            .flatten()
+            .any(|home| boundaries.iter().any(|path| path.starts_with(home)))
+        {
+            return Err(invalid(
+                "personal boundary points into a managed herdr home",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn copied(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
+}
+
 impl ManagedHome {
-    pub(crate) fn local(
-        boot: &BootSessionHosts,
+    pub(crate) fn local(boot: &BootSessionHosts, personal: &PersonalPaths) -> Vec<Target> {
+        Self::of(boot.local_node(), boot.config(), personal)
+    }
+
+    /// Only this node's dedicated endpoints; a user-default endpoint is never resolved or opened.
+    pub(crate) fn of(
+        node: Option<&str>,
+        hosts: &SessionHostsConfig,
         personal: &PersonalPaths,
-    ) -> io::Result<Vec<Self>> {
-        let Some(node) = boot.local_node() else {
-            return Ok(Vec::new());
+    ) -> Vec<Target> {
+        let Some(node) = node else {
+            return Vec::new();
         };
-        let mut homes = BTreeMap::new();
-        for endpoint in boot
-            .config()
+        let endpoints: Vec<_> = hosts
             .herdr
             .endpoints
-            .values()
-            .filter(|e| e.execution_node.trim() == node)
-        {
-            let path = resolve(&endpoint.herdr_home, personal)?;
+            .iter()
+            .filter(|(_, e)| e.mode == EndpointMode::LegacyDedicated)
+            .filter(|(_, e)| e.execution_node.trim() == node)
+            .collect();
+        if endpoints.is_empty() {
+            return Vec::new();
+        }
+        let uid = personal_boundary(
+            personal,
+            endpoints.iter().map(|(_, e)| e.herdr_home.as_path()),
+        )
+        .and_then(|()| Ok(fs::metadata(&personal.home)?.uid()));
+        let mut targets = Vec::new();
+        let mut homes: BTreeMap<PathBuf, (Vec<String>, (PathBuf, PathBuf), bool)> = BTreeMap::new();
+        for (key, endpoint) in endpoints {
+            let resolved = uid
+                .as_ref()
+                .map_err(copied)
+                .and_then(|_| resolve(&endpoint.herdr_home, personal));
+            let path = match resolved {
+                Ok(path) => path,
+                Err(error) => {
+                    targets.push(Target {
+                        keys: vec![key.clone()],
+                        declared: endpoint.herdr_home.clone(),
+                        home: Err(error),
+                    });
+                    continue;
+                }
+            };
             let declaration = (endpoint.socket_path.clone(), endpoint.herdr_home.clone());
-            if let Some(previous) = homes.insert(path, declaration.clone())
-                && previous != declaration
-            {
-                return Err(invalid(
+            let entry = homes
+                .entry(path)
+                .or_insert_with(|| (Vec::new(), declaration.clone(), false));
+            entry.0.push(key.clone());
+            entry.2 |= entry.1 != declaration;
+        }
+        for (path, (keys, (_, declared), conflict)) in homes {
+            let home = match (conflict, &uid) {
+                (true, _) => Err(invalid(
                     "one BOOT home has conflicting socket or config paths",
-                ));
-            }
+                )),
+                (false, Err(error)) => Err(copied(error)),
+                (false, Ok(uid)) => {
+                    let target = Self { path, uid: *uid };
+                    match fs::symlink_metadata(&target.path) {
+                        Ok(_) => target.verify_dir().map(|()| target),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(target),
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            targets.push(Target {
+                keys,
+                declared,
+                home,
+            });
         }
-        if homes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let uid = fs::metadata(&personal.home)?.uid();
-        let targets: Vec<_> = homes.into_keys().map(|path| Self { path, uid }).collect();
-        for target in &targets {
-            match fs::symlink_metadata(&target.path) {
-                Ok(_) => target.verify_dir()?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(targets)
+        targets
     }
 
     pub(super) fn verify_dir(&self) -> io::Result<()> {

@@ -9,10 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::observe::{ConfigRead, RestoreUnverified, ServerProvenance};
 
-#[cfg(unix)]
-#[path = "managed_config.rs"]
-pub(crate) mod managed_config;
-
 /// Larger than any canonical config; a bigger file is not read past this.
 const CONFIG_READ_LIMIT: u64 = 4096;
 
@@ -56,7 +52,7 @@ impl ServerProvenance for OsProvenance {
 
     fn config_publication(&self, path: &Path) -> Result<Option<SystemTime>, RestoreUnverified> {
         #[cfg(unix)]
-        return managed_config::publication::read(path);
+        return super::managed_config::publication::read(path);
         #[cfg(not(unix))]
         {
             let _ = path;

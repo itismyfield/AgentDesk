@@ -2,7 +2,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::super::super::observe::RestoreUnverified;
+use super::super::observe::RestoreUnverified;
 use super::{invalid, open_regular, publish, synced_temp, unchanged};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 
