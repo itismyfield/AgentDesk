@@ -77,7 +77,7 @@ async fn cold_submit_returns_exact_attempt_and_releases_writer_before_source_pg(
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let completion = submit(&mailbox, index as u64 * 31_000, move |frame| {
             assert!(
-                crate::services::tui_input::human_frame::history::v2::scoped(),
+                crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
                 "cold effect owns its exact V2 history scope"
             );
             assert_eq!(

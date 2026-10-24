@@ -29,9 +29,13 @@ pub(super) async fn submit<O: Send + 'static>(
                 .ok_or("unprepared payload")?
                 .frame
                 .clone();
-            let history =
-                crate::services::tui_input::human_frame::history::v2::Registry::runtime()?;
-            owner.prepare_history(&history)?;
+            let registry = history::Registry::runtime()?;
+            owner.prepare_history(&registry)?;
+            let namespace = owner
+                .snapshot
+                .namespace
+                .clone()
+                .ok_or("missing namespace")?;
             let permit = owner.arm(&key, now)?;
             Ok((key, permit, frame, registry, namespace))
         })
