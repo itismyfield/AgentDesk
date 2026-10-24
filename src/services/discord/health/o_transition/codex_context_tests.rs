@@ -373,11 +373,25 @@ fn verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep() {
     std::fs::write(&marker, serde_json::to_vec(&json!({"rollout_path": proof.source.path, "session_id": ID,
         "codex_ownership": {"execution_nonce": fixture.context.execution_nonce, "proof_seq": proof.seq,
             "dev": proof.source.dev, "ino": proof.source.ino}})).unwrap()).unwrap();
+    let log = crate::config::runtime_root()
+        .unwrap()
+        .join(format!("binding_events/{CHANNEL}.log"));
+    let before = (
+        std::fs::read(&log).unwrap(),
+        std::fs::read(&marker).unwrap(),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(assert_actual_codex_sweep(&fixture));
+    assert_eq!(
+        (
+            std::fs::read(&log).unwrap(),
+            std::fs::read(&marker).unwrap()
+        ),
+        before
+    );
     std::fs::write(&marker, "{}").unwrap();
     assert!(
         runtime
@@ -447,4 +461,9 @@ fn same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep() {
     );
     assert_eq!(inputs.current, fixture.source);
     runtime.block_on(assert_actual_codex_sweep(&fixture));
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        before,
+        "observation must leave the no-op resume log unchanged"
+    );
 }
