@@ -14,15 +14,33 @@ pub(super) fn submit(
     tmux_session_name: &str,
     prompt: &str,
 ) -> Result<Submitted, SubmissionError> {
+    submit_using(
+        transcript_path_string,
+        fresh_turn_start_offset,
+        || {
+            crate::services::claude_tui::input::send_prompt_with_readiness(
+                tmux_session_name,
+                prompt,
+                crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
+                cancel_token,
+            )
+        },
+        std::thread::sleep,
+        tmux_session_name,
+    )
+}
+
+fn submit_using(
+    transcript_path_string: &str,
+    fresh_turn_start_offset: u64,
+    mut ready: impl FnMut() -> Result<(), SubmissionError>,
+    mut sleep: impl FnMut(std::time::Duration),
+    tmux_session_name: &str,
+) -> Result<Submitted, SubmissionError> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         let turn_started_at = chrono::Utc::now();
-        match crate::services::claude_tui::input::send_prompt_with_readiness(
-            tmux_session_name,
-            prompt,
-            crate::services::claude_tui::input::PromptReadinessKind::FreshTurn,
-            cancel_token,
-        ) {
+        match ready() {
             Ok(()) => {
                 let hook_events_after = chrono::Utc::now();
                 let start_offset = claude_tui_turn_start_offset_after_timestamp(
@@ -56,26 +74,31 @@ pub(super) fn submit(
                     error = %error,
                     "claude_tui fresh prompt readiness retry scheduled"
                 );
-                std::thread::sleep(backoff);
+                sleep(backoff);
             }
             Err(SubmissionError::Legacy(error)) => {
                 if crate::services::claude_tui::input::is_prompt_ready_timeout_error(&error) {
-                    return Err(format!(
-                        "{}; fresh prompt readiness attempts exhausted ({} attempts)",
-                        error, CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
-                    )
-                    .into());
+                    return Err(exhausted(Some(&error)).into());
                 }
                 return Err(error.into());
             }
         }
     }
 
-    Err(format!(
-        "claude tui fresh prompt readiness attempts exhausted ({} attempts)",
-        CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
-    )
-    .into())
+    Err(exhausted(None).into())
+}
+
+fn exhausted(detail: Option<&str>) -> String {
+    match detail {
+        Some(error) => format!(
+            "{error}; fresh prompt readiness attempts exhausted ({} attempts)",
+            CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+        ),
+        None => format!(
+            "claude tui fresh prompt readiness attempts exhausted ({} attempts)",
+            CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
+        ),
+    }
 }
 
 pub(super) fn observe(

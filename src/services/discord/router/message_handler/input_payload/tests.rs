@@ -116,9 +116,14 @@ fn raw_admission_apis_stay_inside_the_owner_boundary() {
     let migration = Lexed::new(include_str!(
         "../../../../turn_orchestrator/queued_head/v2/sources.rs"
     ));
-    assert_eq!(
-        owner.find_all("pub(super) fn enqueue(").len(),
-        1,
+    let declarations = owner.find_all("fn enqueue(");
+    assert_eq!(declarations.len(), 1);
+    let prefix = owner.text()[..declarations[0]]
+        .rsplit(['{', '}', ';'])
+        .next()
+        .unwrap();
+    assert!(
+        !prefix.contains("pub"),
         "raw enqueue must stay inside owner scope"
     );
     assert_eq!(

@@ -215,7 +215,6 @@ fn prepare_codex_tui_launch_script(
     )
 }
 
-/// Publish markers and script after the driver completes its cleanup.
 #[cfg(unix)]
 pub(super) use first_input::publish_codex_tui_launch_script;
 /// Why a Codex Herdr launch is refused, judged from reads before its Pending row.

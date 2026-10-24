@@ -2008,6 +2008,8 @@ services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiesc
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
 services::claude::first_input::tests::cold_claude_submit_returns_before_missing_source_and_keeps_payload_once
+services::claude::first_input::tests::fresh_readiness_exhaustion_keeps_error_and_exact_attempt_budget
+services::claude::first_input::tests::fresh_submit_held_and_guarded_never_retry_or_write_payload
 services::claude::fresh_hold_tests::a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker
 services::claude::guarded_owner_tests::cg_b2c_fresh_finalize_preserves_the_typed_post_fence_stop
 services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cleanup_with_valid_clearance
@@ -7258,6 +7260,7 @@ services::discord::router::message_handler::intake_turn::runtime_transition::tes
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
 services::discord::router::message_handler::intake_turn::session_preparation::tests::preparation_keeps_existing_and_explicit_restore_veto_states
+services::discord::router::message_handler::intake_turn::session_preparation::tests::preparation_restores_provider_session_and_memento_from_memory
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified

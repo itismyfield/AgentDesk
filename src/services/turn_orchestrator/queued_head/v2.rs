@@ -52,7 +52,7 @@ impl Owner {
         Ok(owner)
     }
 
-    pub(super) fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
+    fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
         if self.pending.is_some() {
             return Err(AdmitError::NotCommitted("owner recovery required".into()));
         }

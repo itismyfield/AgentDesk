@@ -137,6 +137,7 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
     )
 }
 
+/// Publish markers and script after the driver completes its cleanup.
 pub(in crate::services::codex) fn publish_codex_tui_launch_script(
     tmux_session_name: &str,
     session_id: Option<&str>,
