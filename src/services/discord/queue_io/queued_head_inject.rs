@@ -130,10 +130,37 @@ pub(in crate::services::discord) async fn try_busy(
         head_state,
     }
     .emit();
-    // A head the actor handed back was not sent either: the caller's own start may follow.
+    if *provider == ProviderKind::Claude
+        && matches!(attempt, health::InjectAttempt::NotSent(veto) | health::InjectAttempt::HandedBack { veto, .. } if preparation_veto(veto))
+    {
+        super::super::turn_bridge::followup_requeue::preparation_notice::enqueue(
+            deps.shared,
+            provider,
+            channel,
+            head.message_id.get(),
+            head.queued_generation,
+            reason,
+        )
+        .await;
+        return true;
+    }
+    // Other non-submission outcomes retain their existing idle-start policy.
     !matches!(
         attempt,
         health::InjectAttempt::NotSent(_) | health::InjectAttempt::HandedBack { .. }
+    )
+}
+
+fn preparation_veto(veto: &str) -> bool {
+    matches!(
+        veto,
+        "draft"
+            | "modal"
+            | "unpredictable_render"
+            | "pane_unavailable"
+            | "human_attached"
+            | "attach_unknown"
+            | "lock_contended"
     )
 }
 

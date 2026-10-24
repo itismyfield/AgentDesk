@@ -293,31 +293,24 @@ pub(super) fn put_back_session_retry_context(
     }
 }
 
-/// #4307 PR-B: one-shot take of the voluntary tool_feedback reminder stashed at
-/// the previous turn's end (provider-scoped key — see
-/// `recovery_text::voluntary_feedback_reminder_key`). Mirrors
-/// `take_session_retry_context`; the take deletes the stash so the reminder is
-/// injected into exactly one turn.
+/// Borrow the provider-scoped reminder; confirmed completion consumes the durable stash.
 pub(super) fn take_voluntary_feedback_reminder(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<String> {
-    super::super::turn_bridge::recovery_text::take_voluntary_feedback_reminder(
+    let store = super::response_format::retry_prompt_context::store::peek;
+    store(
         shared.pg_pool.as_ref(),
-        provider,
-        channel_id.get(),
+        &super::response_format::retry_prompt_context::store::key(
+            "voluntary_feedback_reminder",
+            provider,
+            channel_id.get(),
+        ),
     )
 }
 
-/// #4307 PR-B: take the reminder stashed at the previous turn's end and fold its
-/// formatted block into `reply_context`, so it reaches the next prompt (via the
-/// intake `context_chunks`) AND is carried forward inside `reply_context.clone()`
-/// if this turn is re-queued for a TUI-busy retry. Returns the owned reminder
-/// (for the refusal-branch put-back) alongside the augmented reply context.
-///
-/// Extracted from `intake_turn.rs` (rather than inlined like the sibling
-/// session-retry take) to keep that frozen giant file from re-inflating.
+/// Select one reminder for prompt assembly without removing its durable owner.
 pub(super) fn take_and_merge_feedback_reminder(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -334,28 +327,24 @@ pub(super) fn take_and_merge_feedback_reminder(
     (feedback_reminder, reply_context)
 }
 
-/// #4196: one-shot take of the turn-end WIP warning stashed at the previous
-/// turn's end (provider-scoped key — see `recovery_text::turn_end_wip_warning`).
-/// Mirrors `take_voluntary_feedback_reminder`; the take deletes the stash so the
-/// warning is injected into exactly one turn.
+/// Borrow the provider-scoped WIP warning until input and answer delivery are confirmed.
 pub(super) fn take_turn_end_wip_warning(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<String> {
-    super::super::turn_bridge::recovery_text::take_turn_end_wip_warning(
+    let store = super::response_format::retry_prompt_context::store::peek;
+    store(
         shared.pg_pool.as_ref(),
-        provider,
-        channel_id.get(),
+        &super::response_format::retry_prompt_context::store::key(
+            "turn_end_wip_warning",
+            provider,
+            channel_id.get(),
+        ),
     )
 }
 
-/// #4196: take the WIP warning stashed at the previous turn's end and fold its
-/// formatted block into `reply_context`, so it reaches the next prompt (via the
-/// intake `context_chunks`) AND is carried forward inside `reply_context.clone()`
-/// if this turn is re-queued for a TUI-busy retry. Returns the owned warning
-/// (for the refusal-branch put-back) alongside the augmented reply context.
-/// Mirrors `take_and_merge_feedback_reminder`.
+/// Select one WIP warning; requeue returns raw context while the stash keeps ownership.
 pub(super) fn take_and_merge_wip_warning(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

@@ -829,7 +829,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     pending_long_running_open_after_state_save,
                     pending_long_running_retarget_after_state_save,
                     long_running_placeholder_active,
-                    inflight_state,
+                    inflight_state: inflight_state.with_live_submission_from(&bridge.inflight_state),
                     api_friction_reports,
                     review_dispatch_warning,
                     last_edit_text,

@@ -12,7 +12,7 @@ use crate::services::claude_tui::host_input::{
 };
 use crate::services::claude_tui::input::{
     PromptReadinessSnapshot, claude_prompt_draft_backspace_budget_from_tail,
-    prompt_readiness_snapshot,
+    prompt_readiness_snapshot_from_capture,
 };
 use crate::services::provider::CancelToken;
 use crate::services::session_host::{HerdrTarget, HostKey};
@@ -97,8 +97,8 @@ pub(crate) fn clear_draft(
     cancel_token: Option<&CancelToken>,
 ) -> ClearedDraft {
     let mut keys = KeyGroups::new(session, host.gate, cancel_token);
-    let mut snapshot = prompt_readiness_snapshot(session);
-    let run = clear_attempts(&mut keys, clear, &mut snapshot)
+    let (mut snapshot, mut capture) = cleanup_snapshot(session);
+    let run = clear_attempts(&mut keys, clear, &mut snapshot, &mut capture)
         .err()
         .unwrap_or(InputRun::Applied);
     ClearedDraft { run, snapshot }
@@ -112,6 +112,7 @@ fn clear_attempts(
     keys: &mut KeyGroups,
     clear: DraftClear,
     snapshot: &mut PromptReadinessSnapshot,
+    capture: &mut Option<String>,
 ) -> Result<(), InputRun> {
     const CLEAR_LINE: &[HostKey] = &[HostKey::CtrlE, HostKey::CtrlU];
     let (groups, name, cancel_after_settle): (&[&[HostKey]], &str, bool) = match clear {
@@ -128,17 +129,18 @@ fn clear_attempts(
     for attempt in 1..=DRAFT_CLEAR_ATTEMPTS {
         keys.check_cancel()?;
         for group in groups {
+            require_cleanup_owner(keys.session, capture.as_deref())?;
             keys.send(group, name)?;
             std::thread::sleep(DRAFT_KEY_SETTLE);
             if cancel_after_settle {
                 keys.check_cancel()?;
             }
-            *snapshot = prompt_readiness_snapshot(keys.session);
+            (*snapshot, *capture) = cleanup_snapshot(keys.session);
             if draft_gone(snapshot) {
                 return Ok(());
             }
         }
-        clear_with_backspaces(keys, snapshot)?;
+        clear_with_backspaces(keys, snapshot, capture)?;
         if draft_gone(snapshot) {
             return Ok(());
         }
@@ -156,11 +158,13 @@ fn clear_attempts(
 fn clear_with_backspaces(
     keys: &mut KeyGroups,
     snapshot: &mut PromptReadinessSnapshot,
+    capture: &mut Option<String>,
 ) -> Result<(), InputRun> {
     let Some(mut remaining) = claude_prompt_draft_backspace_budget_from_tail(&snapshot.pane_tail)
     else {
         return Ok(());
     };
+    require_cleanup_owner(keys.session, capture.as_deref())?;
     keys.send(&[HostKey::CtrlE], "draft-clear-cursor-end")?;
     while remaining > 0 {
         keys.check_cancel()?;
@@ -169,8 +173,35 @@ fn clear_with_backspaces(
         remaining -= batch;
     }
     std::thread::sleep(DRAFT_KEY_SETTLE);
-    *snapshot = prompt_readiness_snapshot(keys.session);
+    (*snapshot, *capture) = cleanup_snapshot(keys.session);
     Ok(())
+}
+
+fn cleanup_snapshot(session: &str) -> (PromptReadinessSnapshot, Option<String>) {
+    let capture = host_input::observe_draft(session);
+    let snapshot = prompt_readiness_snapshot_from_capture(
+        capture.as_deref(),
+        host_input::legacy_pane_alive(session),
+    );
+    (snapshot, capture)
+}
+
+fn require_cleanup_owner(session: &str, capture: Option<&str>) -> Result<(), InputRun> {
+    use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner_in_session};
+    if capture.map(|capture| composer_owner_in_session(session, capture))
+        == Some(ComposerOwner::AgentDesk)
+    {
+        return Ok(());
+    }
+    let hold = crate::services::claude_tui::input::PreparationHold::before(
+        session,
+        "cleanup_not_owned",
+        "claude tui cleanup held: composer ownership changed".into(),
+    );
+    crate::services::claude_tui::guarded_outcome::preparation_held(&hold);
+    Err(InputRun::Refused(InputRefusal::Composer(
+        crate::services::tui_input::submission::Refusal::OwnDraft,
+    )))
 }
 
 /// Typed result of a draft clear on confirmed tmux: recreation only under the legacy

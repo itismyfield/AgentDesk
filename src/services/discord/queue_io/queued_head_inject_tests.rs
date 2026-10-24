@@ -1444,3 +1444,69 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     assert_eq!(body["delivery"], "queued", "{body}");
     assert_eq!(fixture.pane.tmux_calls(), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_queued_hold_blocks_idle_fallthrough_without_retry_charge_pg() {
+    use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(7_314_201, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let original = std::fs::read_to_string(fixture.pane.path("cap.before")).unwrap();
+    fixture.pane.set("cap.before", "unrecognized overlay");
+    guard_draft(&fixture.pane.session(), DraftGuard::RecoveryRequired);
+    let before = fixture.queue().await;
+    let head = before[0].message_id;
+    let deps = router::IntakeDeps {
+        http: &fixture.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared: &fixture.shared,
+        token: "s2b-test-token",
+    };
+    for _ in 0..3 {
+        let blocked = super::try_busy(
+            &deps,
+            &ProviderKind::Claude,
+            fixture.channel,
+            Some(|_, _| true),
+            "a2-held",
+        )
+        .await;
+        assert!(
+            blocked,
+            "a preparation veto must stop the caller before AI kickoff"
+        );
+        assert_eq!(fixture.pane.records().len(), 0);
+        assert_eq!(fixture.queue().await[0].message_id, head);
+        assert!(
+            crate::services::discord::busy_followup_retry_store::load(
+                &ProviderKind::Claude,
+                fixture.channel.get(),
+                head.get()
+            )
+            .is_none(),
+            "an initial queued hold creates no busy attempt or placeholder binding"
+        );
+    }
+    let target = format!("channel:{}", fixture.channel.get());
+    let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND reason_code='claude.input.preparation_hold'")
+        .bind(target).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(notices, 1, "one non-turn notice for this held source");
+    fixture.pane.set("cap.before", &original);
+    assert!(
+        super::try_busy(
+            &deps,
+            &ProviderKind::Claude,
+            fixture.channel,
+            Some(|_, _| true),
+            "a2-released"
+        )
+        .await
+    );
+    assert_eq!(
+        fixture.pane.records().len(),
+        1,
+        "one submission after release"
+    );
+    assert_eq!(fixture.queue().await.len(), before.len() - 1);
+}

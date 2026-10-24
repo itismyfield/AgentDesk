@@ -5,7 +5,7 @@ use super::{
     CancelToken, PROMPT_READY_TIMEOUT_ERROR_PREFIX, PromptReadinessKind, TuiInputAction,
     host_input, prompt_readiness_snapshot, run_actions,
 };
-use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner};
+use crate::services::claude_tui::busy_inject::{ComposerOwner, composer_owner_in_session};
 use crate::services::claude_tui::composer_lock::{
     DraftGuard, admit_composer_write, guard_draft, with_composer_mutation_lock,
 };
@@ -23,20 +23,22 @@ pub(super) fn admit_automatic_write(
         .map_err(super::SubmissionError::into_legacy)?;
     let capture = || host_input::observe_draft(session_name);
     admit_composer_write(session_name, capture)
-        .map_err(|_| held_error(readiness, "draft_recovery_hold"))
+        .map_err(|_| held_error(session_name, readiness, "draft_recovery_hold"))
 }
 
-fn held_error(readiness: PromptReadinessKind, reason: &str) -> String {
-    format!(
+fn held_error(session: &str, readiness: PromptReadinessKind, reason: &'static str) -> String {
+    let detail = format!(
         "{PROMPT_READY_TIMEOUT_ERROR_PREFIX} {} prompt input readiness held; reason={reason}; previous_tui_turn_still_running=false; prompt_marker_detected=true",
         readiness.label()
-    )
+    );
+    super::SubmissionError::Held(super::PreparationHold::before(session, reason, detail))
+        .into_legacy()
 }
 
 /// Why an automatic write must not type into the composer `capture` shows, if it must not; a
 /// person's draft also protects the pane until a later capture sees it gone.
 pub(crate) fn composer_refusal(session_name: &str, capture: Option<&str>) -> Option<&'static str> {
-    match capture.map(composer_owner) {
+    match capture.map(|capture| composer_owner_in_session(session_name, capture)) {
         Some(ComposerOwner::Empty) => None,
         Some(ComposerOwner::Person) => {
             guard_draft(session_name, DraftGuard::DraftRestored);
@@ -57,7 +59,7 @@ fn held(session_name: &str, readiness: PromptReadinessKind, capture: Option<&str
         capture_available = capture.is_some(),
         "claude_tui follow-up held: the composer is not empty or could not be read"
     );
-    held_error(readiness, reason)
+    held_error(session_name, readiness, reason)
 }
 
 /// Reads the composer with attributes just before a follow-up types; anything but an empty composer
@@ -67,7 +69,11 @@ pub(super) fn refuse_composer_draft(
     readiness: PromptReadinessKind,
 ) -> Result<(), String> {
     let capture = host_input::observe_draft(session_name);
-    if capture.as_deref().map(composer_owner) == Some(ComposerOwner::Empty) {
+    if capture
+        .as_deref()
+        .map(|c| composer_owner_in_session(session_name, c))
+        == Some(ComposerOwner::Empty)
+    {
         return Ok(());
     }
     Err(held(session_name, readiness, capture.as_deref()))
@@ -82,7 +88,10 @@ pub(crate) fn stranded_draft_is_ours(
     super::guarded_outcome::held_result(session_name)
         .map_err(super::SubmissionError::into_legacy)?;
     let capture = host_input::observe_draft(session_name);
-    match capture.as_deref().map(composer_owner) {
+    match capture
+        .as_deref()
+        .map(|capture| super::super::busy_inject::composer_owner_in_session(session_name, capture))
+    {
         Some(ComposerOwner::Empty) => Ok(false),
         Some(ComposerOwner::AgentDesk) => Ok(true),
         _ => Err(held(session_name, readiness, capture.as_deref())),
@@ -108,3 +117,7 @@ pub(super) fn dismiss_startup_dialog(
         run_actions(session_name, &[TuiInputAction::Enter], cancel_token)
     })
 }
+
+#[cfg(test)]
+#[path = "draft_hold_session_tests.rs"]
+mod draft_hold_session_tests;

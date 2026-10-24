@@ -167,7 +167,11 @@ fn synthetic_bridge_handoff_fixture(
             if native_compaction { assistant["sessionId"] = "native-auto-session".into(); }
             let previous = if failed_save { "" } else { "{\"type\":\"user\",\"message\":{\"content\":\"previous turn\"}}\n" };
             let source_start = previous.len() as u64;
-            std::fs::write(&output, format!("{previous}{assistant}\n")).unwrap();
+            let native_user = if provider == ProviderKind::Claude {
+                assistant["sessionId"] = if native_compaction { "native-auto-session" } else { "native-handoff-session" }.into();
+                format!("{}\n", serde_json::json!({"type":"user", "sessionId":assistant["sessionId"], "message":{"content":"handoff prompt"}}))
+            } else { String::new() };
+            std::fs::write(&output, format!("{previous}{native_user}{assistant}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
                 tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -449,7 +453,7 @@ fn synthetic_bridge_handoff_fixture(
                 assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(&after).unwrap());
                 assert!(Arc::ptr_eq(&actor, &crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap()));
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, source_start);
-                std::fs::write(&output, format!("{previous}{assistant}\n")).unwrap();
+                std::fs::write(&output, format!("{previous}{native_user}{assistant}\n")).unwrap();
                 synthetic_start::bridge_handoff::resume_unpublished(&shared, &after, &output).await.unwrap();
             }
             if postgres_race {
