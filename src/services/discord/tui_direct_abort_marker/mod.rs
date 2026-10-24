@@ -221,23 +221,23 @@ pub(in crate::services::discord) use deferred_claim::{
     LiveInflightProbe, ensure_marker_for_own_synthetic_turn, record_for_deferred_claim,
 };
 #[cfg(test)]
-use drain::drain_on_terminal_commit_with_applier_and_offsets;
+use drain::{
+    drain_on_terminal_commit_with_applier, drain_on_terminal_commit_with_applier_and_offset,
+    drain_on_terminal_commit_with_applier_and_offsets,
+};
 pub(in crate::services::discord) use drain::{
-    drain_on_terminal_commit, drain_on_terminal_commit_with_applier,
-    drain_on_terminal_commit_with_applier_and_offset, drain_on_terminal_commit_with_offset,
     drain_on_terminal_commit_with_offsets, resolve_own_claim_markers_for_visibly_completed_anchor,
 };
 use store::reload;
 #[cfg(test)]
 pub(in crate::services::discord) use store::{
-    COMMIT_TOMBSTONE_RETENTION_MS, record_commit_tombstone_at,
+    COMMIT_TOMBSTONE_RETENTION_MS, load_commit_tombstones, record_commit_tombstone_at,
     record_commit_tombstone_at_with_offset, record_commit_tombstone_at_with_offsets,
     set_test_root_override,
 };
 pub(in crate::services::discord) use store::{
-    CommitTombstone, delete, gc_expired_commit_tombstones, load_all, load_commit_tombstones,
-    load_for_channel, record, record_commit_tombstone, record_commit_tombstone_with_offset,
-    record_commit_tombstone_with_offsets, try_claim_marker,
+    CommitTombstone, delete, gc_expired_commit_tombstones, load_all, load_for_channel, record,
+    record_commit_tombstone_with_offset, record_commit_tombstone_with_offsets, try_claim_marker,
 };
 #[cfg(test)]
 use store::{root, tombstone_root};

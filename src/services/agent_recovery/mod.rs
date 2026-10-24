@@ -25,18 +25,16 @@ pub use checkpoint::{
     RecoveryStoreError, RecoveryTransition,
 };
 pub use detector::{
-    DetectorSignal, MailboxStallKind, classify_trigger, mailbox_kind_from_name,
-    trigger_from_error_message,
+    DetectorSignal, classify_trigger, mailbox_kind_from_name, trigger_from_error_message,
 };
-pub use handoff::{FallbackSpawnPlan, RecoveryIntake, dual_processing, effective_handles};
+#[cfg(test)]
+pub use handoff::effective_handles;
+pub use handoff::{FallbackSpawnPlan, RecoveryIntake};
 pub use policy::{
-    OrgAgentInput, OrgChannelInput, PolicyError, RecoveryCatalog, RecoveryConfigWire,
-    RecoveryPolicy, TriggerKind, WorkspaceMode, build_recovery_catalog,
-    load_org_recovery_catalog_from_yaml, validate_distinct_fallback_agent,
+    OrgAgentInput, OrgChannelInput, PolicyError, RecoveryCatalog, RecoveryConfigWire, TriggerKind,
+    build_recovery_catalog, validate_distinct_fallback_agent,
 };
-pub use restore::{
-    RestorePlan, RestoreSessionMode, format_restore_packet, session_mode_for_provider,
-};
+pub use restore::RestorePlan;
 
 use checkpoint::{last_n_events, prepare_event};
 use policy::ChannelRecoveryBinding;
@@ -540,16 +538,17 @@ impl RecoveryRuntime {
 
 mod durable;
 #[cfg(test)]
+pub use durable::observe_durable;
+#[cfg(test)]
 pub(crate) use durable::test_store;
 pub(crate) use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
 };
 pub use durable::{
-    abort_takeover_durable, allows_cli_turn, allows_cli_turn_for_provider, attach_pg_pool,
-    channel_recovery_intake, clear_catalog, complete_turn_durable, fallback_prompt_prefix,
-    fallback_provider, hydrate_from_pg, inherit_workspace, install_catalog, lease_for_provider,
-    observe_durable, observe_with_checkpoint_durable, take_restore_packet,
+    allows_cli_turn_for_provider, channel_recovery_intake, clear_catalog, complete_turn_durable,
+    fallback_prompt_prefix, fallback_provider, hydrate_from_pg, inherit_workspace, install_catalog,
+    lease_for_provider, observe_with_checkpoint_durable, take_restore_packet,
     try_restore_owner_durable,
 };
 
