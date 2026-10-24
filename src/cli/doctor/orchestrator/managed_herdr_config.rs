@@ -2,10 +2,13 @@
 //! config, through the dcserver upkeep's writer; nothing here installs, edits or restarts a job.
 use super::*;
 
+#[cfg(unix)]
 const ID: &str = "herdr_managed_config";
+#[cfg(unix)]
 const NAME: &str = "Herdr managed config";
 #[cfg(target_os = "macos")]
 const JOB_LABEL: &str = "com.agentdesk.herdr";
+#[cfg(unix)]
 const RESTART: &str = "restart the herdr server with its service manager at least 2.1s after the repair; a server started earlier keeps E7 unverified";
 
 /// A dedicated endpoint on this node in the live config or in the snapshot this process booted.
@@ -40,7 +43,9 @@ fn hosts() -> Result<config::session_hosts::BootSessionHosts, String> {
     Ok(selection.hosts().clone())
 }
 
-pub(super) fn fixed(cfg: &config::Config, mut actions: Vec<FixAction>) -> Vec<FixAction> {
+pub(super) fn fixed(cfg: &config::Config, actions: Vec<FixAction>) -> Vec<FixAction> {
+    #[cfg(unix)]
+    let mut actions = actions;
     #[cfg(unix)]
     if relevant(cfg) {
         use crate::services::session_host::managed_config::path::PersonalPaths;
@@ -62,7 +67,9 @@ pub(super) fn fixed(cfg: &config::Config, mut actions: Vec<FixAction>) -> Vec<Fi
     actions
 }
 
-pub(super) fn checked(cfg: &config::Config, mut checks: Vec<Check>) -> Vec<Check> {
+pub(super) fn checked(cfg: &config::Config, checks: Vec<Check>) -> Vec<Check> {
+    #[cfg(unix)]
+    let mut checks = checks;
     #[cfg(unix)]
     if relevant(cfg) {
         use crate::services::session_host::managed_config::path::PersonalPaths;
@@ -155,6 +162,7 @@ pub(super) fn fixes_for(
     actions
 }
 
+#[cfg(unix)]
 const RECORD: &str = "the publication record .agentdesk-config-state is unreadable and is never removed automatically; stop the herdr server, confirm config.toml is canonical, move the record aside, run `agentdesk doctor --fix`, then start the server at least 2.1s later";
 
 /// Read-only: inspects each dedicated home and the herdr job without a lock or any write.

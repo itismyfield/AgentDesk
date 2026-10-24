@@ -6,11 +6,8 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use tokio::time::Instant;
 
-use super::{ExecutionIdentity, NoticeObservation, Owner, Scope, lock};
+use super::{ExecutionIdentity, HERDR_CONFIG, NoticeObservation, Owner, Scope, lock};
 use crate::services::session_host::managed_config::maintenance::OperatorNotice;
-
-/// Receipt namespace of herdr managed-config faults, apart from every provider's turn notices.
-pub(super) const HERDR_CONFIG: &str = "herdr_config";
 
 /// Operator faults have no presence to hold their owner, so it lives for the process.
 static OPERATOR: LazyLock<Mutex<HashMap<Scope, Arc<Owner>>>> = LazyLock::new(Default::default);
