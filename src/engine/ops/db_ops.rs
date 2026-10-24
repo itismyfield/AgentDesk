@@ -1412,6 +1412,9 @@ where
 }
 
 #[cfg(test)]
+mod policy_sql_schema_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1887,5 +1890,61 @@ mod tests {
 
         pool.close().await;
         test_db.drop().await;
+    }
+
+    /// #7351: every policy SQL variant must PREPARE on the migrated schema after
+    /// the runtime translation. The JS harness only substring-matches SQL, so a
+    /// missing table or column used to reach production unnoticed (#7347 L1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_sql_prepares_against_migrated_schema_pg() {
+        use super::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};
+
+        let calls =
+            extract_policy_sql(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"));
+        let test_db = TestDatabase::create().await;
+        let pool = test_db.migrate().await;
+        let mut conn = pool.acquire().await.expect("acquire probe connection");
+        let params = vec![serde_json::Value::Null; 64];
+        let mut prepared = 0usize;
+        let mut failures = Vec::new();
+        for call in &calls {
+            let site = format!("{}:{} ({})", call.file, call.line, call.method);
+            for sql in call.variants.iter().filter(|sql| !sql.contains(DYN_MARKER)) {
+                let translated = match prepare_policy_sql_for_pg(sql, &params) {
+                    Ok(translated) => translated.sql,
+                    Err(error) => {
+                        failures.push(format!("{site}: translate: {error}\n    {sql}"));
+                        continue;
+                    }
+                };
+                let probe = format!("PREPARE adk_policy_sql_probe AS {translated}");
+                match sqlx::raw_sql(AssertSqlSafe(probe))
+                    .execute(&mut *conn)
+                    .await
+                {
+                    Ok(_) => {
+                        prepared += 1;
+                        sqlx::raw_sql("DEALLOCATE adk_policy_sql_probe")
+                            .execute(&mut *conn)
+                            .await
+                            .expect("deallocate policy sql probe");
+                    }
+                    Err(error) => failures.push(format!("{site}: {error}\n    {translated}")),
+                }
+            }
+        }
+        drop(conn);
+        pool.close().await;
+        test_db.drop().await;
+
+        assert!(
+            prepared >= 100,
+            "prepared only {prepared} policy statements"
+        );
+        assert!(
+            failures.is_empty(),
+            "policy SQL that does not PREPARE on the migrated schema:\n{}",
+            failures.join("\n")
+        );
     }
 }

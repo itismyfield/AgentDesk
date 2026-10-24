@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "e143a3cd5cab3799cdbc73b0f02d64da6eb9083f",
+  "measured_at_sha": "915336543c91a602080be04ea781283d53392d5f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1670,24 +1670,6 @@
     {
       "root": "policies",
       "kind": "POLICY",
-      "path": "policies/lib/auto-queue-error-recovery.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:a04fd150af1121a74da5c12c9d2715af8b26e3ab44f710be6edd4eaa587b2eed"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/lib/auto-queue-error-recovery.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:b9fa23f8153676fd47b71ed9633c40fe0633d93ce2689c3b05c7d3dd7d5e51bd"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
       "path": "policies/lib/auto-queue-lifecycle.js",
       "api": "agentdesk.db.query",
       "symbol": "query",
@@ -1764,25 +1746,7 @@
       "api": "agentdesk.db.execute",
       "symbol": "execute",
       "classification": "STATIC",
-      "fingerprint": "sha256:5533c9c22b51f1bf38f0d853491dc86df8a6b6f480be8968dc2f04558dd49e0c"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/lib/auto-queue-phase-gate.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
       "fingerprint": "sha256:ac0ee7c1715bbd23579776047ec9a8cb134e0672ed95686f3c6eebfbd95bbfbf"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/lib/auto-queue-phase-gate.js",
-      "api": "agentdesk.db.execute",
-      "symbol": "execute",
-      "classification": "STATIC",
-      "fingerprint": "sha256:bf28658d5450b6381454b89c16c81a4bec4c9d8a2558b5f88622554145bf6418"
     },
     {
       "root": "policies",
@@ -1801,15 +1765,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:3ca47e22626dd5cd9a107edcb73321f33a629401d0149bcdd64864757e67b914"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/lib/auto-queue-phase-gate.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:436860be031afbc64f9ffc20ccd87ac99f5130f7008eaff6c705c36a5556585b"
     },
     {
       "root": "policies",
@@ -1845,7 +1800,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:d3ad24e52bc5890d23a9f589ea8d6370402292e046dcdf9eeb3c1f8f6bc919ef"
+      "fingerprint": "sha256:deecdd2467f0c6566264fb0159f3a5ba4474baaed65d9110f4cb7e840b46792f"
     },
     {
       "root": "policies",
@@ -2079,6 +2034,15 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:0e2a401c1e3999511285c8ec3a3128d2cd704709e6dd0c8b229fcbef24bb4b2d"
+    },
+    {
+      "root": "policies",
+      "kind": "POLICY",
+      "path": "policies/review-automation.js",
+      "api": "agentdesk.db.query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:1dba1697c6e65f69f3522d99be6fb3dcd19f6c7c103b3822d3f1520d6933d50f"
     },
     {
@@ -2089,15 +2053,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:2ce9eb6b808b5d483a98dd5044742390d992a0e8e099c2520d01ca9f978b93c9"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/review-automation.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:2d78a0773876955ff5db2ebba5041b40f855aa9dd969699bdc2da49f51f19f38"
     },
     {
       "root": "policies",
@@ -2142,7 +2097,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:5e8bf1e12a471ab2d706423d4e1cafd336ea2c5023e6290e5c3252af052637a8"
+      "fingerprint": "sha256:5d8be4ef27ba65f103c1643d500ebbaf14cfdccecd8c96d50a5f94b28dcf2d2f"
     },
     {
       "root": "policies",
@@ -2160,7 +2115,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:6cc601e1e3240f2a8222ecef4de12c5c65d68e73f0d305351d28296444ea8b82"
+      "fingerprint": "sha256:6acd6c2cf23b816417d4ce0dfb996fc7adf655bcf249ba74c2b2069b864d9d69"
     },
     {
       "root": "policies",
@@ -2169,7 +2124,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:6ce0319be42a7a4c886a0692a52540bac0fb5472f9542eeb5c1ba6e1c8a79b20"
+      "fingerprint": "sha256:6cc601e1e3240f2a8222ecef4de12c5c65d68e73f0d305351d28296444ea8b82"
     },
     {
       "root": "policies",
@@ -2241,7 +2196,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:c5eb8bf21b7cd41c69536445bc4f6dc3b64c51a3872b000d6930c9ef362d1aff"
+      "fingerprint": "sha256:e07b152bc0a9b31939d2af58d079d135b8b2934d75f58c1618fefa2089dd9a33"
     },
     {
       "root": "policies",
@@ -2250,7 +2205,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:e07b152bc0a9b31939d2af58d079d135b8b2934d75f58c1618fefa2089dd9a33"
+      "fingerprint": "sha256:e6bd7cbd9f036aedf9a03360f77b55e399a698e5127902602db995fb136ce00f"
     },
     {
       "root": "policies",
@@ -2394,7 +2349,7 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:08a284f1c96e8648626b49b29acd3a63a6015437ce7ddd39096c6aeaea21f30d"
+      "fingerprint": "sha256:38743c9be80c4d893a10f82c5f09f4242c06f75d54d25a2293c9ea158a610064"
     },
     {
       "root": "policies",
@@ -2440,24 +2395,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:a0f2d27d18bcb07c48f7ea387a829e611efe32ba18074a864fec7af999fb02f1"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/workspace-branch-guard.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:04f9cba3daa8eeaf62f24e6da6924dee62e4938f040ba327ce46fd235b7e6b17"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/workspace-branch-guard.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:230de70d04fdc42bb8f5bb3901823f818f03007f14c5b42d584a1a64e01aee14"
     },
     {
       "root": "src",
@@ -18162,6 +18099,15 @@
       "api": "prepare_policy_sql_for_pg",
       "symbol": "prepare_policy_sql_for_pg",
       "classification": "UNRESOLVED",
+      "fingerprint": "sha256:12967412783f43b47ff39c6c90f18e4f7d023e52d0b4715bd35ea256e63f7dbf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/db_ops.rs",
+      "api": "prepare_policy_sql_for_pg",
+      "symbol": "prepare_policy_sql_for_pg",
+      "classification": "UNRESOLVED",
       "fingerprint": "sha256:1524c1d7216c0b9a48b54936190072ee7deec19524e09400f67aeef965fb985d"
     },
     {
@@ -18343,6 +18289,24 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:a84e9e91afd4b36db8eeb8a9490eae8a70b8a7988689ef1f000e0bb845619a6b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/db_ops.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7c4df84860861e0e45f1477a72ed1da7a799d6e1d41a11ccd8dcf3cf8746bf4b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/engine/ops/db_ops.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:65ec23b2dc732220735cf6afae56b3b1a88b0f1bac8442422bd9c919eaa1e22a"
     },
     {
       "root": "src",

@@ -20,7 +20,6 @@ require("./timeouts/review-auto-accept")(timeouts, helpers);
 require("./timeouts/dispatch-maintenance")(timeouts, helpers);
 require("./timeouts/active-monitor")(timeouts, helpers);
 require("./timeouts/orphan-dispatch")(timeouts, helpers);
-require("./timeouts/workspace-branch-guard")(timeouts, helpers);
 require("./timeouts/idle-kill")(timeouts, helpers);
 
 // ── Tiered tick handlers (#127) ──────────────────────────────────
@@ -59,7 +58,8 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] total " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [B] [G] [M] [O] + TTL cleanup (non-critical reconciliation)
+// 5min tier: [B] [G] [O] + TTL cleanup (non-critical reconciliation)
+// [M] workspace branch guard runs once at dcserver startup (src/cli/dcserver.rs, #181).
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
@@ -74,8 +74,6 @@ timeouts.onTick5min = function(ev) {
   agentdesk.log.debug("[tick5min][B] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_G(); } catch(e) { agentdesk.log.warn("[tick5min] G error: " + e); }
   agentdesk.log.debug("[tick5min][G] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_M(); } catch(e) { agentdesk.log.warn("[tick5min] M error: " + e); }
-  agentdesk.log.debug("[tick5min][M] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_O(); } catch(e) { agentdesk.log.warn("[tick5min] O error: " + e); }
   agentdesk.log.debug("[tick5min][O] " + (Date.now() - t) + "ms");
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
