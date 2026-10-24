@@ -3,6 +3,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+pub(crate) mod statusline;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookBundleConfig {
     pub endpoint: String,
@@ -55,9 +57,7 @@ pub fn render_claude_hook_settings(config: &HookBundleConfig) -> Value {
         hooks.insert((*event).to_string(), json!([matcher]));
     }
 
-    json!({
-        "hooks": hooks
-    })
+    json!({"hooks": hooks, "statusLine": statusline::settings(&statusline::record_dir())})
 }
 
 pub fn render_codex_hook_config_override(config: &HookBundleConfig) -> String {

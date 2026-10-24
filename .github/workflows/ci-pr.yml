@@ -885,6 +885,7 @@ jobs:
               - 'src/services/session_host/**'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
+              - 'src/services/turn_summary_line/quota_tests.rs'
               # DERIVED BLOCK (#5832) -- do not hand-edit. cross_os_rust does
               # not select 'src/services/discord/**' wholesale, so every file in
               # that subtree that carries a platform cfg shim (or names a

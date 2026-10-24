@@ -62,7 +62,7 @@ impl Latch {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::services::discord) struct LiveSummary {
     key: TurnKey,
     runtime_kind: Option<RuntimeHandoffKind>,
@@ -70,6 +70,7 @@ pub(in crate::services::discord) struct LiveSummary {
     elapsed_ms: Option<u64>,
     context_pct: Option<u8>,
     started: Option<chrono::DateTime<chrono::Utc>>,
+    session_id: Option<String>,
 }
 
 pub(in crate::services::discord) fn outcome(cancelled: bool, failed: bool) -> Outcome {
@@ -98,6 +99,7 @@ impl LiveSummary {
             elapsed_ms,
             context_pct: None,
             started: quota::legacy_started(&state.started_at),
+            session_id: state.session_id.clone(),
         }
     }
 
@@ -146,6 +148,7 @@ impl LiveSummary {
                 elapsed_ms,
                 context_pct: None,
                 started: quota::legacy_started(&state.started_at),
+                session_id: state.session_id.clone(),
             }
             .with_context(shared),
         )
@@ -228,6 +231,7 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
         provider.as_str(),
         summary.key.channel_id.get(),
         summary.started.map(quota::Selected::Within),
+        summary.session_id.as_deref(),
     );
     let text = render(
         summary.outcome,

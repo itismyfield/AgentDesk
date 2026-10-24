@@ -2167,6 +2167,11 @@ services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_compose
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::try_composer_lock_serializes_existing_writer
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_lock_serializes_concurrent_callbacks
 services::claude_tui::composer_lock::claude_tui_composer_lock_tests::turn_locks_are_shared_per_session_only
+services::claude_tui::hook_bundle::statusline::tests::absent_statusline_is_empty_and_config_dir_override_selects_the_user_command
+services::claude_tui::hook_bundle::statusline::tests::concurrent_sessions_publish_complete_isolated_records_by_atomic_rename
+services::claude_tui::hook_bundle::statusline::tests::generated_session_settings_install_the_executable_wrapper
+services::claude_tui::hook_bundle::statusline::tests::passthrough_preserves_original_stdin_and_stdout_byte_for_byte
+services::claude_tui::hook_bundle::statusline::tests::recorder_errors_and_malformed_stdin_do_not_block_the_original_display
 services::claude_tui::hook_bundle::tests::codex_hook_command_uses_stable_session_id_for_trust_identity
 services::claude_tui::hook_bundle::tests::codex_hook_config_override_renders_all_current_events
 services::claude_tui::hook_bundle::tests::codex_hook_config_overrides_enable_and_trust_hooks_for_session
@@ -10761,6 +10766,7 @@ services::discord::turn_bridge::watcher_orphan_cleanup::watcher_orphan_cleanup_t
 services::discord::turn_bridge::watcher_orphan_cleanup::watcher_orphan_cleanup_tests::genuine_non_terminal_orphan_is_deleted
 services::discord::turn_bridge::watcher_orphan_cleanup::watcher_orphan_cleanup_tests::watcher_orphan_spinner_cleanup_retries_only_lifecycle_failures
 services::discord::turn_bridge::watcher_orphan_cleanup::watcher_orphan_cleanup_tests::watcher_reuse_deletes_only_bridge_created_response_placeholder
+services::discord::turn_end_summary::tests::captured_claude_session_quota_reaches_the_legacy_summary
 services::discord::turn_end_summary::tests::future_watcher_start_is_omitted_before_submillisecond_duration_truncation
 services::discord::turn_end_summary::tests::latch_keeps_distinct_zero_id_sources_and_episode_nonces_separate
 services::discord::turn_end_summary::tests::latch_retains_pending_attempts_and_bounds_finished_entries_by_ttl_and_capacity
@@ -15044,6 +15050,11 @@ services::turn_orchestrator::witnessed_release::tests::a_closed_actor_runs_no_wi
 services::turn_orchestrator::witnessed_release::tests::a_same_message_episode_with_another_nonce_is_kept
 services::turn_orchestrator::witnessed_release::tests::an_empty_nonce_names_no_episode
 services::turn_orchestrator::witnessed_release::tests::the_witnessed_episode_is_released_after_its_withdrawal
+services::turn_summary_line::quota::statusline::tests::fifteen_minutes_is_inclusive_and_stale_records_use_cswap
+services::turn_summary_line::quota::statusline::tests::mismatched_session_is_rejected_before_cswap_fallback
+services::turn_summary_line::quota::statusline::tests::missing_legacy_malformed_and_empty_records_preserve_cswap_or_omit_quota
+services::turn_summary_line::quota::statusline::tests::stdin_epoch_limits_render_percentages_and_kst_resets
+services::turn_summary_line::quota::statusline::tests::zero_is_real_only_with_a_valid_future_window_and_one_window_can_survive
 services::turn_summary_line::quota::tests::active_claude_quota_renders_one_line_in_order_with_kst_resets
 services::turn_summary_line::quota::tests::claude_missing_stale_and_ambiguous_accounts_never_supply_a_quota
 services::turn_summary_line::quota::tests::claude_usage_age_includes_cache_residence_and_expires_after_fifteen_minutes
@@ -15053,6 +15064,7 @@ services::turn_summary_line::quota::tests::contended_quota_cache_still_renders_w
 services::turn_summary_line::quota::tests::quota_does_not_change_untimed_completion_cancellation_or_failure
 services::turn_summary_line::quota::tests::quota_windows_need_valid_percent_and_a_future_reset
 services::turn_summary_line::quota::tests::recorded_profile_and_collected_quota_reach_the_o_summary_boundary
+services::turn_summary_line::quota::tests::statusline_quota_reaches_o_summary_when_cswap_usage_is_429
 services::turn_summary_line::tests::all_percent_values_and_elapsed_extremes_are_bounded_single_lines_in_the_canonical_grammar
 services::turn_summary_line::tests::canonical_completed_cancelled_and_failed_examples_match_exactly
 services::turn_summary_line::tests::canonical_grammar_requires_the_completed_space_and_rejects_extra_status_text
