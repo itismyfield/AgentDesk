@@ -1,8 +1,8 @@
 name: CI PR
 
 on:
-  # PR-only: no push/dispatch run may publish `Script checks`. Mirrors use !cancelled(): on run cancel
-  # pending mirrors never start and running ones are cancelled; a timed-out upstream still mirrors red.
+  # PR-only: no push/dispatch run may publish `Script checks`. The judge uses !cancelled(): on run cancel
+  # it never starts or is cancelled; a timed-out upstream still judges red.
   pull_request:
 
 concurrency:
@@ -11,7 +11,7 @@ concurrency:
   # Manual dispatch has no PR payload, so isolate it by the selected ref.
   group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
   # A newer push makes every result from the older SHA stale, so release its
-  # hosted runners immediately. The `*_required_context` mirrors remain
+  # hosted runners immediately. The required-context judge remains
   # fail-closed: cancellation may leave failed/cancelled contexts on the OLD
   # SHA, while branch protection still requires fresh green contexts on the
   # newest exact HEAD SHA. Manual cancellation of the newest run therefore
@@ -34,8 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
-      # Verified docs/comment-only changes suppress heavy Rust jobs; their mirrors
-      # read the same effective outputs so expected skips still publish green.
+      # Verified docs/comment-only changes suppress heavy Rust jobs; the judge
+      # reads the same effective outputs so expected skips still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
       rust_tests_skip: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}
@@ -51,7 +51,7 @@ jobs:
       # True when a Rust-compile change touches a source surface that needs
       # native Windows verification. Most relay-only PRs leave this false, but
       # the cross-platform inflight lock primitive is an explicit exception.
-      # Its mirror permits unrelated-path skips and rejects unexpected skips.
+      # The judge permits unrelated-path skips and rejects unexpected skips.
       cross_os_rust: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
     steps:
@@ -286,7 +286,7 @@ jobs:
             # native Windows verification. Most relay-only changes remain out
             # of this positive list and rely on the nightly matrix, but owners
             # of cross-platform primitives may be listed explicitly below.
-            # When selected, the stable required-context mirror makes this
+            # When selected, the stable required-context judge makes this
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
@@ -491,17 +491,17 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
-  # Cross-OS Rust compile lane. The required-context mirror below makes this
+  # Cross-OS Rust compile lane. The required-context judge makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
   # skip it. Nightly retains the broader macOS/Windows test matrix.
   check_fast_cross_os:
     # Keep this job name stable: the infrastructure-failure classifier and
-    # the required-context mirror identify it by this exact context string.
+    # the required-context judge identify it by this exact context string.
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
     # Run only when `cross_os_rust` selects a native Windows source surface.
     # Most relay-only PRs still skip it, while the inflight lock primitive is
-    # explicitly selected and enforced through the required-context mirror.
+    # explicitly selected and enforced through the required-context judge.
     if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
     runs-on: ${{ matrix.os }}
     env:
@@ -587,7 +587,7 @@ jobs:
         run: sccache --show-stats || true
 
   # The writer namespace test build runs on its own Windows runner so it
-  # overlaps `cargo check`; the required-context mirror waits for both jobs.
+  # overlaps `cargo check`; the required-context judge waits for both jobs.
   check_fast_cross_os_targets:
     name: Windows exact targets (${{ matrix.os }})
     needs: changes
@@ -901,7 +901,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py 83895afcf0cdaafb3948277ffb9b85389cd65f12d15b51ae57a4aad5b5bd9d8e
-          pin scripts/check-ci-runner-hardening.sh 6776e15cb5f47a558dccb179fb987a8fc54f5391cf143bf0e395391412b4457c
+          pin scripts/check-ci-runner-hardening.sh 3489b5976ce694f0974d2dbea4bffbd0f752de4d2d3dae7274fd4801cf92aa7a
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required context
@@ -931,7 +931,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
-
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
@@ -1091,7 +1090,6 @@ jobs:
         with:
           fetch-depth: 0
 
-
       # Keep Rust available for inventory fallback and the H2 module-map driver.
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
@@ -1221,7 +1219,7 @@ jobs:
           retention-days: 14
 
   # Parallel Script checks shards without cargo. ci-script-checks.sh assigns
-  # every check to one shard, and the result mirror below requires all of them.
+  # every check to one shard, and the required-context judge requires all of them.
   scripts_guards:
     name: Script checks runner (guards)
     needs: changes
@@ -1305,7 +1303,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
-
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
