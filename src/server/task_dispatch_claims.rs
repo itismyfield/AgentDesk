@@ -9,6 +9,9 @@ use crate::config::{ClusterConfig, ClusterSemaphoreConfig};
 const DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_TASK_DISPATCH_CLAIM_LIMIT: i64 = 10;
 
+mod config_read;
+pub use config_read::claim_task_dispatches;
+
 #[cfg(test)]
 #[path = "task_dispatch_claims_replay_tests.rs"]
 mod replay_tests;
@@ -51,14 +54,6 @@ pub struct TaskDispatchClaimSkip {
     pub id: String,
     pub reasons: Vec<String>,
     pub required_capabilities: Option<Value>,
-}
-
-pub async fn claim_task_dispatches(
-    pool: &PgPool,
-    request: &TaskDispatchClaimRequest,
-) -> Result<TaskDispatchClaimOutcome, String> {
-    let cluster_config = crate::config::load_graceful().cluster;
-    claim_task_dispatches_with_cluster_config(pool, request, &cluster_config).await
 }
 
 async fn claim_task_dispatches_with_cluster_config(
@@ -415,7 +410,7 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(test)]
-mod task_dispatch_claims_pg_tests {
+pub(crate) mod task_dispatch_claims_pg_tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
@@ -1278,7 +1273,7 @@ mod task_dispatch_claims_pg_tests {
         }
     }
 
-    async fn seed_worker_node(
+    pub(crate) async fn seed_worker_node(
         pool: &PgPool,
         instance_id: &str,
         label: &str,
@@ -1327,7 +1322,7 @@ mod task_dispatch_claims_pg_tests {
         .unwrap();
     }
 
-    async fn seed_dispatch_semaphore_holding(
+    pub(crate) async fn seed_dispatch_semaphore_holding(
         pool: &PgPool,
         scope: &str,
         scope_key: &str,
@@ -1355,7 +1350,7 @@ mod task_dispatch_claims_pg_tests {
         .unwrap();
     }
 
-    async fn seed_agent_and_card(pool: &PgPool) {
+    pub(crate) async fn seed_agent_and_card(pool: &PgPool) {
         sqlx::query("INSERT INTO agents (id, name) VALUES ('agent-1', 'Agent 1')")
             .execute(pool)
             .await
@@ -1366,7 +1361,7 @@ mod task_dispatch_claims_pg_tests {
             .unwrap();
     }
 
-    async fn seed_dispatch_with_required_capabilities(
+    pub(crate) async fn seed_dispatch_with_required_capabilities(
         pool: &PgPool,
         dispatch_id: &str,
         title: &str,

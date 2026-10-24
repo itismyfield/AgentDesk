@@ -258,7 +258,6 @@ async fn legacy_divergence_discord_input_behind_backlog_reaches_provider_pg() {
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let event = serenity::FullEvent::Message {
         new_message: message,

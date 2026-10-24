@@ -1,5 +1,4 @@
-//! A channel with a home row reaches the router's home decision before the gateway's placement
-//! hold; a channel without one is placed exactly as before.
+//! Ordinary foreign delivery preserves complete source metadata and replay receipts.
 use std::ffi::OsString;
 use std::sync::Arc;
 
@@ -8,20 +7,11 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use super::{IntakeAdmission, IntakeOrigin, IntakeSubmission, admit_text_intake};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::o_channel_homes::{
-    HomeWrite, adopt, begin_reclaim, delegate, finish_reclaim, finish_release, remove_reclaimed,
-};
-use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
-use crate::services::cluster::channel_home::{self, HomeGate};
-use crate::services::cluster::intake_router_hook::{HomeBlock, IntakeBlockedReason};
 use crate::services::discord::router::TurnKind;
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
-use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
 
 const DELEGATED: u64 = 4_380_601;
-const SELECTED: u64 = 4_380_602;
 const OTHER: u64 = 4_380_603;
 const GW: &str = "gw-4386";
 const MINI: &str = "mini-4386";
@@ -103,34 +93,9 @@ fn submission(channel: u64, message: u64) -> IntakeSubmission {
     }
 }
 
-async fn admit(
-    shared: &Arc<crate::services::discord::SharedData>,
-    channel: u64,
-) -> IntakeAdmission {
-    let http = Arc::new(serenity::Http::new("Bot home-order-test"));
-    let deps = IntakeDeps {
-        http: &http,
-        cache: None,
-        ctx_for_chained_dispatch: None,
-        shared,
-        token: "Bot home-order-test",
-    };
-    admit_text_intake(&deps, &submission(channel, channel + 10)).await
-}
-
-/// The placement hold's refusal, or a failure to say why this was not one.
-fn placement_hold(admission: IntakeAdmission) -> String {
-    match admission {
-        IntakeAdmission::Blocked {
-            reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
-        } => detail,
-        other => panic!("expected the placement hold, got {other:?}"),
-    }
-}
-
-/// Seeds the agents, the holder node and DELEGATED's worker home held by MINI; returns its epoch.
-async fn seed(pool: &sqlx::PgPool) -> i64 {
-    for channel in [DELEGATED, SELECTED, OTHER] {
+/// Seeds ordinary foreign routing through a configured agent preference.
+async fn seed(pool: &sqlx::PgPool) {
+    for channel in [DELEGATED, OTHER] {
         sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_id) VALUES ($1, 'Test', 'claude', $2)")
             .bind(format!("agent-{channel}"))
             .bind(channel.to_string())
@@ -148,151 +113,20 @@ async fn seed(pool: &sqlx::PgPool) -> i64 {
     .execute(pool)
     .await
     .unwrap();
-    let channel = DELEGATED.to_string();
-    let applied = |write| match write {
-        Ok(HomeWrite::Applied(home)) => home,
-        other => panic!("home write: {other:?}"),
-    };
-    let home = applied(delegate(pool, &channel, "claude", GW, MINI).await);
-    let home = applied(finish_release(pool, &channel, GW, home.epoch).await);
-    applied(adopt(pool, &channel, MINI, home.epoch).await).epoch
-}
-
-// A gateway whose stale boot snapshot still owns a delegated channel sends it to the holder the
-// home row names; a moving or unreadable row is refused, and a channel without one holds as before.
-#[tokio::test(flavor = "current_thread")]
-async fn a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg() {
-    let _env = EnforceEnv::new();
-    let fixture = TestPostgresDb::create().await;
-    let pool = fixture.connect_and_migrate().await;
-    let epoch = seed(&pool).await;
-    let shared =
-        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    let no_pool = crate::services::discord::make_shared_data_for_tests();
-    let _owned = test_override::force_channels(&[(SELECTED, ClaudeTui), (DELEGATED, ClaudeTui)]);
-    assert!(
-        !channel_home::any_registered(),
-        "this gateway takes part in no home"
-    );
-    let home_block = |admission: IntakeAdmission| match admission {
-        IntakeAdmission::Blocked {
-            reason: IntakeBlockedReason::ChannelHome { block },
-        } => block,
-        other => panic!("expected a home refusal, got {other:?}"),
-    };
-
-    let _not_ready = test_probe::answers(&[false]);
-    let forwarded = admit(&shared, DELEGATED).await;
-    assert!(
-        matches!(&forwarded, IntakeAdmission::Forwarded { target_instance_id, .. }
-            if target_instance_id == MINI),
-        "{forwarded:?}"
-    );
-    let stamped: Option<i64> = sqlx::query_scalar(
-        "SELECT home_epoch FROM intake_outbox WHERE channel_id = $1 AND target_instance_id = $2",
+    sqlx::query("UPDATE agents SET preferred_intake_node_labels='[\"foreign-source\"]'::JSONB WHERE discord_channel_id=$1")
+        .bind(DELEGATED.to_string()).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE worker_nodes SET labels='[\"foreign-source\"]'::JSONB WHERE instance_id=$1",
     )
-    .bind(DELEGATED.to_string())
     .bind(MINI)
-    .fetch_one(&pool)
+    .execute(pool)
     .await
     .unwrap();
-    assert_eq!(stamped, Some(epoch), "routed at the home's epoch");
-
-    let _not_ready = test_probe::answers(&[false]);
-    let held = placement_hold(admit(&shared, SELECTED).await);
-    assert!(held.contains("writer ready"), "no home row: {held}");
-    let _ready = test_probe::answers(&[true, true]);
-    let local = admit(&shared, SELECTED).await;
-    assert!(matches!(local, IntakeAdmission::Local(_)), "{local:?}");
-    let _not_ready = test_probe::answers(&[false]);
-    let held = placement_hold(admit(&no_pool, DELEGATED).await);
-    assert!(held.contains("writer ready"), "without Postgres: {held}");
-
-    // No state but a holder's worker row takes intake, and no readiness is read on the way.
-    let channel = DELEGATED.to_string();
-    let applied = |write| match write {
-        Ok(HomeWrite::Applied(home)) => home,
-        other => panic!("home write: {other:?}"),
-    };
-    let _unread = test_probe::answers(&[]);
-    let home = applied(begin_reclaim(&pool, &channel, epoch, GW).await);
-    let block = home_block(admit(&shared, DELEGATED).await);
-    assert_eq!(
-        block,
-        HomeBlock::InTransition {
-            state: "reclaiming"
-        }
-    );
-    let home = applied(finish_reclaim(&pool, &channel, MINI, home.epoch).await);
-    let block = home_block(admit(&shared, DELEGATED).await);
-    assert_eq!(block, HomeBlock::InTransition { state: "reclaimed" });
-    let removed = remove_reclaimed(&pool, &channel, GW, home.epoch).await;
-    assert!(matches!(removed, Ok(HomeWrite::Applied(()))), "{removed:?}");
-    let home = applied(delegate(&pool, &channel, "claude", GW, MINI).await);
-    let block = home_block(admit(&shared, DELEGATED).await);
-    assert_eq!(block, HomeBlock::InTransition { state: "releasing" });
-    applied(finish_release(&pool, &channel, GW, home.epoch).await);
-    let block = home_block(admit(&shared, DELEGATED).await);
-    assert_eq!(block, HomeBlock::InTransition { state: "released" });
-
-    sqlx::query("ALTER TABLE o_channel_homes RENAME TO o_channel_homes_away")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let block = home_block(admit(&shared, SELECTED).await);
-    assert!(matches!(block, HomeBlock::Unreadable { .. }), "{block:?}");
-    drop(_unread);
-    sqlx::query("ALTER TABLE o_channel_homes_away RENAME TO o_channel_homes")
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    // A Codex channel awaiting turn mode without a home row still waits queued, not refused.
-    let config = serde_json::from_value(serde_json::json!({
-        "server": {},
-        "agents": [{"id": "w", "name": "W",
-            "channels": {"codex": {"id": OTHER.to_string(), "runtime": "tui"}}}],
-        "tui_o": {"writer": {"channels": [OTHER]}, "turn": {"channels": [OTHER]}}
-    }))
-    .unwrap();
-    let boot = BootChannels::validate(&config).unwrap();
-    let _turn = test_override::force_boot(boot.adopted(Adoption::Committed));
-    let _ready = test_probe::answer_with(|_| true);
-    let mut codex = submission(OTHER, OTHER + 10);
-    codex.provider = ProviderKind::Codex;
-    let http = Arc::new(serenity::Http::new("Bot home-order-test"));
-    let deps = IntakeDeps {
-        http: &http,
-        cache: None,
-        ctx_for_chained_dispatch: None,
-        shared: &shared,
-        token: "Bot home-order-test",
-    };
-    let waits = admit_text_intake(&deps, &codex).await;
-    assert!(
-        matches!(waits, IntakeAdmission::DeferredTurnMode(Ok(_))),
-        "{waits:?}"
-    );
-
-    pool.close().await;
-    fixture.drop().await;
 }
 
 mod source_forwarding_tests {
     use super::*;
     // Exercises foreign admission and source fences through the actual delivery INSERT.
-
-    struct P2bSourceHomeRegistration;
-    impl Drop for P2bSourceHomeRegistration {
-        fn drop(&mut self) {
-            channel_home::unregister(&DELEGATED.to_string());
-        }
-    }
-
-    fn p2b_source_home() -> P2bSourceHomeRegistration {
-        channel_home::register(Arc::new(HomeGate::new(&DELEGATED.to_string(), GW)));
-        P2bSourceHomeRegistration
-    }
 
     async fn p2b_forward_sources(
         shared: &Arc<crate::services::discord::SharedData>,
@@ -319,7 +153,7 @@ mod source_forwarding_tests {
                 assert_eq!(target_instance_id, MINI);
                 outbox_id
             }
-            other => panic!("actual admission must forward to the foreign home: {other:?}"),
+            other => panic!("actual admission must forward to the foreign worker: {other:?}"),
         }
     }
 
@@ -359,7 +193,6 @@ mod source_forwarding_tests {
         seed(&pool).await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-        let _home = p2b_source_home();
         let _active = test_activation::activate(DELEGATED);
         let ctx =
             ReplayAdmissionContext::production(&pool, "p2b-source-leader", "source-incarnation")
@@ -396,7 +229,10 @@ mod source_forwarding_tests {
                 "delivery rows cannot occupy the canonical receipt's unique key"
             );
             assert_eq!(stored.2, format!("merged source body {representative}"));
-            assert_eq!(stored.3.as_deref(), Some("original reply reference"));
+            let context = crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext::decode(stored.3.as_deref()).unwrap();
+            assert_eq!(context.raw.as_deref(), Some("original reply reference"));
+            assert_eq!(context.selected, Default::default());
+            assert!(context.may_select());
             assert_eq!((stored.4, stored.5), (1, false));
 
             let held_source = sources[held_index];
@@ -507,7 +343,6 @@ mod source_forwarding_tests {
         seed(&pool).await;
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-        let _home = p2b_source_home();
         let first = DELEGATED * 100 + 41;
         let representative = first + 1;
         let row = p2b_forward_sources(&shared, representative, &[first, representative]).await;
@@ -642,7 +477,6 @@ async fn dormant_owner_admission_primitive_preserves_full_sources_without_receip
         preserve_on_cancel: false,
         agent_id: format!("agent-{OTHER}"),
         provider: "claude".into(),
-        home_epoch: None,
         replay_source_message_ids: Some(sources.clone()),
     };
     let identity = OwnerIdentity::new("claude", &OTHER.to_string());

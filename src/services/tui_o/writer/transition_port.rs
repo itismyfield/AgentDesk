@@ -12,12 +12,14 @@ use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
 pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
-use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 
 /// Envelopes a run's mailbox holds before its actor takes one.
 const MAILBOX: usize = 4;
+
+/// The actor Inspect budget, shared with the read-only sweep deadline.
+pub(crate) const INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The wall clock the actor's probes stamp, read on the worker as each probe starts.
 pub(crate) type Wall = Arc<dyn Fn() -> SystemTime + Send + Sync>;
@@ -58,12 +60,9 @@ pub(crate) struct Context {
     /// The pane and spawn nonce of the execution the request was checked against.
     pub tmux: String,
     pub nonce: String,
-    /// The epoch of the registered home the request was admitted under; `None` without one.
-    pub home_epoch: Option<i64>,
     /// The channel's session transition lock, taken only around each retirement.
     pub lock: Arc<tokio::sync::Mutex<()>>,
-    /// The home's command admission, kept until the job ends however the requester left.
-    pub permit: Option<CommandPermit>,
+    pub codex: Option<Arc<dyn super::codex_snapshot::Observer>>,
 }
 
 pub(crate) struct Envelope {
@@ -163,6 +162,9 @@ pub(crate) struct Diagnostics {
     pub history: Result<HistoryView, String>,
     pub overlaps: Vec<Overlap>,
     pub candidates: Vec<Candidate>,
+    pub codex: Option<super::codex_snapshot::Observation>,
+    pub observation_id: Option<Result<String, String>>,
+    pub reading: usize,
 }
 
 /// An old source of the judgment by its spool key, with the pane its hop resolves to, if any.
@@ -209,6 +211,7 @@ impl Reply {
 /// The sending side of one run's mailbox.
 #[derive(Clone)]
 pub(crate) struct TransitionPort {
+    provider: Option<crate::services::tui_o::shadow::ShadowProvider>,
     suspension: super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
@@ -219,7 +222,7 @@ pub(crate) struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Envelope>,
-    /// The writer's gate, which owns a channel without a registered home.
+    /// The writer's channel ownership gate.
     pub(super) gate: Arc<OwnershipGate>,
     pub(super) wall: Wall,
     /// The host's stop, raised before the actor's own stop reaches it.
@@ -227,6 +230,22 @@ pub(crate) struct Receiver {
 }
 
 impl TransitionPort {
+    pub(crate) fn with_provider(
+        mut self,
+        provider: crate::services::tui_o::shadow::ShadowProvider,
+    ) -> Self {
+        #[cfg(test)]
+        if super::deliver::bo_mutant("provider_wiring") {
+            return self;
+        }
+        self.provider = Some(provider);
+        self
+    }
+
+    pub(crate) fn provider(&self) -> Option<crate::services::tui_o::shadow::ShadowProvider> {
+        self.provider
+    }
+
     pub(crate) fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
         self.suspension = suspension;
         self
@@ -248,6 +267,7 @@ impl TransitionPort {
     ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
         let port = Self {
+            provider: None,
             suspension: Default::default(),
             generation,
             run: Arc::clone(&run),
@@ -274,7 +294,7 @@ impl TransitionPort {
     }
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
-    /// runs to its end with the permit, and only the reply is lost.
+    /// runs to its end, and only the reply is lost.
     pub(crate) async fn request(
         &self,
         operation: Operation,

@@ -10,11 +10,10 @@ use crate::services::tui_o::writer::transition_port::Context;
 
 fn context(pane: &ProducerPane, nonce: &str) -> Context {
     Context {
+        codex: None,
         tmux: pane.tmux.into(),
         nonce: nonce.into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     }
 }
 

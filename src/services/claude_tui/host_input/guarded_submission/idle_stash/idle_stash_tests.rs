@@ -127,6 +127,8 @@ while True:
         if (root/'inflight').exists():
             state=json.loads(pathlib.Path((root/'inflight').read_text()).read_text())
             (root/'phase-at-stash').write_text(state['managed_submission']['phase'])
+        if (root/'draft-bytes').exists(): (root/'draft-bytes').rename(root/'draft-stash')
+        if (root/'draft-chip').exists(): (root/'draft-chip').rename(root/'draft-stash-chip')
         event('C-s'); pending=pending[1:]; render('stashed')
     if pending.startswith(b'\x1b[200~') and b'\x1b[201~' in pending:
         body, pending = pending[6:].split(b'\x1b[201~',1)
@@ -136,8 +138,11 @@ while True:
         event('Enter')
         body=(root/'body').read_text()
         if mode == 'foreign': record('foreign before expected')
-        if mode == 'mixed': record([{'type':'text','text':body},{'type':'tool_result','content':'x'}])
+        if mode == 'wrapped': record('\n\n<pasted_content id="a17f">\n'+body+'\n</pasted_content id="a17f">\n')
+        elif mode == 'mixed': record([{'type':'text','text':body},{'type':'tool_result','content':'x'}])
         else: record(body)
+        if (root/'draft-stash').exists(): (root/'draft-stash').rename(root/'draft-bytes')
+        if (root/'draft-stash-chip').exists(): (root/'draft-stash-chip').rename(root/'draft-chip')
         render('after'); pending=b''
 "#).unwrap();
     let command = format!("python3 {} {}", quote(&script), quote(&root));
@@ -403,12 +408,11 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 "listed={listed}, fault={fault}: unexpected viewport observation"
             );
             if matches!(fault, "continuation" | "viewport_read" | "viewport_resize") {
-                assert!(matches!(
-                    result,
-                    Err(guarded_outcome::SubmissionError::Guarded(
-                        InputRun::Refused(InputRefusal::Composer(Refusal::NotReady))
-                    ))
-                ));
+                assert!(
+                    matches!(result, Err(guarded_outcome::SubmissionError::Held(ref hold))
+                        if hold.reason == "composer_not_ready" && hold.may_requeue()),
+                    "not-ready stays a typed pre-payload hold: {result:?}"
+                );
                 assert!(events(&root).is_empty());
                 assert_eq!(attempt.fenced.load(Ordering::SeqCst), 0);
                 if fault == "continuation" {
@@ -957,7 +961,7 @@ fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
 }
 
 #[test]
-fn managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fence() {
+fn managed_admission_rejects_busy_stash_modal_and_agentdesk_without_fence() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Count(AtomicUsize);
     impl SubmissionFence for Count {
@@ -970,7 +974,7 @@ fn managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fenc
         }
     }
     let f = Fixture::new();
-    for kind in ["busy", "stash", "modal", "agentdesk", "folded", "long"] {
+    for kind in ["busy", "stash", "modal", "agentdesk"] {
         let name = format!("negative-{kind}");
         let mut before = view("js", kind == "stash");
         if kind == "modal" {
@@ -990,12 +994,7 @@ fn managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fenc
         } else {
             "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n"
         };
-        let long = "x".repeat(801);
-        let prompt = match kind {
-            "long" => long.as_str(),
-            "folded" => "a\nb\nc\nd",
-            _ => PROMPT,
-        };
+        let prompt = PROMPT;
         let root = renderer_with(&f, &name, "normal", before, transcript, prompt);
         let authority = Authority {
             identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
@@ -1017,5 +1016,289 @@ fn managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fenc
         });
         assert!(events(&root).is_empty(), "{kind}: no C-s, paste or Enter");
         assert_eq!(fence.0.load(Ordering::SeqCst), 0, "{kind}: no fence entry");
+    }
+}
+
+fn effort_view(text: &str, stashed: bool) -> String {
+    let status = if stashed {
+        "◉ xhigh · /effort · › stashed"
+    } else {
+        "◉ xhigh · /effort"
+    };
+    let shown = view(text, stashed);
+    let (_, composer) = shown.split_once('\n').unwrap();
+    format!("{status:>158}\n{composer}")
+}
+
+#[test]
+fn managed_multiline_stash_restores_plain_and_chip_bytes_with_measured_effort_status() {
+    let f = Fixture::new();
+    let prompt = format!(
+        "[User: test]\n{}",
+        (0..14)
+            .map(|n| format!("outgoing {n}: {}", "긴 메시지 ".repeat(12)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let chip = format!("[Pasted text #2 +{} lines]", prompt.matches('\n').count());
+    for human_chip in [false, true] {
+        let name = format!("multiline-effort-{human_chip}");
+        let original = if human_chip {
+            "원래 붙여넣기\n보존할 둘째 줄  \n마지막 줄"
+        } else {
+            "사람 초안\n둘째 줄  \n마지막 줄"
+        };
+        let human_shown = if human_chip {
+            "[Pasted text #1 +2 lines]"
+        } else {
+            original
+        };
+        let root = renderer_with(
+            &f,
+            &name,
+            "wrapped",
+            effort_view(human_shown, false),
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+            &prompt,
+        );
+        fs::write(root.join("draft-bytes"), original.as_bytes()).unwrap();
+        if human_chip {
+            fs::write(root.join("draft-chip"), human_shown).unwrap();
+        }
+        fs::write(root.join("stashed"), effort_view("", true)).unwrap();
+        fs::write(
+            root.join("own"),
+            effort_view(&chip, true).replace(
+                "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+                "  paste again to expand",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("after"), effort_view(human_shown, false)).unwrap();
+        let authority = Authority {
+            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
+            admitted: Cell::new(true),
+        };
+        let target = InputTarget::legacy_tmux(&name);
+        let transcript = root.join("transcript");
+        let request = Request {
+            target: &target,
+            gate: &LegacyTmuxGate,
+            prompt: &prompt,
+            transcript: &transcript,
+            cancel: None,
+            timing: &FAST,
+        };
+        let got = run(Some(&authority), true, &request).unwrap();
+        assert_eq!(got.delivery, Delivery::Observed, "human_chip={human_chip}");
+        assert_eq!(got.draft, DraftState::RestoredObserved);
+        assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
+        assert_eq!(fs::read(root.join("body")).unwrap(), prompt.as_bytes());
+        assert_eq!(
+            fs::read(root.join("draft-bytes")).unwrap(),
+            original.as_bytes()
+        );
+        assert!(!root.join("draft-stash").exists());
+        assert!(!root.join("draft-stash-chip").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("draft-chip")).ok(),
+            human_chip.then(|| human_shown.to_string())
+        );
+        assert!(composer_lock::draft_guarded(&name));
+        let after = SubmissionTmux
+            .pin_guarded(&name)
+            .unwrap()
+            .capture_draft()
+            .unwrap();
+        assert_eq!(
+            screen::stashable(&after, PROMPT, Some((160, 40))),
+            Some(
+                human_shown
+                    .split('\n')
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            )
+        );
+    }
+}
+
+#[test]
+fn managed_idle_literal_modal_text_submits_but_identical_chrome_blocks_all_keys() {
+    let f = Fixture::new();
+    let literal = "Enter to confirm · esc to cancel";
+    let prompt = format!("[User: test]\n{literal}");
+    for in_chrome in [false, true] {
+        let name = format!("idle-literal-modal-{in_chrome}");
+        let before = if in_chrome {
+            view("js", false).replace(
+                "  ⏵⏵ bypass permissions on",
+                &format!("  {literal}\n  ⏵⏵ bypass permissions on"),
+            )
+        } else {
+            view("js", false)
+        };
+        assert_eq!(
+            judge_pane(ShadowProvider::Claude, &before) == PaneVerdict::Modal,
+            in_chrome
+        );
+        assert_ne!(
+            judge_pane(ShadowProvider::Claude, &view(&prompt, true)),
+            PaneVerdict::Modal,
+            "literal composer content is not an idle modal"
+        );
+        let root = renderer_with(
+            &f,
+            &name,
+            "normal",
+            before,
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+            &prompt,
+        );
+        let authority = Authority {
+            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
+            admitted: Cell::new(true),
+        };
+        let target = InputTarget::legacy_tmux(&name);
+        let transcript = root.join("transcript");
+        let request = Request {
+            target: &target,
+            gate: &LegacyTmuxGate,
+            prompt: &prompt,
+            transcript: &transcript,
+            cancel: None,
+            timing: &FAST,
+        };
+        let got = run(Some(&authority), true, &request).unwrap();
+        if in_chrome {
+            assert_eq!(got.delivery, Delivery::NotAttempted);
+            assert_eq!(got.draft, DraftState::Unchanged);
+            assert!(events(&root).is_empty());
+        } else {
+            assert_eq!(got.delivery, Delivery::Observed);
+            assert_eq!(got.draft, DraftState::RestoredObserved);
+            assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
+            assert_eq!(fs::read_to_string(root.join("body")).unwrap(), prompt);
+        }
+    }
+}
+
+#[test]
+fn managed_idle_stash_modal_after_stash_or_paste_never_enters() {
+    let f = Fixture::new();
+    let modal =
+        "  Do you want to proceed?\n  1. Allow\n  2. Deny\n  Enter to confirm · esc to cancel\n";
+    for phase in ["stashed", "own"] {
+        let name = format!("idle-modal-{phase}");
+        let root = renderer(&f, &name, "normal");
+        let state = root.join(phase);
+        let shown = fs::read_to_string(&state).unwrap();
+        let overlay = shown.replace(
+            "  ⏵⏵ bypass permissions on",
+            &format!("{modal}  ⏵⏵ bypass permissions on"),
+        );
+        fs::write(&state, &overlay).unwrap();
+        assert_eq!(
+            judge_pane(ShadowProvider::Claude, &overlay),
+            PaneVerdict::Modal,
+            "the modal fixture must reach the idle modal check"
+        );
+        assert!(
+            if phase == "stashed" {
+                screen::stashed(&overlay)
+            } else {
+                screen::owns(&overlay, PROMPT)
+            },
+            "the modal must veto a readable, otherwise owned composer"
+        );
+        let authority = Authority {
+            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
+            admitted: Cell::new(true),
+        };
+        let target = InputTarget::legacy_tmux(&name);
+        let transcript = root.join("transcript");
+        let request = Request {
+            target: &target,
+            gate: &LegacyTmuxGate,
+            prompt: PROMPT,
+            transcript: &transcript,
+            cancel: None,
+            timing: &FAST,
+        };
+        let got = run(Some(&authority), true, &request).unwrap();
+        assert_eq!(
+            got.delivery,
+            Delivery::AttemptedUnconfirmed,
+            "phase={phase}"
+        );
+        assert_eq!(got.draft, DraftState::Unknown);
+        assert_eq!(
+            events(&root),
+            if phase == "stashed" {
+                vec!["C-s"]
+            } else {
+                vec!["C-s", "paste"]
+            },
+            "phase={phase}"
+        );
+        assert!(composer_lock::draft_guarded(&name));
+    }
+}
+
+#[test]
+fn managed_idle_receipt_accepts_only_exact_measured_paste_wrappers() {
+    use receipt::Receipt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript");
+    let wrapped =
+        |body: &str| format!("<pasted_content id=\"a17f\">\n{body}\n</pasted_content id=\"a17f\">");
+    for (case, body, accepted) in [
+        ("plain", PROMPT.to_string(), true),
+        ("wrapped", wrapped(PROMPT), true),
+        (
+            "outer-separators",
+            format!("\n\n{}\n", wrapped(PROMPT)),
+            true,
+        ),
+        ("prefix", format!("foreign {}", wrapped(PROMPT)), false),
+        ("suffix", format!("{} foreign", wrapped(PROMPT)), false),
+        (
+            "inner-foreign",
+            wrapped(&format!("{PROMPT} foreign")),
+            false,
+        ),
+        (
+            "wrong-close",
+            wrapped(PROMPT).replace(
+                "</pasted_content id=\"a17f\">",
+                "</pasted_content id=\"b17f\">",
+            ),
+            false,
+        ),
+        ("short-token", wrapped(PROMPT).replace("a17f", "a17"), false),
+        (
+            "upper-token",
+            wrapped(PROMPT).replace("a17f", "A17F"),
+            false,
+        ),
+        ("partial-outer", format!("\n{}\n", wrapped(PROMPT)), false),
+    ] {
+        for blocks in [false, true] {
+            fs::write(&path, "{\"type\":\"system\"}\n").unwrap();
+            let receipt = Receipt::before(&path).unwrap();
+            let content = if blocks {
+                serde_json::json!([{"type":"text", "text":body}])
+            } else {
+                serde_json::json!(body)
+            };
+            append(
+                &path,
+                serde_json::json!({"type":"user","message":{"content":content}}),
+            );
+            assert_eq!(
+                receipt.scan(PROMPT),
+                Some(accepted),
+                "case={case}, blocks={blocks}"
+            );
+        }
     }
 }

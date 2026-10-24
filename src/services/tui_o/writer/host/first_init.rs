@@ -64,7 +64,7 @@ pub(super) async fn start<I: HostIo>(
                 let facts =
                     unless_stopped(stopping, io.activation_facts(channel, provider)).await?;
                 // Facts read before a lost gate are not acted on; wait for Owned and read again.
-                if owned_now(channel, gate) {
+                if owned_now(gate) {
                     break facts;
                 }
             };

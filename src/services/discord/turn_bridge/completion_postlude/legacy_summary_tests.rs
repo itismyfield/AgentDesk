@@ -281,7 +281,7 @@ async fn real_bridge_and_watcher_producers_share_the_pinned_episode_latch_in_eit
         let recorder =
             crate::services::discord::recovery_engine::o_cut_recorder::start(channel).await;
         if watcher_first {
-            watcher(&recorder.http, &shared, channel, snapshot).await;
+            watcher(&recorder.http, &shared, channel, snapshot.clone()).await;
         }
         bridge(
             shared.clone(),

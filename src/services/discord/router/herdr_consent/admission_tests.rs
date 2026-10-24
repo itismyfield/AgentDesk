@@ -1532,15 +1532,12 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
     );
     assert_eq!(
         f.state.local_note_posts.load(Ordering::SeqCst),
-        1,
-        "worker_before_record_lifecycle_notice_contract"
+        0,
+        "worker_before_record_transient_failure_no_notice_contract"
     );
     assert!(
-        f.state
-            .written_texts()
-            .iter()
-            .any(|text| text.contains(&format!("row {row}")) && text.contains("Pending")),
-        "worker_before_record_notice_names_original_row_contract"
+        f.state.written_texts().is_empty(),
+        "worker_before_record_pending_retry_has_no_operator_notice_contract"
     );
     sqlx::query(
         "ALTER TABLE sessions RENAME COLUMN unavailable_hosted_execution TO hosted_execution",
@@ -1583,6 +1580,132 @@ async fn actual_worker_assessment_failure_rearms_same_row_then_holds_once_pg() {
         store().load_all().unwrap()[0].unresolved_intents().len(),
         1,
         "worker_before_record_one_hold_after_retry_contract"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_worker_persistent_consent_error_rearms_once_then_preserves_spawned_pg() {
+    use crate::services::cluster::intake_worker::{self as worker, test_executor};
+    const CHANNEL: u64 = discord_mock::CHANNEL_ID + 330;
+    let mut f = Fixture::new("disabled").await;
+    f.state.allow_channel(CHANNEL);
+    let _rest = crate::services::discord::shared_state::test_rest::install(f.http.clone());
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    f.shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+    Arc::get_mut(&mut f.shared).unwrap().health_registry = Arc::downgrade(&registry);
+    f.shared
+        .http
+        .cached_bot_token
+        .set("isolated-worker-token".into())
+        .unwrap();
+    registry.register("claude".into(), f.shared.clone()).await;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    seed_ready_row(&pool, &f.shared, CHANNEL).await;
+    let row = crate::db::intake_outbox::owner_fence_pg_tests::seed(
+        &pool,
+        &CHANNEL.to_string(),
+        "pending",
+        true,
+    )
+    .await;
+    let observed_pool = pool.clone();
+    let claims = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_claims = claims.clone();
+    let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_injected = injected.clone();
+    let _checkpoint = test_executor::hook(Box::new(move |point| {
+        let pool = observed_pool.clone();
+        let claims = observed_claims.clone();
+        let injected = observed_injected.clone();
+        Box::pin(async move {
+            if point == test_executor::Checkpoint::AfterClaim {
+                claims.fetch_add(1, Ordering::SeqCst);
+            }
+            if point == test_executor::Checkpoint::Spawned && !injected.swap(true, Ordering::SeqCst)
+            {
+                sqlx::query("ALTER TABLE sessions RENAME COLUMN hosted_execution TO unavailable_hosted_execution")
+                    .execute(&pool).await.unwrap();
+            }
+        })
+    }));
+    let original = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+    let mut rearms = 0;
+    let mut markers = Vec::new();
+    for _ in 0..3 {
+        let outcome = worker::run_intake_worker_tick(
+            &pool,
+            &f.shared,
+            "fence-worker",
+            "claude",
+            "token",
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                worker::TickOutcome::Held | worker::TickOutcome::QueueEmpty
+            ),
+            "worker_persistent_consent_no_effects_contract: {outcome:?}"
+        );
+        let current = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+        if current["status"] == "pending" {
+            rearms += 1;
+        }
+        markers.push(current["last_error"].clone());
+        for field in [
+            "id",
+            "user_text",
+            "attachment_refs",
+            "attempt_no",
+            "retry_count",
+            "parent_outbox_id",
+        ] {
+            assert_eq!(
+                current[field], original[field],
+                "worker_persistent_consent_original_payload_contract: {field}"
+            );
+        }
+    }
+    assert_eq!(rearms, 1, "worker_persistent_consent_rearm_once_contract");
+    assert!(
+        markers.iter().all(|marker| marker == &markers[0]),
+        "worker_persistent_consent_marker_never_resets_contract"
+    );
+    assert_eq!(
+        claims.load(Ordering::SeqCst),
+        2,
+        "worker_persistent_consent_claim_bound_contract"
+    );
+    let final_row = crate::db::intake_outbox::owner_fence_pg_tests::snapshot(&pool, row).await;
+    assert_eq!(
+        final_row["status"], "spawned",
+        "worker_persistent_consent_spawned_preserved_contract"
+    );
+    assert_eq!(
+        f.state.local_note_posts.load(Ordering::SeqCst),
+        1,
+        "worker_persistent_consent_one_inspection_notice_contract"
+    );
+    assert!(
+        f.state
+            .written_texts()
+            .iter()
+            .any(|text| text.contains(&format!("row {row}"))
+                && text.contains("requires inspection")
+                && text.contains("Spawned")),
+        "worker_persistent_consent_notice_preserved_row_contract"
+    );
+    assert!(
+        !f.root.path().join("runtime/herdr_policy/consents").exists(),
+        "worker_persistent_consent_before_record_has_no_store_publication_contract"
     );
     pool.close().await;
     db.drop().await;

@@ -11,9 +11,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use super::*;
 use crate::config::session_hosts::ForcedSessionHosts;
-use crate::db::o_channel_homes::{HeldHome, HomeState};
 use crate::services::claude_tui::source_verify::{SourceHistory, Visit};
-use crate::services::cluster::channel_home::HomeGate;
 use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::store::fault::{self, Step};
 use crate::services::tui_o::store::rotation::{Rotation, Successor};
@@ -52,7 +50,7 @@ fn chain(hops: usize) -> Chain {
     chain_on(hops, true)
 }
 
-/// `herdr` configures the channel, so its POSTs are counted and its rotation count published.
+/// `herdr` enables the channel's drain publications; both paths count POSTs.
 fn chain_on(hops: usize, herdr: bool) -> Chain {
     let hop = |n: usize| (format!("h{n}"), row(&format!("n{n}"), &format!("h{n} one")));
     chain_named(hops, herdr, hop)
@@ -118,11 +116,10 @@ impl Chain {
 
     fn context(&self) -> Context {
         Context {
+            codex: None,
             tmux: self.pane.clone(),
             nonce: "nonce".into(),
-            home_epoch: None,
             lock: Arc::default(),
-            permit: None,
         }
     }
 
@@ -150,6 +147,8 @@ impl Chain {
             });
         }
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -253,6 +252,22 @@ fn run(chain: &Chain) -> Run {
 /// The actor of `chain` with its run's mailbox. Its probes are stamped with a wall clock that
 /// follows tokio's paused time, read only once `held` is clear.
 fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>) -> Run {
+    run_writer(
+        chain,
+        readers,
+        held,
+        chain.harness.writer(),
+        ShadowProvider::Claude,
+    )
+}
+
+fn run_writer(
+    chain: &Chain,
+    readers: Option<ReaderConfig>,
+    held: Arc<AtomicBool>,
+    writer: Writer,
+    provider: ShadowProvider,
+) -> Run {
     let (t0, w0) = (tokio::time::Instant::now(), SystemTime::now());
     let wall: transition_port::Wall = Arc::new(move || {
         while held.load(Ordering::Acquire) {
@@ -271,12 +286,9 @@ fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>)
         published,
         Owing::default(),
     );
-    let (config, writer) = (WriterConfig { enabled: true }, chain.harness.writer());
+    let config = WriterConfig { enabled: true };
     let bindings = Arc::clone(&chain.bindings);
-    let spawn = || {
-        let provider = ShadowProvider::Claude;
-        spawn_projecting(&config, readers, writer, provider, bindings, projections)
-    };
+    let spawn = || spawn_projecting(&config, readers, writer, provider, bindings, projections);
     let task = transition_port::spawning(receiver, spawn).unwrap();
     Run {
         port,
@@ -817,43 +829,23 @@ async fn transition_apply_holds_a_source_whose_inputs_changed_after_its_probes()
     }
 }
 
-/// A home holding channel 70 here with intake open, so its commands are admitted.
-fn admitting_home() -> Arc<HomeGate> {
-    let home = Arc::new(HomeGate::new("70", "mini"));
-    let written = HeldHome::for_test("70", "mini", 1, HomeState::Worker);
-    home.confirm(&written, tokio::time::Instant::now()).unwrap();
-    home
-}
-
-// A request dropped before the mailbox took it changes nothing; a taken one keeps its job and
-// permit to the end whoever left, until the actor itself ends.
+// A request dropped before mailbox admission changes nothing; an admitted job continues
+// after its requester leaves, until the work completes or its actor ends.
 #[tokio::test(start_paused = true)]
-async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_left() {
+async fn transition_job_runs_to_completion_after_the_requester_leaves() {
     let chain = chain(1);
     let _current = chain.current();
     let actor = run(&chain);
     settle(&chain).await;
-    let home = admitting_home();
-    let mut permits = [(); 3].map(|_| home.admit_command("claude"));
-    assert_eq!(home.commands_in_flight(), 3);
-    let with = |permit| Context {
-        permit,
-        ..chain.context()
-    };
     let base = hooks::started();
     drop(
         actor
             .port
-            .request(chain.apply(chain.request(JOB)), with(permits[0].take())),
+            .request(chain.apply(chain.request(JOB)), chain.context()),
     );
     polls(3).await;
     assert_eq!(hooks::started() - base, 0, "[T4:dropped_before]");
-    assert_eq!(home.commands_in_flight(), 2, "[T4:dropped_before]");
-    let asked = send(
-        &actor,
-        chain.apply(chain.request(JOB)),
-        with(permits[1].take()),
-    );
+    let asked = send(&actor, chain.apply(chain.request(JOB)), chain.context());
     for _ in 0..5 {
         polls(1).await;
         hooks::settle_workers();
@@ -863,23 +855,19 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
     }
     assert_eq!(hooks::started() - base, 1, "[T4:taken]");
     asked.abort();
-    assert_eq!(home.commands_in_flight(), 2, "[T4:requester_left]");
     for _ in 0..40 {
         polls(1).await;
         hooks::settle_workers();
     }
     assert_eq!(chain.audit(0).as_deref(), Some(JOB), "[T4:ran_to_its_end]");
-    assert_eq!(home.commands_in_flight(), 1, "[T4:released_at_end]");
     let asked = send(
         &actor,
         Operation::Inspect(chain.request("next")),
-        with(permits[2].take()),
+        chain.context(),
     );
     polls(1).await;
     hooks::settle_workers();
-    assert_eq!(home.commands_in_flight(), 1, "[T4:held_by_the_job]");
     halt(actor.stop, actor.task).await;
-    assert_eq!(home.commands_in_flight(), 0, "[T4:actor_ended]");
     let ended = asked.await.unwrap().err();
     assert_eq!(
         ended.as_deref(),
@@ -889,7 +877,7 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
 }
 
 // A stop, the actor's or only its host's so far, raised while the retiring poll awaits a POST is
-// read again before the write: nothing is written, and the job answers with its permit released.
+// read again before the write: nothing is written and the job answers with Stopping.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held() {
     for host in [false, true] {
@@ -899,11 +887,7 @@ async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_hel
         let release = Release(Arc::clone(&held));
         let actor = run_with(&chain, None, Arc::clone(&held));
         settle(&chain).await;
-        let home = admitting_home();
-        let context = Context {
-            permit: home.admit_command("claude"),
-            ..chain.context()
-        };
+        let context = chain.context();
         let (base, kept) = (hooks::started(), chain.cursor_file(0));
         let asked = send(&actor, chain.apply(chain.request(JOB)), context);
         for _ in 0..5 {
@@ -960,7 +944,6 @@ async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_hel
             Outcome::Held(Hold::Stopping),
             "[stop:{host}:outcome]"
         );
-        assert_eq!(home.commands_in_flight(), 0, "[stop:{host}:permit]");
         let last = port.posts().last().cloned();
         assert_eq!(
             last.as_deref(),
@@ -1010,6 +993,7 @@ async fn transition_judges_uncounted_posts_unknown() {
     let _current = chain.current();
     let actor = run(&chain);
     settle(&chain).await;
+    crate::services::tui_o::writer::deliver::forget_posts_for_test(CHANNEL);
     let reply = ask(
         &actor,
         Operation::Inspect(chain.request(JOB)),
@@ -1259,3 +1243,49 @@ mod apply_tests;
 
 #[path = "transition_automatic_tests.rs"]
 mod automatic_tests;
+
+#[tokio::test(start_paused = true)]
+async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_restore() {
+    let chain = chain(0);
+    let _current = chain.current();
+    chain.harness.gate.acquired();
+    chain.harness.port.say(BOT + 1, "history readable");
+    chain
+        .harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(super::Reply::Unsent);
+    let mut writer = chain.harness.writer();
+    assert_eq!(
+        writer
+            .deliver(&piece("retry-observation", "owed retry"))
+            .await,
+        super::Step::Done
+    );
+    assert!(writer.has_local_retry());
+    assert_eq!(writer.store().ledger().unresolved(), None);
+    for reopen in 0..2 {
+        let actor = run_writer(&chain, None, Arc::default(), writer, ShadowProvider::Claude);
+        polls(2).await;
+        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
+        let reply = ask(
+            &actor,
+            Operation::Inspect(chain.request(JOB)),
+            chain.context(),
+        )
+        .await;
+        assert_eq!(
+            reply.summary.unwrap().obligations.unwrap().owed,
+            1,
+            "retry survives queue0 and reopen {reopen}"
+        );
+        assert_eq!(chain.harness.port.posts().len(), 1, "retry not due");
+        halt(actor.stop, actor.task).await;
+        writer = chain.harness.writer();
+    }
+}
+
+#[path = "transition_actor_bo_tests.rs"]
+pub(crate) mod bo;

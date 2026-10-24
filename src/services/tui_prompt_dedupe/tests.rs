@@ -1,18 +1,38 @@
 use super::*;
 
-// A private process gives lock-state probes their own registry, including unguarded readers.
-pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+// Probes that break whenever another test in the process touches STATE (resets or try_lock contention).
+const PRIVATE_REGISTRY_TESTS: &[&str] = &[
+    "services::tui_prompt_dedupe::shadow_peek::tests::existing_binding_peek_semantics_are_preserved",
+    "services::tui_prompt_dedupe::shadow_peek::tests::detailed_binding_peek_distinguishes_busy_without_mutating_state",
+    "services::tui_prompt_dedupe::shadow_peek::tests::detailed_binding_peek_recovers_poison_with_existing_optional_semantics",
+    "services::tui_prompt_dedupe::tests::reconcile_holds_source_authority_across_read_decision_and_replacement",
+];
+const PRIVATE_REGISTRY_CHILD: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TEST";
+// When set, each probe body appends its test name so the list can be checked end to end.
+const PRIVATE_REGISTRY_TRACE: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TRACE";
+
+fn listed_private_registry_test(test_name: &str) -> &str {
     let test_name = test_name
         .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
         .expect("crate-qualified test name");
-    const CHILD_TEST: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TEST";
-    if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+    assert!(
+        PRIVATE_REGISTRY_TESTS.contains(&test_name),
+        "{test_name} must be listed in PRIVATE_REGISTRY_TESTS"
+    );
+    test_name
+}
+
+// A private process gives lock-state probes their own registry, including unguarded readers.
+// Returns true in the shared process, which must then return without running the body.
+pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+    let test_name = listed_private_registry_test(test_name);
+    if std::env::var(PRIVATE_REGISTRY_CHILD).as_deref() == Ok(test_name) {
         return false;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test_name, "--format=pretty", "--color=never"])
-        .env(CHILD_TEST, test_name)
+        .env(PRIVATE_REGISTRY_CHILD, test_name)
         .output()
         .expect("start private registry test process");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -27,6 +47,59 @@ pub(super) fn run_with_private_registry(test_name: &str) -> bool {
         status = output.status,
     );
     true
+}
+
+// First line of a probe body: the body may only run inside its own private registry process.
+pub(super) fn assert_private_registry_body(test_name: &str) {
+    let test_name = listed_private_registry_test(test_name);
+    assert_eq!(
+        std::env::var(PRIVATE_REGISTRY_CHILD).as_deref(),
+        Ok(test_name),
+        "{test_name} body ran outside its private registry process"
+    );
+    if let Some(trace) = std::env::var_os(PRIVATE_REGISTRY_TRACE) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(trace)
+            .expect("open private registry trace");
+        writeln!(file, "{test_name}").expect("write private registry trace");
+    }
+}
+
+// Every listed probe must run its body in a child, so the shared sweep never runs it unisolated.
+#[test]
+fn private_registry_tests_run_their_bodies_only_in_a_private_process() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, test_name) in PRIVATE_REGISTRY_TESTS.iter().enumerate() {
+        let trace = dir.path().join(format!("trace-{index}"));
+        let child = {
+            let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--format=pretty", "--color=never"])
+                .env_remove(PRIVATE_REGISTRY_CHILD)
+                .env(PRIVATE_REGISTRY_TRACE, &trace)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("start sweep-mode test process")
+        };
+        let output = child.wait_with_output().expect("sweep-mode test output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "sweep-mode run of {test_name} failed ({status}):\n{stdout}\n{stderr}",
+            status = output.status,
+            stderr = String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&trace).unwrap_or_default(),
+            format!("{test_name}\n"),
+            "{test_name} must run its body once, in its private registry process"
+        );
+    }
 }
 
 fn reset_state() {
@@ -2948,12 +3021,14 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
-    if run_with_private_registry(concat!(
+    let name = concat!(
         module_path!(),
         "::reconcile_holds_source_authority_across_read_decision_and_replacement"
-    )) {
+    );
+    if run_with_private_registry(name) {
         return;
     }
+    assert_private_registry_body(name);
     // The authority key follows the runtime root env, so no other test may move it mid-probe.
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK

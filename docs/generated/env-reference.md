@@ -26,6 +26,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
+| `ADK_CODEX_OBSERVATION_MUTANT` | `src/services/session_host/herdr_registry.rs`, `src/services/tui_prompt_dedupe/binding_context/inventory.rs`, `src/services/tui_prompt_dedupe/binding_events/codex/observation.rs` | Reads whole registered endpoints. |
 | `ADK_COLDSTOP_MUTANT` | `src/services/provider/herdr_before_start.rs` |  |
 | `ADK_EMPTY_TERMINAL_MUTANT` | `src/services/codex_tui/rollout_tail/parser/managed_empty.rs`, `src/services/discord/inflight/save_store/identity_gate/runtime_stamp/captured_terminal_admission.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
@@ -46,14 +47,11 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_RECAP_CLEANUP_MUTANT` | `src/services/discord/session_idle_cleanup.rs` | Test-only cleanup mutations; production retains the claim and card guards. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
-| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
-| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs`, `src/services/cluster/channel_home_boot.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
-| `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
-| `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
+| `ADK_S3B_MUTANT` | `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs` | Writes the first `init` under the gate's admission: a drain's close or a lease transition waits for its synchronous I/O and the activation serial lock. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
-| `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
+| `ADK_TEST_HOME_COMMAND_MUTANT` | `src/server/routes/queue_api.rs` | Cancel the active turn in a channel. |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
@@ -62,6 +60,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
+| `AGENTDESK_BO_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/tui_o/writer/deliver.rs` |  |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
 | `AGENTDESK_CLAUDE_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` | `0` lets watcher respawn take over a live Claude original again. |
@@ -76,6 +75,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
+| `AGENTDESK_CODEX_SNAPSHOT_MUTANT` | `src/services/tui_o/writer/actor/codex_history.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
 | `AGENTDESK_CONFIG` | `src/config.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/settings.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/git/repo_resolver.rs`, `src/services/mcp_config.rs` | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |

@@ -445,12 +445,14 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
     let row = super::super::load_inflight_state(&ProviderKind::Claude, channel).unwrap();
     let birth = InflightEpisodePin::from_state(&row);
     let restarted = ManagedSubmission(Arc::new(Attempt {
+        native_session_id: row.session_id.clone(),
         provider: ProviderKind::Claude,
         channel_id: channel,
         birth,
         target: row.tmux_session_name.clone().unwrap(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
+        evidence: Mutex::new(evidence::Evidence::default()),
     }));
     let session = row.tmux_session_name.as_deref().unwrap();
     assert!(crate::services::claude_tui::guarded_outcome::held(session).is_none());
@@ -474,4 +476,188 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
         ),
         InflightEpisodePin::from_state(&row)
     );
+}
+
+#[test]
+fn a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence() {
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::claude_tui::input::PreparationHold;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    use std::io::Write;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (mut row, _) = managed_row(7_314_292);
+    row.session_id = Some("native-warm-sid".into());
+    let cap = install_managed_submission_boundary(&mut row, &TurnHost::Tmux).unwrap();
+    super::super::clear_inflight_state(&ProviderKind::Claude, row.channel_id);
+    super::super::save_inflight_state_create_new(&row).unwrap();
+    let session = row.tmux_session_name.as_deref().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.jsonl");
+    std::fs::write(&path, "").unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    cap.observer().preparation_held(&PreparationHold::before(
+        session,
+        "cleanup_not_owned",
+        "transient cleanup refusal".into(),
+    ));
+    assert!(cap.preparation_hold().is_some());
+    guarded_outcome::with_owner(Some(cap.observer()), || {
+        guarded_outcome::receipt(session, &row.user_text)
+    });
+    cap.fence().before_first_payload().unwrap();
+    assert!(
+        cap.preparation_hold().is_none(),
+        "an accepted fence supersedes only a before-payload refusal"
+    );
+    writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+        serde_json::json!({"type":"user", "sessionId":row.session_id, "message":{"content":row.user_text}})).unwrap();
+    let (sender, _rx) = std::sync::mpsc::channel();
+    crate::services::claude::emit_claude_tui_watcher_handoff(
+        &sender,
+        path.to_str().unwrap(),
+        session,
+        &path,
+    );
+    cap.observer().receipt_finished(session);
+    assert!(
+        cap.exact_user_receipt(),
+        "warm binding without SID uses the attempt native SID"
+    );
+    cap.observer()
+        .preparation_held(&PreparationHold::uncertain(session, "lost ACK".into()));
+    cap.fence().before_first_payload().unwrap();
+    assert!(
+        cap.preparation_hold().is_some_and(|h| !h.may_requeue()),
+        "an uncertain send remains sticky"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn a2_resolved_fresh_sid_survives_nested_receipt_recapture() {
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    use std::io::Write;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (mut row, _) = managed_row(7_314_293);
+    row.session_id = Some("previous-session-sid".into());
+    let cap = install_managed_submission_boundary(&mut row, &TurnHost::Tmux).unwrap();
+    super::super::clear_inflight_state(&ProviderKind::Claude, row.channel_id);
+    super::super::save_inflight_state_create_new(&row).unwrap();
+    let session = row.tmux_session_name.as_deref().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh-native.jsonl");
+    std::fs::write(&path, "").unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some("resolved-fresh-sid".into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    guarded_outcome::with_owner(Some(cap.observer()), || {
+        guarded_outcome::fresh_receipt(
+            session,
+            &row.user_text,
+            path.to_str().unwrap(),
+            "resolved-fresh-sid",
+        );
+        guarded_outcome::capture_preparation(|| {
+            guarded_outcome::receipt(session, &row.user_text);
+            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(false));
+            cap.fence().before_first_payload().unwrap();
+            writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+                serde_json::json!({"type":"user", "sessionId":"resolved-fresh-sid", "message":{"content":row.user_text}})).unwrap();
+            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(true), "real attempt owner exposes its live exact input receipt");
+            Ok(())
+        })
+        .unwrap();
+    });
+    let (sender, _rx) = std::sync::mpsc::channel();
+    crate::services::claude::emit_claude_tui_watcher_handoff(
+        &sender,
+        path.to_str().unwrap(),
+        session,
+        &path,
+    );
+    cap.observer().receipt_finished(session);
+    assert!(
+        cap.exact_user_receipt(),
+        "resolved fresh SID survives nested adapters and an older inflight SID"
+    );
+    tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn a2_fresh_launch_receipt_survives_stale_binding_until_real_handoff() {
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (index, old_sid) in [None, Some("old-sid".to_string())].into_iter().enumerate() {
+        let (row, cap) = managed_row(7_314_294 + index as u64);
+        let session = row.tmux_session_name.as_deref().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("previous.jsonl");
+        let new = dir.path().join("launch.jsonl");
+        std::fs::write(&old, "previous transcript\n").unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: old.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: old_sid.clone(),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        guarded_outcome::with_owner(Some(cap.observer()), || {
+            guarded_outcome::fresh_receipt(
+                session,
+                &row.user_text,
+                new.to_str().unwrap(),
+                "launch-sid",
+            );
+            guarded_outcome::capture_preparation(|| {
+                // Repeat all submission snapshots while the old binding is still live.
+                for _ in 0..3 {
+                    guarded_outcome::receipt(session, &row.user_text);
+                }
+                Ok(())
+            })
+            .unwrap();
+            cap.fence().before_first_payload().unwrap();
+            std::fs::write(&new, serde_json::json!({"type":"user", "sessionId":"launch-sid", "message":{"content":row.user_text}}).to_string()+"\n").unwrap();
+            let (sender, _rx) = std::sync::mpsc::channel();
+            crate::services::claude::emit_claude_tui_watcher_handoff(
+                &sender,
+                new.to_str().unwrap(),
+                session,
+                &new,
+            );
+            cap.observer().receipt_finished(session);
+            assert!(
+                cap.exact_user_receipt(),
+                "fresh launch transcript must survive stale binding recapture: old_sid={old_sid:?}"
+            );
+        });
+        tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    }
 }

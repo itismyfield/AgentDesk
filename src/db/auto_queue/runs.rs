@@ -39,7 +39,7 @@ pub(crate) async fn queue_run_completion_notify_on_pg(
 
     for channel_id in targets {
         let target = format!("channel:{channel_id}");
-        crate::services::message_outbox::enqueue_outbox_pg_on_tx(
+        crate::services::message_outbox::enqueue_session_notice_pg_on_tx(
             tx,
             crate::services::message_outbox::OutboxMessage {
                 target: &target,

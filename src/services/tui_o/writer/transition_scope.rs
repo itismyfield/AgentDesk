@@ -9,6 +9,9 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::transition_port::Context;
 
+#[path = "transition_scope/codex.rs"]
+pub(crate) mod codex;
+
 const DOMAIN: &[u8] = b"agentdesk/hrot/transition-scope\0";
 const VERSION: u8 = 1;
 const PREFIX: &str = "hrot-scope-v1:";
@@ -66,6 +69,9 @@ pub(crate) fn approve(
     request: &Request,
     context: &Context,
 ) -> Result<ScopeApproval, String> {
+    if snapshot.provider == ShadowProvider::Codex {
+        return Err("Codex apply is deferred; observation identity is not an approval".into());
+    }
     if request.channel != snapshot.channel {
         return Err("the request names another channel".into());
     }
@@ -149,13 +155,8 @@ pub(super) fn encode(
     });
     bytes(&mut out, context.tmux.as_bytes());
     bytes(&mut out, context.nonce.as_bytes());
-    match context.home_epoch {
-        None => out.push(0),
-        Some(epoch) => {
-            out.push(1);
-            out.extend(epoch.to_be_bytes());
-        }
-    }
+    // Retain the existing v1 NULL home-epoch tag.
+    out.push(0);
     int(&mut out, hops.len() as u64);
     let source = |out: &mut Vec<u8>, source: &SourceId| {
         bytes(out, source.session_id.as_bytes());

@@ -113,3 +113,6 @@ impl super::PendingMessageOutboxRow {
 
 #[cfg(test)]
 mod attachment_pg_tests;
+
+#[cfg(test)]
+mod session_notice_pg_tests;

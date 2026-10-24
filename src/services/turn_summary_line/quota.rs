@@ -9,6 +9,8 @@ use crate::services::provider_auth_profile::ProviderAuthOverlay;
 
 const MAX_AGE_SECONDS: i64 = 15 * 60;
 
+mod statusline;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Quota {
     five_hour: Option<Window>,
@@ -201,20 +203,30 @@ fn cached_codex(
     fresh(*fetched, now).then_some(*quota)?.current(now)
 }
 
-pub(crate) fn snapshot(provider: &str, channel: u64, selection: Option<Selected>) -> Option<Quota> {
+pub(crate) fn snapshot(
+    provider: &str,
+    channel: u64,
+    selection: Option<Selected>,
+    session_id: Option<&str>,
+) -> Option<Quota> {
     let now = Utc::now();
     match provider {
-        "claude" => {
-            let cache = CACHE.try_read().ok()?;
-            if cache
-                .profiles
-                .get(&(provider.to_string(), channel))
-                .is_some_and(|selected| selected.profile != "default")
-            {
-                return None;
-            }
-            claude(&CswapService::global().cached_accounts_for_summary()?, now)
-        }
+        "claude" => statusline::with_fallback(
+            &crate::services::claude_tui::hook_bundle::statusline::record_dir(),
+            session_id,
+            now,
+            || {
+                let cache = CACHE.try_read().ok()?;
+                if cache
+                    .profiles
+                    .get(&(provider.to_string(), channel))
+                    .is_some_and(|selected| selected.profile != "default")
+                {
+                    return None;
+                }
+                claude(&CswapService::global().cached_accounts_for_summary()?, now)
+            },
+        ),
         "codex" => cached_codex(&CACHE, channel, selection?, now),
         _ => None,
     }

@@ -9,16 +9,12 @@ use serde_json::{Value, json};
 use super::force_kill::{FORCE_KILL_RETRY_LIMIT, Prepared};
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::hosted_execution::http_force::herdr_execution;
-use crate::services::cluster::channel_home::admit_command;
 use crate::services::discord::herdr_terminate::OperatorTerminate;
 use crate::services::discord::herdr_terminate::http_force::{Expected, terminate_for_http};
 use crate::services::provider::ProviderKind;
 
 mod effects;
 use effects::{HERDR_TERMINATE, HerdrKillEffects, KillInput, herdr_force_kill_effects};
-
-/// The home command a force-kill is admitted under while it terminates the channel's execution.
-const COMMAND: &str = "force_kill_session";
 
 /// The answer when the force-kill's read picked a Claude/Codex Herdr execution its row owns, under
 /// the requested key and no other runtime channel, bound to that read's owner and dispatch.
@@ -43,13 +39,6 @@ pub(super) async fn herdr_force_kill(
     #[cfg(test)]
     crate::services::discord::herdr_terminate::run_before_selection_probe().await;
     let (key, dispatch) = (prepared.session_key, prepared.active_dispatch_id.clone());
-    let permit = match admit_command(&record.owner.channel_id, COMMAND) {
-        Ok(permit) => permit,
-        Err(refusal) => {
-            let body = json!({"error": refusal.to_string(), "session_key": key});
-            return Some((StatusCode::CONFLICT, Json(body)));
-        }
-    };
     let input = KillInput {
         state: state.clone(),
         pool: prepared.pool.clone(),
@@ -68,7 +57,7 @@ pub(super) async fn herdr_force_kill(
     };
     let bound = (request, expected);
     let pool = prepared.pool.clone();
-    let (result, effects) = terminate_for_http(registry, pool, bound, permit, reason, {
+    let (result, effects) = terminate_for_http(registry, pool, bound, reason, {
         move |exclusion| herdr_force_kill_effects(exclusion, input).boxed()
     })
     .await;

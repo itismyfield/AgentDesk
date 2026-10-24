@@ -295,7 +295,6 @@ async fn catch_up_live_entry(reserved: bool) {
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     let mut message = discord_mock::user_message(message_id.get(), TEXT);
     message.channel_id = channel;

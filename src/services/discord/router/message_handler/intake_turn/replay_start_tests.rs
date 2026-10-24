@@ -17,6 +17,18 @@ use std::time::Duration;
 
 const STALE: &str = "stale-resume";
 
+fn assert_retry_context_eq(actual: Option<&str>, expected: Option<&str>) {
+    use crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext;
+    let actual = RetryPromptContext::restore(actual.map(str::to_owned));
+    let expected = RetryPromptContext::restore(expected.map(str::to_owned));
+    assert_eq!(actual.raw, expected.raw, "original reply custody");
+    assert_eq!(
+        actual.selected, expected.selected,
+        "selected prelude custody"
+    );
+    assert_eq!(actual.may_select(), expected.may_select());
+}
+
 mod kickoff_tests {
     //! Exercises late start, durable handback and queue views through actual kickoff.
 
@@ -252,7 +264,10 @@ mod kickoff_tests {
             actual.text, original.text,
             "whole original request, including second line"
         );
-        assert_eq!(actual.reply_context, original.reply_context);
+        assert_retry_context_eq(
+            actual.reply_context.as_deref(),
+            original.reply_context.as_deref(),
+        );
         assert_eq!(actual.has_reply_boundary, original.has_reply_boundary);
         assert_eq!(actual.merge_consecutive, original.merge_consecutive);
         assert_eq!(
@@ -320,7 +335,7 @@ mod kickoff_tests {
         sources.sort();
         assert_eq!(stored.0, original.text);
         assert_eq!(stored.1, sources);
-        assert_eq!(stored.2, original.reply_context);
+        assert_retry_context_eq(stored.2.as_deref(), original.reply_context.as_deref());
         assert_eq!(
             stored.3,
             serde_json::json!(
@@ -365,12 +380,15 @@ mod kickoff_tests {
         head_card: MessageId,
         merged_card: MessageId,
     ) {
-        let (checked, role_override) = turn_orchestrator::load_channel_pending_queue_checked(
-            &ProviderKind::Claude,
-            &host.shared.token_hash,
-            channel,
-        )
-        .expect("checked durable queue loader must succeed, never treat a read failure as empty");
+        let (checked, role_override) =
+            turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                &ProviderKind::Claude,
+                &host.shared.token_hash,
+                channel,
+            )
+            .expect(
+                "checked durable queue loader must succeed, never treat a read failure as empty",
+            );
         assert!(role_override.is_none());
         assert_eq!(checked.len(), 2);
         assert_full_item(&checked[0], original);
@@ -875,7 +893,7 @@ mod kickoff_tests {
                     .collect();
                 sources.sort();
                 assert_eq!(stored.4, sources);
-                assert_eq!(stored.5, original.reply_context);
+                assert_retry_context_eq(stored.5.as_deref(), original.reply_context.as_deref());
                 assert_eq!(
                     stored.6,
                     serde_json::json!(
@@ -905,12 +923,13 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
-                    &ProviderKind::Claude,
-                    &host.shared.token_hash,
-                    channel,
-                )
-                .expect("durable queue custody must ACK, not soft-skip its loader error");
+                let (restored, role) =
+                    turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                        &ProviderKind::Claude,
+                        &host.shared.token_hash,
+                        channel,
+                    )
+                    .expect("durable queue custody must ACK, not soft-skip its loader error");
                 assert!(role.is_none());
                 assert_eq!(restored.len(), 2);
                 assert_full_item(&restored[0], &original);
@@ -1059,12 +1078,13 @@ mod kickoff_tests {
                 assert_full_item(&snapshot.intervention_queue[0], &original);
                 assert_full_item(&snapshot.intervention_queue[1], &tail);
                 assert!(snapshot.cancel_token.is_none());
-                let (restored, role) = turn_orchestrator::load_channel_pending_queue_checked(
-                    &ProviderKind::Claude,
-                    &host.shared.token_hash,
-                    channel,
-                )
-                .expect("raw Deferred requires a real durable queue ACK");
+                let (restored, role) =
+                    turn_orchestrator::test_support::load_channel_pending_queue_checked(
+                        &ProviderKind::Claude,
+                        &host.shared.token_hash,
+                        channel,
+                    )
+                    .expect("raw Deferred requires a real durable queue ACK");
                 assert!(role.is_none());
                 assert_eq!(restored.len(), 2);
                 assert_full_item(&restored[0], &original);
@@ -1235,7 +1255,6 @@ mod worker_entry_tests {
             preserve_on_cancel: true,
             agent_id: format!("input-b-{channel}"),
             provider: "claude".into(),
-            home_epoch: None,
         };
         let id = insert_pending(&host.pool, &payload, 1, None).await.unwrap();
         // Seed SQL directly to cover rows written by older delivery producers.
@@ -2004,7 +2023,7 @@ async fn started(
         owner_id: "7".into(),
         agent_id: String::new(),
         attachments: serde_json::json!([]),
-        reply_context: None,
+        reply_context: crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext::raw(None).requeue(),
         provenance: "new_input",
     };
     let receipt = write::register_or_reuse(&host.pool, &input, "node-a")

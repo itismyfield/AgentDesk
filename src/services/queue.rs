@@ -102,68 +102,55 @@ impl QueueService {
                 let active_turn = self
                     .load_cancel_dispatch_turn_session(pool, dispatch_id)
                     .await?;
-                let permit = match active_turn.as_ref() {
-                    None => None,
-                    Some(turn) => {
-                        let admission = match turn.channel_id.as_deref() {
-                            Some(channel) => crate::services::cluster::channel_home::admit_command(
-                                channel,
-                                turn.provider_name.as_deref().unwrap_or("cancel_dispatch"),
-                            ),
-                            None => crate::services::cluster::channel_home::admit_unattributed(),
-                        };
-                        admission.map_err(|reason| ServiceError::conflict(reason.to_string()))?
-                    }
-                };
-                crate::services::cluster::channel_home::command_scope(permit, async {
-                let mut turn_cancelled = false;
-                let mut turn_session_key = None;
-                let mut turn_tmux_name = None;
-                let mut turn_channel_id = None;
-                let mut turn_agent_id = None;
-                let mut turn_status = None;
-                let mut turn_completed_at = None;
-                let mut turn_lifecycle_path = None;
-                let mut turn_tmux_killed = None;
-                let mut turn_queue_preserved = None;
-                let mut turn_inflight_cleared = None;
-                let mut turn_queued_remaining = None;
-                // #1672 P2: capture the lifecycle target so we can kick a
-                // post-cancel queue drain after the dispatch row is
-                // updated — same semantics the `/turns/{id}/cancel`
-                // surface already provides.
-                let mut drain_target: Option<TurnLifecycleTarget> = None;
+                {
+                    let mut turn_cancelled = false;
+                    let mut turn_session_key = None;
+                    let mut turn_tmux_name = None;
+                    let mut turn_channel_id = None;
+                    let mut turn_agent_id = None;
+                    let mut turn_status = None;
+                    let mut turn_completed_at = None;
+                    let mut turn_lifecycle_path = None;
+                    let mut turn_tmux_killed = None;
+                    let mut turn_queue_preserved = None;
+                    let mut turn_inflight_cleared = None;
+                    let mut turn_queued_remaining = None;
+                    // #1672 P2: capture the lifecycle target so we can kick a
+                    // post-cancel queue drain after the dispatch row is
+                    // updated — same semantics the `/turns/{id}/cancel`
+                    // surface already provides.
+                    let mut drain_target: Option<TurnLifecycleTarget> = None;
 
-                if let Some(active_turn) = active_turn.as_ref() {
-                    let provider_kind = active_turn
-                        .provider_name
-                        .as_deref()
-                        .and_then(ProviderKind::from_str);
-                    let parsed_channel_id = active_turn
-                        .channel_id
-                        .as_deref()
-                        .and_then(|channel_id| channel_id.parse::<u64>().ok())
-                        .map(ChannelId::new);
-                    let tmux_name = tmux_name_from_session_key(&active_turn.session_key)
-                        .unwrap_or_else(|| active_turn.session_key.clone());
-                    let target = TurnLifecycleTarget {
-                        provider: provider_kind,
-                        channel_id: parsed_channel_id,
-                        tmux_name: tmux_name.clone(),
-                    };
-                    let lifecycle = stop_turn_preserving_queue_without_cancel_event(
-                        health_registry.map(Arc::as_ref),
-                        &target,
-                        "queue-api cancel_dispatch (preserve)",
-                    )
-                    .await;
-                    // A kept turn changed nothing: the dispatch and its session stay as they are.
-                    if lifecycle.host_guard_kept() {
-                        return Err(ServiceError::conflict(lifecycle.refusal_reason())
-                            .with_code(ErrorCode::Dispatch)
-                            .with_context("dispatch_id", dispatch_id));
-                    }
-                    let finalizer =
+                    if let Some(active_turn) = active_turn.as_ref() {
+                        let provider_kind = active_turn
+                            .provider_name
+                            .as_deref()
+                            .and_then(ProviderKind::from_str);
+                        let parsed_channel_id = active_turn
+                            .channel_id
+                            .as_deref()
+                            .and_then(|channel_id| channel_id.parse::<u64>().ok())
+                            .map(ChannelId::new);
+                        let tmux_name = tmux_name_from_session_key(&active_turn.session_key)
+                            .unwrap_or_else(|| active_turn.session_key.clone());
+                        let target = TurnLifecycleTarget {
+                            provider: provider_kind,
+                            channel_id: parsed_channel_id,
+                            tmux_name: tmux_name.clone(),
+                        };
+                        let lifecycle = stop_turn_preserving_queue_without_cancel_event(
+                            health_registry.map(Arc::as_ref),
+                            &target,
+                            "queue-api cancel_dispatch (preserve)",
+                        )
+                        .await;
+                        // A kept turn changed nothing: the dispatch and its session stay as they are.
+                        if lifecycle.host_guard_kept() {
+                            return Err(ServiceError::conflict(lifecycle.refusal_reason())
+                                .with_code(ErrorCode::Dispatch)
+                                .with_context("dispatch_id", dispatch_id));
+                        }
+                        let finalizer =
                         crate::services::turn_cancel_finalizer::finalize_turn_cancel(
                             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
                                 crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
@@ -183,92 +170,92 @@ impl QueueService {
                             ),
                         );
 
-                    if let Err(error) = sqlx::query(
-                        "UPDATE sessions
+                        if let Err(error) = sqlx::query(
+                            "UPDATE sessions
                          SET status = 'disconnected',
                              active_dispatch_id = NULL,
                              claude_session_id = NULL
                          WHERE session_key = $1",
-                    )
-                    .bind(&active_turn.session_key)
-                    .execute(pool)
-                    .await
-                    {
-                        tracing::warn!(
-                            session_key = active_turn.session_key,
-                            "failed to mark postgres session disconnected during cancel_dispatch: {error}"
-                        );
+                        )
+                        .bind(&active_turn.session_key)
+                        .execute(pool)
+                        .await
+                        {
+                            tracing::warn!(
+                                session_key = active_turn.session_key,
+                                "failed to mark postgres session disconnected during cancel_dispatch: {error}"
+                            );
+                        }
+
+                        turn_cancelled = true;
+                        turn_session_key = Some(active_turn.session_key.clone());
+                        turn_tmux_name = Some(tmux_name);
+                        turn_channel_id = active_turn.channel_id.clone();
+                        turn_agent_id = active_turn.agent_id.clone();
+                        turn_status = Some(finalizer.status);
+                        turn_completed_at = Some(finalizer.completed_at.to_rfc3339());
+                        turn_lifecycle_path = Some(lifecycle.lifecycle_path);
+                        turn_tmux_killed = Some(lifecycle.tmux_killed);
+                        turn_queue_preserved = lifecycle.queue_preserved;
+                        turn_inflight_cleared = Some(lifecycle.inflight_cleared);
+                        turn_queued_remaining = lifecycle.queue_depth_if_observed();
+                        drain_target = Some(target);
                     }
 
-                    turn_cancelled = true;
-                    turn_session_key = Some(active_turn.session_key.clone());
-                    turn_tmux_name = Some(tmux_name);
-                    turn_channel_id = active_turn.channel_id.clone();
-                    turn_agent_id = active_turn.agent_id.clone();
-                    turn_status = Some(finalizer.status);
-                    turn_completed_at = Some(finalizer.completed_at.to_rfc3339());
-                    turn_lifecycle_path = Some(lifecycle.lifecycle_path);
-                    turn_tmux_killed = Some(lifecycle.tmux_killed);
-                    turn_queue_preserved = lifecycle.queue_preserved;
-                    turn_inflight_cleared = Some(lifecycle.inflight_cleared);
-                    turn_queued_remaining = lifecycle.queue_depth_if_observed();
-                    drain_target = Some(target);
-                }
-
-                crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-                    pool,
-                    dispatch_id,
-                    None,
-                )
-                .await
-                .map_err(|error| {
-                    ServiceError::internal(format!("cancel postgres dispatch: {error}"))
-                        .with_code(ErrorCode::Database)
-                        .with_operation("cancel_dispatch.cancel_pg")
-                        .with_context("dispatch_id", dispatch_id)
-                })?;
-
-                sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                    .bind(format!("dispatch_notified:{dispatch_id}"))
-                    .execute(pool)
+                    crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                        pool,
+                        dispatch_id,
+                        None,
+                    )
                     .await
                     .map_err(|error| {
-                        ServiceError::internal(format!(
-                            "clear postgres dispatch notify guard: {error}"
-                        ))
-                        .with_code(ErrorCode::Database)
-                        .with_operation("cancel_dispatch.clear_guard_pg")
-                        .with_context("dispatch_id", dispatch_id)
+                        ServiceError::internal(format!("cancel postgres dispatch: {error}"))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("cancel_dispatch.cancel_pg")
+                            .with_context("dispatch_id", dispatch_id)
                     })?;
 
-                // A refused drain invalidates an earlier depth observation too.
-                if let Some(target) = drain_target.as_ref() {
-                    turn_queued_remaining = schedule_post_cancel_queue_drain(
-                        health_registry,
-                        target,
-                        "queue_api_cancel_dispatch",
-                    )
-                    .await;
-                }
+                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                        .bind(format!("dispatch_notified:{dispatch_id}"))
+                        .execute(pool)
+                        .await
+                        .map_err(|error| {
+                            ServiceError::internal(format!(
+                                "clear postgres dispatch notify guard: {error}"
+                            ))
+                            .with_code(ErrorCode::Database)
+                            .with_operation("cancel_dispatch.clear_guard_pg")
+                            .with_context("dispatch_id", dispatch_id)
+                        })?;
 
-                tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
-                Ok(json!({
-                    "ok": true,
-                    "dispatch_id": dispatch_id,
-                    "active_turn_cancelled": turn_cancelled,
-                    "turn_session_key": turn_session_key,
-                    "turn_tmux_session": turn_tmux_name,
-                    "turn_channel_id": turn_channel_id,
-                    "turn_agent_id": turn_agent_id,
-                    "turn_status": turn_status,
-                    "turn_completed_at": turn_completed_at,
-                    "turn_lifecycle_path": turn_lifecycle_path,
-                    "turn_tmux_killed": turn_tmux_killed,
-                    "turn_queue_preserved": turn_queue_preserved,
-                    "turn_inflight_cleared": turn_inflight_cleared,
-                    "turn_queued_remaining": turn_queued_remaining,
-                }))
-                }).await
+                    // A refused drain invalidates an earlier depth observation too.
+                    if let Some(target) = drain_target.as_ref() {
+                        turn_queued_remaining = schedule_post_cancel_queue_drain(
+                            health_registry,
+                            target,
+                            "queue_api_cancel_dispatch",
+                        )
+                        .await;
+                    }
+
+                    tracing::info!("[queue-api] Cancelled dispatch {dispatch_id}");
+                    Ok(json!({
+                        "ok": true,
+                        "dispatch_id": dispatch_id,
+                        "active_turn_cancelled": turn_cancelled,
+                        "turn_session_key": turn_session_key,
+                        "turn_tmux_session": turn_tmux_name,
+                        "turn_channel_id": turn_channel_id,
+                        "turn_agent_id": turn_agent_id,
+                        "turn_status": turn_status,
+                        "turn_completed_at": turn_completed_at,
+                        "turn_lifecycle_path": turn_lifecycle_path,
+                        "turn_tmux_killed": turn_tmux_killed,
+                        "turn_queue_preserved": turn_queue_preserved,
+                        "turn_inflight_cleared": turn_inflight_cleared,
+                        "turn_queued_remaining": turn_queued_remaining,
+                    }))
+                }
             }
         }
     }
@@ -352,165 +339,169 @@ impl QueueService {
         headers: &HeaderMap,
         forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     ) -> ServiceResult<Value> {
-        let permit =
-            crate::services::cluster::channel_home::admit_command(channel_id, "cancel_turn")
-                .map_err(|reason| {
-                    ServiceError::conflict(reason.to_string())
-                        .with_context("channel_id", channel_id)
-                })?;
-        crate::services::cluster::channel_home::command_scope(permit, async {
-        if let Some(response) =
-            crate::services::session_forwarding::forward_remote_cancel_if_needed(
-                forward_context,
-                headers,
-                channel_id,
-                force,
-            )
-            .await?
         {
-            return Ok(response);
-        }
+            if let Some(response) =
+                crate::services::session_forwarding::forward_remote_cancel_if_needed(
+                    forward_context,
+                    headers,
+                    channel_id,
+                    force,
+                )
+                .await?
+            {
+                return Ok(response);
+            }
 
-        let pool = self.pg_pool.as_ref().ok_or_else(|| {
-            ServiceError::internal("postgres pool unavailable for cancel_turn session lookup")
-                .with_code(ErrorCode::Database)
-                .with_operation("cancel_turn.query_active_session.no_pool")
+            let pool = self.pg_pool.as_ref().ok_or_else(|| {
+                ServiceError::internal("postgres pool unavailable for cancel_turn session lookup")
+                    .with_code(ErrorCode::Database)
+                    .with_operation("cancel_turn.query_active_session.no_pool")
+                    .with_context("channel_id", channel_id)
+            })?;
+            #[cfg(unix)]
+            let (session_info, selected) = http_force::select(pool, channel_id, force).await?;
+            #[cfg(not(unix))]
+            let session_info =
+                crate::services::session_forwarding::load_cancel_turn_session(pool, channel_id)
+                    .await?;
+
+            let owner = session_info
+                .as_ref()
+                .and_then(|session| session.owner_instance_id.as_deref());
+            if let Err((_, Json(body))) =
+                crate::services::session_forwarding::enforce_receiver_fence(
+                    headers,
+                    owner,
+                    forward_context.cluster_instance_id.as_deref(),
+                )
+            {
+                return Err(ServiceError::conflict(
+                    "forwarded cancel owner changed before local mutation",
+                )
                 .with_context("channel_id", channel_id)
-        })?;
-        #[cfg(unix)]
-        let (session_info, selected) = http_force::select(pool, channel_id, force).await?;
-        #[cfg(not(unix))]
-        let session_info =
-            crate::services::session_forwarding::load_cancel_turn_session(pool, channel_id).await?;
+                .with_context("forward_fence", body));
+            }
 
-        let owner = session_info
-            .as_ref()
-            .and_then(|session| session.owner_instance_id.as_deref());
-        if let Err((_, Json(body))) = crate::services::session_forwarding::enforce_receiver_fence(
-            headers,
-            owner,
-            forward_context.cluster_instance_id.as_deref(),
-        ) {
-            return Err(ServiceError::conflict(
-                "forwarded cancel owner changed before local mutation",
-            )
-            .with_context("channel_id", channel_id)
-            .with_context("forward_fence", body));
-        }
+            let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
 
-        let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
+            let (session_key, dispatch_id, provider_name, agent_id, requested_provider, match_rank) =
+                if let Some(session_info) = session_info {
+                    (
+                        Some(session_info.session_key),
+                        session_info.dispatch_id,
+                        session_info.provider_name,
+                        session_info.agent_id,
+                        session_info.requested_provider,
+                        Some(session_info.match_rank),
+                    )
+                } else if let Some(channel_target) = channel_target {
+                    (
+                        None,
+                        None,
+                        channel_target.requested_provider.clone(),
+                        Some(channel_target.agent_id),
+                        channel_target.requested_provider,
+                        None,
+                    )
+                } else {
+                    return Err(
+                        ServiceError::not_found("no active turn found for this channel")
+                            .with_context("channel_id", channel_id)
+                            .with_context(
+                                "expected_owner_instance_id",
+                                crate::services::session_forwarding::forwarded_session_owner(
+                                    headers,
+                                ),
+                            )
+                            .with_context(
+                                "receiver_instance_id",
+                                forward_context.cluster_instance_id.as_deref(),
+                            ),
+                    );
+                };
 
-        let (session_key, dispatch_id, provider_name, agent_id, requested_provider, match_rank) =
-            if let Some(session_info) = session_info {
-                (
-                    Some(session_info.session_key),
-                    session_info.dispatch_id,
-                    session_info.provider_name,
-                    session_info.agent_id,
-                    session_info.requested_provider,
-                    Some(session_info.match_rank),
-                )
-            } else if let Some(channel_target) = channel_target {
-                (
-                    None,
-                    None,
-                    channel_target.requested_provider.clone(),
-                    Some(channel_target.agent_id),
-                    channel_target.requested_provider,
-                    None,
-                )
-            } else {
+            let provider_kind = provider_name.as_deref().and_then(ProviderKind::from_str);
+            let parsed_channel_id = channel_id.parse::<u64>().ok().map(ChannelId::new);
+            if session_key.is_none()
+                && (provider_kind.is_none()
+                    || parsed_channel_id.is_none()
+                    || health_registry.is_none())
+            {
                 return Err(
                     ServiceError::not_found("no active turn found for this channel")
                         .with_context("channel_id", channel_id)
                         .with_context(
-                            "expected_owner_instance_id",
-                            crate::services::session_forwarding::forwarded_session_owner(headers),
-                        )
-                        .with_context(
-                            "receiver_instance_id",
+                            "owner_instance_id",
                             forward_context.cluster_instance_id.as_deref(),
                         ),
                 );
-            };
-
-        let provider_kind = provider_name.as_deref().and_then(ProviderKind::from_str);
-        let parsed_channel_id = channel_id.parse::<u64>().ok().map(ChannelId::new);
-        if session_key.is_none()
-            && (provider_kind.is_none() || parsed_channel_id.is_none() || health_registry.is_none())
-        {
-            return Err(
-                ServiceError::not_found("no active turn found for this channel")
-                    .with_context("channel_id", channel_id)
-                    .with_context(
-                        "owner_instance_id",
-                        forward_context.cluster_instance_id.as_deref(),
-                    ),
-            );
-        }
-
-        crate::services::session_forwarding::revalidate_local_cancel_owner(
-            forward_context,
-            channel_id,
-            session_key.as_deref(),
-        )
-        .await?;
-
-        let tmux_name = session_key
-            .as_deref()
-            .map(|session_key| {
-                tmux_name_from_session_key(session_key).unwrap_or_else(|| session_key.to_string())
-            })
-            .unwrap_or_default();
-        let target = TurnLifecycleTarget {
-            provider: provider_kind,
-            channel_id: parsed_channel_id,
-            tmux_name: tmux_name.clone(),
-        };
-        #[cfg(unix)]
-        {
-            let forced = http_force::herdr_force(health_registry, pool, channel_id, selected);
-            if let Some(answer) = forced.await {
-                return answer;
             }
-        }
-        let herdr = herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
-        if let Some(stopped) = herdr.await {
-            return Ok(stopped);
-        }
-        // Capture identifies discarded sources for durable reporting; it does not restore them.
-        let queue_capture =
-            crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target).await;
-        let lifecycle = if force {
-            let row = self.pg_pool.as_ref().zip(session_key.as_deref());
-            let row = row.map(|(pool, session_key)| ForceKillRow {
-                pool,
-                session_key,
-                stored_provider: provider_name.as_deref(),
-            });
-            force_kill_turn_without_cancel_event(
-                health_registry.map(Arc::as_ref),
-                &target,
-                row,
-                "queue-api cancel_turn (force)",
-                "queue_api_cancel_turn",
+
+            crate::services::session_forwarding::revalidate_local_cancel_owner(
+                forward_context,
+                channel_id,
+                session_key.as_deref(),
             )
-            .await
-        } else {
-            stop_turn_preserving_queue_without_cancel_event(
-                health_registry.map(Arc::as_ref),
-                &target,
-                "queue-api cancel_turn (preserve)",
-            )
-            .await
-        };
-        // A refused kill changed nothing: no cancel event, dispatch or session update follows.
-        if lifecycle.host_guard_kept() {
-            return Err(ServiceError::conflict(lifecycle.refusal_reason())
-                .with_context("channel_id", channel_id)
-                .with_context("session_key", session_key.as_deref()));
-        }
-        let finalizer = crate::services::turn_cancel_finalizer::finalize_turn_cancel(
+            .await?;
+
+            let tmux_name = session_key
+                .as_deref()
+                .map(|session_key| {
+                    tmux_name_from_session_key(session_key)
+                        .unwrap_or_else(|| session_key.to_string())
+                })
+                .unwrap_or_default();
+            let target = TurnLifecycleTarget {
+                provider: provider_kind,
+                channel_id: parsed_channel_id,
+                tmux_name: tmux_name.clone(),
+            };
+            #[cfg(unix)]
+            {
+                let forced = http_force::herdr_force(health_registry, pool, channel_id, selected);
+                if let Some(answer) = forced.await {
+                    return answer;
+                }
+            }
+            let herdr =
+                herdr_stop::live_turn(force, health_registry, &target, session_key.as_deref());
+            if let Some(stopped) = herdr.await {
+                return Ok(stopped);
+            }
+            // Capture identifies discarded sources for durable reporting; it does not restore them.
+            let queue_capture =
+                crate::services::turn_cancel_queue_guard::capture_queue_before_cancel(&target)
+                    .await;
+            let lifecycle = if force {
+                let row = self.pg_pool.as_ref().zip(session_key.as_deref());
+                let row = row.map(|(pool, session_key)| ForceKillRow {
+                    pool,
+                    session_key,
+                    stored_provider: provider_name.as_deref(),
+                });
+                force_kill_turn_without_cancel_event(
+                    health_registry.map(Arc::as_ref),
+                    &target,
+                    row,
+                    "queue-api cancel_turn (force)",
+                    "queue_api_cancel_turn",
+                )
+                .await
+            } else {
+                stop_turn_preserving_queue_without_cancel_event(
+                    health_registry.map(Arc::as_ref),
+                    &target,
+                    "queue-api cancel_turn (preserve)",
+                )
+                .await
+            };
+            // A refused kill changed nothing: no cancel event, dispatch or session update follows.
+            if lifecycle.host_guard_kept() {
+                return Err(ServiceError::conflict(lifecycle.refusal_reason())
+                    .with_context("channel_id", channel_id)
+                    .with_context("session_key", session_key.as_deref()));
+            }
+            let finalizer = crate::services::turn_cancel_finalizer::finalize_turn_cancel(
             crate::services::turn_cancel_finalizer::FinalizeTurnCancelRequest::from_lifecycle_result(
                 crate::services::turn_cancel_finalizer::TurnCancelCorrelation {
                     provider: target.provider.clone(),
@@ -537,152 +528,152 @@ impl QueueService {
             ),
         );
 
-        if let Some(dispatch_id) = dispatch_id.as_ref() {
-            if let Some(pool) = self.pg_pool.as_ref()
-                && let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-                    pool,
-                    dispatch_id,
-                    None,
-                )
-                .await
-            {
-                tracing::warn!(
-                    dispatch_id,
-                    "failed to cancel postgres dispatch while cancelling turn: {error}"
-                );
+            if let Some(dispatch_id) = dispatch_id.as_ref() {
+                if let Some(pool) = self.pg_pool.as_ref()
+                    && let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+                        pool,
+                        dispatch_id,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        dispatch_id,
+                        "failed to cancel postgres dispatch while cancelling turn: {error}"
+                    );
+                }
             }
-        }
 
-        if let Some(session_key) = session_key.as_deref() {
-            if let Some(pool) = self.pg_pool.as_ref()
-                && let Err(error) = sqlx::query(
-                    "UPDATE sessions
+            if let Some(session_key) = session_key.as_deref() {
+                if let Some(pool) = self.pg_pool.as_ref()
+                    && let Err(error) = sqlx::query(
+                        "UPDATE sessions
                      SET status = 'disconnected',
                          active_dispatch_id = NULL,
                          claude_session_id = NULL
                      WHERE session_key = $1",
-                )
-                .bind(session_key)
-                .execute(pool)
-                .await
-            {
-                tracing::warn!(
-                    session_key,
-                    "failed to mark postgres session disconnected during cancel_turn: {error}"
-                );
-            }
-        }
-
-        let exact_channel_match = match_rank.is_none_or(|rank| rank <= 2);
-
-        // #1672: prefer the *observed* tmux session name over the
-        // session-key-derived one. The latter is empty whenever the
-        // session row is missing (cancel-via-watcher fallback) but the
-        // runtime still knows the tmux name from the watcher binding /
-        // inflight state — those are exactly the incidents where the
-        // operator most needs to see the real session name.
-        let reported_tmux_session = lifecycle
-            .tmux_session_observed
-            .clone()
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| tmux_name.clone());
-        let queue_purge = if force {
-            force_purge_channel_mailbox(health_registry, &target, session_key.as_deref()).await
-        } else {
-            None
-        };
-        let drain_depth = if !force {
-            schedule_post_cancel_queue_drain(health_registry, &target, "queue_api_cancel_turn")
-                .await
-        } else {
-            None
-        };
-        let loss = crate::services::turn_cancel_queue_guard::record_queue_loss_after_cancel(
-            &target,
-            &queue_capture,
-            self.pg_pool.as_ref(),
-            if force {
-                CancelRemovalWitness::Purge(queue_purge)
-            } else {
-                CancelRemovalWitness::Preserve {
-                    disk_lost: disk_queue_lost(
-                        lifecycle.queue_disk_present_before,
-                        lifecycle.queue_disk_present_after,
-                    ),
+                    )
+                    .bind(session_key)
+                    .execute(pool)
+                    .await
+                {
+                    tracing::warn!(
+                        session_key,
+                        "failed to mark postgres session disconnected during cancel_turn: {error}"
+                    );
                 }
-            },
-            if force {
-                "queue_api_cancel_turn_force"
+            }
+
+            let exact_channel_match = match_rank.is_none_or(|rank| rank <= 2);
+
+            // #1672: prefer the *observed* tmux session name over the
+            // session-key-derived one. The latter is empty whenever the
+            // session row is missing (cancel-via-watcher fallback) but the
+            // runtime still knows the tmux name from the watcher binding /
+            // inflight state — those are exactly the incidents where the
+            // operator most needs to see the real session name.
+            let reported_tmux_session = lifecycle
+                .tmux_session_observed
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| tmux_name.clone());
+            let queue_purge = if force {
+                force_purge_channel_mailbox(health_registry, &target, session_key.as_deref()).await
             } else {
-                "queue_api_cancel_turn"
-            },
-        )
-        .await;
-        // Publish only measurements after the final queue mutation attempt.
-        let queued_remaining = if force {
-            loss.queue_depth_after
-                .or(queue_purge.as_ref().and_then(|c| c.queue_len_after))
-        } else {
-            drain_depth.or(loss.queue_depth_after)
-        };
-        let queue_purged_count = queue_purge.as_ref().map(|c| c.drained);
+                None
+            };
+            let drain_depth = if !force {
+                schedule_post_cancel_queue_drain(health_registry, &target, "queue_api_cancel_turn")
+                    .await
+            } else {
+                None
+            };
+            let loss = crate::services::turn_cancel_queue_guard::record_queue_loss_after_cancel(
+                &target,
+                &queue_capture,
+                self.pg_pool.as_ref(),
+                if force {
+                    CancelRemovalWitness::Purge(queue_purge)
+                } else {
+                    CancelRemovalWitness::Preserve {
+                        disk_lost: disk_queue_lost(
+                            lifecycle.queue_disk_present_before,
+                            lifecycle.queue_disk_present_after,
+                        ),
+                    }
+                },
+                if force {
+                    "queue_api_cancel_turn_force"
+                } else {
+                    "queue_api_cancel_turn"
+                },
+            )
+            .await;
+            // Publish only measurements after the final queue mutation attempt.
+            let queued_remaining = if force {
+                loss.queue_depth_after
+                    .or(queue_purge.as_ref().and_then(|c| c.queue_len_after))
+            } else {
+                drain_depth.or(loss.queue_depth_after)
+            };
+            let queue_purged_count = queue_purge.as_ref().map(|c| c.drained);
 
-        tracing::info!(
-            "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={:?}, queued_before={:?}, queued_after={:?}, queue_disk_before={:?}, queue_disk_after={:?}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
-            channel_id,
-            session_key,
-            reported_tmux_session,
-            lifecycle.tmux_killed,
-            dispatch_id,
-            lifecycle.lifecycle_path,
-            agent_id,
-            requested_provider,
-            exact_channel_match,
-            lifecycle.queue_preserved,
-            lifecycle.queue_depth_before,
-            lifecycle.queue_depth_after,
-            lifecycle.queue_disk_present_before,
-            lifecycle.queue_disk_present_after,
-            queue_purged_count,
-            lifecycle.mailbox_foreground_free,
-            lifecycle.queue_dropped_message_ids,
-        );
+            tracing::info!(
+                "[queue-api] Cancelled turn: channel={}, session={:?}, tmux={}, killed={}, dispatch={:?}, lifecycle={}, agent={:?}, requested_provider={:?}, exact_match={}, queue_preserved={:?}, queued_before={:?}, queued_after={:?}, queue_disk_before={:?}, queue_disk_after={:?}, queue_purged={:?}, mailbox_foreground_free={:?}, queue_dropped_message_ids={:?}",
+                channel_id,
+                session_key,
+                reported_tmux_session,
+                lifecycle.tmux_killed,
+                dispatch_id,
+                lifecycle.lifecycle_path,
+                agent_id,
+                requested_provider,
+                exact_channel_match,
+                lifecycle.queue_preserved,
+                lifecycle.queue_depth_before,
+                lifecycle.queue_depth_after,
+                lifecycle.queue_disk_present_before,
+                lifecycle.queue_disk_present_after,
+                queue_purged_count,
+                lifecycle.mailbox_foreground_free,
+                lifecycle.queue_dropped_message_ids,
+            );
 
-        Ok(json!({
-            "ok": true,
-            "channel_id": channel_id,
-            "agent_id": agent_id,
-            "requested_provider": requested_provider,
-            "exact_channel_match": exact_channel_match,
-            "session_key": session_key,
-            "tmux_session": reported_tmux_session,
-            "tmux_killed": lifecycle.tmux_killed,
-            "lifecycle_path": lifecycle.lifecycle_path,
-            "queued_remaining": queued_remaining,
-            "queued_before": lifecycle.queue_depth_before,
-            "queue_purged": queue_purged_count,
-            "queue_preserved": lifecycle.queue_preserved,
-            "queue_disk_present_before": lifecycle.queue_disk_present_before,
-            "queue_disk_present_after": lifecycle.queue_disk_present_after,
-            "inflight_cleared": lifecycle.inflight_cleared,
-            // #5176: the honest cancel-success field. `turn_status: cancelled`
-            // only stamps the turn record; this says whether the channel mailbox
-            // actually let go of its foreground slot. `false` means the channel
-            // is still blocked no matter what `turn_status` says.
-            "mailbox_foreground_free": lifecycle.mailbox_foreground_free,
-            // #5176: which user instructions the cancel destroyed, by primary
-            // Discord message id. Empty is the contract; non-empty is a bug
-            // report the operator can act on.
-            "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
-            // True proves no removal; recorded removals remain unknown, and any unrecorded loss is false.
-            "queue_dead_lettered_message_ids": loss.dead_lettered_message_ids,
-            "queue_unpreserved_message_ids": loss.unpreserved_message_ids,
-            "queue_loss_recorded": loss.loss_recorded(),
-            "dispatch_cancelled": dispatch_id,
-            "turn_status": finalizer.status,
-            "turn_completed_at": finalizer.completed_at.to_rfc3339(),
-        }))
-        }).await
+            Ok(json!({
+                "ok": true,
+                "channel_id": channel_id,
+                "agent_id": agent_id,
+                "requested_provider": requested_provider,
+                "exact_channel_match": exact_channel_match,
+                "session_key": session_key,
+                "tmux_session": reported_tmux_session,
+                "tmux_killed": lifecycle.tmux_killed,
+                "lifecycle_path": lifecycle.lifecycle_path,
+                "queued_remaining": queued_remaining,
+                "queued_before": lifecycle.queue_depth_before,
+                "queue_purged": queue_purged_count,
+                "queue_preserved": lifecycle.queue_preserved,
+                "queue_disk_present_before": lifecycle.queue_disk_present_before,
+                "queue_disk_present_after": lifecycle.queue_disk_present_after,
+                "inflight_cleared": lifecycle.inflight_cleared,
+                // #5176: the honest cancel-success field. `turn_status: cancelled`
+                // only stamps the turn record; this says whether the channel mailbox
+                // actually let go of its foreground slot. `false` means the channel
+                // is still blocked no matter what `turn_status` says.
+                "mailbox_foreground_free": lifecycle.mailbox_foreground_free,
+                // #5176: which user instructions the cancel destroyed, by primary
+                // Discord message id. Empty is the contract; non-empty is a bug
+                // report the operator can act on.
+                "queue_dropped_message_ids": lifecycle.queue_dropped_message_ids,
+                // True proves no removal; recorded removals remain unknown, and any unrecorded loss is false.
+                "queue_dead_lettered_message_ids": loss.dead_lettered_message_ids,
+                "queue_unpreserved_message_ids": loss.unpreserved_message_ids,
+                "queue_loss_recorded": loss.loss_recorded(),
+                "dispatch_cancelled": dispatch_id,
+                "turn_status": finalizer.status,
+                "turn_completed_at": finalizer.completed_at.to_rfc3339(),
+            }))
+        }
     }
 
     async fn resolve_cancel_turn_channel_target(
@@ -916,55 +907,5 @@ mod tests {
                 "force-purged hydrated message must not dispatch later"
             );
         });
-    }
-}
-
-#[cfg(test)]
-mod home_command_tests {
-    use super::*;
-    use crate::db::o_channel_homes::HomeState;
-    use crate::services::cluster::channel_home;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn command_rest_home_refusal_precedes_forward_and_session_mutation() {
-        let channel = 9200000000000104;
-        let home = channel_home::register_for_test(channel, Some(HomeState::Releasing));
-        let service = QueueService::new(None);
-        let context = crate::services::session_forwarding::ForwardCallerContext {
-            pg_pool: None,
-            config: Arc::new(crate::config::Config::default()),
-            cluster_instance_id: None,
-        };
-        for force in [false, true] {
-            let error = service
-                .cancel_turn(
-                    None,
-                    &channel.to_string(),
-                    force,
-                    &HeaderMap::new(),
-                    &context,
-                )
-                .await
-                .unwrap_err();
-            assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
-            assert!(error.to_string().contains("home_draining"), "{error}");
-            assert_eq!(home.commands_in_flight(), 0);
-        }
-        channel_home::unregister(home.channel_id());
-        let error = service
-            .cancel_turn(
-                None,
-                &channel.to_string(),
-                false,
-                &HeaderMap::new(),
-                &context,
-            )
-            .await
-            .unwrap_err();
-        assert_ne!(
-            error.status(),
-            axum::http::StatusCode::CONFLICT,
-            "Legacy still reaches its existing pool error"
-        );
     }
 }

@@ -21,11 +21,10 @@ fn inspect() -> Operation {
 
 fn context() -> Context {
     Context {
+        codex: None,
         tmux: "tmux".into(),
         nonce: "nonce".into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     }
 }
 

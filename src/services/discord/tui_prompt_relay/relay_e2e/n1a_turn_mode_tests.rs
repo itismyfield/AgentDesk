@@ -19,7 +19,7 @@ fn n1a_confirmed_direct_prompt_posts_only_its_notice() {
         let h = RelayE2eHarness::start_with_health_registry().await;
         h.cache_relay_transport();
         h.answer_placeholders_immediately();
-        h.use_mock_notify_bot(Duration::from_secs(5)).await;
+        h.use_mock_provider_bot(Duration::from_secs(5)).await;
         let tmux = "n1a-confirmed-direct-prompt";
         h.attach_tmux_watcher(tmux, "n1a-direct.jsonl");
         let _confirmed = TestConfirmation::new(CHANNEL_ID);
@@ -263,7 +263,7 @@ fn n1a_confirmed_slash_raw_and_wrapper_post_one_notice() {
         let h = RelayE2eHarness::start_with_health_registry().await;
         h.cache_relay_transport();
         h.answer_placeholders_immediately();
-        h.use_mock_notify_bot(Duration::from_secs(5)).await;
+        h.use_mock_provider_bot(Duration::from_secs(5)).await;
         let tmux = "n1a-confirmed-slash-pair";
         h.attach_tmux_watcher(tmux, "n1a-slash.jsonl");
         let _confirmed = TestConfirmation::new(CHANNEL_ID);
@@ -382,7 +382,7 @@ fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_witho
         let h = RelayE2eHarness::start_with_health_registry().await;
         h.cache_relay_transport();
         h.answer_placeholders_immediately();
-        h.use_mock_notify_bot(Duration::from_secs(5)).await;
+        h.use_mock_provider_bot(Duration::from_secs(5)).await;
         let tmux = "n1c-hook-direct-prompt";
         h.attach_tmux_watcher(tmux, "n1c-hook-direct.jsonl");
         let turn = crate::services::tui_o::turn_mode::TurnConfig {

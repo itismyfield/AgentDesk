@@ -788,6 +788,21 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
     )) {
         return;
     }
+    scope_during_transition(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm"
+    )) {
+        return;
+    }
+    scope_during_transition(true).await;
+}
+
+async fn scope_during_transition(inspect: bool) {
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -796,11 +811,11 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
-    let (_, n2) = proven(root.path());
+    let n2 = (!inspect).then(|| proven(root.path()).1);
     let (n3_context, n3) = proven(root.path());
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| {
-        [&n2, &n3]
-            .into_iter()
+        n2.iter()
+            .chain(std::iter::once(&n3))
             .map(|source| InitSource {
                 source_id: source.clone(),
                 delivery_start: std::fs::metadata(&source.path).unwrap().len(),
@@ -818,9 +833,13 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
         .channel()
         .set_binding_checkpoint(checkpoint)
         .unwrap();
-    let old_cursor = harness.channel().cursor(&n2).unwrap().clone();
-    let old_bytes = std::fs::read(&n2.path).unwrap();
-    let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&n2.path);
+    let old = n2.as_ref().map(|n2| {
+        (
+            harness.channel().cursor(n2).unwrap().clone(),
+            std::fs::read(&n2.path).unwrap(),
+            crate::services::codex::actual_submit_tests::source_io::Watch::start(&n2.path),
+        )
+    });
     answer(&n3, "Q1 before transition");
     let writer = harness.writer();
     let selection = writer.suspension.clone();
@@ -846,32 +865,50 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
         )),
         CANARY_TMUX,
         &n3_context.execution_nonce,
+        inspect,
         || {
             assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
-            assert!(selection.contains(&n2));
+            assert_eq!(selection.is_empty(), inspect);
+            if let Some(n2) = &n2 {
+                assert!(selection.contains(n2));
+            }
             assert_eq!(alarm_count(), 0);
             let (context, n4) = proven(root.path());
             answer(&n4, "Q2 after transition");
             context.execution_nonce
         },
         || {
-            assert_eq!(alarm_count(), 1, "a held exact root raises one alarm");
+            assert_eq!(
+                alarm_count(),
+                usize::from(!inspect),
+                "only Apply holds a fresh root"
+            );
             assert_eq!(
                 harness.alarms.cleared.load(Ordering::SeqCst),
                 0,
                 "new_root_waiting must not clear while the transition job still exists"
             );
             assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
-            assert_eq!(
-                selection.nonce().as_deref(),
-                Some(n3_context.execution_nonce.as_str()),
-                "a held root must not change the installed selection"
-            );
+            if inspect {
+                assert_ne!(
+                    selection.nonce().as_deref(),
+                    Some(n3_context.execution_nonce.as_str()),
+                    "Inspect must allow the new selection while its quiet probe still waits"
+                );
+            } else {
+                assert_eq!(
+                    selection.nonce().as_deref(),
+                    Some(n3_context.execution_nonce.as_str()),
+                    "Apply must not change the installed selection"
+                );
+            }
         },
     )
     .await;
     assert_eq!(selection.nonce().as_deref(), Some(n4_nonce.as_str()));
-    assert!(selection.contains(&n2));
+    if let Some(n2) = &n2 {
+        assert!(selection.contains(n2));
+    }
     assert!(selection.contains(&n3));
     assert_eq!(
         harness.port.posts(),
@@ -882,15 +919,21 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
             "-# ✅ 완료"
         ]
     );
-    assert_eq!(alarm_count(), 1, "resolving the hold must not re-alarm");
+    assert_eq!(
+        alarm_count(),
+        usize::from(!inspect),
+        "Inspect must raise no waiting alarm"
+    );
     assert_eq!(
         harness.alarms.cleared.load(Ordering::SeqCst),
-        1,
-        "installing the new root must clear its own waiting incident exactly once"
+        usize::from(!inspect),
+        "only an actual Apply hold leaves a waiting incident to clear"
     );
-    assert_eq!(harness.channel().cursor(&n2), Some(&old_cursor));
-    assert_eq!(std::fs::read(&n2.path).unwrap(), old_bytes);
-    assert_eq!(old_io.stats().read_bytes, 0);
+    if let (Some(n2), Some((old_cursor, old_bytes, old_io))) = (&n2, old) {
+        assert_eq!(harness.channel().cursor(n2), Some(&old_cursor));
+        assert_eq!(std::fs::read(&n2.path).unwrap(), old_bytes);
+        assert_eq!(old_io.stats().read_bytes, 0);
+    }
     dedupe::binding_events::forget_channel_for_tests(CANARY_CHANNEL);
     dedupe::binding_events::set_test_root(None);
     dedupe::reset_state_for_tests();
@@ -1021,11 +1064,10 @@ async fn selection_install_fault(after_rename: bool) {
         termination: None,
     });
     let context = Context {
+        codex: None,
         tmux: CANARY_TMUX.into(),
         nonce: current.execution_nonce.clone(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     };
     let refusal = transition.request(request, context).await;
     assert!(

@@ -293,21 +293,8 @@ pub(crate) async fn admit_text_intake(
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
-    // A channel with a home row, or a local gate, is decided by the router's home read; an
-    // unreadable row goes there too and is refused. Without Postgres it holds here.
-    let home_first = match deps.shared.pg_pool.as_ref() {
-        None => false,
-        Some(_) if crate::services::cluster::channel_home::registered(&channel_id).is_some() => {
-            true
-        }
-        Some(pool) => !matches!(
-            crate::db::o_channel_homes::read_home(pool, &channel_id).await,
-            Ok(None)
-        ),
-    };
-    if !home_first
-        && let IntakeRoute::Hold(detail) =
-            intake_route::for_input_placement(provider, destination.get()).await
+    if let IntakeRoute::Hold(detail) =
+        intake_route::for_input_placement(provider, destination.get()).await
     {
         if crate::services::tui_o::cutover::codex_turn_awaited(destination.get()).is_some() {
             return IntakeAdmission::DeferredTurnMode(
@@ -403,6 +390,11 @@ pub(crate) async fn admit_text_intake(
         )
         .sources
     });
+    let routed_reply_context =
+        super::response_format::retry_prompt_context::RetryPromptContext::for_routing(
+            request.reply_context.clone(),
+            matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
+        );
     let ctx = IntakeRouterContext {
         mode,
         leader_instance_id: &self_instance_id,
@@ -414,7 +406,7 @@ pub(crate) async fn admit_text_intake(
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&request.request_owner_name),
         user_text: &request.user_text,
-        reply_context: request.reply_context.as_deref(),
+        reply_context: routed_reply_context.as_deref(),
         has_reply_boundary: request.has_reply_boundary,
         dm_hint: request.dm_hint,
         turn_kind,
@@ -424,7 +416,6 @@ pub(crate) async fn admit_text_intake(
         wait_for_completion: request.wait_for_completion,
         preserve_on_cancel: submission.preserve_on_cancel,
         node_override_instance_id: node_override.as_deref(),
-        owner_authority: authority_channel_opt_in,
         has_nonportable_uploads: submission.has_nonportable_uploads
             || submission
                 .preloaded_uploads

@@ -137,6 +137,56 @@ fn summary(channel: u64, user: u64, nonce: &str) -> LiveSummary {
 }
 
 #[tokio::test]
+async fn captured_claude_session_quota_reaches_the_legacy_summary() {
+    use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
+    let _isolation = Isolation::new();
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let channel = 7_319_002;
+    let session = uuid::Uuid::new_v4().to_string();
+    let root = record_dir();
+    std::fs::create_dir_all(&root).unwrap();
+    let path = record_path(&root, &session);
+    let now = chrono::Utc::now();
+    std::fs::write(
+        &path,
+        serde_json::json!({"session_id":session,"rate_limits":{
+            "five_hour":{"used_percentage":24,"resets_at":now.timestamp()+18000}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let mut state = row(channel, 1, "statusline-legacy");
+    state.session_id = Some(session.clone());
+    let snapshot = LiveSummary::bridge(
+        ChannelId::new(channel),
+        &state,
+        0,
+        Outcome::Completed,
+        Some(1000),
+    );
+    assert_eq!(snapshot.session_id.as_deref(), Some(session.as_str()));
+    let shared = super::super::make_shared_data_for_tests();
+    let watcher = LiveSummary::watcher(
+        &shared,
+        Some(snapshot.key),
+        Some(&state),
+        false,
+        Outcome::Completed,
+    )
+    .unwrap();
+    assert_eq!(watcher.session_id.as_deref(), Some(session.as_str()));
+    state.session_id = Some("successor-session".into());
+    assert_eq!(state.session_id.as_deref(), Some("successor-session"));
+    assert_eq!(snapshot.session_id.as_deref(), Some(session.as_str()));
+    let gateway = Gateway::default();
+    post_live(&gateway, &ProviderKind::Claude, snapshot).await;
+    let posts = gateway.posts();
+    let _ = std::fs::remove_file(path);
+    assert_eq!(posts.len(), 1);
+    assert!(posts[0].starts_with("-# ⏱️ 1초 · 5h 24% ("), "{posts:?}");
+}
+
+#[tokio::test]
 async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query() {
     use futures::FutureExt;
     let _isolation = Isolation::new();
@@ -241,7 +291,7 @@ async fn uncertain_or_cancelled_sends_are_consumed_without_a_second_producer_ret
         gateway.fail.store(!pending, Ordering::SeqCst);
         gateway.pending.store(pending, Ordering::SeqCst);
         let summary = summary(586_003 + u64::from(pending), 1, "attempt");
-        let mut attempt = Box::pin(post_live(&gateway, &ProviderKind::Claude, summary));
+        let mut attempt = Box::pin(post_live(&gateway, &ProviderKind::Claude, summary.clone()));
         if pending {
             assert!(futures::poll!(&mut attempt).is_pending());
             drop(attempt);
@@ -264,8 +314,8 @@ async fn o_ownership_and_unknown_identity_suppress_summary_without_consuming_leg
     {
         let _boot =
             crate::services::tui_o::cutover::test_override::force_channels(&[(586_005, ClaudeTui)]);
-        post_live(&gateway, &ProviderKind::Claude, summary).await;
-        let mut unknown = summary;
+        post_live(&gateway, &ProviderKind::Claude, summary.clone()).await;
+        let mut unknown = summary.clone();
         unknown.runtime_kind = None;
         post_live(&gateway, &ProviderKind::Claude, unknown).await;
         assert!(gateway.posts().is_empty());
@@ -428,7 +478,7 @@ async fn real_watcher_producer_posts_body_then_one_summary_for_retired_flags_and
                 let mut last = String::new();
                 for _ in 0..2 {
                     crate::services::discord::tmux::tmux_watcher::completion_producer::complete_watcher_terminal_footer_or_status_panel_with_sniffer(
-                &recorder.http,&shared,channel_id,&ProviderKind::Claude,0,mode,&mut spin,None,None,"answer",None,&mut last,None,None,|_|async{false},None,false,false,false,Some(summary),None,
+                &recorder.http,&shared,channel_id,&ProviderKind::Claude,0,mode,&mut spin,None,None,"answer",None,&mut last,None,None,|_|async{false},None,false,false,false,Some(summary.clone()),None,
             ).await;
                 }
                 assert_eq!(

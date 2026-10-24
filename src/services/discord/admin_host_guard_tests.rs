@@ -875,7 +875,6 @@ async fn a_worker_refusal_without_a_session_fails_its_row_with_its_attachments_p
         preserve_on_cancel: false,
         agent_id: "agent-h".into(),
         provider: "claude".into(),
-        home_epoch: None,
     };
     let insert = crate::db::intake_outbox::insert_pending;
     let row = insert(&pool, &payload, 1, None).await.unwrap();

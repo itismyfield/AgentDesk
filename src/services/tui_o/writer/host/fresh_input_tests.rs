@@ -154,11 +154,10 @@ fn operation(channel: u64) -> transition_port::Operation {
 
 fn context() -> transition_port::Context {
     transition_port::Context {
+        codex: None,
         tmux: "unit-no-live-target".into(),
         nonce: "unit-no-native-proof".into(),
-        home_epoch: None,
         lock: Arc::new(tokio::sync::Mutex::new(())),
-        permit: None,
     }
 }
 

@@ -296,8 +296,8 @@ fn decide_with_snapshot(
     }
     let selected =
         channel_policy::owns_output(enabled, snapshot.channels(), channel_id, Some(kind));
-    let candidate = super::output_candidate(snapshot, channel_id);
-    // The body and its host share both state and sends, even while delegated intake is closed.
+    let candidate = snapshot.candidate(channel_id);
+    // The body and its host share both state and sends.
     let Some(candidate) = candidate.filter(|_| selected) else {
         return Ok(legacy());
     };

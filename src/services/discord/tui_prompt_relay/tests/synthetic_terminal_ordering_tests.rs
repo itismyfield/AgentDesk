@@ -58,7 +58,10 @@ fn terminal_ordering_fixture(
             let header = if provider == ProviderKind::Codex {
                 format!("{}\n", serde_json::json!({"type":"session_meta", "payload":{"id":"native-ordering-session"}}))
             } else { String::new() };
-            std::fs::write(&output, format!("{header}{assistant}\n{terminal}\n")).unwrap();
+            let user = if provider == ProviderKind::Claude {
+                format!("{}\n", serde_json::json!({"type":"user", "sessionId":"native-ordering-session", "message":{"content":"terminal ordering prompt"}}))
+            } else { String::new() };
+            std::fs::write(&output, format!("{header}{user}{assistant}\n{terminal}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
                     runtime_kind: runtime,

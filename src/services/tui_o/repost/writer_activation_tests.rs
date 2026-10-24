@@ -1,7 +1,6 @@
 //! Activation contracts exercised through the channel writer's real dispatch and ledger.
 
 use super::*;
-use crate::services::cluster::channel_home::{self, HomeGate};
 use crate::services::tui_o::repost::io::probe::evidence::{FIRST_PASS_AFTER, SECOND_PASS_AFTER};
 use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 use sha2::Digest;
@@ -173,19 +172,13 @@ impl RepostHook<Writer> for ActorDispatch {
     }
 }
 
-fn home() -> Arc<HomeGate> {
-    let home = Arc::new(HomeGate::new(&CHANNEL.to_string(), "node-a"));
-    channel_home::register(Arc::clone(&home));
-    home
-}
-
-/// Scope is checked again after grant and by each request, without restoring its spent slot.
+/// Dispatch and a 429 retry preserve the spent grant and ordinary writer ledger.
 #[tokio::test]
-async fn d4act_scope_revoked_after_grant_and_during_429_wait_pg() {
+async fn d4act_spent_grant_survives_dispatch_and_429_wait_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    for (waiting, revoke) in [(false, false), (false, true), (true, false), (true, true)] {
-        let key = admitted(&pool, &format!("scope-{waiting}-{revoke}"), "piece").await;
+    for waiting in [false, true] {
+        let key = admitted(&pool, &format!("scope-{waiting}"), "piece").await;
         let harness = Harness::new();
         harness.gate.acquired();
         let mut writer = harness.writer();
@@ -198,99 +191,67 @@ async fn d4act_scope_revoked_after_grant_and_during_429_wait_pg() {
         let Admission::Granted { permit, lease } = admission.await.unwrap() else {
             panic!("granted")
         };
-        let mut registered = None;
-        if !waiting && revoke {
-            registered = Some(home());
-        }
         let started = dispatch::start(&mut writer, permit, lease, &*io).await;
         if waiting {
             io.waiting.notified().await;
-            if revoke {
-                registered = Some(home());
-            }
             io.release.notify_one();
         }
         started.finish(&mut writer, &pool).await.unwrap();
-        assert_eq!(
-            io.wire(),
-            match (waiting, revoke) {
-                (false, true) => 0,
-                (true, false) => 2,
-                _ => 1,
-            }
-        );
-        assert_eq!(
-            writer.store().ledger().next_serial(),
-            u64::from(waiting || !revoke)
-        );
+        assert_eq!(io.wire(), if waiting { 2 } else { 1 });
+        assert_eq!(writer.store().ledger().next_serial(), 1);
         assert_eq!(
             results(&pool, &key).await.len(),
             2,
             "the granted slot stays spent"
         );
-        if let Some(home) = registered {
-            assert!(channel_home::unregister_if_same(&home));
-        }
     }
     pool.close().await;
     db.drop().await;
 }
 
-/// Fresh work whose key was admitted remains suppressed even in an unsupported home.
+/// An admitted key suppresses its original, while fresh work keeps ordinary dispatch.
 #[tokio::test]
-async fn f6_delegated_admission_requires_sendable_home_pg() {
+async fn f6_admitted_work_suppresses_original_and_fresh_work_dispatches_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    for delegated in [true, false] {
-        let harness = Harness::new();
-        harness.gate.acquired();
-        let io = Io::over(&harness.port);
-        let registered = delegated.then(home);
-        let mut hook = turn(&harness, pool.clone(), &io);
-        let mut writer = harness.writer();
-        hook.turn(&mut writer).await;
-        if delegated {
-            assert!(!sidecar(&harness).exists());
-            assert_eq!(io.reads.load(Ordering::SeqCst), 0);
-        }
-        let native = format!("delegated-admitted-{delegated}");
-        let key = admitted(&pool, &native, "admitted").await;
-        let mut writer = writer.with_repost(Some(Box::new(hook)));
-        assert_eq!(
-            writer.deliver(&piece(&native, "admitted")).await,
-            Step::Done
+
+    let harness = Harness::new();
+    harness.gate.acquired();
+    let io = Io::over(&harness.port);
+    let mut hook = turn(&harness, pool.clone(), &io);
+    let mut writer = harness.writer();
+    hook.turn(&mut writer).await;
+    let native = "ordinary-admitted".to_string();
+    let key = admitted(&pool, &native, "admitted").await;
+    let mut writer = writer.with_repost(Some(Box::new(hook)));
+    assert_eq!(
+        writer.deliver(&piece(&native, "admitted")).await,
+        Step::Done
+    );
+    assert!(harness.port.posts().is_empty());
+    let fresh = "ordinary-fresh".to_string();
+    let _ = writer.deliver(&piece(&fresh, "fresh")).await;
+    {
+        assert_eq!(harness.port.posts(), ["fresh"]);
+        assert!(
+            ProvenanceLog::open(&sidecar(&harness))
+                .unwrap()
+                .state()
+                .intent(0)
+                .is_some()
         );
-        assert!(harness.port.posts().is_empty());
-        let fresh = format!("delegated-fresh-{delegated}");
-        let _ = writer.deliver(&piece(&fresh, "fresh")).await;
-        if delegated {
-            assert!(harness.port.posts().is_empty());
-            assert!(!sidecar(&harness).exists());
-            assert!(load(&pool, &key).await.unwrap().is_some());
-        } else {
-            assert_eq!(harness.port.posts(), ["fresh"]);
-            assert!(
-                ProvenanceLog::open(&sidecar(&harness))
-                    .unwrap()
-                    .state()
-                    .intent(0)
-                    .is_some()
-            );
-            let started = start(
-                &mut Runner::new(pool.clone(), BOT, run_scope()),
-                &mut writer,
-                &pool,
-                &key,
-                &io,
-            )
-            .await;
-            started.finish(&mut writer, &pool).await.unwrap();
-            assert_eq!(io.wire(), 1, "the same unregistered home can dispatch");
-        }
-        if let Some(home) = registered {
-            assert!(channel_home::unregister_if_same(&home));
-        }
+        let started = start(
+            &mut Runner::new(pool.clone(), BOT, run_scope()),
+            &mut writer,
+            &pool,
+            &key,
+            &io,
+        )
+        .await;
+        started.finish(&mut writer, &pool).await.unwrap();
+        assert_eq!(io.wire(), 1, "the ordinary writer can dispatch");
     }
+
     pool.close().await;
     db.drop().await;
 }

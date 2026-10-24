@@ -32,11 +32,10 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
             termination: None,
         });
         let context = Context {
+            codex: None,
             tmux: "test-pane".into(),
             nonce: "old-execution".into(),
-            home_epoch: None,
             lock: Arc::new(tokio::sync::Mutex::new(())),
-            permit: None,
         };
         // Leave the port's selection empty: only Actor.poll_transition may reject this envelope.
         let request = port.request(operation, context);
@@ -80,12 +79,13 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
     }
 }
 
-/// A preexisting operator job isolates the quiescence gate; Codex mailbox admission stays closed.
+/// Inspect crosses the real mailbox; only Apply uses a synthetic job to test its closed gate.
 pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
     mut writer: ChannelWriter<P, L, A>,
     bindings: Arc<B>,
     tmux: &str,
     initial_nonce: &str,
+    inspect: bool,
     next_root: impl FnOnce() -> String,
     held: impl Fn(),
 ) -> String
@@ -103,6 +103,15 @@ where
         writer.store().ledger(),
     );
     let (_stop, stopped) = watch::channel(false);
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let (port, receiver) = TransitionPort::new(
+        81,
+        gate.clone(),
+        Arc::new(std::time::SystemTime::now),
+        stopped.clone(),
+    );
+    let port = port.with_suspension(suspension.clone());
     let mut actor = Actor {
         writer,
         deriver,
@@ -111,17 +120,19 @@ where
         sources: Sources::new(channel, ShadowProvider::Codex, bindings.clone())
             .with_suspension(suspension),
         bindings,
-        transitions: Transitions::new(None, stopped.clone()),
+        transitions: Transitions::new(Some(receiver), stopped.clone()),
         notice: None,
         waiting: Waiting::default(),
         clock: (Instant::now(), chrono::Utc::now()),
         scope_hold: None,
         boot_previous_nonce: None,
     };
-    assert!(
-        actor.rescope(),
-        "the first exact root must install its selection"
+    assert_eq!(actor.rescope(), !inspect);
+    assert_eq!(
+        actor.writer.suspension.nonce().as_deref(),
+        Some(initial_nonce)
     );
+    assert_eq!(actor.writer.suspension.is_empty(), inspect);
     actor
         .sources
         .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
@@ -136,66 +147,114 @@ where
     assert!(!actor.deriver.has_unsealed());
     assert!(actor.sources.quiescent_for_rescope());
     let context = Context {
+        codex: None,
         tmux: tmux.into(),
         nonce: initial_nonce.into(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     };
-    let gate = Arc::new(OwnershipGate::default());
-    gate.acquired();
-    let (_, common) = actor
-        .build_snapshot(&context, &gate, &BTreeMap::new())
-        .unwrap();
-    let (reply, completed) = oneshot::channel();
-    actor.transitions.job = Some(Job {
-        request: Request {
-            channel,
-            cutoff: actor.writer.store().binding_checkpoint().unwrap().unwrap(),
-            job_id: "fresh-root-waiting".into(),
-            operator: "fixture".into(),
-            at: chrono::Utc::now(),
-            reason: "finish an existing transition before selecting a new root".into(),
-            termination: None,
-        },
-        apply: false,
-        automatic: None,
-        scope: None,
-        stopping: stopped,
-        context,
-        reply,
-        gate,
-        wall: Arc::new(std::time::SystemTime::now),
-        common,
-        first: Vec::new(),
-        probes: BTreeMap::new(),
-        queue: VecDeque::new(),
-        stage: Stage::First,
-        worker: None,
-        deadline: now() + DEADLINE,
-        hashed: 0,
-        outcomes: BTreeMap::new(),
-    });
-    let nonce = next_root();
-    for _ in 0..3 {
-        assert!(actor.transitions.has_job());
+    let request = Request {
+        channel,
+        cutoff: actor.writer.store().binding_checkpoint().unwrap().unwrap(),
+        job_id: "fresh-root-waiting".into(),
+        operator: "fixture".into(),
+        at: chrono::Utc::now(),
+        reason: "finish an existing transition before selecting a new root".into(),
+        termination: None,
+    };
+    let nonce;
+    if inspect {
+        // No source has been denied yet, so this is reachable through the production port.
+        let pending = port.request(Operation::Inspect(request), context);
+        tokio::pin!(pending);
+        assert!(futures::poll!(&mut pending).is_pending());
+        actor.take_request();
+        let job = actor
+            .transitions
+            .job
+            .as_mut()
+            .expect("mailbox accepted Inspect");
+        assert!(!job.apply);
+        // Codex currently has no eligible probes and finishes in the same poll. Retain the
+        // mailbox-admitted Inspect at Quiet to exercise suspension across a future probe wait.
+        job.stage = Stage::Quiet(now() + RETIRE_QUIET);
+        // Tap the actor reply, then forward it unchanged through the port's suspension check.
+        let (reply, completed) = oneshot::channel();
+        let port_reply = std::mem::replace(&mut job.reply, reply);
+        nonce = next_root();
         assert!(
-            !actor.rescope(),
-            "a live transition job must hold the new root"
+            actor.rescope(),
+            "a read-only Inspect in Quiet must not delay a proven fresh root"
         );
-        assert_eq!(actor.scope_hold, Some("new_root_waiting"));
+        assert_eq!(actor.scope_hold, None);
+        assert_eq!(
+            actor.writer.suspension.nonce().as_deref(),
+            Some(nonce.as_str())
+        );
+        assert!(!actor.writer.suspension.is_empty());
         actor.observe_waiting(false);
         held();
+        for _ in 0..3 {
+            actor.poll_transition(true, &watch::channel(None).0).await;
+        }
+        let reply = tokio::time::timeout(Duration::from_millis(100), completed)
+            .await
+            .expect("fresh suspension must answer the active Inspect in finite time")
+            .expect("the actor must send an explicit refusal");
+        assert_eq!(reply.refused, Some(Refused::CodexDeferred));
+        assert!(actor.transitions.job.is_none());
+        port_reply.send(reply).unwrap();
+        assert_eq!(pending.await.unwrap_err(), "suspended_sources");
+    } else {
+        let (_, common) = actor
+            .build_snapshot(&context, &gate, &BTreeMap::new())
+            .unwrap();
+        let (reply, completed) = oneshot::channel();
+        // Codex mailbox Apply stays closed; a synthetic existing Apply isolates its hold guard.
+        actor.transitions.job = Some(Job {
+            request,
+            apply: true,
+            automatic: None,
+            scope: None,
+            stopping: stopped,
+            context,
+            reply,
+            gate,
+            wall: Arc::new(std::time::SystemTime::now),
+            common,
+            first: Vec::new(),
+            probes: BTreeMap::new(),
+            queue: VecDeque::new(),
+            stage: Stage::First,
+            worker: None,
+            deadline: now() + DEADLINE,
+            hashed: 0,
+            outcomes: BTreeMap::new(),
+        });
+        nonce = next_root();
+        for _ in 0..3 {
+            assert!(
+                !actor.rescope(),
+                "an Apply job must still hold the new root"
+            );
+            assert_eq!(actor.scope_hold, Some("new_root_waiting"));
+            actor.observe_waiting(false);
+            held();
+        }
+        let mut job = actor.transitions.job.take().unwrap();
+        for _ in 0..4 {
+            if actor.step(&mut job, &watch::channel(None).0).await {
+                break;
+            }
+            test_hooks::settle_workers();
+        }
+        actor.finish(job);
+        assert!(completed.await.unwrap().refused.is_none());
+        assert!(!actor.transitions.has_job());
+        assert!(
+            actor.rescope(),
+            "finishing Apply must permit the exact new root"
+        );
     }
-    let mut job = actor.transitions.job.take().unwrap();
-    assert!(actor.step(&mut job, &watch::channel(None).0).await);
-    actor.finish(job);
-    assert!(completed.await.unwrap().refused.is_none());
-    assert!(!actor.transitions.has_job());
-    assert!(
-        actor.rescope(),
-        "finishing the job must permit the exact new root"
-    );
     assert_eq!(actor.scope_hold, None);
     actor.observe_waiting(false);
     actor

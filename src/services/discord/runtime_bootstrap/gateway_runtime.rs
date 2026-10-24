@@ -52,10 +52,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
     let voice_receiver_for_setup = voice_receiver.clone();
 
     let slash_commands = run_bot_build_slash_commands();
-    // Only a gateway reaches here, so standby and REST runtimes never start the ingress shadow.
-    let ingress_shadow =
-        super::super::ingress_shadow::ShadowConfig::of(&crate::config::load_graceful());
-
     let framework = poise::Framework::builder()
         .options(run_bot_framework_options(slash_commands))
         .setup(move |ctx, _ready, framework| {
@@ -65,7 +61,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
             let token_for_ready = token_owned.clone();
             let voice_config_for_setup = voice_config_for_setup.clone();
             let voice_receiver_for_setup = voice_receiver_for_setup.clone();
-            let ingress_shadow = ingress_shadow.clone();
             Box::pin(run_bot_framework_setup(
                 ctx,
                 _ready,
@@ -81,7 +76,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
                 startup_reconcile_remaining,
                 startup_doctor_started,
                 api_port,
-                ingress_shadow,
             ))
         })
         .build();
@@ -151,11 +145,6 @@ pub(in crate::services::discord) fn run_bot_framework_options(
             })
         }),
         event_handler: |framework, event| {
-            // handle_event's only production caller, so every gateway event is observed before any branch.
-            super::super::ingress_shadow::observe(
-                framework.user_data.ingress_shadow.as_ref(),
-                event,
-            );
             Box::pin(handle_event(
                 framework.serenity_context,
                 event,

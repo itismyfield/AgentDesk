@@ -4,7 +4,6 @@ use poise::CreateReply;
 
 use super::super::{Context, Error, check_auth};
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::store::tool_card_switch::{self, Published};
 
 #[derive(Debug, Clone, Copy, poise::ChoiceParameter)]
@@ -29,7 +28,6 @@ impl ToolCallAction {
 
 trait CommandContext: Sync {
     fn authorized(&self) -> impl std::future::Future<Output = bool> + Send;
-    fn admit_home(&self) -> Result<Option<CommandPermit>, String>;
     fn channel(&self) -> u64;
     fn user(&self) -> u64;
     fn kind(&self) -> Option<RuntimeHandoffKind>;
@@ -77,14 +75,6 @@ async fn run(ctx: &impl CommandContext, action: ToolCallAction) -> Result<(), Er
         return Ok(());
     }
     let enabled = action.enabled();
-    let _home_permit = if enabled.is_some() {
-        match ctx.admit_home() {
-            Ok(permit) => permit,
-            Err(refusal) => return ctx.reply(refusal, false).await,
-        }
-    } else {
-        None
-    };
     let Some(kind @ (RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui)) = ctx.kind()
     else {
         return ctx
@@ -157,10 +147,6 @@ impl CommandContext for DiscordContext<'_> {
             log_command_received!(ctx.channel_id().get(), &ctx.author().name, "/tool-call");
         }
         allowed
-    }
-    fn admit_home(&self) -> Result<Option<CommandPermit>, String> {
-        super::control::home_fence::admit(self.0.channel_id(), "tool_call")
-            .map_err(|error| error.to_string())
     }
     fn channel(&self) -> u64 {
         self.0.channel_id().get()

@@ -473,8 +473,7 @@ class E4ProviderBodyWait(unittest.TestCase):
         driver.validate_scenario_schema(scenario)
         bot = assertions.provider_bot_id(driver.cell_provider(cell))
         warmup = [{"id": "11", "content": "[E2E:E4:WARMUP]", "author": {"id": bot, "bot": True}, "type": 0}]
-        direct = [{"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n"
-                   "direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK\n```",
+        direct = [{"id": "12", "content": "-# ⌨️ direct-input-echo (E-4) — please reply with the literal string DIRECT_E4_OK",
                    "author": {"id": self.NOTICE_BOT, "bot": True}, "type": 0}]
         direct += [{"id": str(20 + i), "content": "DIRECT_E4_OK", "author": {"id": author, "bot": True}, "type": 0}
                    for i, author in enumerate(bodies)]
@@ -527,13 +526,21 @@ class E4ProviderBodyWait(unittest.TestCase):
         result = self.run_e4("claude-tui", [claude], delete_bodies_after_first_fetch=True)
         self.assertEqual(result["status"], "fail", result)
         self.assertIn("provider bot", result["reason"])
-        window = _window({"id": "12", "content": "터미널에 직접 주입된 입력 (tmux : `s`):\nDIRECT_E4_OK",
+        window = _window({"id": "12", "content": "-# ⌨️ DIRECT_E4_OK",
                           "author": {"id": claude, "bot": True}, "type": 0})
         with self.assertRaises(assertions.AssertionError):
             driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"}, window=window, provider="claude")
         with self.assertRaisesRegex(assertions.AssertionError, "cell provider"):
             driver.run_assertion({"provider_text_present": "DIRECT_E4_OK"},
                                  window=_window(_relay_msg(1, "DIRECT_E4_OK")))
+
+    def test_input_subtext_cannot_satisfy_generic_wait_or_text_present(self):
+        message = {"id": "12", "content": "-# ⌨️ DIRECT_E4_OK",
+                   "author": {"id": assertions.provider_bot_id("claude"), "bot": True}, "type": 0}
+        window = _window(message)
+        self.assertIsNone(assertions.relay_body(message))
+        with self.assertRaises(assertions.AssertionError):
+            driver.run_assertion({"text_present": "DIRECT_E4_OK"}, window=window)
 
     def test_relay_author_accepts_only_provider(self):
         scenario = {"steps": [{"wait_for_discord_text": "X", "relay_author": "notify"}], "assertions": []}

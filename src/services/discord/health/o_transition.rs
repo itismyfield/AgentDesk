@@ -9,7 +9,6 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLookup, HostedLookupKey, HostedRecord, HostedState,
     load_hosted_execution_pg,
 };
-use crate::services::cluster::channel_home::{self, CommandPermit, HomeOwnership};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_endpoints;
 use crate::services::tui_o::writer::transition_port::Context;
@@ -47,13 +46,26 @@ pub(crate) async fn resolve_context(
         return Err("the row's bot is not this runtime's".into());
     }
     launched(&record)?;
-    let (home_epoch, permit) = home_admission(target.channel)?;
     Ok(Context {
         lock: shared.session_transition_lock(channel),
         tmux: record.owner.logical_key,
         nonce: record.execution_nonce,
-        home_epoch,
-        permit,
+        codex: None,
+    })
+}
+
+/// Codex supplies observation only; the caller never promotes it into automatic Apply.
+pub(crate) async fn resolve_codex_context(
+    registry: &HealthRegistry,
+    shared: std::sync::Arc<crate::services::discord::SharedData>,
+    channel: u64,
+) -> Result<Context, codex_context::Unavailable> {
+    let prepared = codex_context::prepare(registry, shared.clone(), channel).await?;
+    Ok(Context {
+        lock: shared.session_transition_lock(ChannelId::new(channel)),
+        tmux: prepared.tmux,
+        nonce: prepared.nonce,
+        codex: Some(prepared.observer),
     })
 }
 
@@ -102,19 +114,7 @@ fn launched(record: &HostedExecution) -> Result<(), String> {
     }
 }
 
-/// The registered home's epoch and a permit, checked and taken under one home lock; a channel
-/// without a registered home has neither.
-pub(crate) fn home_admission(channel: u64) -> Result<(Option<i64>, Option<CommandPermit>), String> {
-    let Some(home) = channel_home::registered_channel(channel) else {
-        return Ok((None, None));
-    };
-    let HomeOwnership::Owned { home_epoch, .. } = home.ownership() else {
-        return Err("the channel's home is not held here".into());
-    };
-    let permit = home.admit_at_epoch(ProviderKind::Claude.as_str(), home_epoch, false);
-    let permit = permit.ok_or("the channel's home admits no command now")?;
-    Ok((Some(home_epoch), Some(permit)))
-}
-
 pub(crate) mod automatic;
 mod automatic_idle;
+mod codex_census;
+mod codex_context;

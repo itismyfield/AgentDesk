@@ -163,8 +163,9 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
     let user_text_owned = ctx.user_text_owned;
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
+    let preparation = completion_proof::waiting(state.inflight_state);
     let claude_tui_followup_busy_readiness_timeout =
-        ctx.claude_tui_followup_busy_readiness_timeout;
+        ctx.claude_tui_followup_busy_readiness_timeout || preparation.is_some();
     let rx_disconnected = ctx.rx_disconnected;
     let turn_start = ctx.turn_start;
     let review_dispatch_warning = ctx.review_dispatch_warning;
@@ -369,7 +370,16 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     }
                 }
                 if !resume_failed {
-                    if claude_tui_followup_busy_readiness_timeout {
+                    if let Some(hold) = &preparation {
+                        followup_requeue::preparation_notice::enqueue(&shared_owned, &ProviderKind::Claude,
+                            channel_id, inflight_state.effective_busy_followup_retry_user_msg_id(),
+                            shared_owned.restart.current_generation, hold.reason).await;
+                    }
+                    if preparation.as_ref().is_some_and(|hold| !hold.may_requeue()) {
+                        preserve_inflight_for_cleanup_retry = true;
+                        claude_tui_busy_requeue_pending = false;
+                        terminal_empty_response_notice = None;
+                    } else if claude_tui_followup_busy_readiness_timeout {
                         claude_tui_busy_requeue_pending = true;
                         terminal_empty_response_notice = None;
                         let ts = chrono::Local::now().format("%H:%M:%S");

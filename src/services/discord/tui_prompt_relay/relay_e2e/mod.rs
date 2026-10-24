@@ -340,7 +340,6 @@ impl RelayE2eHarness {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel_id = ChannelId::new(CHANNEL_ID);
         let cwd = root.path().to_str().expect("utf8 test root").to_string();
@@ -387,7 +386,6 @@ impl RelayE2eHarness {
             provider: self.data.provider.clone(),
             voice_config: self.data.voice_config.clone(),
             voice_receiver: self.data.voice_receiver.clone(),
-            ingress_shadow: None,
         }
     }
 
@@ -662,24 +660,25 @@ impl RelayE2eHarness {
         self.mock.release_held_history.notify_one();
     }
 
-    /// Points the notify bot at the mock; `timeout` bounds each of its requests.
-    pub(super) async fn use_mock_notify_bot(&self, timeout: Duration) {
+    /// Registers a provider notice bot at the mock with the requested HTTP timeout.
+    pub(super) async fn use_mock_provider_bot(&self, timeout: Duration) {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .expect("notify bot client");
-        let http = serenity::HttpBuilder::new("notify-test-token")
+            .expect("provider bot client");
+        let http = serenity::HttpBuilder::new("provider-test-token")
             .client(client)
             .proxy(self.proxy.clone())
             .ratelimiter_disabled(true)
             .build();
+        let owner = crate::services::discord::make_shared_data_for_tests();
+        let mut ctx = self.ctx.clone();
+        ctx.http = Arc::new(http);
+        owner.http.cached_serenity_ctx.set(ctx).ok().unwrap();
         self.health_registry
             .as_ref()
             .expect("started with a health registry")
-            .set_utility_bot_http_for_tests(
-                crate::services::discord::bot_role::UtilityBotRole::Notify,
-                Arc::new(http),
-            )
+            .register(PROVIDER_KEY.to_string(), owner)
             .await;
     }
 

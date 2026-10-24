@@ -23,7 +23,9 @@ impl<I: HostIo> Hosted<'_, I> {
         let stopping = self.stopping.clone();
         let (transition, receiver) =
             TransitionPort::new(generation, Arc::clone(self.gate), wall, stopping);
-        let transition = transition.with_suspension(suspension.clone());
+        let transition = transition
+            .with_provider(self.provider)
+            .with_suspension(suspension.clone());
         let (submission, spawned) = if self.provider == ShadowProvider::Codex {
             let (submission, commands) = actor::codex_submission::Port::new(generation);
             let submission = submission.with_suspension(suspension);
@@ -72,7 +74,14 @@ impl Readiness {
 
     /// The running actor's port, while it takes work as `with_submission` checks it.
     pub(crate) fn transition(&self, channel: u64) -> Option<TransitionPort> {
-        self.with_transition(channel, |port| Ok(port.clone())).ok()
+        self.with_transition(channel, false, |port| Ok(port.clone()))
+            .ok()
+    }
+
+    /// Returns a live port for read-only diagnostics; requests still enforce suspension.
+    pub(crate) fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
+        self.with_transition(channel, true, |port| Ok(port.clone()))
+            .ok()
     }
 
     /// Consumes `reply` only while the run `sent` named is still the channel's current one.
@@ -83,7 +92,7 @@ impl Readiness {
         reply: transition_port::Reply,
         consume: impl FnOnce(&transition_port::Reply) -> T,
     ) -> Result<T, &'static str> {
-        self.with_transition(channel, |current| match current.same_run(sent) {
+        self.with_transition(channel, false, |current| match current.same_run(sent) {
             true => Ok(consume(&reply)),
             false => Err("stale_actor_reply"),
         })
@@ -92,6 +101,7 @@ impl Readiness {
     fn with_transition<T>(
         &self,
         channel: u64,
+        observation: bool,
         consume: impl FnOnce(&TransitionPort) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
         let live = locked(&self.live);
@@ -100,12 +110,12 @@ impl Readiness {
             || live.resumed.has_changed().is_err()
             || !self.is_ready(channel)
             || !*live.resumed.borrow()
-            || !owned_now(channel, &live.gate)
+            || !owned_now(&live.gate)
         {
             return Err("actor_unavailable");
         }
         let port = live.transition.as_ref().ok_or("actor_unavailable")?;
-        if !port.sources_unsuspended() {
+        if !observation && !port.sources_unsuspended() {
             return Err("suspended_sources");
         }
         consume(port)
@@ -136,6 +146,9 @@ mod test_support {
             port: TransitionPort,
             (resumed, stopping): (watch::Receiver<bool>, watch::Receiver<bool>),
         ) -> HostedForTest {
+            let port = port
+                .clone()
+                .with_provider(port.provider().unwrap_or(ShadowProvider::Claude));
             let owing = Owing::default();
             let owed = OwedView {
                 published: owing.published.subscribe(),
