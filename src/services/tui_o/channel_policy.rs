@@ -1,6 +1,5 @@
-//! Validated writer membership is fixed for the lifetime of the process; on the O home each
-//! selected or locally committed channel also carries this process's adoption state, and off it
-//! each selected channel keeps its local store state for a delegated home.
+//! Writer membership is fixed for the process. The configured O home carries adoption state
+//! for selected or locally committed channels; other nodes only report their local store state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -36,9 +35,6 @@ pub(crate) struct BootChannels {
     site: Site,
     configured_id: Option<String>,
     candidates: BTreeMap<u64, Candidate>,
-    /// Off the home, each selected channel's local store state, kept so a delegated home can open
-    /// here without a restart. Holding one opens nothing: the channel's home gate decides.
-    standby: BTreeMap<u64, Candidate>,
 }
 
 /// Membership as configured; the adoption states and kept committed channels are process state.
@@ -235,13 +231,12 @@ impl BootChannels {
             site,
             configured_id,
             candidates: BTreeMap::new(),
-            standby: BTreeMap::new(),
         })
     }
 
     /// Starts each selected channel's adoption. The store is read only for an enabled writer with
     /// a non-empty selection. The home also keeps every channel its store committed; a non-home
-    /// node adopts nothing, reports local store state and keeps it as standby.
+    /// node adopts nothing and reports local store state.
     pub(crate) fn seeded(
         mut self,
         enabled: bool,
@@ -281,8 +276,6 @@ impl BootChannels {
                 for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
                     alarms.raise_at(channel, &alarm, Instant::now());
                 }
-                let standby = |(channel, state)| (channel, self.seed_candidate(channel, state));
-                self.standby = states.into_iter().map(standby).collect();
             }
         }
         Ok(self)
@@ -341,11 +334,6 @@ impl BootChannels {
         self.candidates.get(&channel)
     }
 
-    /// A selected channel's local store state off the home; only a home gate makes it count.
-    pub(crate) fn standby(&self, channel: u64) -> Option<&Candidate> {
-        self.standby.get(&channel)
-    }
-
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
     #[cfg(test)]
     pub(crate) fn adopted(mut self, state: Adoption) -> Self {
@@ -362,14 +350,6 @@ impl BootChannels {
         self.site = Site::Foreign { home: home.into() };
         self.channels = self.selected.clone();
         self.candidates.clear();
-        self
-    }
-
-    /// Every selected channel kept as standby in `state`, as `seeded` would leave it off the home.
-    #[cfg(test)]
-    pub(crate) fn standing_by(mut self, state: Adoption) -> Self {
-        let standby = |&channel: &u64| (channel, Candidate::new(state));
-        self.standby = self.selected.iter().map(standby).collect();
         self
     }
 }

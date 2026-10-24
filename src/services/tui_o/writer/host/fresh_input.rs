@@ -9,7 +9,7 @@ pub(crate) fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
     let Some(live) = live.get(&channel) else {
         return Some("host_missing");
     };
-    let owned = owned_now(channel, &live.gate);
+    let owned = owned_now(&live.gate);
     #[cfg(test)]
     let owned = owned || crate::services::claude_tui::source_verify::n2b_mutant("b1b-host");
     if !owned {

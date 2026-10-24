@@ -1,12 +1,12 @@
 //! Inflight removal, stale-generation invalidation, and the non-destructive loader.
 
+use super::store;
+use super::store::InflightStateFileLock;
 use super::*;
 use std::collections::HashMap;
 use std::path::Path;
-
-use super::store;
-use super::store::InflightStateFileLock;
-use crate::services::cluster::channel_home_port::RestoreFailure;
+mod restore_failure;
+use restore_failure::RestoreFailure;
 
 fn channel_id_from_path(path: &Path) -> u64 {
     path.file_stem()

@@ -457,7 +457,6 @@ impl FullEventTask {
             provider: ProviderKind::Codex,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&config),
             voice_config: config,
-            ingress_shadow: None,
         };
         let event = serenity::FullEvent::Message {
             new_message: discord_mock::user_message(id, text),

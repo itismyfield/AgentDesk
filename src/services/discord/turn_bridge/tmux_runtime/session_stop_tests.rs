@@ -223,7 +223,6 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1b-direct-parent";
@@ -467,7 +466,6 @@ fn codex_parent_without_session_meta_refuses_stop_and_replies() {
             provider: ProviderKind::Codex,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "codex-without-parent-header";
@@ -519,7 +517,6 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1c-discord-turn";
@@ -716,7 +713,6 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
                 provider: provider.clone(),
                 voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
                 voice_config,
-                ingress_shadow: None,
             };
             command(&ctx, &data, channel).await;
             assert!(mock.unhandled.lock().unwrap().is_empty());
@@ -782,7 +778,11 @@ fn owner_stop_case(name: &str, case: OwnerCase) {
             if let Some(worker) = worker {
                 worker.join().unwrap();
             }
-            assert_eq!(reply.text(), expected);
+            assert_eq!(
+                reply.text(),
+                expected,
+                "slash stop uses ordinary owner identity"
+            );
             reply.finish(&shared, &provider, channel).await;
         }
         let calls = fx.take_calls();
@@ -989,7 +989,7 @@ pub(super) fn mutate_candidates(candidates: &mut Vec<(String, SourceBinding)>) {
 }
 
 #[test]
-fn preserve_stop_forwarded_session_skip_reports_unconfirmed_without_mailbox() {
+fn preserve_slash_stop_session_skip_reports_unconfirmed_without_mailbox() {
     let fx = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let _binding_root = TestBindingRoot::enter(Some(root.path()));
@@ -1002,18 +1002,14 @@ fn preserve_stop_forwarded_session_skip_reports_unconfirmed_without_mailbox() {
         let path = root.path().join("session.jsonl");
         open(&path, "first");
         bind_live(&shared, &ProviderKind::Claude, channel, session, &path);
-        let reply = crate::services::discord::commands::stop::run_holder_stop_on(
+        let reply = crate::services::discord::commands::stop::run_slash_stop(
             &shared,
             &ProviderKind::Claude,
             channel,
         )
         .await;
-        assert_eq!(reply["outcome"], "unconfirmed");
-        assert_eq!(reply["effect_started"], false);
-        assert!(
-            crate::services::discord::commands::stop::remote_cancel_reply(&reply)
-                .contains("중단 미확인")
-        );
+        assert!(reply.text().contains("중단 미확인"));
+        reply.finish(&shared, &ProviderKind::Claude, channel).await;
         assert!(shared.mailbox_peek(channel).is_none());
         assert!(
             !fx.take_calls()

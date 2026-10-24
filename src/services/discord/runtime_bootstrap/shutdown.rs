@@ -1,19 +1,13 @@
 use super::*;
 
-use crate::services::cluster::home_supervisor::{
-    HomeLifecycle, Settled, StopReason, stop_all_and_join,
-};
-
-/// On SIGTERM: persist queue/inflight/last_message state, end this runtime's homes, quick-exit.
-/// Spawned once per slot-holding runtime, after its homes' writers start; tmux/TUI sessions survive.
+/// On SIGTERM, persist queue/inflight/last_message state before consuming the shutdown slot.
+/// Spawned once per slot-holding runtime; tmux/TUI sessions survive.
 pub(super) fn run_bot_spawn_sigterm_handler(
     shared: &Arc<SharedData>,
     provider_for_shutdown: ProviderKind,
 ) -> tokio::task::JoinHandle<()> {
     let shared_for_signal = shared.clone();
     let source = SigtermSource::take();
-    // Held from registration, so this handler only ever ends its own runtime's homes.
-    let homes = super::o_writer_host::lifecycles(Some(&provider_for_shutdown));
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -36,7 +30,6 @@ pub(super) fn run_bot_spawn_sigterm_handler(
             .await;
 
             crate::services::opencode::shutdown_warm_servers();
-            end_homes(homes, StopReason::Sigterm).await;
 
             // Wait for all providers to finish saving before exiting.
             // CAS guard: skip if this provider already decremented via deferred restart path.
@@ -62,21 +55,8 @@ pub(super) fn run_bot_spawn_sigterm_handler(
             }
         }
         #[cfg(not(unix))]
-        let _ = (source, shared_for_signal, provider_for_shutdown, homes);
+        let _ = (source, shared_for_signal, provider_for_shutdown);
     })
-}
-
-/// Stops and joins `homes`; a writer whose end is unconfirmed stays blocked and is only logged.
-pub(super) async fn end_homes(homes: Vec<Arc<dyn HomeLifecycle>>, reason: StopReason) {
-    for settled in stop_all_and_join(homes, reason).await {
-        if let Settled::Stuck(detail) = settled {
-            tracing::error!(
-                ?reason,
-                detail,
-                "a delegated home's writer end is unconfirmed"
-            );
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -278,9 +258,6 @@ async fn finish_gateway_backend<E, F>(
     // lease task is aborted and drops the lease.
     let gate = crate::services::tui_o::ownership::gate(provider_for_error.as_str());
     gate.close();
-    // Its writers end while the lease still holds, so no next gateway's writer overlaps them.
-    let homes = super::o_writer_host::lifecycles(Some(provider_for_error));
-    end_homes(homes, StopReason::BackendExited).await;
     drop(gateway_waiter);
     release_catalog_before_diagnostic(model_catalog_refresh_task, diagnostic).await;
     abort_and_join_task(gateway_lease_task).await;

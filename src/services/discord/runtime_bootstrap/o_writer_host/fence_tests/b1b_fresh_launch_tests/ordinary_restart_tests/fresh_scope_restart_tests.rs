@@ -132,7 +132,7 @@ pub(super) async fn install(
         api.port
     ));
     let _cli = fixture.cold_cli();
-    let prepared = parts(
+    let prepared = parts_with_rest(
         &fixture.shared,
         &ProviderKind::Codex,
         None,

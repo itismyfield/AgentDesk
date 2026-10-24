@@ -22,9 +22,12 @@ fn config(enabled: bool, foreign: bool) -> Config {
 fn production_seed_reserves_before_any_host_placement_or_body() {
     for foreign in [false, true] {
         let config = config(true, foreign);
+        let read = std::cell::Cell::new(false);
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(true, &config, |_, _| {
+            .seeded(true, &config, |_, local| {
+                assert!(!read.replace(true));
+                assert_eq!(local, !foreign);
                 Ok(BTreeMap::from([
                     (41, Adoption::Pending),
                     (42, Adoption::Pending),
@@ -33,24 +36,27 @@ fn production_seed_reserves_before_any_host_placement_or_body() {
                 ]))
             })
             .unwrap();
-        let candidate = boot.candidate(41).or(boot.standby(41)).unwrap().clone();
+        assert!(read.get(), "Foreign still reads and judges its local store");
         assert!(boot.late_adopt_capable());
+        if foreign {
+            assert!(
+                [41, 42, 43, 44]
+                    .into_iter()
+                    .all(|channel| boot.candidate(channel).is_none())
+            );
+            continue;
+        }
+        let candidate = boot.candidate(41).unwrap().clone();
         assert!(
             candidate.late_adopt_origin(),
             "actual seeded origin, foreign={foreign}"
         );
         assert_eq!(candidate.peek(), Adoption::Deferred);
-        let codex = boot.candidate(42).or(boot.standby(42)).unwrap();
+        let codex = boot.candidate(42).unwrap();
         assert!(codex.late_adopt_origin(), "Codex reserves as Claude does");
         assert_eq!(codex.peek(), Adoption::Deferred);
-        assert_eq!(
-            boot.candidate(43).or(boot.standby(43)).unwrap().peek(),
-            Adoption::Held
-        );
-        assert_eq!(
-            boot.candidate(44).or(boot.standby(44)).unwrap().peek(),
-            Adoption::Committed
-        );
+        assert_eq!(boot.candidate(43).unwrap().peek(), Adoption::Held);
+        assert_eq!(boot.candidate(44).unwrap().peek(), Adoption::Committed);
         let _installed = test_override::force_boot(boot);
         assert!(!candidate.claim(41));
         let body = candidate.claim_body(41);

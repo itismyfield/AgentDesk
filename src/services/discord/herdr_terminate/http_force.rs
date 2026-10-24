@@ -11,7 +11,6 @@ use super::{
 };
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::db::dispatched_sessions::hosted_execution::http_force::active_dispatch_pg;
-use crate::services::cluster::channel_home::{CommandPermit, command_scope};
 
 /// A postlude's outcome, finished once the exclusion is gone: work that must not run while the
 /// channel is excluded, such as a drain of the queue the termination kept.
@@ -27,12 +26,11 @@ pub(crate) struct Expected {
 }
 
 /// Runs the scoped terminate bound to `expected`, on a retire `postlude` under the held exclusion
-/// and then its released step; `permit` keeps the home command open until the result is logged.
+/// and then its released step before the result is logged.
 pub(crate) async fn terminate_for_http<T, P>(
     registry: &HealthRegistry,
     pool: PgPool,
     (request, expected): (OperatorTerminate, Expected),
-    permit: Option<CommandPermit>,
     reason: &str,
     postlude: P,
 ) -> (TerminationResult, Option<T>)
@@ -56,7 +54,7 @@ where
             return (result, None);
         }
     };
-    let run = tokio::spawn(command_scope(permit, async move {
+    let run = tokio::spawn(async move {
         let service = async {
             match terminate_scoped(request, shared, &pool, Some(expected)).await {
                 Ok(exclusion) => {
@@ -82,7 +80,7 @@ where
             .unwrap_or_else(|_| panicked());
         logged.write(&outcome.0);
         outcome
-    }));
+    });
     let cancelled = TerminationResult::Indeterminate("terminate task cancelled".into());
     run.await.unwrap_or((cancelled, None))
 }

@@ -58,7 +58,8 @@ fn payload(row: &IntakeOutboxRow) -> Result<String, String> {
         row.attempt_no,
         row.parent_outbox_id,
         row.admission_kind,
-        row.home_epoch
+        // Preserve the null slot in existing consent custody digests.
+        serde_json::Value::Null
     ]);
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(&fields).map_err(|e| e.to_string())?,

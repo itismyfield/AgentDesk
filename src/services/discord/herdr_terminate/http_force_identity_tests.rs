@@ -96,7 +96,7 @@ async fn forwarded(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, V
         ("x-agentdesk-session-owner", herdr::NODE),
     ];
     let body = body.to_string();
-    crate::server::routes::home_stop_test_post(app, uri, &headers, &body).await
+    crate::server::routes::cancel_route_test_post(app, uri, &headers, &body).await
 }
 
 // A forced cancel retires only the execution its own read selected: any later execution on the row
@@ -335,7 +335,7 @@ fn successor_launched(
             let bearer = format!("Bearer {AUTH}");
             let headers = [("authorization", bearer.as_str()), JSON];
             let uri = "/dispatched-sessions/webhook";
-            let post = crate::server::routes::home_stop_test_post;
+            let post = crate::server::routes::cancel_route_test_post;
             let (status, reply) = post(&app, uri, &headers, &marker.to_string()).await;
             assert!(status.is_success(), "{status}: {reply}");
             test_turn::start(&shared, channel(), 61, "turn-b").await;

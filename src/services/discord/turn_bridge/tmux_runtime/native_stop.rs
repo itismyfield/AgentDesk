@@ -241,25 +241,13 @@ impl NativeStop {
                         attempt.clone(),
                         expected_identity,
                     );
-                    let permit = if super::claude_stop_pane::mutant("drop_command_permit") {
-                        None
-                    } else {
-                        crate::services::cluster::channel_home::current_command(
-                            &channel.get().to_string(),
-                            provider.as_str(),
-                        )
-                    };
-                    tokio::spawn(crate::services::cluster::channel_home::command_scope(
-                        permit,
-                        async move {
-                            let _completion = Completion(attempt.clone());
-                            let sent =
-                                interrupt_claude_native_turn(&token, session, &reason, identity)
-                                    .await
-                                    .sent_keys;
-                            attempt.complete(sent);
-                        },
-                    ));
+                    tokio::spawn(async move {
+                        let _completion = Completion(attempt.clone());
+                        let sent = interrupt_claude_native_turn(&token, session, &reason, identity)
+                            .await
+                            .sent_keys;
+                        attempt.complete(sent);
+                    });
                 }
                 stop.sent = attempt.wait().await;
             }

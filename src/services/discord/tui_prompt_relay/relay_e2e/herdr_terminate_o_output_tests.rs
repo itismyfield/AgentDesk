@@ -68,7 +68,7 @@ fn cancel(run: &Terminating) -> impl std::future::Future<Output = (StatusCode, V
         registry.register("claude".into(), shared).await;
         let mut config = crate::config::Config::default();
         config.server.auth_token = Some(AUTH.into());
-        let app = crate::server::routes::home_stop_test_app(
+        let app = crate::server::routes::cancel_route_test_app(
             config,
             Some(pool),
             Some(registry),
@@ -81,7 +81,7 @@ fn cancel(run: &Terminating) -> impl std::future::Future<Output = (StatusCode, V
         ];
         let uri = format!("/turns/{CHANNEL_ID}/cancel");
         let body = json!({"force": true}).to_string();
-        crate::server::routes::home_stop_test_post(&app, &uri, &headers, &body).await
+        crate::server::routes::cancel_route_test_post(&app, &uri, &headers, &body).await
     }
 }
 
