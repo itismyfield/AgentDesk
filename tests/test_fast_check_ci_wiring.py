@@ -699,7 +699,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(python_step["with"]["python-version"], "3.11")
 
         runs = [
-            (job_id, step["run"])
+            (job_id, step.get("run", step.get("uses")))
             for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets")
             for step in jobs[job_id]["steps"][len(setup) :]
             if step.get("name") != "sccache stats"
@@ -709,8 +709,18 @@ class FastCheckCiWiringTests(unittest.TestCase):
             [
                 ("check_fast_cross_os", "cargo check --workspace --all-targets"),
                 ("check_fast_cross_os_targets", "./scripts/ci/run-writer-namespace-windows-targets.sh"),
+                ("check_fast_cross_os_targets", "taiki-e/install-action@v2"),
+                ("check_fast_cross_os_targets",
+                 "set -euo pipefail\n"
+                 "cargo nextest list --lib --ignore-default-filter --message-format json > target/universe-windows.json\n"
+                 "python scripts/ci/rust_test_sources.py compare --platform windows --list target/universe-windows.json\n"),
             ],
         )
+        # The Windows list must come from the Windows runner, with the pinned nextest.
+        install, compare = targets["steps"][len(setup) + 1 : len(setup) + 3]
+        self.assertEqual(install["with"], {"tool": "cargo-nextest@0.9.149"})
+        self.assertEqual((install["if"], compare["if"]), ("runner.os == 'Windows'", "runner.os == 'Windows'"))
+        self.assertNotIn("continue-on-error", compare)
         writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
@@ -1804,7 +1814,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_registered_step_continue_policy_is_typed_and_exact(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        step_name = "Run named relay-authority contract targets"
+        step_name = "Archive, list, compare and plan"
         for label, yaml_value in (
             ("string-false", '"false"'),
             ("boolean-true", "true"),
@@ -1826,7 +1836,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
 
     def test_registered_step_continue_policy_accepts_absent_and_boolean_false(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
-        step_name = "Run named relay-authority contract targets"
+        step_name = "Archive, list, compare and plan"
         for label, insertion in (
             ("absent", ""),
             ("boolean-false", "        continue-on-error: false\n"),
