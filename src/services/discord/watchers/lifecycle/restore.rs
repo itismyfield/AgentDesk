@@ -320,6 +320,14 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                             session_name,
                             *channel_id,
                         )
+                        .or_else(|| {
+                            codex_restore::rollout_fallback_for_rehydrated_binding(
+                                &provider,
+                                session_name,
+                                *channel_id,
+                                &shared.tmux_watchers,
+                            )
+                        })
                     {
                         let output_path = path.output_path().to_string();
                         codex_direct_resume_fallback = Some(path);
