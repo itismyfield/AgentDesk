@@ -308,3 +308,51 @@ fn durable_worker_and_exact_retry_preserve_legacy_rendered_bytes() {
     assert!(restored.may_select(), "WORKER_RAW_DURABLE_PROVENANCE");
     assert_eq!(restored.raw.as_deref(), Some(rendered));
 }
+
+#[tokio::test]
+async fn queued_none_is_raw_and_selects_recovery_after_real_queue_roundtrip_pg() {
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "queued_none",
+        "empty reply remains raw after durable queue restore",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(731_449);
+    recovery_text::store_session_retry_context_with_audit(
+        Some(&pool),
+        channel.get(),
+        "recover queued input",
+        None,
+    )
+    .unwrap();
+    save_channel_queue(
+        &provider,
+        "queued-none",
+        channel,
+        &[queued(None, "queued input")],
+        None,
+    )
+    .unwrap();
+    let (restored, _) =
+        load_channel_pending_queue_checked(&provider, "queued-none", channel).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].reply_context, None);
+    let context = ingress(restored[0].reply_context.clone(), true, false);
+    assert!(context.may_select(), "QUEUED_NONE_IS_RAW");
+    let prepared = prepare(&shared, &provider, channel, context).await;
+    assert_eq!(
+        prepared.context.selected.recovery.as_deref(),
+        Some("recover queued input"),
+        "QUEUED_NONE_IS_RAW"
+    );
+    assert!(
+        prepared.rendered.unwrap().contains("recover queued input"),
+        "QUEUED_NONE_IS_RAW"
+    );
+    pool.close().await;
+    db.drop().await;
+}

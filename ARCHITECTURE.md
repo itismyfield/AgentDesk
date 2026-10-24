@@ -1710,7 +1710,8 @@ src/
 │   │   │   │   │   ├── recovery_context_take_order_tests/
 │   │   │   │   │   │   └── source_guard_tests.rs
 │   │   │   │   │   ├── retry_prompt/
-│   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   │   ├── tests.rs
+│   │   │   │   │   │   └── wiring_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── context.rs
@@ -2261,6 +2262,8 @@ src/
 │   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── prelude_lifecycle/
+│   │   │   │   │   ├── receipt_fallback_tests.rs
+│   │   │   │   │   ├── settlement_pg_tests.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs

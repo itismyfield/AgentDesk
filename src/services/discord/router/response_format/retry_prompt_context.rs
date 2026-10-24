@@ -57,6 +57,9 @@ impl RetryPromptContext {
     }
 
     pub(in crate::services::discord) fn restore(value: Option<String>) -> Self {
+        if value.is_none() {
+            return Self::raw(None);
+        }
         Self::decode(value.as_deref()).unwrap_or(Self {
             legacy_rendered: true,
             ..Self::raw(value)

@@ -13,78 +13,100 @@ pub(super) fn completed(state: &super::CompletionPostludeState) -> bool {
 }
 
 pub(super) fn confirmed_input(state: &InflightTurnState) -> bool {
+    match input_receipt(state) {
+        Ok(confirmed) => confirmed,
+        Err(reason) => {
+            tracing::warn!(channel_id = state.channel_id, %reason,
+                "input receipt unavailable; using normal completion for prelude settlement");
+            true
+        }
+    }
+}
+
+fn input_receipt(state: &InflightTurnState) -> Result<bool, &'static str> {
     if !matches!(
         state.runtime_kind,
         Some(RuntimeHandoffKind::ClaudeTui | RuntimeHandoffKind::CodexTui)
     ) {
-        return true;
+        return Ok(true);
     }
-    let Some(context) = state.retry_prompt_snapshot() else {
-        return false;
-    };
-    let Some(prompt) = context.expected_prompt.as_deref() else {
-        return false;
-    };
-    let (Some(path), Some(offset)) = (state.output_path.as_deref(), state.turn_start_offset) else {
-        return false;
-    };
+    let context = state
+        .retry_prompt_snapshot()
+        .ok_or("missing prompt snapshot")?;
+    let prompt = context
+        .expected_prompt
+        .as_deref()
+        .ok_or("missing expected prompt")?;
+    let path = state.output_path.as_deref().ok_or("missing output path")?;
+    let offset = state.turn_start_offset.ok_or("missing turn start offset")?;
     exact_user_after(
         std::path::Path::new(path),
         offset,
         prompt,
         &state.started_at,
+        state.runtime_kind == Some(RuntimeHandoffKind::CodexTui),
     )
 }
 
-fn exact_user_after(path: &std::path::Path, offset: u64, prompt: &str, started: &str) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    if !file.metadata().is_ok_and(|meta| meta.len() >= offset)
-        || file.seek(std::io::SeekFrom::Start(offset)).is_err()
+fn exact_user_after(
+    path: &std::path::Path,
+    offset: u64,
+    prompt: &str,
+    started: &str,
+    codex: bool,
+) -> Result<bool, &'static str> {
+    let started = crate::services::discord::inflight::parse_started_at_unix(started)
+        .ok_or("unparseable started_at")?;
+    let mut file = std::fs::File::open(path).map_err(|_| "cannot open native transcript")?;
+    if file
+        .metadata()
+        .map_err(|_| "cannot stat native transcript")?
+        .len()
+        < offset
     {
-        return false;
+        return Err("native transcript shorter than turn start offset");
     }
-    let Ok(started) = chrono::DateTime::parse_from_rfc3339(started) else {
-        return false;
-    };
+    file.seek(std::io::SeekFrom::Start(offset))
+        .map_err(|_| "cannot seek native transcript")?;
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
-    while reader.read_line(&mut line).is_ok_and(|read| read > 0) {
-        let matched = line.ends_with('\n')
-            && serde_json::from_str::<serde_json::Value>(&line)
-                .ok()
-                .is_some_and(|record| {
-                    let Some(timestamp) = record
-                        .get("timestamp")
-                        .and_then(|value| value.as_str())
-                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                    else {
-                        return false;
-                    };
-                    if timestamp < started
-                        || record.get("isMeta").and_then(|v| v.as_bool()) == Some(true)
-                    {
-                        return false;
-                    }
-                    let text = if record.get("type").and_then(|v| v.as_str()) == Some("user") {
-                        text_content(record.pointer("/message/content"))
-                    } else if record.get("type").and_then(|v| v.as_str()) == Some("event_msg")
-                        && record.pointer("/payload/type").and_then(|v| v.as_str())
-                            == Some("user_message")
-                    {
-                        text_content(record.pointer("/payload/message"))
-                    } else {
-                        None
-                    };
-                    text.is_some_and(|text| exact_body(&text, prompt))
-                });
-        if matched {
-            return true;
+    while reader
+        .read_line(&mut line)
+        .map_err(|_| "cannot read native transcript")?
+        > 0
+    {
+        if line.ends_with('\n')
+            && let Ok(record) = serde_json::from_str::<serde_json::Value>(&line)
+        {
+            let timestamp = record
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok());
+            // Rebind relays contain normalized stream events, without native user timestamps.
+            if codex && timestamp.is_none() {
+                return Err("Codex normalized relay has no native input receipt");
+            }
+            if timestamp.is_some_and(|value| value.timestamp() >= started)
+                && record.get("isMeta").and_then(|v| v.as_bool()) != Some(true)
+            {
+                let text = if record.get("type").and_then(|v| v.as_str()) == Some("user") {
+                    text_content(record.pointer("/message/content"))
+                } else if record.get("type").and_then(|v| v.as_str()) == Some("event_msg")
+                    && record.pointer("/payload/type").and_then(|v| v.as_str())
+                        == Some("user_message")
+                {
+                    text_content(record.pointer("/payload/message"))
+                } else {
+                    None
+                };
+                if text.is_some_and(|text| exact_body(&text, prompt)) {
+                    return Ok(true);
+                }
+            }
         }
         line.clear();
     }
-    false
+    Ok(false)
 }
 
 fn text_content(value: Option<&serde_json::Value>) -> Option<String> {
@@ -154,3 +176,9 @@ pub(super) async fn settle(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod settlement_pg_tests;
+
+#[cfg(test)]
+mod receipt_fallback_tests;

@@ -7216,6 +7216,8 @@ services::discord::router::message_handler::intake_turn::retry_prompt::tests::bo
 services::discord::router::message_handler::intake_turn::retry_prompt::tests::durable_worker_and_exact_retry_preserve_legacy_rendered_bytes
 services::discord::router::message_handler::intake_turn::retry_prompt::tests::failed_raw_enqueue_and_newer_stash_do_not_lose_borrowed_preludes_pg
 services::discord::router::message_handler::intake_turn::retry_prompt::tests::identical_legacy_and_raw_bytes_keep_distinct_semantics_through_real_queue_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::tests::queued_none_is_raw_and_selects_recovery_after_real_queue_roundtrip_pg
+services::discord::router::message_handler::intake_turn::retry_prompt::wiring_tests::intake_turn_keeps_retry_carriers_at_each_production_handoff
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::handoff_ownership_guard_ignores_comments
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads
 services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
@@ -10118,6 +10120,11 @@ services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_posts_one_terminal_summary_for_all_retired_mode_flags_and_outcomes
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::real_bridge_postlude_suppresses_o_owned_and_unresolved_identity_summaries
 services::discord::turn_bridge::completion_postlude::legacy_summary::tests::suspended_panel_projection_rechecks_summary_authority_without_consuming_the_latch
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::receipt_fallback_tests::codex_normalized_relay_falls_back_and_native_rollout_still_requires_exact_input
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::receipt_fallback_tests::indeterminate_receipt_uses_normal_completion_but_negative_evidence_does_not
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::indeterminate_settlement_consumes_but_negative_receipt_retains_wip_pg
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::production_started_at_receipt_settles_borrowed_wip_pg
+services::discord::turn_bridge::completion_postlude::prelude_lifecycle::settlement_pg_tests::snapshotless_tui_normal_completion_allows_next_reminder_generation_pg
 services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::native_receipt_requires_current_offset_complete_line_and_exact_folded_bytes
 services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::no_submit_notice_and_foreign_user_record_do_not_generate_next_wip
 services::discord::turn_bridge::completion_postlude::prelude_lifecycle::tests::process_completion_keeps_reminders_without_a_tui_receipt_snapshot
