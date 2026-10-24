@@ -165,6 +165,7 @@ pub(super) fn migrate_parked(
             preparation_hold: None,
         },
         reason: RetainedReason::Unconfirmed,
+        disposition: None,
         notice: NoticeIntent {
             kind: "unconfirmed".into(),
             enqueued: false,
