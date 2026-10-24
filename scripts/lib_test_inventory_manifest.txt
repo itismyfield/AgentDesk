@@ -12796,6 +12796,7 @@ services::session_host::herdr::policy::consent::workflow::tests::workflow_retry_
 services::session_host::herdr::policy::consent::workflow::tests::workflow_schema_two_is_newer_to_the_r1_reader_and_schema_one_still_loads
 services::session_host::herdr::policy::consent::workflow::tests::workflow_unsent_card_ttl_starts_at_reservation
 services::session_host::herdr::policy::diagnostics::tests::diagnosis_reports_refusal_and_bounded_checker_output_without_reading_files
+services::session_host::herdr::policy::diagnostics::tests::doctor_uses_the_selected_boot_socket_when_raw_config_omits_the_default
 services::session_host::herdr::policy::diagnostics::tests::health_checker_bounds_unicode_and_preserves_error_after_the_retained_prefix
 services::session_host::herdr::policy::durable::tests::durable_directory_is_lazy_and_missing_is_distinct_from_failure
 services::session_host::herdr::policy::durable::tests::durable_existing_snapshot_permissions_and_nonregular_paths_are_not_missing
