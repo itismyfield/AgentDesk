@@ -4014,6 +4014,7 @@ services::discord::health::liveness_authority::tests::transient_unknown_expires_
 services::discord::health::liveness_authority::tests::verdict_overwrite_child
 services::discord::health::liveness_authority::tests::vouch_enforces_freshness_and_identity_without_turn_age_cap
 services::discord::health::mailbox::tests::agent_turn_status_separates_releasable_and_permanently_held_residue
+services::discord::health::o_transition::automatic::test_support::provider_ticks_only_observe_the_matching_ready_actor
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_an_active_turn_or_reserved_dispatch
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_missing_closed_and_unanswered_mailboxes
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_queued_input_or_recovery

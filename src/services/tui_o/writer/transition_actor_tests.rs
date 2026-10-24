@@ -50,7 +50,7 @@ fn chain(hops: usize) -> Chain {
     chain_on(hops, true)
 }
 
-/// `herdr` configures the channel, so its POSTs are counted and its rotation count published.
+/// `herdr` enables the channel's drain publications; both paths count POSTs.
 fn chain_on(hops: usize, herdr: bool) -> Chain {
     let hop = |n: usize| (format!("h{n}"), row(&format!("n{n}"), &format!("h{n} one")));
     chain_named(hops, herdr, hop)
