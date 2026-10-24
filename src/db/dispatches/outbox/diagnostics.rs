@@ -1,6 +1,6 @@
 use sqlx::{Postgres, Transaction};
 
-use super::DispatchOutboxClaimCandidate;
+use super::model::DispatchOutboxClaimCandidate;
 
 pub(crate) fn wait_reason_from_routing_diagnostics(
     diagnostics: &serde_json::Value,
