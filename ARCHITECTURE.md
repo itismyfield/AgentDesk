@@ -706,6 +706,9 @@ src/
 │   │   │   └── submit.rs
 │   │   ├── busy_inject_tests/
 │   │   │   └── common_glyph_tests.rs
+│   │   ├── hook_bundle/
+│   │   │   ├── statusline.rs
+│   │   │   └── statusline_tests.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -3646,6 +3649,9 @@ src/
 │   │   ├── witnessed_release.rs
 │   │   └── witnessed_release_tests.rs
 │   ├── turn_summary_line/
+│   │   ├── quota/
+│   │   │   ├── statusline.rs
+│   │   │   └── statusline_tests.rs
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
 │   ├── agent_identity.rs

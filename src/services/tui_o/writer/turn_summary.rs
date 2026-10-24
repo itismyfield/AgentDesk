@@ -32,6 +32,7 @@ pub(super) struct TurnSummaryRun {
 
 struct Turn {
     id: Option<String>,
+    session_id: Option<String>,
     started: Option<DateTime<Utc>>,
     first: Option<UnitKey>,
     eligible: bool,
@@ -61,6 +62,10 @@ impl TurnSummaryRun {
     fn open(&mut self, value: &Value, id: Option<String>) {
         self.open = Some(Turn {
             id,
+            session_id: value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             started: timestamp(value),
             first: None,
             eligible: false,
@@ -100,6 +105,9 @@ impl TurnSummaryRun {
         let Some(turn) = self.open.as_mut() else {
             return;
         };
+        if let Some(session) = value.get("sessionId").and_then(Value::as_str) {
+            turn.session_id = Some(session.to_owned());
+        }
         turn.failed = value.get("isApiErrorMessage") == Some(&Value::Bool(true));
         if let Some(usage) = value
             .pointer("/message/usage")
@@ -211,6 +219,9 @@ impl TurnSummaryRun {
             provider,
             key.channel_id,
             turn.started.map(quota::Selected::Before),
+            turn.session_id
+                .as_deref()
+                .or_else(|| value.get("sessionId").and_then(Value::as_str)),
         );
         vec![Derived::Piece(PieceWork {
             unit_key: key,
