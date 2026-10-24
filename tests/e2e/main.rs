@@ -4,3 +4,6 @@
 //! and verifies responses. No Discord integration required.
 
 mod smoke_test;
+
+#[path = "../../src/config/runtime_root_guard/test_process.rs"]
+mod test_runtime_process;

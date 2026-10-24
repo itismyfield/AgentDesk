@@ -180,6 +180,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "queue_io/turn_admission.rs": {"send_channel_message*": 1},
     "recovery_engine/completion_delivery.rs": {"relay_recovered_body_to_placeholder": 3},
     "recovery_engine/herdr_before_start_restart.rs": {"replace_message_with_outcome": 1},
+    "recovery_engine/herdr_row_end.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/restore_inflight.rs": {"relay_recovered_terminal_text_to_placeholder": 2},
     "recovery_engine/terminal_text_idempotency.rs": {"replace_long_message*": 2, "send_long_message*": 2},
     "recovery_engine/two_message_panel.rs": {"send_channel_message*": 1},
@@ -302,6 +303,8 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "recovery_engine/completion_delivery.rs": ("W30,W31", "CUT_D"),
     # Dormant restart stop notice on the turn's own message, sent only when O peek is Ok(false).
     "recovery_engine/herdr_before_start_restart.rs": ("1-D-notice", "KEEP_NONBODY"),
+    # Neutral restart notice on the turn's own card or a new message: no body, claim or context.
+    "recovery_engine/herdr_row_end.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/restore_inflight.rs": ("1-D-notice", "KEEP_NONBODY"),
     "recovery_engine/terminal_text_idempotency.rs": ("W32", "COV:W32"),
     "recovery_engine/two_message_panel.rs": ("1-D-panel", "KEEP_NONBODY"),
@@ -379,6 +382,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
+    "src/services/discord/inflight/clear_store/herdr_row_end.rs": ("o_still_owns:peek",),
     "src/services/discord/turn_end_summary.rs": ("post_live:peek",),
     "src/services/discord/footer_view_reconciler/mod.rs": (
         "edit_body_message:claim",
@@ -397,6 +401,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "o_owns_recovery_body:peek",
         "relay_recovered_body_to_placeholder:claim",
     ),
+    "src/services/discord/recovery_engine/herdr_row_end.rs": ("o_owns_output:peek",),
     "src/services/discord/recovery_engine/producer_resume.rs": (
         "authority:peek",
         "prepare:peek",
