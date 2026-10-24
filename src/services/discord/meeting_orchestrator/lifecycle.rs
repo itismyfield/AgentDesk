@@ -396,33 +396,29 @@ pub(in crate::services::discord) async fn cancel_meeting(
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    let permit = crate::services::cluster::channel_home::admit_command(
-        &channel_id.get().to_string(),
-        "meeting",
-    )?;
-    crate::services::cluster::channel_home::command_scope(permit, async {
-    let meeting_info = {
-        let mut core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-            // #1008: drive the opt-in reducer; tolerant of already-cancelled
-            // meetings (cancel-race idempotency) so a second cancel is a no-op.
-            let _ = record_meeting_transition(&m.id, m.status.to_state(), MeetingEvent::Cancel);
-            // #1008: record a cancel artifact keyed by meeting id — concurrent
-            // cancels collapse onto one row.
-            let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
-            m.status = MeetingStatus::Cancelled;
-            let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
-            Some((mc, m.id.clone()))
-        } else {
-            None
-        }
-    };
+    {
+        let meeting_info = {
+            let mut core = shared.core.lock().await;
+            if let Some(m) = core.active_meetings.get_mut(&channel_id) {
+                // #1008: drive the opt-in reducer; tolerant of already-cancelled
+                // meetings (cancel-race idempotency) so a second cancel is a no-op.
+                let _ = record_meeting_transition(&m.id, m.status.to_state(), MeetingEvent::Cancel);
+                // #1008: record a cancel artifact keyed by meeting id — concurrent
+                // cancels collapse onto one row.
+                let _ = record_cancel_artifact(&m.id, "cancelled-by-user");
+                m.status = MeetingStatus::Cancelled;
+                let mc = m.msg_channel.map(ChannelId::new).unwrap_or(channel_id);
+                Some((mc, m.id.clone()))
+            } else {
+                None
+            }
+        };
 
-    if let Some((mc, meeting_id)) = meeting_info {
-        // Save whatever transcript we have
-        let _ = save_meeting_record(shared, channel_id, None).await;
-        cleanup_meeting(shared, channel_id).await;
-        let _ = send_meeting_message_with_event(
+        if let Some((mc, meeting_id)) = meeting_info {
+            // Save whatever transcript we have
+            let _ = save_meeting_record(shared, channel_id, None).await;
+            cleanup_meeting(shared, channel_id).await;
+            let _ = send_meeting_message_with_event(
             http,
             mc,
             shared,
@@ -430,12 +426,12 @@ pub(in crate::services::discord) async fn cancel_meeting(
             "🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐고, memory write/capture는 자동 실행하지 않았어.",
         )
         .await;
-        Ok(())
-    } else {
-        let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
-        Ok(())
+            Ok(())
+        } else {
+            let _ = send_meeting_message(http, channel_id, shared, "진행 중인 회의가 없어.").await;
+            Ok(())
+        }
     }
-}).await
 }
 
 fn meeting_cancel_event_key(channel_id: ChannelId, meeting_id: &str) -> String {
@@ -501,28 +497,89 @@ pub(in crate::services::discord) async fn meeting_status(
     Ok(())
 }
 
-#[cfg(test)]
-mod home_command_tests {
+#[cfg(all(test, unix))]
+mod cancel_tests {
     use super::*;
-    use crate::db::o_channel_homes::HomeState;
-    use crate::services::cluster::channel_home;
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn command_meeting_refusal_precedes_cancel_state_and_artifact() {
-        let channel = ChannelId::new(9200000000000105);
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let http = serenity::Http::new("");
-        let home = channel_home::register_for_test(channel.get(), Some(HomeState::Releasing));
-        let mut core = shared.core.lock().await;
-        let result = cancel_meeting(&http, channel, &shared).await;
-        assert!(result.unwrap_err().to_string().contains("home_draining"));
-        assert!(
-            core.active_meetings.is_empty(),
-            "refusal never entered the mutation lock"
+    async fn ordinary_cancel_saves_record_and_artifact_once() {
+        if !api_child(
+            "services::discord::meeting_orchestrator::lifecycle::cancel_tests::ordinary_cancel_saves_record_and_artifact_once",
+        ) {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        assert_eq!(runtime_store::agentdesk_root().unwrap(), root.path());
+        let channel = ChannelId::new(1);
+        let id = "ordinary-cancel-before-selection";
+        shared.core.lock().await.active_meetings.insert(
+            channel,
+            Meeting {
+                id: id.into(),
+                channel_id: channel.get(),
+                agenda: "preserved-agenda".into(),
+                primary_provider: ProviderKind::Claude,
+                reviewer_provider: ProviderKind::Codex,
+                selection_reason: None,
+                participants: vec![],
+                transcript: vec![],
+                current_round: 0,
+                max_rounds: 3,
+                status: MeetingStatus::SelectingParticipants,
+                summary: None,
+                started_at: "2026-10-23T00:00:00Z".into(),
+                thread_id: None,
+                msg_channel: None,
+            },
         );
-        assert_eq!(home.commands_in_flight(), 0);
-        core.active_meetings.clear();
-        drop(core);
-        channel_home::unregister(home.channel_id());
+        let (a, b) = tokio::join!(
+            cancel_meeting(&api.http, channel, &shared),
+            cancel_meeting(&api.http, channel, &shared),
+        );
+        a.unwrap();
+        b.unwrap();
+        assert!(
+            !shared
+                .core
+                .lock()
+                .await
+                .active_meetings
+                .contains_key(&channel)
+        );
+        let repo = meeting_artifact_repo();
+        let artifact = repo
+            .get(
+                id,
+                &MeetingArtifactKind::Other("cancel_marker".into()),
+                "cancel",
+            )
+            .unwrap();
+        assert_eq!(artifact.payload, "cancelled-by-user");
+        assert_eq!(repo.len(), 1, "concurrent cancels keep one artifact");
+        let files = std::fs::read_dir(root.path().join("meetings"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(
+            std::fs::read_to_string(files[0].path())
+                .unwrap()
+                .contains("preserved-agenda")
+        );
+        let calls = api.take();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.contains("회의가 취소"))
+                .count(),
+            1,
+            "one cancellation notice: {calls:?}"
+        );
     }
 }

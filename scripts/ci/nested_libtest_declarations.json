@@ -145,51 +145,6 @@
       ]
     },
     {
-      "id": "services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child",
-      "source": "src/services/cluster/intake_worker/s3_real_tests/mod.rs",
-      "platform": "linux",
-      "parents": [],
-      "calls": [
-        {
-          "source": "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
-          "function": "spawn_at",
-          "stdout": "file",
-          "sha256": "bf887ef662602ab7964d496fd085d48ece9dc8bc4e88e91e5e4e343d242ae856",
-          "ignored_args": 1
-        }
-      ]
-    },
-    {
-      "id": "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_child",
-      "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
-      "platform": "linux",
-      "parents": [],
-      "calls": [
-        {
-          "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
-          "function": "committed_child",
-          "stdout": "null",
-          "sha256": "436e5d881f1185e19971e0853e64540d905b27026aca911dd2cca683e611dce4",
-          "ignored_args": 1
-        }
-      ]
-    },
-    {
-      "id": "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::os_sigterm_child",
-      "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
-      "platform": "linux",
-      "parents": [],
-      "calls": [
-        {
-          "source": "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
-          "function": "an_os_sigterm_joins_the_writer_before_exit",
-          "stdout": "null",
-          "sha256": "5a89683d268f6be4b34060a2c1408de9c826f1d49646d2643ac76c6f7e1e298e",
-          "ignored_args": 1
-        }
-      ]
-    },
-    {
       "id": "services::discord::session_relay_sink::tests::dc1_isolated_scanner_child",
       "source": "src/services/discord/session_relay_sink/tests.rs",
       "platform": "linux",

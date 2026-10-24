@@ -159,12 +159,12 @@ impl CanaryFixture {
     ) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
-        let host_env = host.map(|host| {
+        let host_env = Some(
             crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
                 "AGENTDESK_INSTANCE_ID",
-                std::ffi::OsStr::new(host),
-            )
-        });
+                std::ffi::OsStr::new(host.unwrap_or("")),
+            ),
+        );
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let isolation = Isolation {
             _dedupe: dedupe_lock,

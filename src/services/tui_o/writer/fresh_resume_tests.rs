@@ -1023,9 +1023,7 @@ async fn selection_install_fault(after_rename: bool) {
     let context = Context {
         tmux: CANARY_TMUX.into(),
         nonce: current.execution_nonce.clone(),
-        home_epoch: None,
         lock: Arc::default(),
-        permit: None,
     };
     let refusal = transition.request(request, context).await;
     assert!(

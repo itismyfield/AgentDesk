@@ -563,8 +563,6 @@ pub(crate) enum Commands {
     },
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
-    /// Delegated channel homes: status, and the switched delegate, reclaim and force
-    ChannelHome(crate::cli::channel_home::ChannelHomeArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -994,6 +992,9 @@ pub(crate) fn parse() -> ParseOutcome {
 }
 
 #[cfg(test)]
+#[path = "removed_channel_home_tests.rs"]
+mod removed_channel_home_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser, error::ErrorKind};
@@ -1140,7 +1141,6 @@ mod tests {
             "machine-compare",
             "activity",
             "herdr",
-            "channel-home",
             "help",
         ];
 

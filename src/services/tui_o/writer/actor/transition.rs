@@ -599,7 +599,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             unsettled: if stopped { None } else { self.unsettled() },
             diagnostics,
         });
-        drop(context.permit);
     }
 }
 

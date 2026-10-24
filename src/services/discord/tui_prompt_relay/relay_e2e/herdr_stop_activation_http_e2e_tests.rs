@@ -152,11 +152,11 @@ async fn http_cancel(harness: &RelayE2eHarness) -> (axum::http::StatusCode, Valu
     let mut config = crate::config::Config::default();
     config.server.auth_token = Some(AUTH.into());
     let pool = harness.shared.pg_pool.clone();
-    let app = crate::server::routes::home_stop_test_app(config, pool, Some(registry), "e2e");
+    let app = crate::server::routes::cancel_route_test_app(config, pool, Some(registry), "e2e");
     let bearer = format!("Bearer {AUTH}");
     let uri = format!("/turns/{CHANNEL_ID}/cancel");
     let headers = [("authorization", bearer.as_str())];
-    let post = crate::server::routes::home_stop_test_post;
+    let post = crate::server::routes::cancel_route_test_post;
     post(&app, &uri, &headers, r#"{"force":false}"#).await
 }
 

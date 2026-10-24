@@ -56,7 +56,6 @@ pub(crate) struct ReleaseRequest {
 #[derive(Clone)]
 pub(in crate::services::discord) struct OperatorRelease {
     request: ReleaseRequest,
-    _permit: Option<crate::services::cluster::channel_home::CommandPermit>,
     observed_before: Instant,
     clear_outcome: Arc<OnceLock<inflight::GuardedClearOutcome>>,
 }
@@ -152,21 +151,6 @@ async fn release_on(
     channel: ChannelId,
     request: ReleaseRequest,
 ) -> Result<serde_json::Value, String> {
-    let _permit = match crate::services::cluster::channel_home::registered_channel(channel.get()) {
-        Some(home) => Some(
-            home.admit_recovery(provider.as_str())
-                .ok_or_else(|| "home_not_held".to_string())?,
-        ),
-        None => None,
-    };
-    #[cfg(test)]
-    let _permit =
-        if crate::services::cluster::channel_home::command_mutant("release_permit_removed") {
-            drop(_permit);
-            None
-        } else {
-            _permit
-        };
     if request.reason.trim().is_empty() {
         return Err("operator reason is required".into());
     }
@@ -213,19 +197,6 @@ async fn release_on(
     let clear_outcome = Arc::new(OnceLock::new());
     let event = TerminalEvent::OperatorRelease(Box::new(OperatorRelease {
         request,
-        _permit: {
-            #[cfg(test)]
-            if crate::services::cluster::channel_home::command_mutant("release_permit_not_in_event")
-            {
-                None
-            } else {
-                _permit.clone()
-            }
-            #[cfg(not(test))]
-            {
-                _permit.clone()
-            }
-        },
         observed_before: Instant::now(),
         clear_outcome: clear_outcome.clone(),
     }));
@@ -372,7 +343,7 @@ impl OperatorRelease {
         };
         let _ = self.clear_outcome.set(cleared);
         #[cfg(test)]
-        super::commands::control::home_fence::pause("release_claim").await;
+        tests::pause_operator_claim().await;
         tracing::warn!(channel_id = key.channel_id.get(), turn_id = key.user_msg_id,
             turn_nonce = %self.request.expected.turn_nonce, generation = key.generation,
             reason = %self.request.reason, inflight_clear = ?cleared,

@@ -51,7 +51,6 @@ fn payload(channel: u64, message: u64, target: &str) -> InsertPendingPayload {
         preserve_on_cancel: false,
         agent_id: "replay-agent".into(),
         provider: "claude".into(),
-        home_epoch: None,
     }
 }
 

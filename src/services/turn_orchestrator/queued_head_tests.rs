@@ -739,7 +739,7 @@ fn overflow_and_restore_never_displace_a_reserved_head() {
             1_001
         );
         plant(TOKEN, channel, &human(999, 98, "restored"));
-        let load = crate::services::turn_orchestrator::load_channel_pending_queue_checked;
+        let load = crate::services::turn_orchestrator::pending_queue_persistence::load_channel_pending_queue_checked;
         let planted = load(&ProviderKind::Claude, TOKEN, channel).expect("the planted file parses");
         assert_eq!(
             planted.0.last().map(|item| item.message_id.get()),

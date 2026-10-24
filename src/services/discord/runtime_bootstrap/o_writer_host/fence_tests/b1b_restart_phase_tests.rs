@@ -124,7 +124,7 @@ pub(super) async fn restart(
         .expect("the actual O actor must stop at the selected provider phase")
         .unwrap();
     assert!(!readiness.is_hosted(CANARY_CHANNEL));
-    let prepared = parts(
+    let prepared = parts_with_rest(
         &fixture.shared,
         &ProviderKind::Codex,
         None,

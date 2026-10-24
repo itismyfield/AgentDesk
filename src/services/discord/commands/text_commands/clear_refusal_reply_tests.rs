@@ -65,7 +65,6 @@ impl Rig {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         Self {
             api,

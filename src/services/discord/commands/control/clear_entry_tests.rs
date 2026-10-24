@@ -121,7 +121,6 @@ impl Rig {
             provider: PROVIDER,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         Self {
             api,
@@ -433,7 +432,6 @@ async fn a_clear_without_a_pool_commits_and_warns_through_both_entries_pg() {
         provider: PROVIDER,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&rig.data.voice_config),
         voice_config: rig.data.voice_config.clone(),
-        ingress_shadow: None,
     };
     let rig = Rig { data, ..rig };
     for (n, entry) in [Entry::Slash, Entry::Text].into_iter().enumerate() {

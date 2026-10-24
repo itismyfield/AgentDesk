@@ -322,7 +322,6 @@ fn actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg() {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
-            ingress_shadow: None,
         };
         invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
         {
@@ -452,7 +451,6 @@ fn native_idle_slash_recovery(missing: bool, completed: bool) {
         provider: ProviderKind::Claude,
         voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
         voice_config,
-        ingress_shadow: None,
     };
     invoke_real_stop_action(&transport.ctx, &data, channel, author).await;
     assert!(

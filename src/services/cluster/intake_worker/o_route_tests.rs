@@ -32,7 +32,6 @@ async fn seed(pool: &PgPool, channel: u64, message: u64) -> i64 {
         preserve_on_cancel: false,
         agent_id: "agent-o".into(),
         provider: "claude".into(),
-        home_epoch: None,
     };
     let id = insert_pending(pool, &payload, 1, None).await.unwrap();
     // Claims go oldest first; keep creation times apart.
@@ -82,7 +81,11 @@ async fn a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg() 
     let _selected = test_override::force_channels(&[(O, ClaudeTui)]);
     let (o_row, legacy_row) = (seed(&pool, O, 2).await, seed(&pool, LEGACY, 3).await);
     let not_ready = test_probe::answer_with(|_| false);
-    assert_eq!(tick().await.unwrap(), TickOutcome::Processed);
+    assert_eq!(
+        tick().await.unwrap(),
+        TickOutcome::Processed,
+        "ordinary worker input reaches its normal route"
+    );
     assert!(
         ran_past_o(state(&pool, legacy_row).await),
         "the later row is not stuck"
@@ -233,8 +236,6 @@ async fn routed_locally(pool: &PgPool, channel: u64) -> bool {
         wait_for_completion: false,
         preserve_on_cancel: false,
         node_override_instance_id: None,
-        owner_authority:
-            crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn::NotOptedIn,
         has_nonportable_uploads: false,
         attachment_refs: &[],
     };

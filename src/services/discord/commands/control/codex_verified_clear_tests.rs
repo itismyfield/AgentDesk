@@ -241,8 +241,9 @@ fn codex_verified_clear_ends_the_incarnation_releases_its_pin_and_keeps_owed_out
         ));
         let http = Arc::new(serenity::Http::new(""));
 
-        let fenced =
-            clear_channel_session_state_fenced(&http, &shared, &provider, channel, "/clear", None);
+        let fenced = clear_channel_session_state_with_session_key(
+            &http, &shared, &provider, channel, "/clear", None,
+        );
         fenced
             .await
             .expect("a verified incarnation is cleared like any other");

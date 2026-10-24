@@ -62,23 +62,7 @@ pub async fn stop_agent_turn(
         );
     }
 
-    let admission = match session.runtime_channel_id.as_deref() {
-        Some(channel) => crate::services::cluster::channel_home::admit_command(
-            channel,
-            session.provider.as_deref().unwrap_or("agent_stop"),
-        ),
-        None => crate::services::cluster::channel_home::admit_unattributed(),
-    };
-    let permit = match admission {
-        Ok(permit) => permit,
-        Err(reason) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": reason.to_string()})),
-            );
-        }
-    };
-    crate::services::cluster::channel_home::command_scope(permit, async {
+    {
         let session_key = session.session_key.clone();
         let tmux_name = extract_tmux_name(&session_key).unwrap_or_else(|| session_key.clone());
         let lifecycle = stop_turn_preserving_queue(
@@ -132,6 +116,5 @@ pub async fn stop_agent_turn(
             "error"
         });
         (status, Json(body))
-    })
-    .await
+    }
 }

@@ -1,15 +1,12 @@
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
 struct FakeContext {
     root: tempfile::TempDir,
     authorized: bool,
-    refused: bool,
     kind: Option<RuntimeHandoffKind>,
     global: bool,
-    fences: AtomicUsize,
     replies: Mutex<Vec<(String, bool)>>,
 }
 
@@ -18,10 +15,8 @@ impl FakeContext {
         Self {
             root: tempfile::tempdir().unwrap(),
             authorized: true,
-            refused: false,
             kind,
             global: true,
-            fences: AtomicUsize::new(0),
             replies: Mutex::new(Vec::new()),
         }
     }
@@ -30,14 +25,6 @@ impl FakeContext {
 impl CommandContext for FakeContext {
     async fn authorized(&self) -> bool {
         self.authorized
-    }
-    fn admit_home(&self) -> Result<Option<CommandPermit>, String> {
-        self.fences.fetch_add(1, Ordering::SeqCst);
-        if self.refused {
-            Err("다른 노드가 맡고 있어요".into())
-        } else {
-            Ok(None)
-        }
     }
     fn channel(&self) -> u64 {
         123
@@ -61,7 +48,7 @@ impl CommandContext for FakeContext {
 }
 
 #[tokio::test]
-async fn auth_rejection_has_no_reply_or_home_check_or_files() {
+async fn auth_rejection_has_no_reply_or_files() {
     let mut ctx = FakeContext::new(Some(RuntimeHandoffKind::ClaudeTui));
     ctx.authorized = false;
     for action in [
@@ -72,112 +59,7 @@ async fn auth_rejection_has_no_reply_or_home_check_or_files() {
         run(&ctx, action).await.unwrap();
     }
     assert!(ctx.replies.lock().unwrap().is_empty());
-    assert_eq!(ctx.fences.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read_dir(ctx.root.path()).unwrap().count(), 0);
-}
-
-#[tokio::test]
-async fn wrong_home_refuses_mutations_but_status_is_ephemeral_and_read_only() {
-    let mut ctx = FakeContext::new(Some(RuntimeHandoffKind::ClaudeTui));
-    ctx.refused = true;
-    for action in [
-        ToolCallAction::On,
-        ToolCallAction::Off,
-        ToolCallAction::Status,
-    ] {
-        run(&ctx, action).await.unwrap();
-    }
-    let replies = ctx.replies.lock().unwrap();
-    assert_eq!(
-        replies
-            .iter()
-            .map(|(_, ephemeral)| *ephemeral)
-            .collect::<Vec<_>>(),
-        [false, false, true]
-    );
-    assert!(replies[2].0.contains("기본값"));
-    assert_eq!(ctx.fences.load(Ordering::SeqCst), 2);
-    assert_eq!(std::fs::read_dir(ctx.root.path()).unwrap().count(), 0);
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn home_permit_stays_live_through_persistence_and_reply_while_intake_drains() {
-    use crate::db::o_channel_homes::HomeState;
-    use crate::services::cluster::channel_home::{self, HomeGate};
-
-    struct AdmittedContext {
-        base: FakeContext,
-        home: std::sync::Arc<HomeGate>,
-    }
-    impl CommandContext for AdmittedContext {
-        async fn authorized(&self) -> bool {
-            self.base.authorized().await
-        }
-        fn admit_home(&self) -> Result<Option<CommandPermit>, String> {
-            let permit = super::super::control::home_fence::admit(
-                poise::serenity_prelude::ChannelId::new(self.channel()),
-                "tool_call",
-            )
-            .map_err(|error| error.to_string())?;
-            assert_eq!(self.home.commands_in_flight(), 1);
-            self.home.close_intake();
-            Ok(permit)
-        }
-        fn channel(&self) -> u64 {
-            584_639
-        }
-        fn user(&self) -> u64 {
-            self.base.user()
-        }
-        fn kind(&self) -> Option<RuntimeHandoffKind> {
-            self.base.kind()
-        }
-        fn root(&self) -> Option<PathBuf> {
-            assert!(!self.home.intake_open(), "drain began after admission");
-            assert_eq!(
-                self.home.commands_in_flight(),
-                1,
-                "admitted write blocks drain completion"
-            );
-            self.base.root()
-        }
-        fn global_enabled(&self) -> bool {
-            self.base.global_enabled()
-        }
-        async fn reply(&self, content: String, ephemeral: bool) -> Result<(), Error> {
-            assert_eq!(self.home.commands_in_flight(), 1);
-            assert!(
-                !tool_card_switch::status(self.base.root.path(), self.channel())
-                    .unwrap()
-                    .unwrap()
-                    .enabled
-            );
-            tokio::task::yield_now().await;
-            assert_eq!(
-                self.home.commands_in_flight(),
-                1,
-                "permit survives the reply future"
-            );
-            self.base.reply(content, ephemeral).await
-        }
-    }
-    let home = channel_home::register_for_test(584_639, Some(HomeState::Worker));
-    let ctx = AdmittedContext {
-        base: FakeContext::new(Some(RuntimeHandoffKind::ClaudeTui)),
-        home: home.clone(),
-    };
-    run(&ctx, ToolCallAction::Off).await.unwrap();
-    assert_eq!(
-        home.commands_in_flight(),
-        0,
-        "only completion releases the admitted command"
-    );
-    assert!(!ctx.base.replies.lock().unwrap()[0].1);
-    assert!(
-        channel_home::admit_command("584639", "tool_call").is_err(),
-        "draining still rejects a new command"
-    );
-    channel_home::unregister("584639");
 }
 
 #[tokio::test]

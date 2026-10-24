@@ -84,14 +84,8 @@ fn push_fence(sql: &mut QueryBuilder<Postgres>, row: &WorkerSnapshot, stamp: &St
     }
 }
 
-const HOME_CLAIM_FENCE: &str = "(
-    (io.home_epoch IS NULL
-        AND NOT EXISTS (SELECT 1 FROM o_channel_homes h WHERE h.channel_id = io.channel_id))
-    OR EXISTS (
-        SELECT 1 FROM o_channel_homes h
-         WHERE h.channel_id = io.channel_id AND h.provider = io.provider
-           AND h.state = 'worker' AND h.holder = io.target_instance_id
-           AND h.epoch = io.home_epoch))";
+// Historical delegated inputs stay held even when their old home still matches.
+const HOME_CLAIM_FENCE: &str = "io.home_epoch IS NULL";
 const REPLAY_CLAIM_FENCE: &str = "NOT replay_sources_blocked(io.provider, io.channel_id, COALESCE(io.replay_source_message_ids, ARRAY[io.user_msg_id]))";
 
 /// Claim the oldest eligible row without waiting on row or owner locks.
@@ -189,7 +183,7 @@ async fn confirm_selected(
     Ok(None)
 }
 
-// Existing home tests exercise the confirming UPDATE independently of candidate selection.
+// Compatibility coverage exercises the confirming UPDATE independently of candidate selection.
 #[cfg(test)]
 pub(super) async fn confirm_claim(
     tx: &mut Transaction<'_, Postgres>,

@@ -106,17 +106,6 @@ pub struct RuntimeSettingsConfig {
     /// Live operator pane-close switch; unset or false sends no close.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub herdr_terminate_enabled: Option<bool>,
-    /// Switch for the `channel-home` delegate, reclaim and force commands and the boot start of
-    /// delegated homes; unset or false refuses or skips them before any database access.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_home_delegation_enabled: Option<bool>,
-    /// Boot switch for the gateway's ingress ownership shadow, which only logs; it also needs a
-    /// non-empty `channel_ingress_shadow_channels`. Unset or false starts nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_ingress_shadow_enabled: Option<bool>,
-    /// The actual channels the shadow observes; unset or empty observes none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_ingress_shadow_channels: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -158,9 +147,6 @@ impl RuntimeSettingsConfig {
             && self.herdr_codex_turn_enabled.is_none()
             && self.herdr_cancel_enabled.is_none()
             && self.herdr_terminate_enabled.is_none()
-            && self.channel_home_delegation_enabled.is_none()
-            && self.channel_ingress_shadow_enabled.is_none()
-            && self.channel_ingress_shadow_channels.is_none()
             && !self.reset_overrides_on_restart
     }
 
@@ -236,5 +222,25 @@ mod herdr_terminate_tests {
                 config
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod retired_shadow_tests {
+    use super::*;
+
+    #[test]
+    fn retired_ingress_shadow_keys_are_ignored_and_not_serialized() {
+        let old =
+            "channel_ingress_shadow_enabled: true\nchannel_ingress_shadow_channels: [41, 42]\n";
+        let runtime: RuntimeSettingsConfig = serde_yaml::from_str(old).unwrap();
+        assert!(
+            runtime.is_empty(),
+            "retired shadow keys must not activate runtime settings"
+        );
+        let encoded = serde_json::to_value(&runtime).unwrap();
+        assert!(encoded.get("channel_ingress_shadow_enabled").is_none());
+        assert!(encoded.get("channel_ingress_shadow_channels").is_none());
+        assert_eq!(runtime, RuntimeSettingsConfig::default());
     }
 }

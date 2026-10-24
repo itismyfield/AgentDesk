@@ -259,8 +259,7 @@ pub(in crate::services::discord) enum HerdrDelivery {
 }
 
 fn holder(channel: u64) -> bool {
-    use crate::services::cluster::channel_home::{HomeRefusal, refusal};
-    channel != 0 && refusal(channel) != Some(HomeRefusal::NotHeld)
+    channel != 0
 }
 
 /// Whether `token`'s Herdr turn may take this user stop. It writes nothing: the mailbox records
@@ -665,7 +664,6 @@ pub(super) async fn interrupt_herdr(
         return HerdrDelivery::NotSent(Holder);
     }
     let (token, provider) = (token.clone(), provider.clone());
-    let home = crate::services::cluster::channel_home::registered_channel(channel);
     #[cfg(test)]
     let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
     let enabled = herdr_cancel_enabled();
@@ -690,7 +688,6 @@ pub(super) async fn interrupt_herdr(
             &provider,
             &target,
             channel,
-            home.as_deref(),
             &record.execution_nonce,
             &writer_attempted,
         );
@@ -729,7 +726,6 @@ fn deliver(
     provider: &ProviderKind,
     target: &HerdrTarget,
     channel: u64,
-    home: Option<&crate::services::cluster::channel_home::HomeGate>,
     nonce: &str,
     attempted: &AtomicBool,
 ) -> HerdrDelivery {
@@ -737,13 +733,7 @@ fn deliver(
     // A Claude idle refusal's evidence, logged only once the composer lock is released.
     let idle = std::cell::Cell::new(None);
     let attempt = || -> Result<HerdrDelivery, HerdrNotSent> {
-        let held = || {
-            holder(channel)
-                && home.is_none_or(|home| {
-                    home.refusal()
-                        != Some(crate::services::cluster::channel_home::HomeRefusal::NotHeld)
-                })
-        };
+        let held = || holder(channel);
         let state = token.herdr_interrupt_state().ok_or(Pending)?;
         // The reservation belongs to the blocking writer, even if its async waiter disappears.
         let _claim = ClaudeStopDeliveryReservation::claim(token).ok_or(Duplicate)?;

@@ -1,4 +1,4 @@
-//! Claimed input keeps its SQL identity and home fence while the writer observes fresh eligibility.
+//! Claimed input keeps its SQL identity while the writer observes fresh eligibility.
 
 #[cfg(test)]
 use super::test_executor::execute_intake_turn_core;
@@ -46,10 +46,6 @@ pub(super) async fn hold_off_o_gateway(
     };
     let detail = if !exact {
         Some("claimed input identity changed".to_owned())
-    } else if let Some(detail) =
-        super::super::channel_home::intake_hold(&row.channel_id, row.home_epoch)
-    {
-        Some(detail)
     } else {
         let route = if selected {
             intake_route::for_claimed_input(provider, channel_id.get(), row.id, phase).await
