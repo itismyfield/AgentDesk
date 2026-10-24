@@ -177,13 +177,11 @@ where
         outcomes: BTreeMap::new(),
     });
     if inspect {
-        let cursor = actor
-            .writer
-            .store()
-            .cursors()
+        let cursors: Vec<_> = actor.writer.store().cursors().cloned().collect();
+        let cursor = cursors
+            .into_iter()
             .find(|cursor| !actor.writer.suspension.contains(&cursor.source))
-            .expect("the proven current source is readable")
-            .clone();
+            .expect("the proven current source is readable");
         let key = source_key(&cursor.source);
         let token = actor.token(&cursor);
         let job = actor.transitions.job.as_mut().unwrap();
