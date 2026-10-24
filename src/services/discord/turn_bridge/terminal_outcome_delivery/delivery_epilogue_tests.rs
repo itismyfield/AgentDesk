@@ -1786,3 +1786,101 @@ async fn a2_claude_completion_requires_this_attempts_exact_user_receipt() {
         "no completion footer or Response sent without exact input proof"
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn bundle_external_completion_requires_the_admitted_native_user_range() {
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    use std::os::unix::fs::MetadataExt;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let session = format!("bundle-native-{}", uuid::Uuid::new_v4());
+    let path = dir.path().join("native.jsonl");
+    std::fs::write(
+        crate::services::tmux_common::session_temp_path(&session, "generation"),
+        "1",
+    )
+    .unwrap();
+    let record = format!(
+        "{}\n",
+        serde_json::json!({"type":"user", "sessionId":"native-sid", "message":{"content":"native prompt"}})
+    );
+    std::fs::write(&path, &record).unwrap();
+    let metadata = std::fs::metadata(&path).unwrap();
+    tui_prompt_dedupe::register_tmux_runtime_binding(
+        &session,
+        TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            session_id: Some("native-sid".into()),
+            relay_output_path: None,
+            input_fifo_path: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    let mut state = InflightTurnState::new(
+        ProviderKind::Claude,
+        7_314_555,
+        None,
+        7,
+        8,
+        9,
+        "native prompt".into(),
+        Some("native-sid".into()),
+        Some(session.clone()),
+        Some(path.display().to_string()),
+        None,
+        0,
+    );
+    state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    state.turn_source = inflight::TurnSource::ExternalInput;
+    state.last_offset = record.len() as u64;
+    state.tui_terminal_source_file_identity = Some((metadata.dev(), metadata.ino()));
+    state.tui_terminal_generation_mtime_ns = Some(
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(&session),
+    );
+    let confirmed = |row: &InflightTurnState| {
+        super::completion_proof::input_confirmed(&ProviderKind::Claude, row, "answer")
+    };
+    assert!(
+        confirmed(&state),
+        "one exact native user record proves the admitted external turn"
+    );
+    let mut unknown_sid = state.clone();
+    unknown_sid.session_id = None;
+    assert!(
+        confirmed(&unknown_sid),
+        "only the pinned native user record recovers a missing reader SID"
+    );
+    for defect in [
+        "sid",
+        "text",
+        "range",
+        "inode",
+        "generation",
+        "managed",
+        "missing",
+        "duplicate",
+    ] {
+        let mut changed = state.clone();
+        std::fs::write(&path, &record).unwrap();
+        match defect {
+            "sid" => changed.session_id = Some("stale-sid".into()),
+            "text" => changed.user_text = "different prompt".into(),
+            "range" => changed.turn_start_offset = Some(record.len() as u64),
+            "inode" => changed.tui_terminal_source_file_identity = Some((0, 0)),
+            "generation" => changed.tui_terminal_generation_mtime_ns = Some(0),
+            "managed" => changed.turn_source = inflight::TurnSource::Managed,
+            "missing" => {
+                std::fs::write(&path, "").unwrap();
+            }
+            "duplicate" => {
+                std::fs::write(&path, format!("{record}{record}")).unwrap();
+                changed.last_offset *= 2;
+            }
+            _ => unreachable!(),
+        }
+        assert!(!confirmed(&changed), "native proof refuses {defect}");
+    }
+}

@@ -116,6 +116,14 @@ pub(crate) fn capture_preparation(
         }
         result
     });
+    // The inner scope already notified its owner; carry only the captured disposition outward.
+    if let Some(run) = scope.result {
+        OWNER.with(|slot| {
+            if let Some(parent) = slot.borrow_mut().as_mut() {
+                parent.result = Some(run);
+            }
+        });
+    }
     match (result, scope.preparation) {
         (Err(_), Some(hold)) => Err(SubmissionError::Held(hold)),
         (result, _) => result,

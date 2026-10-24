@@ -143,6 +143,58 @@ impl UserReceipt {
         });
     }
 
+    /// An external turn uses the native reader's sealed byte range and original file identity.
+    #[cfg(unix)]
+    pub(crate) fn from_native_range(
+        session: &str,
+        prompt: &str,
+        sid: Option<&str>,
+        range: (u64, u64),
+        source: (u64, u64),
+    ) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        if range.0 >= range.1 || range.1 - range.0 > 16 * 1024 * 1024 {
+            return None;
+        }
+        let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session)?;
+        if binding.runtime_kind != RuntimeHandoffKind::ClaudeTui {
+            return None;
+        }
+        let mut file = open(&binding.output_path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if (metadata.dev(), metadata.ino()) != source || metadata.len() < range.1 {
+            return None;
+        }
+        let sid = if let Some(sid) = sid.filter(|sid| !sid.is_empty()) {
+            sid.to_owned()
+        } else {
+            // A resumed reader may miss Init; only this pinned native input may supply its SID.
+            file.seek(SeekFrom::Start(range.0)).ok()?;
+            let mut found = None;
+            for line in BufReader::new(file.take(range.1 - range.0)).lines() {
+                let record: serde_json::Value = serde_json::from_str(&line.ok()?).ok()?;
+                if user_text(&record)
+                    .is_some_and(|text| super::super::busy_inject::exact_receipt(&text, prompt))
+                {
+                    let native = record["sessionId"].as_str().filter(|sid| !sid.is_empty())?;
+                    if found.replace(native.to_owned()).is_some() {
+                        return None;
+                    }
+                }
+            }
+            found?
+        };
+        let mut receipt = Self::before(session, prompt, Some(&sid))?;
+        let metadata = receipt.file.as_ref()?.metadata().ok()?;
+        if (metadata.dev(), metadata.ino()) != source || metadata.len() < range.1 {
+            return None;
+        }
+        receipt.offset = range.0;
+        receipt.end = Some(range.1);
+        receipt.ended = true;
+        Some(receipt)
+    }
+
     pub(crate) fn confirmed(&mut self) -> bool {
         let Some(end) = self.end else {
             return false;
