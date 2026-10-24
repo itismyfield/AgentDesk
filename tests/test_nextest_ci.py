@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import random
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -17,6 +18,10 @@ SCRIPT = ROOT / "scripts/ci/nextest_ci.py"
 spec = importlib.util.spec_from_file_location("nextest_ci", SCRIPT)
 nci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nci)
+spec = importlib.util.spec_from_file_location("pg_test_classifier", ROOT / "scripts/ci/pg_test_classifier.py")
+pgc = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = pgc  # dataclasses resolve postponed annotations through sys.modules
+spec.loader.exec_module(pgc)
 spec = importlib.util.spec_from_file_location("rust_test_sources", ROOT / "scripts/ci/rust_test_sources.py")
 rts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rts)
@@ -656,6 +661,107 @@ class RustSources(unittest.TestCase):
         for text, os_name, want in cases:
             with self.subTest(text):
                 self.assertIs(rts.cfg_holds(tuple(text.split()), os_name, frozenset({"voice"})), want)
+
+
+class PgClassifier(unittest.TestCase):
+    """Which lib tests need PostgreSQL, judged from source the way the PG lane gate does."""
+
+    DB = """pub fn plain() {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::fixtures::open as opener;
+    fn make_db() -> u8 { TestPostgresDb::new(); 0 }
+    fn wrapper() { make_db(); }
+    #[test]
+    fn direct() { let _db = TestPostgresDb::new(); }
+    #[test]
+    fn indirect_two_hops() { wrapper(); }
+    #[test]
+    fn via_use_alias() { opener(); }
+    #[test]
+    fn pure() { plain(); }
+    #[test]
+    fn nested_helper_does_not_taint() { fn unused() { TestPostgresDb::new(); } }
+}
+"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="pg-classifier-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.tree({
+            "Cargo.toml": '[package]\nname = "x"\n',
+            "src/lib.rs": "mod db;\nmod support;\n#[path = \"store_impl.rs\"]\nmod store;\n#[cfg(test)]\nmod ext_tests;\n",
+            "src/db.rs": self.DB,
+            "src/support.rs": "#[cfg(test)]\npub mod fixtures {\n    pub fn open() { connect_test_pool(); }\n}\n",
+            "src/store_impl.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses_pool() { connect_test_pool_for(); }\n}\n",
+            "src/ext_tests.rs": "#[test]\nfn ext() { let _ = PgRecoveryTestDatabase::new(); }\n#[test]\nfn ext_pure() {}\n",
+        })
+
+    def tree(self, files):
+        for rel, text in files.items():
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def test_seed_reach_decides_pg_membership(self):
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(set(pg), {"db::tests::direct", "db::tests::indirect_two_hops", "db::tests::via_use_alias",
+                                   "store::tests::uses_pool", "ext_tests::ext"})
+        self.assertEqual(pg["store::tests::uses_pool"], "src/store_impl.rs")
+
+    def test_exemption_removes_a_classified_test_and_a_stale_one_is_a_problem(self):
+        pg, problems = pgc.classify(self.root, exempt={"db::tests::direct": "fixture"})
+        self.assertNotIn("db::tests::direct", pg)
+        self.assertEqual(problems, [])
+        _, problems = pgc.classify(self.root, exempt={"db::tests::pure": "not PG at all"})
+        self.assertEqual(problems, ["stale exemption: db::tests::pure is no longer classified as PG"])
+
+    def test_call_chain_past_the_depth_limit_is_a_problem_not_non_pg(self):
+        hops = "".join(f"    fn h{i}() {{ h{i + 1}(); }}\n" for i in range(18))
+        self.tree({"src/db.rs": "#[cfg(test)]\nmod tests {\n" + hops
+                   + "    fn h18() { TestPostgresDb::new(); }\n    #[test]\n    fn deep() { h0(); }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertNotIn("db::tests::deep", pg)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("pg-reach-depth-exhausted: db::tests::deep", problems[0])
+
+    def test_unresolved_test_module_is_a_problem(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\n#[cfg(test)]\nmod gone_tests;\n"})
+        _, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("unresolved-external-test-module: src/lib.rs:3", problems[0])
+
+    def cli(self, *argv):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(pgc, "EXEMPT", {}):
+            try:
+                rc = pgc.main(["--repo-root", str(self.root), *map(str, argv)])
+            except Exception as exc:  # noqa: BLE001
+                return "crash", f"{type(exc).__name__}: {exc}"
+        return rc, err.getvalue()
+
+    def test_list_split_gives_native_runs_the_non_pg_tests(self):
+        listed = {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": {
+            name: {"ignored": False} for name in ("db::tests::direct", "db::tests::pure", "ext_tests::ext_pure")}}}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json", "--list", self.root / "list.json")
+        self.assertEqual(rc, 0, err)
+        out = json.loads((self.root / "out.json").read_text())
+        self.assertEqual(out["non_pg"], ["db::tests::pure", "ext_tests::ext_pure"])
+
+    def test_unreadable_list_or_problem_fails_the_cli(self):
+        (self.root / "list.json").write_text(json.dumps({"rust-binaries": {}}))
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json", "--list", self.root / "list.json")
+        self.assertEqual(rc, 1)
+        self.assertIn("nextest list:", err)
+        self.tree({"src/lib.rs": "mod db;\nmod support;\n#[cfg(test)]\nmod gone_tests;\n"})
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json")
+        self.assertEqual(rc, 1)
+        self.assertIn("unresolved-external-test-module", err)
 
 
 if __name__ == "__main__":
