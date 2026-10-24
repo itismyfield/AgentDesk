@@ -227,13 +227,13 @@ write 사이에 끼어드는 것이라 바이트를 **추가**할 수 있을 뿐
    mirror는 run과 함께 취소 대상이 된다. 그때의 check conclusion은 PR run
    취소로 실측해 확인한다.
 
-`scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `test_fast`,
-`high-risk-recovery`, `check_fast_cross_os`, `check_fast_cross_os_targets`,
-`library_sweep`에는 **강도가 다른 두 층**이 있다.
+`scripts/check-ci-runner-hardening.sh`의 `targets`에 등재된 `rust_build`·`rust_tests`·
+`test_evidence`·`pg15_owner_proof`·`relay_authority_mutations`·`check_fast_cross_os`·
+`check_fast_cross_os_targets`에는 **강도가 다른 두 층**이 있다.
 섞어 읽으면 안 된다.
 
 1. **whole-job semantic hash — 변경 탐지기이지 보장이 아니다.** 같은 diff 안에서
-   재핀하면 무엇이든 통과한다. `test_fast` 실측: 미등록 step 추가, `Start
+   재핀하면 무엇이든 통과한다. 옛 `test_fast` 실측: 미등록 step 추가, `Start
    PostgreSQL service` 삭제, 캐시 step 2개 순서 변경이 모두 기존 pin 대비 rc=1
    이지만 정상 재핀 후 rc=0 이고, expected-step 계약을 고칠 필요조차 없었다.
    리뷰를 부르는 트리거로만 취급한다.
@@ -314,7 +314,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 | --- | --- | --- |
 | Full tests | `full_non_pg` matrix의 `Library sweep (selection-set gated)` step → `full_non_pg_required_context` 집계 | PostgreSQL 환경에서 `sweep-matrix`가 출력한 모든 번호에 대해 `SWEEP_SHARD_TOTAL=<matrix job count> python3 scripts/ci/test-selection.py run --lane sweep --shard <n> --full` |
 | Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
-| Full tests (PR) | `library_sweep` matrix의 `Library sweep (selection-set gated)` step | 같은 checkout에서 생성한 `ADK_TEST_SELECTION_PLAN`과 `SWEEP_SHARD_TOTAL=<sweep_matrix job count>`를 두고 `python3 scripts/ci/test-selection.py run --lane sweep --shard <n>`을 출력된 모든 번호에 실행한다. PostgreSQL 환경도 필요하다. |
+| Full tests (PR) | `rust_tests` worker의 `cargo nextest run`(계획된 exact ID, worker당 PostgreSQL 서버 하나) | PostgreSQL 환경에서 `cargo nextest run --lib --profile ci` |
 | PostgreSQL tests | `postgres` 각 matrix leg의 `just test-postgres-shard` step | 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=<n> just test-postgres-shard`를 모든 numeric 번호에, `PG_INCLUDE_SHARD=continuity just test-postgres-shard`를 한 번 실행한다. 둘을 합친 선택은 기존 `just test-postgres`와 같다. |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
@@ -328,8 +328,8 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
 
-`needs: changes` + `if: needs.changes.outputs.high_risk_recovery == 'true'` 로 게이팅되는
-것은 `ci-pr.yml`의 `high-risk-recovery` job **하나뿐**이다. `ci-main.yml`은 #5232 R3 에서
+`ci-pr.yml`에서 이 필터는 job을 게이팅하지 않는다. `required_contexts`가 `High-risk recovery`를
+판정할 때 N(nextest 실행)을 요구할지만 정한다. `ci-main.yml`은 #5232 R3 에서
 `changes` job과 그 `needs:`/`if:` 를 함께 제거해 위 Always-on 으로 옮겼다. main 쪽 필터가
 "유실됐다"고 판단해 그것들을 복원하면 `services::hang_forensics::tests` 와
 `services::health_diagnostics::tests` 가 main 에서 다시 조용히 미실행된다 —
@@ -400,13 +400,13 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ### Serial execution
 
-- PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `test_fast`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. required `Fast targeted tests (ubuntu-latest)` mirror가 같은 `pg_db` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
-- Main의 `postgres`와 PR의 `test_fast`는 numeric ID 샤드와 독립 `continuity` leg로 PG matrix를 실행한다. numeric 샤드 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정하며(현재 8 numeric + 1 continuity), 이 값으로 SHA256 modulus·full matrix·허용 job 이름을 만든다. PR selected 모드는 선택 ID가 배정된 numeric 샤드에만 `continuity`를 더하며 shard 0을 강제로 추가하지 않는다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 leg 결과를 확인한다.
+- PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `rust_build`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. `required_contexts`의 `Fast targeted tests (ubuntu-latest)` 판정이 `rust_tests` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
+- Main의 `postgres`는 numeric ID 샤드와 독립 `continuity` leg로 PG matrix를 실행한다. numeric 샤드 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정하며(현재 8 numeric + 1 continuity), 이 값으로 SHA256 modulus·full matrix·허용 job 이름을 만든다.
 - `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
-- `PG_INCLUDE_SHARD`는 PG 시험 step에만 `${{ matrix.shard }}`로 설정한다. numeric leg는 자기 PG ID만 실행하며, `continuity` leg는 그 env를 제거한 뒤 기존 `just test-postgres-continuity` recipe를 한 번 실행한다. PR selected 모드도 같은 분리를 적용한다. continuity 대상과 PG ID 집합 사이의 기존 겹침은 유지한다. source·시험 실패를 전파하고, 각 leg 안에서는 `--test-threads=1`을 유지한다.
-- main·PR shard step은 같은 `timeout-minutes: 75` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
-- PR infra retry는 planner가 열거한 실제 shard 이름만 PG로 인정한다. unknown·실제 회귀·불완전 API 응답이면 재시도를 막고, 나머지는 infra로 판정한 shard job만 각각 한 번 재시도한다(최초 attempt에서만 요청). 여러 shard가 infra여도 모두 대상으로 삼으며, default branch checkout과 요청 전 stale-attempt 검사는 유지한다.
-- PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다.
+- `PG_INCLUDE_SHARD`는 PG 시험 step에만 `${{ matrix.shard }}`로 설정한다. numeric leg는 자기 PG ID만 실행하며, `continuity` leg는 그 env를 제거한 뒤 기존 `just test-postgres-continuity` recipe를 한 번 실행한다. continuity 대상과 PG ID 집합 사이의 기존 겹침은 유지한다. source·시험 실패를 전파하고, 각 leg 안에서는 `--test-threads=1`을 유지한다.
+- main shard step은 `timeout-minutes: 75` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
+- PR infra retry는 `Rust tests (worker N)` 워커만 후보로 본다. 로그가 infra로 분류된 워커만 `classify-worker --infra-evidence`로 넘기고, 워커 아티팩트에 시험 실패·읽을 수 없는 결과가 있거나 분류되지 않은 워커·내려받기 실패·plan 부재가 있으면 모든 워커의 재시도를 막는다. 최초 attempt에서만 한 번 요청하며 default branch checkout과 요청 전 stale-attempt·PR head 검사는 유지한다.
+- PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다. 그 뒤 같은 job 이 Windows nextest list 로 `rust_test_sources.py compare --platform windows` 를 30분 예산으로 실행한다.
 - 모든 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
 - `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
 - 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.
