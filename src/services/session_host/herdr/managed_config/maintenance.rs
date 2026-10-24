@@ -146,6 +146,7 @@ pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: b
                 (observe && matches!(file, File::Ensured(_))).then(|| read_e7(boot, key, &target));
             let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
             let previous = records.get(key).cloned();
+            let was = previous.as_ref().and_then(|record| record.reason);
             let record = match (&file, previous) {
                 (File::Busy, Some(previous)) => Record {
                     config: "busy",
@@ -171,8 +172,9 @@ pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: b
                     earliest_start_after: barrier.map(|at| (at + START_WAIT).into()),
                 },
             };
-            if matches!(file, File::Refused | File::RecordUnreadable | File::Failed) {
-                tracing::warn!(endpoint = %key, config = record.config, "[herdr] managed config not ensured");
+            // Logged once per cause change, not every tick the cause persists.
+            if record.reason != was {
+                tracing::warn!(endpoint = %key, config = record.config, reason = ?record.reason, last_e7 = %record.last_e7, "[herdr] managed config upkeep cause changed");
             }
             records.insert(key.clone(), record);
         }
