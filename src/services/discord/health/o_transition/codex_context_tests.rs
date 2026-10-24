@@ -212,6 +212,43 @@ fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
 }
 
 #[test]
+fn existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence() {
+    let fixture = Fixture::new(false);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = fixture.shared(None);
+        shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+        let registry = HealthRegistry::new();
+        registry.register("codex".into(), shared).await;
+        crate::services::tui_o::writer::tests::with_ready_codex(
+            fixture.source.clone(),
+            CHANNEL,
+            |ready| async {
+                let reply =
+                    super::super::automatic::codex_sweep_for_test(&registry, &ready, CHANNEL)
+                        .await
+                        .unwrap();
+                assert!(reply.refused.is_none(), "{reply:?}");
+                let diagnostics =
+                    serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
+                assert!(
+                    diagnostics["codex"]["Complete"].is_object(),
+                    "{diagnostics}"
+                );
+                assert!(
+                    matches!(reply.scope, Some(Err(_))),
+                    "Codex Apply scope stays unavailable"
+                );
+            },
+        )
+        .await;
+    });
+}
+
+#[test]
 fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown() {
     let fixture = Fixture::new(true);
     let _node =
@@ -243,6 +280,15 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
         sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'codex', 'idle', 'discord_channel', $2, $3, $4)")
             .bind(key).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(serde_json::to_value(&row).unwrap()).execute(&pool).await.unwrap();
         let prepared = prepare(&HealthRegistry::new(), shared.clone(), CHANNEL).await.unwrap();
+        shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+        let health = HealthRegistry::new();
+        health.register("codex".into(), shared.clone()).await;
+        crate::services::tui_o::writer::tests::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async {
+            let reply = super::super::automatic::codex_sweep_for_test(&health, &ready, CHANNEL).await.unwrap();
+            assert!(reply.refused.is_none(), "{reply:?}");
+            let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
+            assert!(diagnostics["codex"]["Complete"].is_object(), "{diagnostics}");
+        }).await;
         assert!(matches!(fixture.observe(&prepared).unwrap().target.host_path, model::HostPath::Herdr { .. }));
         rig.show_panes(&["w1-1", "w1-2"]);
         assert!(prepare(&HealthRegistry::new(), shared, CHANNEL).await.is_err());
