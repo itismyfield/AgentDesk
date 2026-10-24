@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::TestRuntimeRootGuard;
 use crate::services::cluster::attachment_transfer::{self as assets, uploads::Upload};
 
 #[tokio::test]
