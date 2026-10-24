@@ -532,15 +532,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::recovery_engine::herdr_before_start_restart::tests::only_a_turn_this_process_indexed_is_held_at_restart
   services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_keeps_every_held_receipt_silent_and_untouched
   services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
-  services::discord::recovery_engine::herdr_row_end::tests::rig::gate::a_pass_during_a_running_end_names_the_task_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::gate::each_held_pass_names_its_gate_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_o_owned_relayed_turn_ends_without_a_notice_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::a_restarted_herdr_row_holds_gateway_and_rest_starts_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::a_row_without_its_input_time_ends_with_the_neutral_notice_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_aborted_turn_clears_its_spinner_silently_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_turn_ended_after_its_terminal_ends_silently_pg
-  services::discord::recovery_engine::herdr_row_end::tests::rig::settle::an_o_owned_turn_with_a_later_prompt_ends_silently_pg
   services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_on_a_withheld_herdr_pane_reports_the_withhold_not_a_reused_watcher
   services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_repeated_rebind_on_a_withheld_pane_adopts_fences_and_announces_nothing
