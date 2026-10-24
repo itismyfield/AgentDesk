@@ -17,7 +17,8 @@ use crate::services::tui_o::store::spool::ExecutionEnd;
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::host::{Readiness, process_readiness};
 use crate::services::tui_o::writer::transition_port::{
-    Hop, Idle, Operation, Outcome, Reply, Request, Termination, TransitionPort, Verdict,
+    Hop, INSPECT_DEADLINE, Idle, Operation, Outcome, Reply, Request, Termination, TransitionPort,
+    Verdict,
 };
 
 pub(crate) mod termination;
@@ -184,6 +185,39 @@ async fn send(
         .map_err(|_| "stale_actor_reply")
 }
 
+fn codex_actor_error(reason: &'static str, suspended: bool) -> &'static str {
+    #[cfg(test)]
+    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "codex_suspended") {
+        return reason;
+    }
+    if suspended {
+        "codex_suspended_sources"
+    } else {
+        reason
+    }
+}
+
+async fn codex_send(
+    ready: &Readiness,
+    channel: u64,
+    port: &TransitionPort,
+    operation: Operation,
+    context: Context,
+) -> Result<Reply, &'static str> {
+    let send = send(ready, channel, port, operation, context);
+    #[cfg(test)]
+    if std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|m| m == "codex_inspect_timeout") {
+        return send.await;
+    }
+    let budget = INSPECT_DEADLINE
+        + crate::services::tui_o::writer::rotation::RETIRE_QUIET
+        + Duration::from_secs(10);
+    let result = tokio::time::timeout(budget, send)
+        .await
+        .map_err(|_| "codex_inspect_timeout")?;
+    result.map_err(|reason| codex_actor_error(reason, !port.sources_unsuspended()))
+}
+
 async fn channel_sweep(
     registry: &HealthRegistry,
     ready: &Readiness,
@@ -191,7 +225,12 @@ async fn channel_sweep(
     channel: u64,
     stats: &mut Stats,
 ) -> Result<(), &'static str> {
-    let port = ready.transition(channel).ok_or("actor_unavailable")?;
+    let port = if *provider == ProviderKind::Codex {
+        ready.observation_transition(channel)
+    } else {
+        ready.transition(channel)
+    }
+    .ok_or("actor_unavailable")?;
     let expected = match provider {
         ProviderKind::Claude => ShadowProvider::Claude,
         ProviderKind::Codex => ShadowProvider::Codex,
@@ -199,6 +238,9 @@ async fn channel_sweep(
     };
     if port.provider() != Some(expected) {
         return Ok(());
+    }
+    if expected == ShadowProvider::Codex && !port.sources_unsuspended() {
+        return Err(codex_actor_error("actor_reply_unavailable", true));
     }
     let shared = registry
         .shared_for_provider_on_channel(provider, ChannelId::new(channel))
@@ -234,7 +276,7 @@ async fn channel_sweep(
             reason: "read-only Codex execution observation".into(),
             termination: None,
         };
-        let reply = send(ready, channel, &port, Operation::Inspect(request), context).await?;
+        let reply = codex_send(ready, channel, &port, Operation::Inspect(request), context).await?;
         #[cfg(test)]
         test_support::record_codex_reply(reply.clone());
         if !stats.actor_refused(&reply) {

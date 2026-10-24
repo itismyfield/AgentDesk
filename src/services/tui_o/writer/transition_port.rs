@@ -18,6 +18,9 @@ use crate::services::tui_o::shadow::SourceId;
 /// Envelopes a run's mailbox holds before its actor takes one.
 const MAILBOX: usize = 4;
 
+/// The actor Inspect budget, shared with the read-only sweep deadline.
+pub(crate) const INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The wall clock the actor's probes stamp, read on the worker as each probe starts.
 pub(crate) type Wall = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 

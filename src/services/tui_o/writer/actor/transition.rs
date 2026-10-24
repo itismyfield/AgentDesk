@@ -23,15 +23,14 @@ use crate::services::tui_o::writer::transition_cleanup::{
     Judged, Request, Termination, Unclear, Verdict, judge,
 };
 use crate::services::tui_o::writer::transition_port::{
-    Context, Envelope, Hold, Hop, Kind, Operation, Outcome, Receiver, Refused, Reply, Wall,
+    Context, Envelope, Hold, Hop, INSPECT_DEADLINE as DEADLINE, Kind, Operation, Outcome, Receiver,
+    Refused, Reply, Wall,
 };
 
 /// Candidates one inspection probes; automatic jobs inspect every pending source.
 const CANDIDATES: usize = 64;
 /// Sources one worker probes before the actor takes its results.
 const BATCH: usize = 4;
-/// Inspections hold every source not probed twice by this deadline.
-const DEADLINE: Duration = Duration::from_secs(60);
 /// Prefix bytes one inspection may hash: two probes of every candidate at 32 MiB each.
 const HASH_BUDGET: u64 = 2 * CANDIDATES as u64 * (32 << 20);
 
@@ -178,6 +177,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let suspended = suspended
             && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
         if suspended {
+            let discard = true;
+            #[cfg(test)]
+            let discard = discard && !super::super::deliver::bo_mutant("inspect_job_cleanup");
+            if discard && let Some(job) = self.transitions.job.take() {
+                debug_assert!(!job.apply);
+                let _ = job
+                    .reply
+                    .send(Reply::refused(&job.request.job_id, Refused::CodexDeferred));
+            }
             if let Some(receiver) = &mut self.transitions.receiver
                 && let Ok(Some(envelope)) = receiver.try_next()
             {

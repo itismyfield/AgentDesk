@@ -74,7 +74,14 @@ impl Readiness {
 
     /// The running actor's port, while it takes work as `with_submission` checks it.
     pub(crate) fn transition(&self, channel: u64) -> Option<TransitionPort> {
-        self.with_transition(channel, |port| Ok(port.clone())).ok()
+        self.with_transition(channel, false, |port| Ok(port.clone()))
+            .ok()
+    }
+
+    /// Returns a live port for read-only diagnostics; requests still enforce suspension.
+    pub(crate) fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
+        self.with_transition(channel, true, |port| Ok(port.clone()))
+            .ok()
     }
 
     /// Consumes `reply` only while the run `sent` named is still the channel's current one.
@@ -85,7 +92,7 @@ impl Readiness {
         reply: transition_port::Reply,
         consume: impl FnOnce(&transition_port::Reply) -> T,
     ) -> Result<T, &'static str> {
-        self.with_transition(channel, |current| match current.same_run(sent) {
+        self.with_transition(channel, false, |current| match current.same_run(sent) {
             true => Ok(consume(&reply)),
             false => Err("stale_actor_reply"),
         })
@@ -94,6 +101,7 @@ impl Readiness {
     fn with_transition<T>(
         &self,
         channel: u64,
+        observation: bool,
         consume: impl FnOnce(&TransitionPort) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
         let live = locked(&self.live);
@@ -107,7 +115,7 @@ impl Readiness {
             return Err("actor_unavailable");
         }
         let port = live.transition.as_ref().ok_or("actor_unavailable")?;
-        if !port.sources_unsuspended() {
+        if !observation && !port.sources_unsuspended() {
             return Err("suspended_sources");
         }
         consume(port)
