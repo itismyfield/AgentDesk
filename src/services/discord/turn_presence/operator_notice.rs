@@ -25,7 +25,7 @@ pub(in crate::services::discord::turn_presence) fn adopt(effects: &Arc<super::su
     posters.push(Arc::downgrade(effects));
 }
 
-/// The posted text: the cause and what to do, never paths, backups or environment values.
+/// One-line subtext naming the cause and what to do; never paths, backups or environment values.
 fn text(cause: &str) -> String {
     let body = match cause {
         "herdr_config_restart_required" => {
@@ -35,14 +35,14 @@ fn text(cause: &str) -> String {
             "실행 중 herdr 서버가 관리 home이 아닌 설정으로 떠 있습니다. herdr job의 HERDR_CONFIG_PATH·XDG_CONFIG_HOME을 확인한 뒤 계획 재시작하세요."
         }
         "herdr_managed_home_unsafe" => {
-            "관리 herdr home을 안전하게 쓸 수 없어 config를 맞추지 못했습니다(권한·소유자·경로). `agentdesk doctor`로 원인을 확인하세요."
+            "관리 herdr home을 안전하게 쓸 수 없어 config를 맞추지 못했습니다(권한·소유자·경로). agentdesk doctor로 원인을 확인하세요."
         }
         "herdr_config_record_unreadable" => {
-            "관리 herdr home의 publication 기록을 읽을 수 없어 자동 보장을 멈췄습니다. `agentdesk doctor`의 수동 절차를 따르세요."
+            "관리 herdr home의 publication 기록을 읽을 수 없어 자동 보장을 멈췄습니다. agentdesk doctor의 수동 절차를 따르세요."
         }
-        _ => "관리 herdr config를 맞추지 못했습니다. `agentdesk doctor`로 원인을 확인하세요.",
+        _ => "관리 herdr config를 맞추지 못했습니다. agentdesk doctor로 원인을 확인하세요.",
     };
-    format!("⚠ {body} (사유: {cause})")
+    crate::services::discord::session_notice::subtext("⚠️", &format!("{body} (사유: {cause})"))
 }
 
 impl OperatorNotice {

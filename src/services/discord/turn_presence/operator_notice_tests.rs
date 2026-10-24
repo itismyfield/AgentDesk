@@ -111,8 +111,9 @@ fn one_operator_notice_per_cause_episode_across_ticks_restarts_and_retries() {
     });
     let sent = lock(&sent).clone();
     assert!(sent.iter().all(|(channel, _)| *channel == 41));
-    assert!(sent[0].1.contains("herdr 서버 재시작 필요") && sent[0].1.contains(RESTART));
-    assert!(sent[1].1.contains(JOB_ENV));
+    assert!(sent[0].1.starts_with("-# ⚠️ herdr 서버 재시작 필요"));
+    assert!(sent[0].1.contains(r"herdr\_config\_restart\_required"));
+    assert!(sent[1].1.contains(r"herdr\_job\_env\_mismatch"));
     assert!(
         sent.iter().all(|(_, text)| !text.contains("/managed")),
         "a notice names no path"
