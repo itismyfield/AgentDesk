@@ -555,8 +555,19 @@ async fn decision_route_dispute_re_review(
     // due to lock contention or JS error), re-fire with blocking lock.
     {
         let card_ctx = load_review_decision_card_context_pg_first(state, &body.card_id).await;
+        // Fail closed: re-firing OnReviewEnter on an unreadable state could stack a
+        // second review dispatch; the live-review check below still rejects a gap.
         let has_review_dispatch =
-            has_pending_reviewish_dispatch_pg_first(state, &body.card_id).await;
+            match has_pending_reviewish_dispatch_pg_first(state, &body.card_id).await {
+                Ok(has_review_dispatch) => has_review_dispatch,
+                Err(error) => {
+                    tracing::warn!(
+                        "[review-decision] #229 safety net skipped for card {}: {error}",
+                        body.card_id
+                    );
+                    true
+                }
+            };
         let effective_pipeline = resolve_effective_pipeline_pg_first(
             state,
             card_ctx.repo_id.as_deref(),
@@ -574,9 +585,15 @@ async fn decision_route_dispute_re_review(
                 "[review-decision] Card {} in review state but no review dispatch after dispute — re-firing OnReviewEnter (#229)",
                 body.card_id
             );
-            let _ = state
+            if let Err(error) = state
                 .engine
-                .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": body.card_id }));
+                .fire_hook_by_name_blocking("OnReviewEnter", json!({ "card_id": body.card_id }))
+            {
+                tracing::warn!(
+                    "[review-decision] #229 OnReviewEnter re-fire failed for card {}: {error:#}",
+                    body.card_id
+                );
+            }
             crate::kanban::drain_hook_side_effects_with_backends(&state.engine);
         }
     }
