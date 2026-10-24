@@ -9,6 +9,7 @@ use crate::services::tui_o::writer::transition_port::Context;
 
 fn context() -> Context {
     Context {
+        codex: None,
         tmux: PANE.into(),
         nonce: "nonce".into(),
         lock: Arc::default(),
@@ -254,6 +255,7 @@ fn transition_scope_encodes_to_its_golden_bytes_and_digest() {
         termination: Some(Termination::Confirmed(end)),
     };
     let context = Context {
+        codex: None,
         tmux: "p".into(),
         nonce: "n0".into(),
         ..context()
