@@ -27,10 +27,8 @@ SWAP_ACTION = "./.github/actions/ensure-swap"
 # Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
 EXPECTED_SWAP_JOBS = {
     ".github/workflows/ci-pr.yml": {
-        "test_fast",
+        "rust_build",
         "pg15_owner_proof",
-        "high-risk-recovery",
-        "library_sweep",
         "lint",
         "scripts",
         "relay_authority_targets",
@@ -52,6 +50,7 @@ EXPECTED_SWAP_JOBS = {
 }
 LIB_BUILD_MARKERS = (
     re.compile(r"cargo test\b[^\n]*--lib\b"),
+    re.compile(r"\bcargo nextest archive\b"),
     re.compile(r"\bjust test-postgres"),
     re.compile(r"\btest-selection\.py run\b"),
     re.compile(r"--observe-selection"),
@@ -64,12 +63,8 @@ CI_SCRIPT_CHECKS = REPO_ROOT / "scripts/ci-script-checks.sh"
 # The shared lib producer replaced these duplicate per-job selection observers.
 REMOVED_OBSERVER_STEPS = ("Observe curated lane selections", "Require observer summary")
 MEM_PROBE = re.compile(r"mem-measure\.sh \S+ --")
-# The one memory probe left in PR CI; its line must be bare so `set -e` sees the status.
-LIB_INVENTORY_PROBE = re.compile(
-    r'^AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure\.sh lib-inventory -- '
-    r'"\$PYTHON" scripts/ci-timeout\.py \d+ "\$PYTHON" '
-    r"scripts/check_test_target_integrity\.py --verify-lib-inventory$"
-)
+# A memory probe line must be bare so `set -e` sees the command's own status.
+BARE_PROBE = re.compile(r"^(?:[A-Z_]+=\S+ )*bash scripts/ci/mem-measure\.sh \S+ -- [^|&]*$")
 
 
 def needs_swap(step: dict, job: dict) -> bool:
@@ -103,8 +98,7 @@ def memory_observer_problems(jobs: dict, script: str) -> list[str]:
         problems.append("ci-script-checks.sh must start with set -euo pipefail")
     problems += [f"relaxed shell option: {line!r}" for line in lines if re.match(r"set \+", line)]
     probes = [line for line in lines if MEM_PROBE.search(line) and not line.startswith("#")]
-    if len(probes) != 1 or not LIB_INVENTORY_PROBE.match(probes[0]):
-        problems.append(f"expected one bare lib-inventory memory probe, found {probes!r}")
+    problems += [f"memory probe hides its status: {line!r}" for line in probes if not BARE_PROBE.match(line)]
     return problems
 
 
@@ -163,16 +157,11 @@ class SwapStepWiring(unittest.TestCase):
 
     def test_observe_steps_report_memory_without_changing_their_pipeline(self) -> None:
         jobs, script = self.observer_inputs()
-        for job_id in ("test_fast", "high-risk-recovery"):
-            with self.subTest(job=job_id):
-                names = [step.get("name") for step in jobs[job_id]["steps"]]
-                for removed in REMOVED_OBSERVER_STEPS:
-                    self.assertNotIn(removed, names)
         self.assertEqual(memory_observer_problems(jobs, script), [])
 
     def test_observers_that_change_or_hide_their_status_fail(self) -> None:
         jobs, script = self.observer_inputs()
-        probe = next(line for line in script.splitlines() if LIB_INVENTORY_PROBE.match(line))
+        probe = 'bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/check.py'
         restored = {
             "name": REMOVED_OBSERVER_STEPS[0], "shell": "bash",
             "run": "set -o pipefail\nbash scripts/ci/mem-measure.sh observe-high-risk -- python3 "
@@ -182,18 +171,17 @@ class SwapStepWiring(unittest.TestCase):
         script_mutants = {
             "no-errexit": script.replace("set -euo pipefail", "set -uo pipefail", 1),
             "no-pipefail": script.replace("set -euo pipefail", "set -eu", 1),
-            "relaxed-later": script.replace(probe, f"set +e\n{probe}", 1),
-            "or-true": script.replace(probe, f"{probe} || true", 1),
-            "piped-tee": script.replace(probe, f'{probe} | tee "$RUNNER_TEMP/inventory.log"', 1),
-            "backgrounded": script.replace(probe, f"{probe} &", 1),
-            "probe-removed": script.replace(probe + "\n", "", 1),
-            "second-probe": script.replace(probe, f"{probe}\n{probe}", 1),
+            "relaxed-later": f"{script}set +e\n",
+            "or-true": f"{script}{probe} || true\n",
+            "piped-tee": f'{script}{probe} | tee "$RUNNER_TEMP/inventory.log"\n',
+            "backgrounded": f"{script}{probe} &\n",
         }
+        self.assertEqual(memory_observer_problems(jobs, f"{script}{probe}\n"), [])
         for label, mutant in script_mutants.items():
             with self.subTest(script=label):
                 self.assertNotEqual(mutant, script)
                 self.assertNotEqual(memory_observer_problems(jobs, mutant), [])
-        for job_id in ("test_fast", "high-risk-recovery"):
+        for job_id in ("rust_build", "rust_tests"):
             with self.subTest(restored_observer=job_id):
                 mutant_jobs = copy.deepcopy(jobs)
                 mutant_jobs[job_id]["steps"].insert(1, dict(restored))

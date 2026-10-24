@@ -211,135 +211,70 @@ time for diagnostics; neither is a stored approval value.
 
 - canonical_modules: `scripts/check-ci-runner-hardening.sh` parses `.github/workflows/ci-pr.yml`,
   pins the calculated execution surface of the `jobs.scripts`
-  writer-protection/aggregate pair, and verifies the SHA-256 of
-  `scripts/required-check-mirror.sh`. The required `Script checks` publisher
-  compares both the helper digest and the digest of
-  `scripts/check-ci-runner-hardening.sh` immediately after checkout; the
-  required `relay-authority-contract` publisher repeats the same two
-  comparisons in its first step after checkout, before its own gate run and
-  its two result mirrors, and each job then runs only its verified gate copy. The publisher-side copy is intentional and
-  symmetric: it catches a skipped/altered relay job, while the relay copy
-  catches a skipped/altered publisher. The helper's
-  behavior tests remain useful regressions, but byte identity is primary:
-  environment, step-instance, argv0, and unconditional-success branches all
-  change the pinned file bytes.
-- fixed surfaces: the `Script checks` publisher has exactly checkout,
-  contract, and one result-mirror step per shard job (`scripts` runs the
-  `cargo` shard, `scripts_guards` and `scripts_contracts` the others); its
-  `name`, `needs`, job-level `if`, `runs-on`, checkout provenance, and
-  absence of `continue-on-error`,
-  `defaults`/`env`/`environment`/`strategy`/`container` are pinned. The
-  publishers' job-level `if` (wiring table below) is what runs the fail-closed
-  mirror after an upstream failure, skip, or timeout cancellation. When the
-  run is cancelled, a publisher that has not started never starts and a
-  running one is cancelled with the run; its final check conclusion is
-  measured on a PR run, not assumed here. Execution jobs omit job-level `if`
-  so their own work cannot be condition-skipped. Each extra
-  shard job runs `./scripts/ci-script-checks.sh` exactly once with the
-  `scripts` aggregate's effective execution and its own `SCRIPT_CHECK_SHARD`.
-  Its source-byte range is also hashed, so YAML scalar tags and styles remain in
-  the comparison; Psych cannot erase an explicit tag such as `!!binary` or
-  equate YAML 1.1 spellings such as `yes` and `012` with the intended
-  Actions scalars. Plain YAML-boolean-like job IDs fail closed, while quoted
-  `"yes"` remains a valid string job ID. The relay publisher's semantic hash
-  and explicit step registry pin its `needs`, `if`, non-matrix shape, and
-  content-hash backstop. The wiring table below is the single statement of
-  the recursive `needs` closure of the two required publishers and of each
-  member's `needs` and job-level `if`; `tests/test_fast_check_ci_wiring.py`
-  requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
-  `continue-on-error`, and any edge that expands the closure is a
-  review-triggering gate failure.
+  writer-protection/aggregate pair, the nextest jobs (`rust_build`,
+  `rust_tests`, `test_evidence`) and the `required_contexts` judge. The judge
+  job publishes all nine branch-protection names as one matrix and runs
+  `scripts/ci/nextest_required.py` over `toJSON(needs)`. For `Script checks`
+  and `relay-authority-contract` it first compares the SHA-256 of the judge and
+  of the gate itself, then runs only the verified gate copy, so a skipped or
+  altered gate leaves those contexts red.
+- fixed surfaces: the judge job's `name`, `needs`, job-level `if`, `runs-on`,
+  matrix, checkout provenance, pin step and judge step are pinned by value and
+  by source bytes (pins normalised), so YAML scalar tags and styles such as
+  `!!str`, `no` or `010` stay in the comparison. Each extra shard job runs
+  `./scripts/ci-script-checks.sh` exactly once with the `scripts` aggregate's
+  effective execution and its own `SCRIPT_CHECK_SHARD`. Plain
+  YAML-boolean-like job IDs fail closed, while quoted `"yes"` remains a valid
+  string job ID. No other job or workflow may render one of the nine names.
+  The wiring table below is the single statement of the recursive `needs`
+  closure of the judge and of each member's `needs` and job-level `if`;
+  `tests/test_fast_check_ci_wiring.py` requires it to equal `ci-pr.yml`
+  exactly. Every member must exist and omit `continue-on-error`, and any edge
+  that expands the closure is a review-triggering gate failure.
   <!-- required-publisher-wiring -->
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
-  | `lib_test_prepare` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `relay-authority-contract` | `changes`, `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
+  | `check_fast_cross_os` | `changes` | `needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'` |
+  | `check_fast_cross_os_targets` | `changes` | `needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'` |
+  | `dashboard` | `changes` | `needs.changes.outputs.dashboard == 'true'` |
+  | `lint` | `changes` | `needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'` |
+  | `pg15_owner_proof` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
   | `relay_authority_mutations` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `relay_authority_targets` | `changes`, `lib_test_prepare` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
-  | `scripts` | `changes`, `lib_test_prepare` | `${{ !cancelled() }}` |
+  | `relay_authority_targets` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}` |
+  | `required_contexts` | `changes`, `rust_build`, `rust_tests`, `test_evidence`, `lint`, `scripts`, `scripts_guards`, `scripts_contracts`, `dashboard`, `pg15_owner_proof`, `relay_authority_targets`, `relay_authority_mutations`, `check_fast_cross_os`, `check_fast_cross_os_targets` | `${{ !cancelled() }}` |
+  | `rust_build` | `changes` | `${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}` |
+  | `rust_tests` | `changes`, `rust_build` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
+  | `scripts` | `changes` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |
-  | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
+  | `test_evidence` | `changes`, `rust_build`, `rust_tests` | `${{ !cancelled() && needs.rust_build.result == 'success' }}` |
   <!-- /required-publisher-wiring -->
 
 - aggregate execution: the calculator records shell/working-directory
   candidates, environment scopes, `runs-on`, prior recognized file writes, and
-  the selected
-  effective values. The protection pair is fixed at indices `[8, 9]` with no
-  interstitial step. Inventory drift reports expected and observed indices
-  separately from other execution-surface failures, and a dedicated malicious
-  pre-pair overwrite fixture prevents an index shift from masquerading as the
-  asserted attack.
-- update procedure: treat `scripts/required-check-mirror.sh` as a redline. For
-  an intentional reviewed edit, run
-  `shasum -a 256 scripts/required-check-mirror.sh`, replace the old digest in
-  the gate plus both workflow backstops (three production pins total), sync the
-  test fixture's expected digest, then run
-  `scripts/check-ci-runner-hardening.sh` and
-  `python3 -m unittest tests.test_fast_check_ci_wiring`. A digest-only edit
-  with unchanged helper bytes is red; changing the helper first is red until
-  all three reviewed pins agree. Separately, the gate pins a source-range
-  digest of the `scripts_required_context` mirror job itself (a fourth literal
-  in `check-ci-runner-hardening.sh`); any edit inside that job — comments
-  included — is red until that literal is re-pinned to the hash the failure
-  message prints.
-  Treat `scripts/check-ci-runner-hardening.sh` as a separately pinned gate. An
-  intentional gate edit must first make both workflow backstops red. Update any
-  affected in-gate semantic/source-range digest, run
-  `shasum -a 256 scripts/check-ci-runner-hardening.sh`, replace the gate digest
-  in the `Script checks` contract step and the `relay-authority-contract`
-  backstop (two workflow gate pins), sync the fixture's expected gate digest
-  (`CI_RUNNER_HARDENING_SHA256` in `tests/test_fast_check_ci_wiring.py`), then
-  rerun the gate and `python3 -m unittest tests.test_fast_check_ci_wiring` to
-  complete the red-to-green round trip; the wiring fixture is wired into the
-  required aggregate, so skipping that sync leaves the required context red.
-  Do not copy a pre-edit digest or update only one backstop.
-- tests: permanent fixtures cover the historical environment, `GITHUB_ACTION`,
-  argv0, and unconditional-`exit 0` attacks; one-byte helper
-  and digest-only mutations; mirror defaults/env/environment/strategy/container
-  and checkout provenance; relay needs/if/matrix; exact aggregate inventory;
-  YAML boolean-like keys; Psych resolution splits including `!!binary`; and
-  deletion of each independent aggregate-defense assertion. Duplicate job IDs
-  fail closed in the required gate before Psych's last-wins mapping can diverge
-  from the source-range pin. `actionlint` also diagnoses duplicate keys when
-  run, but it is not invoked by the required `Script checks` path, so it is a
-  supplemental check rather than the authority for this property. The
-  aggregate explicitly requires `tests/test_required_check_mirror.sh`; skipped
-  and failed helper inputs remain covered by that shell suite, while the
-  cancelled input is exercised by the `("success", "cancelled")` case in
-  `tests/test_fast_check_ci_wiring.py`, which runs the real helper.
-- threat model — covered: any helper tamper whose bytes differ from the reviewed
-  digest, including conditionally activated code; changes to the fixed
-  publisher surface; the registered relay job surface; and the enumerated
-  aggregate execution inputs above. Hashes are review triggers, so an
-  intentional helper change plus all three digest updates is accepted only as a
-  visible coordinated diff.
+  the selected effective values. The protection pair is fixed at indices
+  `[9, 10]` with no interstitial step. Inventory drift reports expected and
+  observed indices separately from other execution-surface failures.
+- update procedure: an intentional edit of `scripts/ci/nextest_required.py`
+  or of the gate makes the judge's `Script checks` and
+  `relay-authority-contract` contexts red until the matching `pin` line in
+  `required_contexts` holds the new `shasum -a 256` digest. A gate edit that
+  changes a pinned job also needs the in-gate semantic or source-range digest
+  the failure message prints. Then rerun the gate and
+  `python3 -m unittest tests.test_fast_check_ci_wiring`.
+- tests: `tests/test_fast_check_ci_wiring.py` mutation-tests the judge surface,
+  the closure `if`s, the publisher uniqueness rule and both digest backstops;
+  `tests/test_comment_only_ci_gate.py` replays the judge over simulated runs.
 - threat model — not covered: branch protection and hosted-runner policy;
   compromise of the runner, checkout action, or hashing tool; a coordinated
   edit of repository-local guards and their pins; or successful-but-different
-  execution outside the declared snapshots. For `jobs.scripts`, N1′ in-place
-  edits to earlier steps are outside the snapshot except for the narrow
-  mechanical scan of quoted writes on `run` lines whose final shell operation
-  is a redirect to `$GITHUB_ENV` or `$GITHUB_PATH`. N1b checkout
-  `repository:` overrides in that runner job, N3 steps after the protected
-  pair, `container`, `timeout-minutes`, `strategy`, `environment`, and
-  pull-request subfilters such as `paths-ignore` are likewise not guaranteed.
-  The result mirror detects skipped/failed/cancelled upstream jobs; it cannot
-  prove that an upstream success used the intended semantics. Because the
-  publisher runs with `if: ${{ !cancelled() }}`, a failure, skip, or timeout
-  cancellation of a single upstream job in a live run still reaches the mirror
-  and makes the required context red.
-  More fundamentally, a single PR that consistently rewrites every guard and
-  every pin can pass this in-repository gate system. A cheaper edit in the same
-  class: GitHub treats a condition-skipped required check as satisfied, so one
-  PR that adds skip conditions to both the `Script checks` publisher and
-  `relay-authority-contract` leaves no required job to execute the gate. A skip
-  condition on just one required publisher stays blocked because the surviving
-  required job still runs the pinned gate against the edited workflow. This
-  simultaneous required-job skip is an inherent limit
-  of in-repo gating, not a property these hashes claim to solve; human review
-  and branch protection own that trust decision.
+  execution outside the declared snapshots. The judge detects skipped, failed
+  and cancelled upstream jobs; it cannot prove that an upstream success used
+  the intended semantics. GitHub treats a condition-skipped required check as
+  satisfied, so a PR that adds a skip condition to the judge job leaves no
+  required job to run the gate; human review and branch protection own that
+  trust decision.
 - related_issues: #5308, #5321.
 
 ### `ci_failure_classification`

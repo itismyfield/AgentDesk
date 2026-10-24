@@ -228,6 +228,8 @@ jobs:
               # (src/services/routines/loader.rs); adding/removing/renaming
               # a routine script can break the asserted file list.
               - 'routines/**'
+              # Was only in the retired pg_db filter; keeps that path set inside rust_tests.
+              - 'sqlx-data.json'
             # relay_contract: the doc<->code binding surface for the #4268
             # contract symbol-ref gate. When any of these change, the
             # compile-existence half (lint, whose clippy compiles the
@@ -235,8 +237,6 @@ jobs:
             # symbol fails to compile) MUST run even for doc-only changes.
             # Mirrors REFERENCE_SOURCE_MODULES in scripts/check_contract_symbol_refs.py;
             # RelayContractPathFilterTest fails when the two sets differ.
-              # Was only in the retired pg_db filter; keeps that path set inside rust_tests.
-              - 'sqlx-data.json'
             relay_contract:
               - 'docs/relay-state-contract.md'
               - 'scripts/check_contract_symbol_refs.py'

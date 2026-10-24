@@ -206,7 +206,7 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         ]
         union = set().union(*(select(self.filters, area) for area in areas))
         self.assertEqual(select(self.filters, [p for a in areas for p in a]), union)
-        self.assertLessEqual({"dashboard", LANE, "pg_db"}, union)
+        self.assertLessEqual({"dashboard", LANE, "rust_or_policy"}, union)
 
 
 if __name__ == "__main__":

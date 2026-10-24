@@ -7,6 +7,7 @@ context must fail unless every shard job succeeds.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -22,8 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/ci-script-checks.sh"
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
-MIRROR_JOB = "scripts_required_context"
-NEEDS_RESULT = re.compile(r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}")
+JUDGE_JOB = "required_contexts"
 
 
 def clean_env(**extra: str) -> dict[str, str]:
@@ -152,55 +152,40 @@ class GiantDeadlineReporterRegistration(unittest.TestCase):
                 self.assertEqual(set(outcomes), {"ok"})
 
 
-class ScriptChecksMirrorAggregation(unittest.TestCase):
-    """Replay the required-context job against upstream shard results."""
+class ScriptChecksJudgeAggregation(unittest.TestCase):
+    """Replay the workflow's judge step for Script checks against upstream shard results."""
 
-    def run_mirror(self, job: dict, results: dict[str, str]) -> str:
-        needs = job.get("needs", [])
-        needs = [needs] if isinstance(needs, str) else list(needs)
-        declared = {name: results[name] for name in needs}
-        # A live run: `always()` and `!cancelled()` both run the mirror; anything else skips it.
-        runs_on_any_result = scalar(job.get("if", "")).replace(" ", "") in ("always()", "${{!cancelled()}}")
-        if not runs_on_any_result and any(r != "success" for r in declared.values()):
-            return "skipped"
-
-        def expand(value: object) -> str:
-            text = NEEDS_RESULT.sub(lambda m: declared.get(m.group(1), ""), scalar(value))
-            if "${{" in text:
-                raise AssertionError(f"unmodelled expression in mirror step: {text}")
-            return text
-
-        for step in job["steps"]:
-            raw = f"{step.get('env', {})} {step.get('run', '')}"
-            # Steps that never read upstream results cannot turn a failed shard green.
-            if "run" not in step or "needs." not in raw:
-                continue
-            condition = scalar(step.get("if", "success()")).replace(" ", "")
-            if condition in ("false", "${{false}}"):
-                continue
-            if condition not in ("success()", "always()", "${{always()}}"):
-                raise AssertionError(f"unmodelled step condition: {condition}")
-            env = {k: expand(v) for k, v in step.get("env", {}).items()}
-            done = subprocess.run(
-                ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", expand(step["run"])],
-                cwd=REPO_ROOT, env={**clean_env(), **env},
-                capture_output=True, text=True, timeout=60,
-            )
-            if done.returncode != 0 and not step.get("continue-on-error", False):
-                return "failure"
-        return "success"
+    def run_judge(self, job: dict, results: dict[str, str]) -> str:
+        if job.get("if") != "${{ !cancelled() }}":
+            raise AssertionError(f"unmodelled judge condition: {job.get('if')}")
+        outputs = {"rust_tests": "true", "rust_tests_skip": "false"}
+        needs = {name: {"result": results[name], "outputs": outputs if name == "changes" else {}} for name in job["needs"]}
+        step = next(step for step in job["steps"] if step.get("name") == "Judge required context")
+        env = {key: str(value) for key, value in step["env"].items()}
+        self.assertEqual(env.pop("NEEDS_JSON"), "${{ toJSON(needs) }}")
+        command = step["run"].replace("${{ matrix.context }}", "Script checks")
+        if "${{" in command or any("${{" in value for value in env.values()):
+            raise AssertionError(f"unmodelled expression in judge step: {step}")
+        done = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", command],
+            cwd=REPO_ROOT, env={**clean_env(), **env, "NEEDS_JSON": json.dumps(needs)},
+            capture_output=True, text=True, timeout=60,
+        )
+        return "success" if done.returncode == 0 else "failure"
 
     def test_required_context_passes_only_when_every_shard_succeeds(self) -> None:
         jobs = load_jobs()
-        job = jobs[MIRROR_JOB]
+        job = jobs[JUDGE_JOB]
+        self.assertIn("Script checks", job["strategy"]["matrix"]["context"])
         shard_jobs = sorted(workflow_shards(jobs))
-        baseline = {name: "success" for name in ["changes", *shard_jobs]}
-        self.assertEqual(self.run_mirror(job, baseline), "success")
+        self.assertLessEqual(set(shard_jobs), set(job["needs"]))
+        baseline = {name: "success" for name in job["needs"]}
+        self.assertEqual(self.run_judge(job, baseline), "success")
         for shard_job in shard_jobs:
             for outcome in ("failure", "cancelled", "skipped", ""):
                 with self.subTest(job=shard_job, result=outcome or "<empty>"):
                     results = {**baseline, shard_job: outcome}
-                    self.assertEqual(self.run_mirror(job, results), "failure")
+                    self.assertEqual(self.run_judge(job, results), "failure")
 
 
 if __name__ == "__main__":
