@@ -2,14 +2,12 @@
 //! their dedicated owners end them, never a generic sweep.
 
 use super::*;
-use crate::services::session_host::HostKind;
-use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
 /// Why a durable row keeps new idle starts off its channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum RowHold {
     RestartedHerdrRow,
-    /// The row or its host marker did not read; an unread row is never taken for none.
+    /// The row did not read; an unread row is never taken for none.
     Unread,
 }
 
@@ -76,14 +74,10 @@ fn restarted_owner(
     if row.channel_id == 0 || inflight::row_is_current_generation(row, current) {
         return None;
     }
-    if row.hosted_execution_nonce.is_some() {
-        return Some(RowHold::RestartedHerdrRow);
-    }
-    match read_host_kind_marker(&recovery_tmux_session_name(provider, row)?) {
-        HostKindMarker::Known(HostKind::Herdr) => Some(RowHold::RestartedHerdrRow),
-        HostKindMarker::Known(_) | HostKindMarker::Absent => None,
-        HostKindMarker::Unrecognized(_) | HostKindMarker::ReadFailed(_) => Some(RowHold::Unread),
-    }
+    let herdr = row.hosted_execution_nonce.is_some()
+        || recovery_tmux_session_name(provider, row)
+            .is_some_and(|name| crate::services::discord::turn_bridge::herdr_marked(&name));
+    herdr.then_some(RowHold::RestartedHerdrRow)
 }
 
 /// A prior process's Herdr row whose end an owner other than a generic sweep settles: the end
