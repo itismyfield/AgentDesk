@@ -20,10 +20,6 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) fn new(herdr: bool) -> Self {
-        Self::with_policy((!herdr).then_some("shadow"))
-    }
-
-    fn with_policy(policy: Option<&str>) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
@@ -69,7 +65,7 @@ impl Fixture {
             launch_mode: "fresh".into(),
             provider_root: Some(native.clone()),
             first_prompt_digest: None,
-            source_policy: policy.map(str::to_owned),
+            source_policy: (!herdr).then(|| "shadow".into()),
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let source_path = native.join(format!("rollout-test-{ID}.jsonl"));
@@ -90,42 +86,40 @@ impl Fixture {
         )
         .unwrap();
         dedupe::register_tmux_channel(tmux, CHANNEL);
-        if policy != Some("verified") {
-            dedupe::register_tmux_runtime_binding(
-                tmux,
-                dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::CodexTui,
-                    output_path: source.path.display().to_string(),
-                    session_id: Some(ID.into()),
-                    relay_output_path: None,
-                    input_fifo_path: None,
-                    last_offset: 0,
-                    relay_last_offset: None,
-                },
-            );
-            let event = BindingEvent {
-                seq: 1,
-                channel_id: CHANNEL,
-                provider: "codex".into(),
-                tmux_session: tmux.into(),
-                execution_nonce: Some(context.execution_nonce.clone()),
-                old: None,
-                new: BindingTarget::Source(source.clone()),
-                cause: BindingCause::Startup,
-                parent_hint: None,
-                evidence: BindingEvidence {
-                    hook_event: Some("session_start".into()),
-                    received_at: chrono::Utc::now(),
-                },
-                committed_at: chrono::Utc::now(),
-            };
-            std::fs::create_dir_all(runtime_root.join("binding_events")).unwrap();
-            std::fs::write(
-                runtime_root.join(format!("binding_events/{CHANNEL}.log")),
-                format!("{}\n", serde_json::to_string(&event).unwrap()),
-            )
-            .unwrap();
-        }
+        dedupe::register_tmux_runtime_binding(
+            tmux,
+            dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: source.path.display().to_string(),
+                session_id: Some(ID.into()),
+                relay_output_path: None,
+                input_fifo_path: None,
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let event = BindingEvent {
+            seq: 1,
+            channel_id: CHANNEL,
+            provider: "codex".into(),
+            tmux_session: tmux.into(),
+            execution_nonce: Some(context.execution_nonce.clone()),
+            old: None,
+            new: BindingTarget::Source(source.clone()),
+            cause: BindingCause::Startup,
+            parent_hint: None,
+            evidence: BindingEvidence {
+                hook_event: Some("session_start".into()),
+                received_at: chrono::Utc::now(),
+            },
+            committed_at: chrono::Utc::now(),
+        };
+        std::fs::create_dir_all(runtime_root.join("binding_events")).unwrap();
+        std::fs::write(
+            runtime_root.join(format!("binding_events/{CHANNEL}.log")),
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
         Self {
             _root: root,
             _host: host,
