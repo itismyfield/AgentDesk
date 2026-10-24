@@ -1139,7 +1139,10 @@ src/
 │   │   │   │   │   └── termination.rs
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_idle.rs
-│   │   │   │   └── automatic_idle_tests.rs
+│   │   │   │   ├── automatic_idle_tests.rs
+│   │   │   │   ├── codex_census.rs
+│   │   │   │   ├── codex_context.rs
+│   │   │   │   └── codex_context_tests.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -3166,6 +3169,7 @@ src/
 │   │   ├── herdr_host.rs
 │   │   ├── herdr_host_tests.rs
 │   │   ├── herdr_registry.rs
+│   │   ├── herdr_registry_census_tests.rs
 │   │   ├── herdr_socket_rig_tests.rs
 │   │   ├── herdr_t14_client_tests.rs
 │   │   ├── herdr_terminate_real_tests.rs
@@ -3319,6 +3323,8 @@ src/
 │   │   │   │   ├── automatic.rs
 │   │   │   │   ├── automatic_age.rs
 │   │   │   │   ├── automatic_age_tests.rs
+│   │   │   │   ├── codex_history.rs
+│   │   │   │   ├── codex_history_tests.rs
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── scoped_submission_tests.rs
@@ -3366,6 +3372,8 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── transition_scope/
+│   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -3375,6 +3383,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── always_on_repost_tests.rs
 │   │   │   ├── binding.rs
+│   │   │   ├── bo_post_tests.rs
 │   │   │   ├── boundary_pending_health_tests.rs
 │   │   │   ├── canary_policy_tests.rs
 │   │   │   ├── clear_end_empty_session_tests.rs
@@ -3384,6 +3393,7 @@ src/
 │   │   │   ├── codex_end_proof_tests.rs
 │   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
+│   │   │   ├── codex_snapshot.rs
 │   │   │   ├── confirm.rs
 │   │   │   ├── deferred.rs
 │   │   │   ├── deferred_pg_tests.rs
@@ -3403,6 +3413,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_bo_provider_tests.rs
 │   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
@@ -3468,6 +3479,7 @@ src/
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
+│   │   │   ├── transition_actor_bo_tests.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
 │   │   │   ├── transition_automatic_tests.rs
@@ -3505,11 +3517,16 @@ src/
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
+│   │   ├── binding_context/
+│   │   │   ├── inventory.rs
+│   │   │   └── inventory_tests.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
 │   │   │   │   │   └── resume_companions.rs
 │   │   │   │   ├── commit.rs
+│   │   │   │   ├── observation.rs
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── settled.rs
 │   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
@@ -3546,6 +3563,7 @@ src/
 │   │   │   │   └── codex_launch_cause.rs
 │   │   │   ├── adopt_skip.rs
 │   │   │   ├── binding_access.rs
+│   │   │   ├── binding_access_tests.rs
 │   │   │   ├── claude_source.rs
 │   │   │   ├── codex_cursor.rs
 │   │   │   ├── codex_hook.rs

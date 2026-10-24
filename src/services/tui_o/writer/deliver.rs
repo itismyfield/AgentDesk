@@ -100,7 +100,7 @@ fn note_posted(channel: u64, msg_id: u64) {
 
 type Counts = Mutex<BTreeMap<u64, Arc<AtomicUsize>>>;
 
-/// POSTs started per Herdr-configured channel in this process and not ended yet. A channel's
+/// POSTs started per channel in this process and not ended yet. A channel's
 /// writers share one count, so a POST that outlives its writer still counts. Tests keep one per thread.
 #[cfg(not(test))]
 static IN_FLIGHT: Counts = Mutex::new(BTreeMap::new());
@@ -121,6 +121,10 @@ fn with_in_flight<R>(use_counts: impl FnOnce(&mut BTreeMap<u64, Arc<AtomicUsize>
 /// The POSTs of `channel` started and not ended in this process; `None` until a writer of the
 /// channel counted them.
 pub fn posts_in_flight(channel: u64) -> Option<usize> {
+    #[cfg(test)]
+    if bo_mutant("none_zero") {
+        return Some(0);
+    }
     with_in_flight(|counts| {
         counts
             .get(&channel)
@@ -143,6 +147,10 @@ pub(super) fn source_delivery_allowed(
 
 impl Running {
     fn start(count: Arc<AtomicUsize>) -> Self {
+        #[cfg(test)]
+        if bo_mutant("post_start") {
+            return Self(count);
+        }
         count.fetch_add(1, Ordering::SeqCst);
         Self(count)
     }
@@ -150,6 +158,10 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if bo_mutant("post_start") {
+            return;
+        }
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -206,7 +218,7 @@ pub struct ChannelWriter<P, L, A> {
     alarms: A,
     stopped: Option<StopCause>,
     paused: bool,
-    /// The channel's shared POST count; only a Herdr-configured channel keeps one.
+    /// The channel's shared POST count, retained across writer replacement.
     posts: Option<Arc<AtomicUsize>>,
     /// The channel's re-post turn, run from the same actor turn as its posts.
     repost: Option<Box<dyn RepostHook<Self>>>,
@@ -250,11 +262,24 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     ) -> Self {
         let channel = store.init().channel;
         let (stopped, paused) = (None, false);
-        let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
         let shared = |counts: &mut BTreeMap<_, Arc<AtomicUsize>>| {
             Arc::clone(counts.entry(channel).or_default())
         };
-        let posts = herdr.then(|| with_in_flight(shared));
+        let posts = Some(with_in_flight(shared));
+        #[cfg(test)]
+        let posts = if bo_mutant("counter_herdr_only")
+            && crate::config::session_hosts::herdr_endpoint(channel).is_none()
+        {
+            None
+        } else if bo_mutant("counter_reset") {
+            let fresh = Arc::new(AtomicUsize::new(0));
+            with_in_flight(|counts| {
+                counts.insert(channel, Arc::clone(&fresh));
+            });
+            Some(fresh)
+        } else {
+            posts
+        };
         let mut writer = Self {
             suspension: super::suspension::Suspension::default(),
             channel,
@@ -942,4 +967,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> TurnWriter for ChannelWrite
         let live = live && self.stopped.is_none();
         self.repost_live.0.store(live, Ordering::SeqCst);
     }
+}
+
+#[cfg(test)]
+pub(super) fn bo_mutant(name: &str) -> bool {
+    std::env::var("AGENTDESK_BO_MUTANT").is_ok_and(|value| value == name)
+}
+
+#[cfg(test)]
+pub(super) fn forget_posts_for_test(channel: u64) {
+    with_in_flight(|counts| {
+        counts.remove(&channel);
+    });
 }
