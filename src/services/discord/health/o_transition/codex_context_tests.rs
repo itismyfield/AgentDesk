@@ -20,6 +20,10 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) fn new(herdr: bool) -> Self {
+        Self::with_policy((!herdr).then_some("shadow"))
+    }
+
+    fn with_policy(policy: Option<&str>) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
@@ -35,7 +39,7 @@ impl Fixture {
         let tmux = "AgentDesk-codex-bo-observe";
         std::fs::write(
             bin.path().join("tmux"),
-            format!("#!/bin/sh\ncase \"$1\" in list-sessions) echo {tmux} ;; esac\nexit 0\n"),
+            format!("#!/bin/sh\n[ \"$1\" = -u ] && shift\ncase \"$1\" in list-sessions) echo {tmux} ;; esac\nexit 0\n"),
         )
         .unwrap();
         std::fs::set_permissions(
@@ -45,6 +49,10 @@ impl Fixture {
         .unwrap();
         let path =
             crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(bin.path());
+        assert_eq!(
+            crate::services::platform::tmux::list_session_names().unwrap(),
+            [tmux]
+        );
         let native = runtime_root.join("native");
         std::fs::create_dir_all(&native).unwrap();
         let native = native.canonicalize().unwrap();
@@ -61,7 +69,7 @@ impl Fixture {
             launch_mode: "fresh".into(),
             provider_root: Some(native.clone()),
             first_prompt_digest: None,
-            source_policy: (!herdr).then(|| "shadow".into()),
+            source_policy: policy.map(str::to_owned),
         };
         PreparedIncarnation::create(context.clone()).unwrap();
         let source_path = native.join(format!("rollout-test-{ID}.jsonl"));
@@ -82,40 +90,42 @@ impl Fixture {
         )
         .unwrap();
         dedupe::register_tmux_channel(tmux, CHANNEL);
-        dedupe::register_tmux_runtime_binding(
-            tmux,
-            dedupe::TuiRuntimeBinding {
-                runtime_kind: RuntimeHandoffKind::CodexTui,
-                output_path: source.path.display().to_string(),
-                session_id: Some(ID.into()),
-                relay_output_path: None,
-                input_fifo_path: None,
-                last_offset: 0,
-                relay_last_offset: None,
-            },
-        );
-        let event = BindingEvent {
-            seq: 1,
-            channel_id: CHANNEL,
-            provider: "codex".into(),
-            tmux_session: tmux.into(),
-            execution_nonce: Some(context.execution_nonce.clone()),
-            old: None,
-            new: BindingTarget::Source(source.clone()),
-            cause: BindingCause::Startup,
-            parent_hint: None,
-            evidence: BindingEvidence {
-                hook_event: Some("session_start".into()),
-                received_at: chrono::Utc::now(),
-            },
-            committed_at: chrono::Utc::now(),
-        };
-        std::fs::create_dir_all(runtime_root.join("binding_events")).unwrap();
-        std::fs::write(
-            runtime_root.join(format!("binding_events/{CHANNEL}.log")),
-            format!("{}\n", serde_json::to_string(&event).unwrap()),
-        )
-        .unwrap();
+        if policy != Some("verified") {
+            dedupe::register_tmux_runtime_binding(
+                tmux,
+                dedupe::TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::CodexTui,
+                    output_path: source.path.display().to_string(),
+                    session_id: Some(ID.into()),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let event = BindingEvent {
+                seq: 1,
+                channel_id: CHANNEL,
+                provider: "codex".into(),
+                tmux_session: tmux.into(),
+                execution_nonce: Some(context.execution_nonce.clone()),
+                old: None,
+                new: BindingTarget::Source(source.clone()),
+                cause: BindingCause::Startup,
+                parent_hint: None,
+                evidence: BindingEvidence {
+                    hook_event: Some("session_start".into()),
+                    received_at: chrono::Utc::now(),
+                },
+                committed_at: chrono::Utc::now(),
+            };
+            std::fs::create_dir_all(runtime_root.join("binding_events")).unwrap();
+            std::fs::write(
+                runtime_root.join(format!("binding_events/{CHANNEL}.log")),
+                format!("{}\n", serde_json::to_string(&event).unwrap()),
+            )
+            .unwrap();
+        }
         Self {
             _root: root,
             _host: host,
@@ -338,6 +348,8 @@ async fn assert_actual_codex_sweep(fixture: &Fixture) {
 #[test]
 fn verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep() {
     let mut fixture = Fixture::new(false);
+    let predecessor = fixture.source.clone();
+    let fresh_id = "019e660d-4859-7522-9cee-8ba7c4e7c744";
     let mut next = fixture.context.clone();
     next.execution_nonce = "b".repeat(32);
     next.created_at = chrono::Utc::now();
@@ -349,9 +361,22 @@ fn verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep() {
         &fixture.context.execution_nonce,
     )
     .unwrap();
-    std::fs::write(&fixture.source.path, format!("{}\n", json!({"type":"session_meta", "payload": {"id": ID, "cwd": "/test", "source":"cli", "timestamp": chrono::Utc::now().to_rfc3339()}}))).unwrap();
+    let fresh_path = fixture
+        .context
+        .provider_root
+        .as_ref()
+        .unwrap()
+        .join(format!("rollout-fresh-{fresh_id}.jsonl"));
+    std::fs::write(&fresh_path, format!("{}\n", json!({"type":"session_meta", "payload": {"id": fresh_id, "cwd": "/test", "source":"cli", "timestamp": chrono::Utc::now().to_rfc3339()}}))).unwrap();
+    let meta = std::fs::metadata(&fresh_path).unwrap();
+    fixture.source = crate::services::tui_o::shadow::SourceId {
+        session_id: fresh_id.into(),
+        path: fresh_path,
+        dev: meta.dev(),
+        ino: meta.ino(),
+    };
     let claim = p5::codex::Claim {
-        session_id: ID.into(),
+        session_id: fresh_id.into(),
         path: Some(fixture.source.path.clone()),
         evidence: p5::codex::ClaimEvidence::NativeHook {
             event: "session_start".into(),
@@ -368,14 +393,43 @@ fn verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep() {
         )
         .unwrap()
     });
-    let proof = fold.verified.unwrap();
+    let proof = fold
+        .verified
+        .expect("a unique native source may establish fresh verified ownership");
+    let history = p5::codex::observe_channel(CHANNEL, census::LIMIT).unwrap();
+    assert_eq!(history.events.len(), 2);
+    assert_eq!(history.events[0].new, BindingTarget::Source(predecessor));
+    assert_eq!(
+        history.events[1].execution_nonce.as_deref(),
+        Some(fixture.context.execution_nonce.as_str())
+    );
+    assert_eq!(
+        history.events[1].old, None,
+        "the actual initial typed proof has no previous ownership source"
+    );
+    assert_eq!(
+        history.events[1].new,
+        BindingTarget::Source(fixture.source.clone())
+    );
     let marker = tc::session_temp_path(
         &fixture.context.tmux_session,
         tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     );
-    std::fs::write(&marker, serde_json::to_vec(&json!({"rollout_path": proof.source.path, "session_id": ID,
+    std::fs::write(&marker, serde_json::to_vec(&json!({"rollout_path": proof.source.path, "session_id": fresh_id,
         "codex_ownership": {"execution_nonce": fixture.context.execution_nonce, "proof_seq": proof.seq,
             "dev": proof.source.dev, "ino": proof.source.ino}})).unwrap()).unwrap();
+    dedupe::register_launched_tmux_runtime_binding(
+        &fixture.context.tmux_session,
+        dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: fixture.source.path.display().to_string(),
+            session_id: Some(fresh_id.into()),
+            relay_output_path: None,
+            input_fifo_path: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
     let log = crate::config::runtime_root()
         .unwrap()
         .join(format!("binding_events/{CHANNEL}.log"));
