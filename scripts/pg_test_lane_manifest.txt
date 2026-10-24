@@ -153,6 +153,7 @@ src/services/discord/commands/restart.rs
 src/services/discord/commands/text_commands/clear_http_overlap_tests.rs
 src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
+src/services/discord/health/o_transition/codex_context_tests.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/self_watchdog/tests/health_response.rs
@@ -396,6 +397,7 @@ src/services/tui_o/repost/runner_tests.rs
 src/services/tui_o/repost/runtime_host_activation_tests.rs
 src/services/tui_o/repost/writer_activation_tests.rs
 src/services/tui_o/writer/always_on_repost_tests.rs
+src/services/tui_o/writer/bo_post_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/tui_o/writer/local_retry_repost_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
@@ -568,6 +570,7 @@ services::discord::commands::restart::host_guard_tests
 services::discord::commands::text_commands::clear_refusal_reply_tests
 services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap
 services::discord::commands::tui_passthrough::host_guard_tests
+services::discord::health::o_transition::codex_context::tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::self_watchdog::tests::health_response
 services::discord::health::recovery::stall_alert::tests
@@ -820,6 +823,7 @@ services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::always_on
+services::tui_o::writer::tests::actor::repost_turn::bo_post
 services::tui_o::writer::tests::actor::repost_turn::local_retry
 services::tui_o::writer::tests::actor::repost_turn::scoped
 services::tui_o::writer::tests::actor::repost_turn::tool_result
@@ -1796,6 +1800,7 @@ services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_cl
 services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_first_overlap_pg
 services::discord::commands::text_commands::clear_refusal_reply_tests::http_overlap::force_root_replaced_text_clear_overlap_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
+services::discord::health::o_transition::codex_context::tests::pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::self_watchdog::tests::health_response::db_slow_http_response_resets_watchdog_streak
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
@@ -2931,6 +2936,7 @@ services::tui_o::writer::tests::actor::repost_turn::activation::f6_unsent_and_42
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_first_post_confirmed_never_reposts_pg
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_missing_post_reposts_once_at_confirmation_boundary_pg
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_restart_requires_fresh_confirmation_before_one_repost_pg
+services::tui_o::writer::tests::actor::repost_turn::bo_post::bo_legacy_hosted_repost_counter_survives_writer_recreation_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_a_dropped_writer_never_lets_its_repost_send_again_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_general_auto_and_resume_never_overlap_posts_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_block_auto_pg
