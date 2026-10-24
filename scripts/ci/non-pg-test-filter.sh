@@ -803,6 +803,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_on_error_blocks_profile_and_takeover_before_any_recovery
   services::discord::turn_bridge::stream_loop::provider_recovery::coldstop_recovery_tests::coldstop_real_profile_retry_positive_stop_and_off
   services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_may_have_submitted_and_old_or_contaminated_records_never_confirm_completion
+  services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::preparation_hold_tests::a2_owner_cannot_restart_a_finished_receipt_window
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_each_stop_reason_preserves_delivery_and_settlement_axes
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop::slash_stop_asks_the_home_before_the_legacy_owner_forward_and_ends_there
   services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::source_guard_tests::slash_stop_guards_reject_commented_steps_and_count_coded_calls

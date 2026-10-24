@@ -621,6 +621,14 @@ struct TerminalDeliveryDriver {
 }
 
 impl TerminalDeliveryDriver {
+    #[cfg(unix)]
+    fn input_fixture(
+        &self,
+    ) -> crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture {
+        let _guard = &self._env_lock;
+        crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture::after_shared_test_env_lock()
+    }
+
     /// Seeds a runtime root, an inflight row, and a watcher-registry slot whose
     /// `turn_delivered` marker is the coordinate under test. `yields_per_call`
     /// controls how many times each production gateway call suspends, which is

@@ -6,14 +6,13 @@ use crate::services::claude_tui::host_input::guarded_submission::executor_tests:
     install_shim, renderer, screen,
 };
 use crate::services::claude_tui::host_input::{SpyGuard, SpyState};
-use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 
 #[tokio::test(flavor = "current_thread")]
 async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
-    let f = Fixture::after_shared_test_env_lock();
+    let f = driver.input_fixture();
     install_shim(&f);
     let name = format!("a2-held-bridge-{}", uuid::Uuid::new_v4());
     let empty_view =
