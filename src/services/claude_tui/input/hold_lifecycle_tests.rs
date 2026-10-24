@@ -7,6 +7,7 @@ fn empty() -> String {
 }
 
 #[test]
+#[cfg(unix)]
 fn a2_legacy_confirmation_rechecks_person_ownership_before_enter() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let view = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view;

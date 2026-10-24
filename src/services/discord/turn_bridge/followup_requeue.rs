@@ -1133,7 +1133,7 @@ mod tests {
             b"{"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a2_release_survives_sid_rehydration_between_polls() {
         use crate::services::discord::busy_followup_retry_store as retries;
