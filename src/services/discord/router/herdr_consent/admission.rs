@@ -424,7 +424,7 @@ pub(in crate::services::discord::router) async fn worker(
         } else {
             "Spawned; original input preserved; consent recovery requires inspection"
         };
-        if let Some(row) = row_id {
+        if !rearmed && let Some(row) = row_id {
             let notice = format!("worker 입력 보류: row {row} ({detail}): {error}");
             if let Err(notice_error) = crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
                 deps.http.clone(), deps.shared.clone(), request.channel_id, request.user_msg_id,

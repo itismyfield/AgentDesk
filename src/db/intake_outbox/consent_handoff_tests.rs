@@ -460,19 +460,159 @@ async fn consent_before_record_rollback_consumes_exact_authority_and_preserves_b
                 "parent_outbox_id",
                 "owner_instance_id",
                 "owner_generation",
-                "last_error",
             ] {
                 assert_eq!(
                     after[field], before[field],
                     "consent_before_record_bookkeeping_unchanged_contract: {field}"
                 );
             }
+            let encoded = after["last_error"]
+                .as_str()
+                .unwrap()
+                .strip_prefix(REARM_PREFIX)
+                .unwrap();
+            let marker: RearmMarker = serde_json::from_str(encoded).unwrap();
+            assert_eq!(
+                marker.count, 1,
+                "consent_before_record_rearm_count_contract"
+            );
+            assert!(
+                marker.rearmed_at > 0,
+                "consent_before_record_rearm_timestamp_contract"
+            );
         } else {
             assert_eq!(
                 after, before,
                 "consent_before_record_stale_proof_mutation_zero_contract: {change}"
             );
         }
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn consent_before_record_rearm_is_once_across_concurrency_and_reclaim_pg() {
+    use crate::services::cluster::intake_worker::BeforeEffects;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (original, _root, store, consent, intent) = setup(&pool, "891240").await;
+    let (first, concurrent) = tokio::join!(
+        return_before_record(&pool, BeforeEffects::for_test(&original)),
+        return_before_record(&pool, BeforeEffects::for_test(&original)),
+    );
+    assert_eq!(
+        u8::from(first.unwrap()) + u8::from(concurrent.unwrap()),
+        1,
+        "consent_before_record_concurrent_rearm_once_contract"
+    );
+    let rearmed = super::super::owner_fence_pg_tests::snapshot(&pool, original.id).await;
+    let claim =
+        super::super::claim_pending_for_target(&pool, "fence-worker", "claude", "second-claim")
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(claim.id, original.id);
+    assert!(
+        super::super::mark_accepted(&pool, original.id, "second-claim")
+            .await
+            .unwrap()
+    );
+    assert!(
+        super::super::mark_spawned(&pool, original.id, "second-claim")
+            .await
+            .unwrap()
+    );
+    let reclaimed: IntakeOutboxRow = sqlx::query_as("SELECT * FROM intake_outbox WHERE id=$1")
+        .bind(original.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let before = super::super::owner_fence_pg_tests::snapshot(&pool, original.id).await;
+    assert_eq!(
+        before["last_error"], rearmed["last_error"],
+        "consent_rearm_marker_survives_claim_contract"
+    );
+    assert!(
+        !return_before_record(&pool, BeforeEffects::for_test(&reclaimed))
+            .await
+            .unwrap(),
+        "consent_before_record_rearm_once_across_claim_contract"
+    );
+    assert_eq!(
+        super::super::owner_fence_pg_tests::snapshot(&pool, original.id).await,
+        before,
+        "consent_before_record_exhaustion_preserves_spawned_and_timestamp_contract"
+    );
+    hold_before_effects(&pool, &reclaimed, &store, &consent, &intent)
+        .await
+        .unwrap();
+    let held = super::super::owner_fence_pg_tests::snapshot(&pool, original.id).await;
+    assert!(
+        held["last_error"].as_str().unwrap().starts_with(PREFIX),
+        "consent_before_record_successful_retry_replaces_only_owned_marker_contract"
+    );
+    assert_eq!(held["status"], "spawned");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn consent_rearm_custody_rejects_unknown_or_changed_marker_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    for (offset, change) in [
+        "unknown",
+        "malformed",
+        "row",
+        "payload",
+        "owner",
+        "generation",
+        "count",
+        "timestamp",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = (891250 + offset).to_string();
+        let (row, _root, store, consent, intent) = setup(&pool, &channel).await;
+        let mut encoded = serde_json::json!({
+            "row": row.id, "payload": payload(&row).unwrap(),
+            "owner": row.owner_instance_id, "generation": row.owner_generation,
+            "count": 1, "rearmed_at": 100
+        });
+        match change {
+            "row" => encoded["row"] = serde_json::json!(row.id + 1),
+            "payload" => encoded["payload"] = serde_json::json!("changed"),
+            "owner" => encoded["owner"] = serde_json::json!("other-worker"),
+            "generation" => encoded["generation"] = serde_json::json!(1),
+            "count" => encoded["count"] = serde_json::json!(0),
+            "timestamp" => encoded["rearmed_at"] = serde_json::json!(0),
+            _ => {}
+        }
+        let error = match change {
+            "unknown" => "existing durable marker".into(),
+            "malformed" => format!("{REARM_PREFIX}{{"),
+            _ => format!("{REARM_PREFIX}{encoded}"),
+        };
+        sqlx::query("UPDATE intake_outbox SET last_error=$2 WHERE id=$1")
+            .bind(row.id)
+            .bind(error)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await;
+        assert!(
+            hold_before_effects(&pool, &row, &store, &consent, &intent)
+                .await
+                .is_err(),
+            "consent_custody_only_owned_rearm_marker_contract: {change}"
+        );
+        assert_eq!(
+            super::super::owner_fence_pg_tests::snapshot(&pool, row.id).await,
+            before,
+            "consent_custody_foreign_marker_preserved_contract: {change}"
+        );
     }
     pool.close().await;
     db.drop().await;
