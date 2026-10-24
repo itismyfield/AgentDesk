@@ -307,3 +307,144 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
     });
     assert!(rig.sends().is_empty());
 }
+
+async fn assert_actual_codex_sweep(fixture: &Fixture) {
+    let shared = fixture.shared(None);
+    shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+    let registry = HealthRegistry::new();
+    registry.register("codex".into(), shared).await;
+    crate::services::tui_o::writer::tests::with_ready_codex(
+        fixture.source.clone(),
+        CHANNEL,
+        |ready| async move {
+            let reply = super::super::automatic::codex_sweep_for_test(&registry, &ready, CHANNEL)
+                .await
+                .unwrap();
+            assert!(reply.refused.is_none(), "{reply:?}");
+            let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
+            assert!(
+                diagnostics["codex"]["Complete"].is_object(),
+                "{diagnostics}"
+            );
+            assert!(matches!(reply.scope, Some(Err(_))));
+        },
+    )
+    .await;
+}
+
+#[test]
+fn verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep() {
+    let mut fixture = Fixture::new(false);
+    let mut next = fixture.context.clone();
+    next.execution_nonce = "b".repeat(32);
+    next.created_at = chrono::Utc::now();
+    next.source_policy = Some("verified".into());
+    PreparedIncarnation::create(next.clone()).unwrap();
+    fixture.context = next;
+    std::fs::write(
+        tc::session_temp_path(&fixture.context.tmux_session, "spawn_nonce"),
+        &fixture.context.execution_nonce,
+    )
+    .unwrap();
+    std::fs::write(&fixture.source.path, format!("{}\n", json!({"type":"session_meta", "payload": {"id": ID, "cwd": "/test", "source":"cli", "timestamp": chrono::Utc::now().to_rfc3339()}}))).unwrap();
+    let claim = p5::codex::Claim {
+        session_id: ID.into(),
+        path: Some(fixture.source.path.clone()),
+        evidence: p5::codex::ClaimEvidence::NativeHook {
+            event: "session_start".into(),
+            source: Some("startup".into()),
+            first_prompt_digest: None,
+        },
+    };
+    let fold = tc::with_tmux_source_authority(&fixture.context.tmux_session, |_| {
+        p5::codex::commit_claim(
+            &fixture.context,
+            &claim,
+            p5::codex::Decision::Verified(fixture.source.clone()),
+            || Ok(()),
+        )
+        .unwrap()
+    });
+    let proof = fold.verified.unwrap();
+    let marker = tc::session_temp_path(
+        &fixture.context.tmux_session,
+        tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    );
+    std::fs::write(&marker, serde_json::to_vec(&json!({"rollout_path": proof.source.path, "session_id": ID,
+        "codex_ownership": {"execution_nonce": fixture.context.execution_nonce, "proof_seq": proof.seq,
+            "dev": proof.source.dev, "ino": proof.source.ino}})).unwrap()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(assert_actual_codex_sweep(&fixture));
+    std::fs::write(&marker, "{}").unwrap();
+    assert!(
+        runtime
+            .block_on(prepare(
+                &HealthRegistry::new(),
+                fixture.shared(None),
+                CHANNEL
+            ))
+            .is_err(),
+        "verified source cannot become Complete after its consumption marker is withheld"
+    );
+}
+
+#[test]
+fn same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep() {
+    let mut fixture = Fixture::new(false);
+    let root = crate::config::runtime_root().unwrap();
+    let log = root.join(format!("binding_events/{CHANNEL}.log"));
+    let before = std::fs::read(&log).unwrap();
+    let mut resumed = fixture.context.clone();
+    resumed.execution_nonce = "b".repeat(32);
+    resumed.created_at = chrono::Utc::now();
+    resumed.launch_mode = "resume".into();
+    resumed.expected_native_session_id = Some(ID.into());
+    PreparedIncarnation::create(resumed.clone()).unwrap();
+    fixture.context = resumed;
+    std::fs::write(
+        tc::session_temp_path(&fixture.context.tmux_session, "spawn_nonce"),
+        &fixture.context.execution_nonce,
+    )
+    .unwrap();
+    dedupe::register_launched_tmux_runtime_binding(
+        &fixture.context.tmux_session,
+        dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::CodexTui,
+            output_path: fixture.source.path.display().to_string(),
+            session_id: Some(ID.into()),
+            relay_output_path: None,
+            input_fifo_path: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    assert_eq!(
+        std::fs::read(&log).unwrap(),
+        before,
+        "same-source resume must not synthesize a P5 row"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let prepared = runtime
+        .block_on(prepare(
+            &HealthRegistry::new(),
+            fixture.shared(None),
+            CHANNEL,
+        ))
+        .unwrap();
+    let inputs = fixture.observe(&prepared).unwrap();
+    assert!(
+        inputs
+            .events
+            .iter()
+            .all(|event| event.execution_nonce.as_deref()
+                != Some(fixture.context.execution_nonce.as_str()))
+    );
+    assert_eq!(inputs.current, fixture.source);
+    runtime.block_on(assert_actual_codex_sweep(&fixture));
+}
