@@ -129,9 +129,23 @@ fn checker_excerpt(checker: &Value) -> String {
 }
 
 pub(crate) fn doctor_evidence(config: &crate::config::Config) -> Value {
-    use crate::config::session_hosts::EndpointMode;
-    let endpoints: Vec<_> = config
+    use crate::config::session_hosts::{EndpointMode, with_boot};
+    if !config
         .session_hosts
+        .herdr
+        .endpoints
+        .values()
+        .any(|endpoint| endpoint.mode == EndpointMode::UserDefault)
+    {
+        return json!({});
+    }
+    // Observations use the selected boot socket, including execution-user defaults.
+    with_boot(|boot| checker_evidence(boot.map_or(&config.session_hosts, |boot| boot.config())))
+}
+
+fn checker_evidence(hosts: &crate::config::session_hosts::SessionHostsConfig) -> Value {
+    use crate::config::session_hosts::EndpointMode;
+    let endpoints: Vec<_> = hosts
         .herdr
         .endpoints
         .iter()

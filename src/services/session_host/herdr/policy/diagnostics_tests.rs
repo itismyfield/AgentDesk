@@ -73,3 +73,44 @@ fn health_checker_bounds_unicode_and_preserves_error_after_the_retained_prefix()
         "legacy_doctor_exposes_no_user_checker_evidence_contract"
     );
 }
+
+#[test]
+fn doctor_uses_the_selected_boot_socket_when_raw_config_omits_the_default() {
+    use crate::config::session_hosts::{self, EndpointMode};
+    let _boot = session_hosts::force_for_test(
+        Some("doctor-default-node"),
+        &[(7309, "doctor-default-node")],
+    )
+    .with_mode(EndpointMode::UserDefault);
+    let mut config = crate::config::Config::default();
+    config.session_hosts = session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+    let endpoint = config
+        .session_hosts
+        .herdr
+        .endpoints
+        .get_mut("doctor-default-node-endpoint")
+        .unwrap();
+    checker(
+        &endpoint.socket_path,
+        b"resolved stdout",
+        b"resolved stderr",
+    );
+    endpoint.socket_path = PathBuf::new();
+    assert_eq!(
+        doctor_evidence(&config)["doctor-default-node-endpoint"]["stderr"],
+        "resolved stderr",
+        "doctor_omitted_socket_uses_selected_boot_observation_contract"
+    );
+    config
+        .session_hosts
+        .herdr
+        .endpoints
+        .get_mut("doctor-default-node-endpoint")
+        .unwrap()
+        .mode = EndpointMode::LegacyDedicated;
+    assert_eq!(
+        doctor_evidence(&config),
+        json!({}),
+        "legacy_doctor_still_returns_before_selected_boot_observation_contract"
+    );
+}

@@ -8,7 +8,7 @@ use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE,
 const NONCE: &str = "00112233445566778899aabbccddee01";
 fn pane(above: &str, input: &str) -> String {
     format!(
-        "{above}\n────────────────────────────────────────────────────\n❯ {input}\n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2"
+        "{above}\n\n────────────────────────────────────────────────────\n❯ {input}\n────────────────────────────────────────────────────\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
     )
 }
 
@@ -102,6 +102,21 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
         ),
         ("capture failure", None),
     ] {
+        if let Some(capture) = screen.as_deref() {
+            if name == "draft" {
+                assert_eq!(
+                    composer_owner(capture),
+                    ComposerOwner::Person,
+                    "draft_fixture_has_measured_person_ownership_contract"
+                );
+            }
+            if name == "modal" {
+                assert!(
+                    crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_modal(capture),
+                    "modal_fixture_reaches_actual_modal_detector_contract"
+                );
+            }
+        }
         cancel
             .cancelled
             .store(false, std::sync::atomic::Ordering::SeqCst);
