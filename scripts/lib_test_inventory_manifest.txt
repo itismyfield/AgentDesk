@@ -7166,6 +7166,7 @@ services::discord::router::message_handler::headless_turn::routine_metadata::pro
 services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
 services::discord::router::message_handler::input_payload::tests::fresh_source_keeps_rawv1_selected_preludes_voice_and_assets_without_rendering
 services::discord::router::message_handler::input_payload::tests::pg_tests::normal_and_busy_preparation_preserve_attachment_bytes_and_retention_pg
+services::discord::router::message_handler::input_payload::tests::raw_admission_apis_stay_inside_the_owner_boundary
 services::discord::router::message_handler::input_payload::tests::shared_payload_preserves_literal_text_attachment_only_and_author_bytes
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_inherited_route_is_republished_by_its_claim
