@@ -300,6 +300,9 @@ src/
 │   └── types.rs
 ├── engine/
 │   ├── ops/
+│   │   ├── db_ops/
+│   │   │   └── tests/
+│   │   │       └── policy_sql_schema_tests.rs
 │   │   ├── exec_ops/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
