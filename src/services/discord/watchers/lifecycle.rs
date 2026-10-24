@@ -62,6 +62,7 @@ pub(in crate::services::discord) use self::watch_host::{HostSnapshot, WatchHost,
 #[path = "lifecycle/restore_support.rs"]
 mod restore_support;
 pub(super) use self::restore_support::*;
+#[cfg(test)]
 #[path = "lifecycle/tests.rs"]
 mod tests;
 
@@ -118,5 +119,6 @@ mod restore_mapping;
 use self::restore_mapping::add_configured_channel_bindings;
 pub(in crate::services::discord) use self::restore_mapping::session_belongs_to_current_runtime;
 
+#[cfg(test)]
 #[path = "lifecycle/restore_tests.rs"]
 mod restore_tests;
