@@ -7,19 +7,19 @@ use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
-const CHANNEL: u64 = 7_308_810;
+const CHANNEL: u64 = 7;
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
-struct Fixture {
+pub(crate) struct Fixture {
     _root: crate::config::TestRuntimeRootGuard,
     _host: crate::config::TestEnvVarGuard,
     _p5: crate::config::TestEnvVarGuard,
     _path: crate::config::TestEnvVarGuard,
     bin: tempfile::TempDir,
-    context: BindingContext,
-    source: crate::services::tui_o::shadow::SourceId,
+    pub(crate) context: BindingContext,
+    pub(crate) source: crate::services::tui_o::shadow::SourceId,
 }
 impl Fixture {
-    fn new(herdr: bool) -> Self {
+    pub(crate) fn new(herdr: bool) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
@@ -125,7 +125,7 @@ impl Fixture {
             source,
         }
     }
-    fn shared(&self, pool: Option<sqlx::PgPool>) -> Arc<SharedData> {
+    pub(crate) fn shared(&self, pool: Option<sqlx::PgPool>) -> Arc<SharedData> {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool);
         let pane = self.context.tmux_session.clone();
         shared.tmux_watchers.insert(

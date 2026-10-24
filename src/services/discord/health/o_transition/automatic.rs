@@ -218,6 +218,8 @@ async fn channel_sweep(
             termination: None,
         };
         let reply = send(ready, channel, &port, Operation::Inspect(request), context).await?;
+        #[cfg(test)]
+        LAST_CODEX_REPLY.with(|slot| *slot.borrow_mut() = Some(reply.clone()));
         if !stats.actor_refused(&reply) {
             tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
                 "[tui_o] Codex retention observation");
@@ -353,4 +355,23 @@ async fn ended(pane: String) -> bool {
     })
     .await
     .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_CODEX_REPLY: std::cell::RefCell<Option<Reply>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) async fn codex_sweep_for_test(
+    registry: &HealthRegistry,
+    ready: &Readiness,
+    channel: u64,
+) -> Result<Reply, &'static str> {
+    LAST_CODEX_REPLY.with(|slot| slot.borrow_mut().take());
+    let mut stats = Stats::default();
+    channel_sweep(registry, ready, &ProviderKind::Codex, channel, &mut stats).await?;
+    LAST_CODEX_REPLY
+        .with(|slot| slot.borrow_mut().take())
+        .ok_or("no Codex Inspect was sent")
 }

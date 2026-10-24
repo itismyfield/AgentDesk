@@ -118,3 +118,6 @@ pub(crate) mod automatic;
 mod automatic_idle;
 mod codex_census;
 mod codex_context;
+
+#[cfg(all(test, unix))]
+pub(crate) use codex_context::tests::Fixture as CodexObservationFixture;

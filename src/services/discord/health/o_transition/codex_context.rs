@@ -285,4 +285,4 @@ async fn hosted(
 
 #[cfg(all(test, unix))]
 #[path = "codex_context_tests.rs"]
-mod tests;
+pub(crate) mod tests;
