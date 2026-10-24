@@ -1231,6 +1231,126 @@ class PostScenarioIdle(unittest.TestCase):
         self.assertIn("queued_placeholders", str(ctx.exception))
 
 
+E51_TIMEOUT = json.loads(
+    (ROOT / "scripts/e2e/tui_relay/tests/fixtures/e51_codex_tui_20261024_wait_timeout.json")
+    .read_text(encoding="utf-8")
+)
+
+
+def _e51_message(row: dict, **overrides) -> dict:
+    """Rebuild a Discord message from the report's message summary."""
+    message = {
+        "id": row["id"],
+        "type": row["type"],
+        "content": row["content"],
+        "author": {"id": row["author_id"], "bot": row["author_bot"]},
+    }
+    return {**message, **overrides}
+
+
+def _e51_mailbox(**overrides) -> dict:
+    """The 10-24 E-51 target mailbox as /api/health/detail reported it."""
+    (summary,) = E51_TIMEOUT["target_mailboxes"]
+    mailbox = {**_idle_mailbox(summary["channel_id"], provider=summary["provider"]), **{
+        key: summary[key]
+        for key in ("agent_turn_status", "queue_depth", "relay_stall_state")
+    }}
+    mailbox["relay_health"] = {**mailbox["relay_health"], **summary["relay_health"]}
+    return {**mailbox, **overrides}
+
+
+class WaitTimeoutClassification(unittest.TestCase):
+    NEEDLE = E51_TIMEOUT["needle"]
+    PROMPT, WATCHER_UNBOUND = E51_TIMEOUT["recent_raw"]
+
+    def classify(self, *messages: dict, health) -> str:
+        window = assertions.Window(setup_marker_id="1")
+        for message in messages:
+            window.add(message)
+        payloads = {"/api/health/detail": [health]}
+        with (
+            patch("run_tui_relay.urllib.request.urlopen", _fake_urlopen_for(payloads)),
+            patch("run_tui_relay.tmux.capture_pane", return_value="›"),
+        ):
+            diagnostic = driver._collect_wait_timeout_diagnostics(  # noqa: SLF001
+                base_url="http://agentdesk.test",
+                channel_id=E51_TIMEOUT["channel_id"],
+                cell=E51_TIMEOUT["cell"],
+                scenario={"id": "E-51"},
+                thread_channel_id=None,
+                after_id=E51_TIMEOUT["after_id"],
+                wait_kind="relay",
+                needle=self.NEEDLE,
+                prompt=None,
+                window=window,
+            )
+        return diagnostic["classification"]
+
+    def idle_health(self):
+        return (200, _health_detail(_idle_mailbox(E51_TIMEOUT["channel_id"])))
+
+    def test_marker_only_in_our_prompt_or_its_echo_is_not_filter_miss(self):
+        prompt = _e51_message(self.PROMPT)
+        echo = _e51_message(
+            self.PROMPT, id="1563443349741117460", content=f"-# ⌨️ {self.PROMPT['content']}",
+            author={"id": assertions.provider_bot_id("codex"), "bot": True},
+        )
+        self.assertEqual(
+            self.classify(prompt, health=self.idle_health()), "no_direct_input_or_relay_evidence"
+        )
+        self.assertEqual(
+            self.classify(prompt, echo, health=self.idle_health()),
+            "direct_input_notified_no_tail_observed",
+        )
+
+    def test_filtered_provider_output_stays_filter_miss_while_queue_is_blocked(self):
+        filtered = _e51_message(
+            self.WATCHER_UNBOUND, id="1563443355663212700", content=f"✅ {self.NEEDLE}"
+        )
+        self.assertIsNone(assertions.relay_body(filtered))
+        self.assertEqual(
+            self.classify(
+                _e51_message(self.PROMPT),
+                _e51_message(self.WATCHER_UNBOUND),
+                filtered,
+                health=(200, _health_detail(_e51_mailbox(), status="degraded")),
+            ),
+            "relay_surface_filter_miss_raw_contains_needle",
+        )
+
+    def test_e51_report_events_classify_as_queue_blocked_not_started(self):
+        self.assertEqual(E51_TIMEOUT["reported_classification"], "relay_surface_filter_miss_raw_contains_needle")
+        messages = [_e51_message(row) for row in E51_TIMEOUT["recent_raw"]]
+        self.assertEqual(
+            self.classify(*messages, health=(200, _health_detail(_e51_mailbox(), status="degraded"))),
+            "turn_not_started_queue_blocked",
+        )
+        # Each piece of queue evidence is sufficient on its own.
+        self.assertEqual(
+            self.classify(messages[0], health=(200, _health_detail(_e51_mailbox(), status="degraded"))),
+            "turn_not_started_queue_blocked",
+        )
+        self.assertEqual(
+            self.classify(*messages, health=self.idle_health()), "turn_not_started_queue_blocked"
+        )
+
+    def test_unreadable_health_is_not_reported_as_no_queue_hold(self):
+        prompt = _e51_message(self.PROMPT)
+        unreadable = urllib.error.URLError("connection refused")
+        self.assertEqual(
+            self.classify(prompt, health=unreadable), "no_relay_evidence_queue_state_unknown"
+        )
+        self.assertEqual(
+            self.classify(prompt, _e51_message(self.WATCHER_UNBOUND), health=unreadable),
+            "turn_not_started_queue_blocked",
+        )
+        stale_notice = _e51_message(self.WATCHER_UNBOUND, id=str(int(E51_TIMEOUT["after_id"]) - 1))
+        self.assertEqual(
+            self.classify(prompt, stale_notice, health=self.idle_health()),
+            "no_direct_input_or_relay_evidence",
+        )
+
+
 class ScenarioHealthProbe(unittest.TestCase):
     def test_assert_health_passes_with_status_and_counter_caps(self):
         payloads = {
