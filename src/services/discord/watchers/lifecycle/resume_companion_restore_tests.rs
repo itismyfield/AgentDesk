@@ -410,6 +410,59 @@ fn rehydrated_idle_codex_restore_binds_watcher_and_settles_idle() {
     });
 }
 
+fn legacy_rollout(id: &str) -> std::path::PathBuf {
+    let path = install::root()
+        .join("codex/sessions")
+        .join(format!("rollout-{id}.jsonl"));
+    let at = chrono::Utc::now().to_rfc3339();
+    let rows = [
+        json!({"type":"session_meta","timestamp":at,"payload":{"id":id,"timestamp":at,
+            "cwd":install::root(),"source":"cli","originator":"codex-tui"}}),
+        json!({"type":"event_msg","timestamp":at,
+            "payload":{"type":"task_started","turn_id":"legacy-idle"}}),
+        json!({"type":"event_msg","timestamp":at,
+            "payload":{"type":"task_complete","turn_id":"legacy-idle"}}),
+    ];
+    std::fs::write(&path, rows.map(|row| format!("{row}\n")).concat()).unwrap();
+    path
+}
+
+/// A legacy idle pane after boot rehydration: its binding and owner are published, the
+/// wrapper output is gone and no rollout marker is written yet.
+async fn legacy_idle(
+    channel: u64,
+) -> (
+    install::InstallFixture,
+    crate::services::discord::health::test_support::MockDiscord,
+    std::path::PathBuf,
+) {
+    let (fixture, discord) = install::fixture(ProviderKind::Codex, channel).await;
+    let native = legacy_rollout(ID);
+    std::fs::remove_file(&fixture.output).unwrap();
+    dedupe::register_tmux_runtime_binding(
+        &fixture.session,
+        dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+            output_path: native.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(ID.into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    fixture
+        .shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(&fixture.session, fixture.channel);
+    (fixture, discord, native)
+}
+
+fn write_marker(session: &str, rollout: &std::path::Path) {
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker(session, rollout, Some(ID))
+        .unwrap();
+}
+
 /// A legacy pane carries no ownership proof, so only its rollout marker ties the published
 /// binding to this pane.
 #[test]
@@ -421,54 +474,12 @@ fn rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout() {
         return;
     }
     runtime().block_on(async {
-        let (fixture, _discord) = install::fixture(ProviderKind::Codex, 7_061_891).await;
-        let rollout = |id: &str| {
-            let path = install::root()
-                .join("codex/sessions")
-                .join(format!("rollout-{id}.jsonl"));
-            let at = chrono::Utc::now().to_rfc3339();
-            let rows = [
-                json!({"type":"session_meta","timestamp":at,"payload":{"id":id,"timestamp":at,
-                    "cwd":install::root(),"source":"cli","originator":"codex-tui"}}),
-                json!({"type":"event_msg","timestamp":at,
-                    "payload":{"type":"task_started","turn_id":"legacy-idle"}}),
-                json!({"type":"event_msg","timestamp":at,
-                    "payload":{"type":"task_complete","turn_id":"legacy-idle"}}),
-            ];
-            std::fs::write(&path, rows.map(|row| format!("{row}\n")).concat()).unwrap();
-            path
-        };
-        let native = rollout(ID);
-        let other = rollout("019e660d-4859-7522-9cee-000000000001");
-        std::fs::remove_file(&fixture.output).unwrap();
-        dedupe::register_tmux_runtime_binding(
-            &fixture.session,
-            dedupe::TuiRuntimeBinding {
-                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-                output_path: native.display().to_string(),
-                relay_output_path: None,
-                input_fifo_path: None,
-                session_id: Some(ID.into()),
-                last_offset: 0,
-                relay_last_offset: None,
-            },
-        );
-        fixture
-            .shared
-            .tmux_watchers
-            .restore_owner_channel_for_tmux_session(&fixture.session, fixture.channel);
+        let (fixture, _discord, native) = legacy_idle(7_061_891).await;
+        let other = legacy_rollout("019e660d-4859-7522-9cee-000000000001");
         let submitted = Scope::new(&fixture.shared);
-        let write_marker = |path: &std::path::Path| {
-            crate::services::codex_tui::session::write_codex_tui_rollout_marker(
-                &fixture.session,
-                path,
-                Some(ID),
-            )
-            .unwrap()
-        };
         for marker in [None, Some(&other)] {
             if let Some(path) = marker {
-                write_marker(path);
+                write_marker(&fixture.session, path);
             }
             restore_tmux_watchers(&fixture.http, &fixture.shared).await;
             assert_eq!(submitted.submissions(), 0, "marker {marker:?} is no proof");
@@ -480,7 +491,7 @@ fn rehydrated_idle_legacy_codex_restore_requires_marker_for_bound_rollout() {
                     .is_none()
             );
         }
-        write_marker(&native);
+        write_marker(&fixture.session, &native);
         restore_tmux_watchers(&fixture.http, &fixture.shared).await;
         assert_eq!(submitted.submissions(), 1);
         let bound = fixture
@@ -517,5 +528,52 @@ fn rehydrated_idle_codex_restore_refuses_other_owner_channel() {
                 ChannelId::new(7_061_909),
             );
         assert_restore_skips(&fixture).await;
+    });
+}
+
+/// Commit re-reads the proof under source authority, so a marker lost after the scan
+/// reserves no watcher and publishes nothing.
+#[test]
+fn rehydrated_fallback_commit_refuses_a_marker_lost_after_scan() {
+    if !install::isolated(
+        module_path!(),
+        "rehydrated_fallback_commit_refuses_a_marker_lost_after_scan",
+    ) {
+        return;
+    }
+    runtime().block_on(async {
+        let (fixture, _discord, native) = legacy_idle(7_061_911).await;
+        write_marker(&fixture.session, &native);
+        let fallback = codex_restore::rollout_fallback_for_rehydrated_binding(
+            &ProviderKind::Codex,
+            &fixture.session,
+            fixture.channel,
+            &fixture.shared.tmux_watchers,
+        )
+        .expect("the scan admits the marked binding");
+        let binding = dedupe::runtime_binding_for_tmux_session(&fixture.session);
+        let published = dedupe::runtime_binding_recorded_at_for_tests(&fixture.session);
+        std::fs::remove_file(crate::services::tmux_common::session_temp_path(
+            &fixture.session,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        ))
+        .unwrap();
+        let claims = std::cell::Cell::new(0);
+        assert!(!codex_restore::commit_live_direct_resume_fallback(
+            &fixture.session,
+            fixture.channel,
+            Some(fallback),
+            binding,
+            &native.display().to_string(),
+            || {
+                claims.set(claims.get() + 1);
+                true
+            },
+        ));
+        assert_eq!(claims.get(), 0);
+        assert_eq!(
+            dedupe::runtime_binding_recorded_at_for_tests(&fixture.session),
+            published
+        );
     });
 }
