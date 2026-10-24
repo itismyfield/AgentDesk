@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::services::discord::runtime_store;
+use crate::services::discord::runtime_store::durable_publish::FlushStatus;
 use crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart;
+use runtime_store::AtomicWriteContext;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +45,13 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
         return;
     };
     let custody = root.join("discord_custody").join(provider.as_str());
+    let _lock = match super::custody_notice::retention::lock(&custody, true) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::warn!(provider = provider.as_str(), %error, "boot custody lock failed");
+            return;
+        }
+    };
     BUDGET.set(BOOT_COPY_BUDGET);
     let mut episodes: BTreeMap<String, (Value, Vec<Item>)> = BTreeMap::new();
     let mut add = |(key, item): (Value, Item)| {
@@ -71,22 +80,30 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
     let boot_generation = runtime_store::process_generation_binding().generation;
     for (digest, (key, items)) in episodes {
         let dir = custody.join(digest);
-        if let Err(error) = preserve_episode(&dir, key, items, boot_generation) {
+        if let Err(error) = preserve_episode(&root, &dir, key, items, boot_generation) {
             let dir = dir.display();
             tracing::warn!(provider = provider.as_str(), %dir, %error, "boot custody copy failed");
         }
     }
 }
 
-/// Publishes the episode marker once, then one revision with what no earlier one holds.
-fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Result<(), String> {
+/// Publishes the episode marker once, then one revision with what no earlier one holds; every
+/// publication flushes the directories up to the runtime `root`.
+fn preserve_episode(
+    root: &Path,
+    dir: &Path,
+    key: Value,
+    items: Vec<Item>,
+    boot: u64,
+) -> Result<(), String> {
+    let context = AtomicWriteContext::new("discord_custody").durable_root(root);
     let marker = dir.join("episode.json");
     if !marker.exists() {
         let tui_direct = items
             .iter()
             .any(|Item(kind, .., seg, _)| *kind != "row" || seg.is_some());
         let marker_json = json!({ "episode": key, "tui_direct": tui_direct, "first_boot": boot });
-        runtime_store::atomic_write(&marker, &marker_json.to_string())?;
+        runtime_store::critical_publish(&marker, &marker_json.to_string(), context)?;
     }
     let (rev, (digests, transcripts)) = held_copies(dir)?;
     let (mut entries, mut segments) = (Vec::new(), BTreeMap::new());
@@ -115,6 +132,8 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
         let prior = transcripts.get(source.to_string_lossy().as_ref());
         entries.extend(segment_entry(&rev, name, (&source, offset), prior));
     }
+    let manifest_path = rev.join("manifest.json");
+    vouch_for_copies(root, &manifest_path, &mut entries);
     let errors: Vec<&str> = entries
         .iter()
         .filter_map(|entry| entry["error"].as_str())
@@ -124,7 +143,7 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
         let now = chrono::Utc::now().to_rfc3339();
         let manifest = json!({ "boot_generation": boot, "preserved_at": now,
             "complete": complete, "entries": entries });
-        runtime_store::atomic_write(&rev.join("manifest.json"), &manifest.to_string())?;
+        runtime_store::critical_publish(&manifest_path, &manifest.to_string(), context)?;
     }
     match complete {
         true => Ok(()),
@@ -132,6 +151,26 @@ fn preserve_episode(dir: &Path, key: Value, items: Vec<Item>, boot: u64) -> Resu
             "incomplete, retried by a boot that still finds its row or record: {}",
             errors.join("; ")
         )),
+    }
+}
+
+/// A copy counts only once the directories holding it are flushed; until then the manifest
+/// records it as not copied, so the next boot that still finds its source copies it again.
+fn vouch_for_copies(root: &Path, manifest: &Path, entries: &mut [Value]) {
+    if !entries.iter().any(|entry| entry["copy"].is_string()) {
+        return;
+    }
+    let status = runtime_store::durable_publish::flush_chain_before_publish(root, manifest);
+    let FlushStatus::SyncFailed { error, .. } = status else {
+        return;
+    };
+    let error = format!("custody directory sync failed: {error}");
+    for entry in entries.iter_mut().filter(|entry| entry["copy"].is_string()) {
+        entry["copy"] = Value::Null;
+        entry["error"] = error.as_str().into();
+        if let Some(supersedes) = entry.get_mut("supersedes") {
+            *supersedes = Value::Null;
+        }
     }
 }
 

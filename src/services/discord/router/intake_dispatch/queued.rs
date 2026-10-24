@@ -42,6 +42,11 @@ impl QueuedRestoreOwner {
                 self.dispatch_lease.clone(),
             )
             .await;
+            if restored.refusal_reason
+                == Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SupersededByClear)
+            {
+                return super::super::IntakeExecution::ConsumedProtected;
+            }
             if restored.enqueued && restored.persistence_error.is_none() {
                 break;
             }
@@ -114,6 +119,27 @@ pub(crate) async fn admit_queued_intake(
     };
     let admission = admit_text_intake(deps, &submission).await;
     let local_permit = match admission {
+        #[cfg(unix)]
+        IntakeAdmission::ConsentHeld(hold) => {
+            let Some(dispatch_lease) = dispatch_lease else {
+                return QueuedAdmissionDisposition::RejectedRestore;
+            };
+            let owner = QueuedRestoreOwner {
+                original: intervention.clone(),
+                provider: submission.provider.clone(),
+                channel_id,
+                dispatch_lease,
+            };
+            super::super::herdr_consent::admission::restore_then_register(
+                deps,
+                &submission.provider,
+                &submission.request,
+                *hold,
+                owner.restore(deps),
+            )
+            .await;
+            return QueuedAdmissionDisposition::Deferred;
+        }
         IntakeAdmission::ConsumedToHold => {
             tracing::warn!(
                 provider = submission.provider.as_str(),
@@ -228,10 +254,15 @@ pub(crate) async fn finish_admitted_queued_intake(
     let mut owner = admitted
         .restore_owner
         .expect("local queued admission owns its original and lease");
+    if owner.dispatch_lease.superseded_by_clear() {
+        return Ok(super::super::IntakeExecution::ConsumedProtected);
+    }
     if let Some(announcement) = owner.original.voice_announcement.as_ref() {
         crate::voice::announce_meta::global_store()
             .insert_accepted_replay(owner.original.message_id, announcement.clone());
     }
+    #[cfg(unix)]
+    let original_request = admitted.submission.request.clone();
     match finish_admitted_local(deps, permit, admitted.submission).await {
         Err(error) => match error.downcast::<super::QueuedTransitionBusyHandoff>() {
             Ok(handoff) => {
@@ -239,12 +270,34 @@ pub(crate) async fn finish_admitted_queued_intake(
                 owner.original.pending_uploads = handoff.owned_uploads;
                 Ok(owner.restore(deps).await)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                #[cfg(unix)]
+                let error =
+                    match error.downcast::<super::super::herdr_consent::admission::QueuedHold>() {
+                        Ok(hold) => {
+                            let provider = owner.provider.clone();
+                            let outcome =
+                                super::super::herdr_consent::admission::restore_then_register(
+                                    deps,
+                                    &provider,
+                                    &original_request,
+                                    hold.0,
+                                    owner.restore(deps),
+                                )
+                                .await;
+                            return Ok(outcome);
+                        }
+                        Err(error) => error,
+                    };
+                Err(error)
+            }
         },
         Ok(result) => Ok(result),
     }
 }
 
+#[cfg(test)]
+mod clear_discard_tests;
 #[cfg(test)]
 pub(in crate::services::discord::router) mod transition_busy_tests;
 

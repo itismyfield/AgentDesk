@@ -1507,7 +1507,9 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     let path = sessions.path().join(format!("rollout-test-{id}.jsonl"));
     let header = json!({"type":"session_meta","payload":{"id":id,"cwd":"/synthetic","source":"cli",
         "timestamp":(prepared.context.created_at + chrono::Duration::seconds(1)).to_rfc3339()}});
-    std::fs::write(&path, format!("{header}\n")).unwrap();
+    let first_user = json!({"type":"response_item","payload":{"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"첫 argv\n한글"}]}});
+    std::fs::write(&path, format!("{header}\n{first_user}\n")).unwrap();
     let binding = dedupe::TuiRuntimeBinding {
         runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
         output_path: path.display().to_string(),
@@ -1523,7 +1525,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     ));
     let history = events::records_strict(42).unwrap().unwrap();
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].cause, events::BindingCause::Unknown);
+    assert_eq!(history[0].cause, events::BindingCause::Startup);
     assert_eq!(history[0].evidence.hook_event, None);
     let envelope = HookBindingEnvelope {
         context: CapturedContext::Captured(prepared.context.clone()),
@@ -1669,7 +1671,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
         .join(format!("rollout-other-{foreign_id}.jsonl"));
     let mut foreign_header = header.clone();
     foreign_header["payload"]["id"] = json!(foreign_id);
-    std::fs::write(&foreign_path, format!("{foreign_header}\n")).unwrap();
+    std::fs::write(&foreign_path, format!("{foreign_header}\n{first_user}\n")).unwrap();
     let mut foreign_binding = dedupe::peek_tmux_runtime_binding(tmux).unwrap();
     foreign_binding.session_id = Some(foreign_id);
     foreign_binding.output_path = foreign_path.display().to_string();
@@ -1703,7 +1705,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     std::fs::write(&log, encode(&history)).unwrap();
 
     for case in [
-        "startup",
+        "unknown",
         "uuid",
         "path",
         "dev",
@@ -1726,7 +1728,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     ] {
         let mut record = original.clone();
         match case {
-            "startup" => record.cause = events::BindingCause::Startup,
+            "unknown" => record.cause = events::BindingCause::Unknown,
             "alias" => {
                 let alias = sessions.path().join(format!("rollout-alias-{id}.jsonl"));
                 std::os::unix::fs::symlink(&path, &alias).unwrap();
@@ -1797,7 +1799,7 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
             &payload,
             &envelope,
             "session_start",
-            matches!(case, "startup" | "alias"),
+            matches!(case, "unknown" | "alias"),
         );
     }
     std::fs::write(&log, encode(&history)).unwrap();
@@ -1950,6 +1952,9 @@ fn shadow_generic_history_accepts_only_strict_fresh_self_observations() {
     events::set_test_root(None);
     dedupe::reset_state_for_tests();
 }
+
+#[path = "source_observation_tests/codex_launch_cause.rs"]
+mod codex_launch_cause;
 
 #[test]
 fn additive_launch_context_round_trips_with_the_schema_one_old_parser() {

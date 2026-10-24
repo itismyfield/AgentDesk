@@ -110,30 +110,6 @@ pub(super) async fn managed_reset_refusal(
     Some(reason)
 }
 
-/// The refusal a configured channel's Herdr clear met before clears stopped going through Herdr;
-/// only a turn-host test still reads it.
-#[cfg(all(test, unix))]
-pub(crate) const HERDR_CODEX_CLEAR_UNSUPPORTED: &str = "herdr_native_clear_unsupported(codex)";
-
-/// Whether the turn host would have served a Herdr clear for the channel; kept for that test.
-#[cfg(all(test, unix))]
-pub(crate) async fn read_herdr_clear(
-    pool: Option<&PgPool>,
-    provider: &ProviderKind,
-    channel: u64,
-    session_key: Option<&str>,
-) -> Result<(), String> {
-    use crate::services::turn_host::{TurnHost, for_turn};
-    match for_turn(pool, provider, channel, session_key).await {
-        TurnHost::Herdr(_) if *provider == ProviderKind::Codex => {
-            Err(HERDR_CODEX_CLEAR_UNSUPPORTED.into())
-        }
-        TurnHost::Herdr(_) => Ok(()),
-        TurnHost::Refused(refusal) => Err(refusal.to_string()),
-        TurnHost::Tmux => Err("herdr clear: the channel resolved to tmux".into()),
-    }
-}
-
 /// Why a Herdr-configured channel's tmux session is left as it is, whatever its stored rows say.
 pub(crate) fn configured_refusal(channel_id: u64) -> Option<String> {
     let endpoint = crate::config::session_hosts::herdr_endpoint(channel_id)?;

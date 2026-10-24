@@ -36,6 +36,8 @@ const AFTER_CLEAR: &str = "first instruction after clear";
 pub(in crate::services::discord) const NEW_NATIVE_ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 const TEST_BOT: &str = "e51-isolated-test-bot";
 
+pub(in crate::services::discord) mod absent_launch_tests;
+
 struct SourceMode(Option<CodexSourceMode>);
 
 fn mode_name(mode: CodexSourceMode) -> &'static str {
@@ -117,7 +119,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     pub(in crate::services::discord) fake: FakeTmux,
     pub(in crate::services::discord) shared: Arc<SharedData>,
     pub(in crate::services::discord) context: BindingContext,
-    old_source: p5::SourceId,
+    pub(in crate::services::discord) old_source: p5::SourceId,
     alive: Arc<AtomicBool>,
     pub(in crate::services::discord) root: tempfile::TempDir,
     _confirmation: TestConfirmation,
@@ -126,6 +128,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     _hosts: crate::config::session_hosts::ForcedSessionHosts,
     _env: [crate::config::TestEnvVarGuard; 2],
     _source_env: crate::config::TestEnvVarGuard,
+    _host_env: Option<crate::config::TestEnvVarGuard>,
     _binding_env: crate::config::TestEnvVarGuard,
     _hosting: Hosting,
     _isolation: Isolation,
@@ -146,8 +149,22 @@ impl CanaryFixture {
     }
 
     async fn build(prefix: u64, process_mode: CodexSourceMode) -> Self {
+        Self::build_with_host(prefix, process_mode, None).await
+    }
+
+    pub(in crate::services::discord) async fn build_with_host(
+        prefix: u64,
+        process_mode: CodexSourceMode,
+        host: Option<&str>,
+    ) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
+        let host_env = host.map(|host| {
+            crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_INSTANCE_ID",
+                std::ffi::OsStr::new(host),
+            )
+        });
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let isolation = Isolation {
             _dedupe: dedupe_lock,
@@ -209,7 +226,7 @@ impl CanaryFixture {
             tmux_session: CANARY_TMUX.into(),
             channel_id: Some(CANARY_CHANNEL),
             owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
-            host: None,
+            host: host.map(str::to_owned),
             expected_native_session_id: None,
             launch_mode: "fresh".into(),
             provider_root: Some(sessions.canonicalize().unwrap()),
@@ -354,10 +371,26 @@ impl CanaryFixture {
             _hosts: hosts,
             _env: env,
             _source_env: source_env,
+            _host_env: host_env,
             _binding_env: binding_env,
             _hosting: hosting,
             _isolation: isolation,
         }
+    }
+
+    fn warm_followup(&self, enabled: bool) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
+            std::ffi::OsStr::new(if enabled { "1" } else { "0" }),
+        )
+    }
+
+    pub(in crate::services::discord) fn scoped_test_env(
+        &self,
+        key: &'static str,
+        value: &std::ffi::OsStr,
+    ) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(key, value)
     }
 
     pub(in crate::services::discord) fn history(&self) -> PathBuf {
@@ -440,7 +473,13 @@ PY
         }).await.expect("the actual cold launch did not publish its fresh nonce")
     }
 
-    fn publish_context(&self, context: BindingContext) -> BindingContext {
+    async fn publish_context(
+        &self,
+        context: BindingContext,
+        api: &crate::services::discord::admin_host_guard::tests::Recorder,
+        split_tick: bool,
+        observed: &mut Vec<String>,
+    ) -> BindingContext {
         let path = context
             .provider_root
             .as_ref()
@@ -484,9 +523,38 @@ PY
             "the actual verified consumer must admit its new proof"
         );
         let mut output = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        for row in [
+        writeln!(
+            output,
+            "{}",
             json!({"type":"response_item","payload":{"type":"message","role":"assistant",
-                "content":[{"type":"output_text","text":"clear relaunch completed"}]}}),
+            "content":[{"type":"output_text","text":"clear relaunch completed"}]}})
+        )
+        .unwrap();
+        output.flush().unwrap();
+        if split_tick {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    observed.extend(api.take());
+                    let seen = observed.iter().any(|call| {
+                        let Some(body) = call.strip_prefix(&format!(
+                            "PATCH /api/v10/channels/{CANARY_CHANNEL}/messages/900001 "
+                        )) else {
+                            return false;
+                        };
+                        serde_json::from_str::<serde_json::Value>(body).unwrap()["content"]
+                            == "clear relaunch completed"
+                    });
+                    if seen {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("split tick must observe the exact body PATCH before Done");
+            eprintln!("E51_SPLIT_TICK exact body PATCH observed before Done");
+        }
+        for row in [
             json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"new-clear-turn",
                 "last_agent_message":"clear relaunch completed"}}),
             json!({"type":"event_msg","payload":{"type":"composer_ready","turn_id":"new-clear-turn"}}),
@@ -596,6 +664,105 @@ async fn clear_and_first_input(
     if !crate::services::discord::admin_host_guard::tests::api_child(qualified) {
         return;
     }
+    for split_tick in [true, false] {
+        eprintln!("E51_TICK_VARIANT split_tick={split_tick}");
+        clear_and_first_input_at_tick(external_inventory, without_core, process_mode, split_tick)
+            .await;
+    }
+}
+
+pub(in crate::services::discord) async fn settled_owner_observation<T, F, Fut>(
+    counter: &str,
+    mut observe: F,
+    transient: impl Fn(&T) -> bool,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let mut retries = 0;
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        for read in 0..50 {
+            let sample = observe().await;
+            if !transient(&sample) {
+                return Some(sample);
+            }
+            retries += 1;
+            if read + 1 < 50 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        None
+    })
+    .await;
+    eprintln!("{counter}={retries}");
+    observed
+        .expect("owner observation remained transient past the bounded reread timeout")
+        .expect("owner observation remained transient through the bounded reread limit")
+}
+
+pub(in crate::services::discord) fn owner_epoch_error<T, E: AsRef<str>>(
+    observed: &Result<T, E>,
+) -> bool {
+    matches!(observed, Err(reason) if reason.as_ref() == "owner_epoch")
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_keeps_unrelated_error_on_first_observation() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT unrelated_error_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("fixture_io".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Err("fixture_io".to_owned()),
+        "a non-owner-epoch error must remain the first observation"
+    );
+    assert_eq!(calls.get(), 1, "an unrelated error must not be reread");
+}
+
+#[tokio::test]
+async fn owner_epoch_retry_rechecks_one_transient_before_stable_hold() {
+    let calls = std::cell::Cell::new(0);
+    let observed = settled_owner_observation(
+        "OWNER_RETRY_CONTRACT transient_retries",
+        || {
+            let call = calls.get();
+            calls.set(call + 1);
+            std::future::ready(if call == 0 {
+                Err("owner_epoch".to_owned())
+            } else {
+                Ok("Hold(\"owner_unresolved\")".to_owned())
+            })
+        },
+        owner_epoch_error,
+    )
+    .await;
+    assert_eq!(
+        observed,
+        Ok("Hold(\"owner_unresolved\")".to_owned()),
+        "an owner-epoch error must be reread before accepting the observation"
+    );
+    assert_eq!(calls.get(), 2, "only the transient observation is retried");
+}
+
+async fn clear_and_first_input_at_tick(
+    external_inventory: bool,
+    without_core: bool,
+    process_mode: CodexSourceMode,
+    split_tick: bool,
+) {
     let mut fixture = CanaryFixture::new_in(process_mode).await;
     assert!(
         !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
@@ -652,7 +819,6 @@ async fn clear_and_first_input(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -712,15 +878,37 @@ async fn clear_and_first_input(
         clear_persist_failure_tests::queue_len(&fixture.shared, channel).await,
         0
     );
-    let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+    let observed = settled_owner_observation(
+        "E51_AFTER_CLEAR superseded_retries",
+        || activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel),
+        |sample| sample.reason == "superseded",
+    )
+    .await;
+    assert_eq!(
+        (observed.activity, observed.reason),
+        if external_inventory {
+            (Activity::Unknown, "session_identity_unresolved")
+        } else {
+            (Activity::Idle, "no_session")
+        }
+    );
     let cancelled_probe = Arc::new(CancelToken::new());
     cancelled_probe.cancelled.store(true, Ordering::SeqCst);
     let clear_preflight_open =
         crate::services::codex_tui::verified_hold::preflight(CANARY_TMUX, Some(&cancelled_probe))
             .is_none();
-    let underlying =
-        activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
-            .await;
+    let underlying = settled_owner_observation(
+        "E51_AFTER_CLEAR underlying_owner_epoch_retries",
+        || {
+            activity::tests::unbound_verdict_for_tests(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+        },
+        owner_epoch_error,
+    )
+    .await;
     eprintln!(
         "E51_AFTER_CLEAR activity={:?} reason={} underlying={underlying:?}",
         observed.activity, observed.reason
@@ -745,6 +933,7 @@ async fn clear_and_first_input(
         preserve_on_cancel: false,
     };
     let mut failure_guard = None;
+    let mut before_done = Vec::new();
     let (result, events) = crate::services::observability::events::test_capture::capture_async(
         tokio::time::timeout(Duration::from_secs(30), async {
             let intake =
@@ -760,7 +949,12 @@ async fn clear_and_first_input(
                 let token = guard.token.clone();
                 failure_guard = Some(guard);
                 let new = fixture.wait_new_context().await;
-                (fixture.publish_context(new), token)
+                (
+                    fixture
+                        .publish_context(new, &api, split_tick, &mut before_done)
+                        .await,
+                    token,
+                )
             };
             tokio::pin!(intake, hook);
             tokio::select! {
@@ -802,16 +996,8 @@ async fn clear_and_first_input(
     );
     if external_inventory {
         assert_eq!(underlying.unwrap(), "Hold(\"owner_unresolved\")");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Unknown, "session_identity_unresolved")
-        );
     } else {
         assert_eq!(underlying.unwrap(), "Absent(LocalInventory)");
-        assert_eq!(
-            (observed.activity, observed.reason),
-            (Activity::Idle, "no_session")
-        );
     }
     let new = new.unwrap_or_else(|| {
         panic!(
@@ -863,8 +1049,8 @@ async fn clear_and_first_input(
     );
     assert!(after.pending_user_dispatch.is_none());
     assert!(after.intervention_queue.is_empty());
-    let sent = api.take();
-    assert_one_completed_response(&sent);
+    before_done.extend(api.take());
+    assert_one_completed_response(&before_done);
     failure_guard
         .expect("the actual turn had a cancellation owner")
         .finish();
@@ -874,7 +1060,6 @@ async fn clear_and_first_input(
         &ProviderKind::Codex,
         channel,
         "!clear",
-        SoftClearNotifyMode::Suppress,
     )
     .await
     .unwrap();
@@ -893,10 +1078,12 @@ fn assert_no_retirement_warning(report: &ClearReport) {
 }
 
 pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String]) {
-    let mut finals = 0;
+    const RESPONSE: &str = "clear relaunch completed";
+    let mut body_calls = Vec::new();
+    let mut summaries = Vec::new();
     let mut posts = 0;
     let mut messages = std::collections::BTreeSet::new();
-    for call in sent {
+    for (index, call) in sent.iter().enumerate() {
         let mut parts = call.splitn(3, ' ');
         let method = parts.next().unwrap_or_default();
         let path = parts.next().unwrap_or_default();
@@ -906,29 +1093,56 @@ pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String
         {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-            continue;
-        };
-        let Some(content) = value["content"].as_str() else {
-            continue;
-        };
-        if !content.contains("clear relaunch completed") {
+        let value: serde_json::Value = serde_json::from_str(body).expect("message payload");
+        let content = value["content"].as_str().expect("message content");
+        if content.starts_with("-# ") {
+            assert!(
+                method == "POST" && content.starts_with("-# ⏱️ "),
+                "completion summary: {sent:?}"
+            );
+            summaries.push(index);
             continue;
         }
-        finals += usize::from(content == "clear relaunch completed");
-        if method == "POST" {
+        let target = if method == "POST" {
             posts += 1;
-            // The isolated Recorder returns this message ID for successful creates.
-            messages.insert(format!("{path}/900001"));
+            format!("{path}/900001")
         } else {
-            messages.insert(path.to_owned());
-        }
+            path.to_owned()
+        };
+        messages.insert(target.clone());
+        body_calls.push((index, method, target, content.to_owned()));
     }
-    assert_eq!(finals, 1, "one final completed body: {sent:?}");
     assert_eq!(
         messages.len(),
         1,
         "one response message including progress edits: {sent:?}"
     );
     assert!(posts <= 1, "a repeated POST is another response: {sent:?}");
+    let last = body_calls.last().expect("completed body call");
+    assert_eq!(
+        last.3, RESPONSE,
+        "last body call settles the response: {sent:?}"
+    );
+    let finals = body_calls.iter().filter(|call| call.3 == RESPONSE).count();
+    assert!(
+        (1..=2).contains(&finals),
+        "one settle and at most one identical streaming edit: {sent:?}"
+    );
+    for call in &body_calls[..body_calls.len() - 1] {
+        if call.3 == RESPONSE {
+            assert!(
+                call.1 == "PATCH" && call.2 == last.2,
+                "earlier exact body only edits the same target: {sent:?}"
+            );
+        }
+    }
+    assert_eq!(summaries.len(), 1, "one completed turn summary: {sent:?}");
+    assert!(
+        summaries[0] > last.0,
+        "summary follows the last body call: {sent:?}"
+    );
+    eprintln!(
+        "E51_SETTLED finals={finals} summaries=1 last_body={} summary={}",
+        last.0, summaries[0]
+    );
 }

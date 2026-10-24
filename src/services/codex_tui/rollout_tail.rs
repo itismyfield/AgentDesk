@@ -707,10 +707,8 @@ fn explicit_finalize_path(
 
     promote_task_complete_fallback_text(state);
 
-    // Schema-drift guard: an explicit terminal signal without any assistant
-    // text is not enough to emit an empty Done. Fall through to the heuristic
-    // fallback so any subsequent assistant text still has a chance to arrive.
-    if !state.saw_assistant_text {
+    // A bodyless terminal needs the managed input's own native completion witness.
+    if !parser::managed_empty::body_or_verified_empty(state, "body_guard") {
         if !state.explicit_completion_missing_text_warned {
             tracing::warn!(
                 hook_completion_seen = state.hook_completion_seen,
@@ -4607,25 +4605,9 @@ mod tests {
     // check and is only meaningful alongside it.
     #[test]
     fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
-        let source = include_str!("rollout_tail.rs");
-        for entry in [
-            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux",
-            "pub fn tail_warm_followup_rollout_for_tmux",
-            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux",
-        ] {
-            let body = source
-                .split_once(entry)
-                .unwrap_or_else(|| panic!("entry point not found: {entry}"))
-                .1;
-            let body = body
-                .split_once("\n}\n")
-                .expect("entry point body must terminate")
-                .0;
-            assert!(
-                body.contains("discord_handoff_tail_options("),
-                "{entry} builds its own options instead of the shared constructor, so it \
-                 can silently miss terminal_range_eligible"
-            );
-        }
+        let gaps = source_guard_tests::handoff_options_gaps(source_guard_tests::ROLLOUT_TAIL);
+        assert_eq!(gaps, Vec::<String>::new());
     }
+
+    mod source_guard_tests;
 }

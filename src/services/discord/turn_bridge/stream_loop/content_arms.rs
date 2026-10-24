@@ -288,6 +288,7 @@ pub(super) async fn handle_stream_content_message(
                             session_id: sid,
                         } => {
                             let session_died_retry = result == "__session_died_retry__";
+                            if !session_died_retry { ctx.cancel_token.native_stop.completed(); }
                             if session_died_retry {
                                 // Recovery reader requests the generic Discord-history
                                 // auto-retry when the resumed session dies pre-completion.

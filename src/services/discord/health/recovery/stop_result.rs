@@ -14,6 +14,21 @@ pub struct RuntimeTurnStopResult {
 }
 
 impl RuntimeTurnStopResult {
+    pub(crate) fn native_preserved(
+        path: &'static str,
+        queue_depth: usize,
+        mailbox_foreground_free: bool,
+    ) -> Self {
+        Self {
+            lifecycle_path: path,
+            had_active_turn: true,
+            queue_depth,
+            inflight: InflightDisposition::PreservedByNativeStop,
+            termination_recorded: false,
+            mailbox_foreground_free,
+        }
+    }
+
     /// The host guard kept the judged turn: nothing was cancelled, finished or cleared.
     pub(crate) fn preserved_by_host_guard(queue_depth: usize) -> Self {
         Self {
@@ -76,6 +91,8 @@ pub enum InflightDisposition {
     NotNeeded,
     /// The stop was not a legacy one: the row stays for the turn's owner, and no caller clears it.
     PreservedByHostGuard,
+    /// A native stop has not published cancellation; its reader and row remain owned.
+    PreservedByNativeStop,
 }
 
 impl InflightDisposition {

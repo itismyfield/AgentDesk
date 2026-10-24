@@ -162,7 +162,7 @@ const RESTORED_CHANNEL: u64 = 5_340_213;
 // gone: the user's clear closes nothing, retires the execution and releases its hold.
 #[test]
 fn clear_root_replaced_retires_without_close_pg() {
-    use super::super::commands::control::{SoftClearNotifyMode, clear_channel_session_state};
+    use super::super::commands::control::clear_channel_session_state;
     let path = concat!(
         module_path!(),
         "::clear_root_replaced_retires_without_close_pg"
@@ -190,12 +190,15 @@ fn clear_root_replaced_retires_without_close_pg() {
         let key = key(&shared, channel, &provider, None).await.unwrap();
         let bound = herdr::HostedState::Bound;
         let _switches = rig.bind(&pool, &shared.token_hash, &key, bound).await;
+        let root = crate::config::runtime_root().unwrap().display().to_string();
+        sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(hosted_execution, '{owner,runtime_root}', to_jsonb($2::text)), '{source_ref,runtime_root}', to_jsonb($2::text)) WHERE session_key = $1")
+            .bind(&key).bind(root).execute(&pool).await.unwrap();
         rig.restore_shell();
 
         let http = std::sync::Arc::new(poise::serenity_prelude::Http::new(""));
-        let notify = SoftClearNotifyMode::Suppress;
+
         let clear =
-            clear_channel_session_state(&http, &shared, &provider, channel, "/clear", notify);
+            clear_channel_session_state(&http, &shared, &provider, channel, "/clear");
         let reply = clear.await.expect("a clear always commits").reply();
 
         let cleared = super::super::commands::SESSION_CLEARED_RESPONSE;

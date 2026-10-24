@@ -91,7 +91,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/sessions/{session_key}/force-kill",
             "sessions",
-            "Force-kill session and optionally retry",
+            "Force-kill session and optionally retry. With the P11 terminate switch on, a Claude/Codex Herdr execution the session row owns is retired through the terminate service instead of the tmux kill; only then are the session disconnected and the dispatch failed or retried, and the reply adds `termination` with `lifecycle_path: herdr-terminate`.",
         )
         .with_example(
             json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {"retry": true, "reason": "stalled turn"}}),

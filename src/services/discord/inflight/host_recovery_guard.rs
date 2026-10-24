@@ -16,6 +16,8 @@ use crate::services::session_host::{
 };
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
+mod log_state;
+
 pub(in crate::services::discord) fn locator_witness(
     locator: Option<&PersistedHostLocator>,
 ) -> HostWitness {
@@ -39,10 +41,6 @@ pub(in crate::services::discord) fn marker_witness(marker: HostKindMarker) -> Ho
         HostKindMarker::Unrecognized(raw) => HostWitness::Unrecognized(raw),
         HostKindMarker::ReadFailed(error) => HostWitness::ReadFailed(error),
     }
-}
-
-pub(in crate::services::discord) fn tmux_marker_is_known(name: &str) -> bool {
-    read_host_kind_marker(name) == HostKindMarker::Known(HostKind::Tmux)
 }
 
 /// Adds what the inflight row carries without overwriting what the caller read.
@@ -198,18 +196,34 @@ pub(in crate::services::discord) fn teardown_for_lookup(
         effect: AutomaticEffect::Kill,
         observed,
     };
-    match clear_legacy_session(&target, change) {
+    let result = clear_legacy_session(&target, change);
+    let changed = log_state::changed(
+        (
+            provider.as_str(),
+            channel_id,
+            caller,
+            tmux_name,
+            session_key,
+        ),
+        result
+            .as_ref()
+            .err()
+            .map(|verdict| (format!("{verdict:?}"), row_missing, target.host.clone())),
+    );
+    match result {
         Ok(session) => KeyedTeardown::Cleared(session),
         Err(verdict) => {
-            tracing::warn!(
-                caller,
-                tmux_name,
-                session_key,
-                ?verdict,
-                row_missing,
-                host = ?target.host,
-                "host guard refused the keyed teardown"
-            );
+            if changed {
+                tracing::warn!(
+                    caller,
+                    tmux_name,
+                    session_key,
+                    ?verdict,
+                    row_missing,
+                    host = ?target.host,
+                    "host guard refused the keyed teardown"
+                );
+            }
             if row_missing {
                 KeyedTeardown::RowMissing
             } else {
@@ -222,6 +236,10 @@ pub(in crate::services::discord) fn teardown_for_lookup(
 #[cfg(test)]
 #[path = "host_recovery_guard_keyed_tests.rs"]
 pub(super) mod keyed_tests;
+
+#[cfg(test)]
+#[path = "host_recovery_guard_log_tests.rs"]
+mod log_tests;
 
 #[cfg(test)]
 mod tests {

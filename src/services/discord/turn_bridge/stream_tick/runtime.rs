@@ -1,5 +1,37 @@
 use super::*;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Deref};
+
+pub(super) struct ProviderRef<'a>(pub(super) &'a ProviderKind);
+
+impl Deref for ProviderRef<'_> {
+    type Target = ProviderKind;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl ProviderRef<'_> {
+    pub(super) fn clone(&self) -> ProviderKind {
+        self.0.clone()
+    }
+}
+
+pub(super) struct TurnIdRef<'a>(pub(super) &'a str);
+
+impl Deref for TurnIdRef<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl TurnIdRef<'_> {
+    pub(super) fn as_str(&self) -> &str {
+        self.0
+    }
+}
 
 pub(super) struct TickContext<'a> {
     pub(super) shared_owned: &'a Arc<SharedData>,
@@ -8,6 +40,7 @@ pub(super) struct TickContext<'a> {
     pub(super) provider: &'a ProviderKind,
     pub(super) turn_id: &'a str,
     pub(super) stream_tick_expected: &'a crate::services::discord::inflight::InflightTurnIdentity,
+    pub(super) captured_nonce: Option<&'a str>,
     pub(super) status_interval: std::time::Duration,
     pub(super) single_message_panel_footer_mode: bool,
     pub(super) status_panel_started_at: i64,
@@ -108,6 +141,7 @@ pub(super) async fn authorize_visible_mutation(
         provider,
         shared_owned,
         stream_tick_expected,
+        captured_nonce,
         ..
     } = *ctx;
     let provider = ProviderRef(provider);
@@ -141,6 +175,7 @@ pub(super) async fn authorize_visible_mutation(
             pending_current_message_candidate: tick.pending_current_message_candidate,
             bridge_created_response_placeholder_msg_id: tick
                 .bridge_created_response_placeholder_msg_id,
+            captured_nonce,
         },
         caller,
     )

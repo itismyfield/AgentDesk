@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 130
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -25,7 +25,9 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
+| `ADK_CODEX_END_MUTANT` | `src/services/codex_tui/execution_end/mod.rs` | Test-only fault injection; release builds never consult the environment. |
 | `ADK_COLDSTOP_MUTANT` | `src/services/provider/herdr_before_start.rs` |  |
+| `ADK_EMPTY_TERMINAL_MUTANT` | `src/services/codex_tui/rollout_tail/parser/managed_empty.rs`, `src/services/discord/inflight/save_store/identity_gate/runtime_stamp/captured_terminal_admission.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
@@ -41,6 +43,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_P10_3_MUTANT` | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs`, `src/services/provider/cancel_token_claude_interrupt.rs` | Test-only effect mutations run against one binary; production always keeps every fence. |
 | `ADK_QUALITY_ALERT_DRILL_BASE` | `src/services/agent_quality/regression_alerts.rs` | Resolve the drill-down base URL (env override or fallback const). |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
+| `ADK_RECAP_CLEANUP_MUTANT` | `src/services/discord/session_idle_cleanup.rs` | Test-only cleanup mutations; production retains the claim and card guards. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
@@ -48,7 +51,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
-| `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
+| `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
+| `ADK_TEST_FRAME_LEDGER_PATH` | `src/services/tui_input/human_frame/history.rs` | Test subprocesses reopen their parent's temporary ledger to verify restart replay. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
@@ -70,7 +74,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs` |  |
 | `AGENTDESK_CODEX_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` |  |
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
-| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs` |  |
+| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
 | `AGENTDESK_CONFIG` | `src/config.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/settings.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/git/repo_resolver.rs`, `src/services/mcp_config.rs` | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |
@@ -97,6 +101,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_HOOK_RELAY_TEST_ENDPOINT` | `src/services/claude_tui/hook_relay.rs` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_MUTATION` | `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/claude_tui/hook_server/relay_receipts.rs` |  |
 | `AGENTDESK_HOOK_RELAY_TEST_STDOUT_PATH` | `src/services/claude_tui/hook_relay.rs` |  |
+| `AGENTDESK_I7193_MUTANT` | `src/services/provider/native_stop.rs` |  |
 | `AGENTDESK_INSTANCE_ID` | `src/services/cluster/node_registry.rs`, `src/services/tui_prompt_dedupe/binding_context.rs` | Resolve the self instance_id, preferring the value the cluster bootstrap registered (config-driven if present), falling back to the env-var/hostname pair only… |
 | `AGENTDESK_KAKAO_ACCOUNTS` | `src/services/kakao.rs` |  |
 | `AGENTDESK_KAKAO_CALENDAR_ACCOUNTS` | `src/services/kakao/account.rs` | Separate allowlist: enabling calendar never implicitly grants all message accounts. |
@@ -109,9 +114,10 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_MEMENTO_HOOK` | `src/cli/utils.rs` | #2655: marker key that identifies AgentDesk-managed hook entries in a Claude Code `settings.json`. |
 | `AGENTDESK_MEMORY_MERGE_SKILL` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR` | `src/services/routines/migrated.rs` |  |
-| `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs` | Test-only switch naming the one rule a mutation run disables. |
+| `AGENTDESK_N2B_TEST_MUTATION` | `src/services/claude_tui/source_verify.rs`, `src/services/discord/turn_presence/activity/unbound/binding_metadata.rs`, `src/services/tui_o/writer/binding.rs` | Test-only switch naming the one rule a mutation run disables. |
 | `AGENTDESK_OBSIDIAN_AGENTS_SRC` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_OBSIDIAN_SKILL_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
+| `AGENTDESK_OTRANSITION_MUTANT` | `src/services/discord/health/o_transition/automatic.rs`, `src/services/discord/health/o_transition/automatic/termination.rs` |  |
 | `AGENTDESK_POLICY_HARDENING` | `src/engine/loader.rs`, `src/engine/mod.rs` |  |
 | `AGENTDESK_POLICY_TRUST_ENFORCE` | `src/engine/loader.rs` |  |
 | `AGENTDESK_POLICY_TRUST_OVERRIDE` | `src/engine/loader.rs` |  |
@@ -159,7 +165,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `GEMINI_CLIENT_ID` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLIENT_SECRET` | `src/server/mod.rs` | Gemini CLI OAuth app credentials, from env vars or the installed CLI bundle. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/utils.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs`, `src/cli/utils.rs`, `src/config/session_hosts.rs`, `src/services/discord/sidecar_interaction.rs`, `src/services/mcp_config.rs`, `src/services/observability/events.rs`, `src/services/operator_connectors.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs`, `src/services/scheduled_messages.rs`, `src/services/tmux_common.rs` |  |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |

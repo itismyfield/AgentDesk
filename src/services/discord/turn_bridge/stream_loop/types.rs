@@ -57,19 +57,16 @@ impl PinnedTerminalTransport<'_> {
         use crate::services::discord::formatting::ReplaceLongMessageOutcome as Replace;
         use crate::services::tui_o::cutover::{BodySend, claim_then_send};
         use LeaseOutcome::{NotDelivered, Unknown};
-        use terminal_controller_cutover as cutover;
         use terminal_delivery::PinnedBridgeCommit::*;
         let (shared, gateway, provider) = self.source;
-        let (owner, channel, msg) = self.target;
-        let (tmux, body, range) = self.payload;
+        let (_, channel, msg) = self.target;
+        let (tmux, body, _) = self.payload;
         if let Some(admitted) = self.admitted
             && !admitted.parked_current(shared).await
         {
             pinned.release_without_receipt(NotDelivered);
             return (false, false, None);
         }
-        let settle =
-            cutover::begin_pinned_terminal(shared, provider, long, (owner, channel), range);
         let (message_id, failed, fallback) = if long {
             let send = || {
                 send_ordered_long_terminal_response(
@@ -130,7 +127,6 @@ impl PinnedTerminalTransport<'_> {
             admitted.complete_parked_delivery();
         }
         let receipt = committed.then_some(message_id).flatten();
-        settle(receipt, committed);
         (committed, fallback, receipt)
     }
 }
@@ -207,8 +203,9 @@ pub(in super::super) fn persist_pinned_terminal_anchor(
     let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(state);
     let authority = crate::services::discord::inflight::StreamRelayAuthority::from_state(state);
     let (channel, current, len) = (state.channel_id, state.current_msg_id, state.current_msg_len);
+    let (offset, nonce) = (state.turn_start_offset, state.turn_nonce.clone());
     crate::services::discord::inflight::bind_recovery_anchor_if_matches_identity(
-        &provider, channel, &expected, state.turn_start_offset, current, Some(len), anchor.get(), len,
+        &provider, channel, (&expected, offset, nonce.as_deref()), current, Some(len), anchor.get(), len,
         Some(authority), Some(state),
     ) == crate::services::discord::inflight::GuardedSaveOutcome::Saved
 }

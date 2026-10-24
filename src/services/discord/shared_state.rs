@@ -817,13 +817,58 @@ pub(in crate::services::discord) mod restart_lifecycle_tests {
 
         // Both stores of a pair land before the adapter returns, so the matrix
         // cannot see their order. Pin it at the source instead.
-        let source = include_str!("shared_state.rs");
-        for name in "legacy_deferred_rollback legacy_lease_lost legacy_sigterm".split(' ') {
-            let start = source.find(&format!("fn {name}(&self) {{")).expect("fn");
-            let body = &source[start..start + source[start..].find("\n    }\n").expect("end")];
-            let shutdown_at = body.find("self.shutting_down.store").expect("shutdown");
-            let pending_at = body.find("self.restart_pending.store").expect("pending");
-            assert!(shutdown_at < pending_at, "{name} stores shutdown first");
+        assert_eq!(shutdown_first_gaps(SHARED_STATE), Vec::<String>::new());
+    }
+
+    const SHARED_STATE: &str = include_str!("shared_state.rs");
+    const PAIRED_ADAPTERS: [&str; 3] = [
+        "legacy_deferred_rollback",
+        "legacy_lease_lost",
+        "legacy_sigterm",
+    ];
+    const SHUTDOWN: &str = "self.shutting_down.store";
+    const PENDING: &str = "self.restart_pending.store";
+
+    /// Classification 2: inside each paired adapter item, comments excluded, the shutdown
+    /// store precedes the pending store. A lexical tripwire over statement order only.
+    fn shutdown_first_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let lexed = Lexed::new(source);
+        PAIRED_ADAPTERS
+            .into_iter()
+            .filter(|name| {
+                let body = lexed.block(&format!("fn {name}(&self) {{"));
+                let order = body
+                    .as_ref()
+                    .map(|body| (body.find(SHUTDOWN), body.find(PENDING)));
+                !matches!(order, Some((Some(shutdown), Some(pending))) if shutdown < pending)
+            })
+            .map(|name| format!("{name} must store shutdown before pending"))
+            .collect()
+    }
+
+    #[test]
+    fn shutdown_first_guard_rejects_commented_and_reordered_stores() {
+        use crate::services::discord::router::source_guard_support::{forge, swap};
+        use crate::test_support::CommentForgery;
+        let heads = PAIRED_ADAPTERS.map(|name| format!("fn {name}(&self) {{"));
+        for needle in heads.iter().map(String::as_str).chain([SHUTDOWN, PENDING]) {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(SHARED_STATE, needle, forgery);
+                assert!(
+                    !shutdown_first_gaps(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        for adapter in &heads {
+            let at = SHARED_STATE.find(adapter.as_str()).expect("adapter");
+            let swapped = format!(
+                "{}{}",
+                &SHARED_STATE[..at],
+                swap(&SHARED_STATE[at..], SHUTDOWN, PENDING)
+            );
+            assert_eq!(shutdown_first_gaps(&swapped).len(), 1, "{adapter}");
         }
     }
 

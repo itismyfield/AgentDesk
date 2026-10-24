@@ -24,6 +24,8 @@ impl std::error::Error for QueuedTransitionBusyHandoff {}
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
+#[cfg(test)]
+mod initial_fresh_tests;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -71,7 +73,8 @@ pub(crate) struct IntakeSubmission {
     pub(crate) origin: IntakeOrigin,
     pub(crate) preserve_on_cancel: bool,
     pub(crate) has_nonportable_uploads: bool,
-    pub(crate) attachments: Vec<message_handler::AttachmentDescriptor>,
+    pub(in crate::services::discord::router) attachments:
+        Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads:
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
@@ -101,6 +104,8 @@ impl LocalAdmissionPermit {
 
 #[derive(Debug)]
 pub(crate) enum IntakeAdmission {
+    #[cfg(unix)]
+    ConsentHeld(Box<Result<super::herdr_consent::admission::Hold, String>>),
     Local(LocalAdmissionPermit),
     Forwarded {
         target_instance_id: String,
@@ -122,6 +127,13 @@ pub(crate) enum IntakeAdmission {
     DeferredTurnMode(
         Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, String>,
     ),
+}
+
+#[cfg(all(test, unix))]
+impl IntakeAdmission {
+    pub(in crate::services::discord) fn is_local_for_tests(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
 }
 
 /// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
@@ -213,7 +225,7 @@ async fn portable_uploads(
 }
 
 /// The attachments a turn-mode wait queues; without Postgres they cannot be made portable.
-async fn turn_mode_uploads(
+pub(in crate::services::discord::router) async fn turn_mode_uploads(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
     channel_id: &str,
@@ -236,6 +248,13 @@ pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
+    #[cfg(unix)]
+    if let Some(hold) =
+        super::herdr_consent::admission::check(deps, &submission.provider, &submission.request)
+            .await
+    {
+        return IntakeAdmission::ConsentHeld(Box::new(hold));
+    }
     let channel_id = submission.request.channel_id.get().to_string();
     if let Some(pool) = deps.shared.pg_pool.as_ref()
         && replay_starts_dormant(&channel_id)
@@ -288,7 +307,7 @@ pub(crate) async fn admit_text_intake(
     };
     if !home_first
         && let IntakeRoute::Hold(detail) =
-            intake_route::route_for_placement(provider, destination.get())
+            intake_route::for_input_placement(provider, destination.get()).await
     {
         if crate::services::tui_o::cutover::codex_turn_awaited(destination.get()).is_some() {
             return IntakeAdmission::DeferredTurnMode(
@@ -556,6 +575,10 @@ pub(crate) async fn dispatch_text_intake(
 
 /// Only active replay starts defer a live input, so only they hold its checkpoint until custody.
 pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) -> bool {
+    #[cfg(unix)]
+    if super::herdr_consent::endpoint(channel_id.get()).is_some() {
+        return true;
+    }
     !replay_starts_dormant(&channel_id.get().to_string())
 }
 
@@ -578,10 +601,13 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
 ) -> BoxedIntake<'a> {
     Box::pin(async move {
         let admission = admit_text_intake(deps, &submission).await;
-        if !matches!(
-            admission,
-            IntakeAdmission::ReplayDeferred(_) | IntakeAdmission::DeferredTurnMode(_)
-        ) {
+        #[cfg(all(test, unix))]
+        super::herdr_consent::admission::tests::after_preflight(&submission).await;
+        let waits = admission_waits_for_custody(&admission);
+        #[cfg(unix)]
+        let waits =
+            waits || super::herdr_consent::endpoint(submission.request.channel_id.get()).is_some();
+        if !waits {
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
         }
@@ -596,7 +622,10 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
     admission: IntakeAdmission,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
-    if !matches!(admission, IntakeAdmission::DeferredTurnMode(_)) {
+    let waits = matches!(admission, IntakeAdmission::DeferredTurnMode(_));
+    #[cfg(unix)]
+    let waits = waits || matches!(admission, IntakeAdmission::ConsentHeld(_));
+    if !waits {
         return finish_text_intake_admission(deps, admission, submission).await;
     }
     let (provider, request) = (submission.provider.clone(), &submission.request);
@@ -610,6 +639,17 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
         );
     };
     finish_deferred(deps, admission, submission, checkpoint).await
+}
+
+fn admission_waits_for_custody(admission: &IntakeAdmission) -> bool {
+    #[cfg(unix)]
+    if matches!(admission, IntakeAdmission::ConsentHeld(_)) {
+        return true;
+    }
+    matches!(
+        admission,
+        IntakeAdmission::ReplayDeferred(_) | IntakeAdmission::DeferredTurnMode(_)
+    )
 }
 
 /// A deferred input advances its checkpoint only after the queue durably holds it.
@@ -630,6 +670,10 @@ pub(crate) async fn finish_text_intake_admission(
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     match admission {
+        #[cfg(unix)]
+        IntakeAdmission::ConsentHeld(hold) => {
+            super::herdr_consent::admission::hold_live(deps, submission, *hold).await?;
+        }
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
         }
@@ -692,6 +736,17 @@ pub(crate) async fn finish_admitted_local(
         );
         return Ok(super::IntakeExecution::ConsumedProtected);
     }
+    #[cfg(unix)]
+    if let Some(hold) =
+        super::herdr_consent::admission::check(deps, &submission.provider, &submission.request)
+            .await
+    {
+        if matches!(submission.origin, IntakeOrigin::QueuedDrain(_)) {
+            return Err(Box::new(super::herdr_consent::admission::QueuedHold(hold)));
+        }
+        super::herdr_consent::admission::hold_live(deps, submission, hold).await?;
+        return Ok(super::IntakeExecution::Deferred);
+    }
     let preserve_on_cancel = submission.preserve_on_cancel;
     local_turn(deps, submission, preserve_on_cancel).await
 }
@@ -706,6 +761,10 @@ fn local_turn<'a, 'b: 'a>(
     submission: IntakeSubmission,
     preserve_on_cancel: bool,
 ) -> BoxedIntake<'a, super::IntakeExecution> {
+    #[cfg(all(test, unix))]
+    if let Some(result) = super::herdr_consent::admission::tests::final_local(&submission) {
+        return Box::pin(async move { result });
+    }
     let (queued_drain, queued) = match submission.origin {
         IntakeOrigin::QueuedDrain(route) => (true, route),
         _ => (false, None),
@@ -746,7 +805,7 @@ fn defer_with_all_sources<'a, 'b: 'a>(
 
 /// Queues a live input behind the slow backstop, with every absorbed source when asked; true once
 /// the queue durably holds it.
-async fn defer_live_submission(
+pub(in crate::services::discord::router) async fn defer_live_submission(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
     all_sources: bool,
@@ -783,6 +842,17 @@ async fn defer_live_submission(
         intervention.source_message_ids.push(source);
         intervention.source_message_queued_generations.push(queued);
     }
+    #[cfg(unix)]
+    if super::herdr_consent::endpoint(channel_id.get()).is_some() {
+        let origin = if intervention.voice_announcement.is_some() {
+            "Voice".into()
+        } else {
+            format!("{:?}", submission.origin)
+        };
+        for source in &mut intervention.source_message_queued_generations {
+            source.origin = Some(origin.clone());
+        }
+    }
     let outcome = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
         super::super::mailbox_enqueue_intervention(
             deps.shared,
@@ -813,6 +883,10 @@ async fn defer_live_submission(
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
     match admission {
+        #[cfg(unix)]
+        IntakeAdmission::ConsentHeld(_) => {
+            tracing::info!(channel_id, user_msg_id, "consent keeps original custody")
+        }
         IntakeAdmission::Forwarded {
             target_instance_id,
             outbox_id,

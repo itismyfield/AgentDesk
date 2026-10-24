@@ -3,6 +3,8 @@ use chrono::Duration;
 use serde_json::json;
 use sqlx::Row;
 
+type OptionalTimestamp = Option<DateTime<Utc>>;
+
 tokio::task_local! {
     pub(super) static START_TARGET: std::cell::RefCell<Option<(crate::services::provider::ProviderKind, u64, u64)>>;
 }
@@ -88,6 +90,7 @@ async fn insert_agent_message(
     db::insert_scheduled_message_pg(
         pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: format!("scheduled agent payload for {agent_id}"),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -135,6 +138,7 @@ async fn insert_due_push_message(pool: &PgPool) -> ScheduledMessageRow {
     db::insert_scheduled_message_pg(
         pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "guarded push payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -305,6 +309,7 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "Kakao keeps this exact body".to_string(),
             discord_mention_user_ids: vec![
                 "1469509284508340276".to_string(),
@@ -600,6 +605,7 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -688,6 +694,7 @@ async fn postgres_resume_anchor_compat_migration_preserves_active_trigger_now_an
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "legacy trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -805,9 +812,9 @@ async fn postgres_launch_compat_migration_backfills_legacy_turn_as_ambiguous() {
 
     let (started_at, turn_intent_at, launch_committed_at, turn_started_at): (
         DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
+        OptionalTimestamp,
+        OptionalTimestamp,
+        OptionalTimestamp,
     ) = sqlx::query_as(
         "SELECT started_at, turn_intent_at, launch_committed_at, turn_started_at
          FROM scheduled_message_deliveries
@@ -857,6 +864,7 @@ async fn postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_pol
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
+            image_attachment: None,
             content: "agent trigger-now cadence payload".to_string(),
             discord_mention_user_ids: Vec::new(),
             title: None,
@@ -1625,6 +1633,113 @@ async fn postgres_expiry_does_not_terminalize_a_still_live_agent_turn() {
     assert_eq!(deliveries[0].status, "running");
     assert_eq!(deliveries[0].fallback_outbox_id, None);
 
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_image_handoff_requires_loaded_snapshot_and_preserves_bytes() {
+    let (pg_db, pool) =
+        create_test_pool("agentdesk_smsg_image_handoff", "loaded image handoff").await;
+    let message = insert_due_push_message(&pool).await;
+    let bytes = b"\x89PNG\r\n\x1a\n\0\xffhandoff snapshot";
+    sqlx::query("UPDATE scheduled_messages SET image_filename='snapshot.png',image_content_type='image/png',image_data=$1 WHERE id=$2")
+        .bind(&bytes[..]).bind(&message.id).execute(&pool).await.unwrap();
+    let fire = claim_one(&pool, "loaded-image-handoff").await;
+    sqlx::query("UPDATE scheduled_messages SET image_data=$1 WHERE id=$2")
+        .bind(&b"changed definition after claim"[..])
+        .bind(&message.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut unloaded = fire.clone();
+    unloaded.message = db::list_scheduled_messages_pg(
+        &pool,
+        &db::ListFilters {
+            limit: 10,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|row| row.id == message.id)
+    .unwrap();
+    assert!(
+        unloaded
+            .message
+            .image_attachment
+            .as_ref()
+            .unwrap()
+            .data
+            .is_none()
+    );
+    let error = push_handoff::commit(&pool, &unloaded, Utc::now())
+        .await
+        .expect_err("metadata-only image must fail closed at outbox handoff");
+    assert!(matches!(
+        error,
+        push_handoff::PushHandoffError::Invalid("scheduled image bytes are not loaded")
+    ));
+    let mut no_discord = fire.clone();
+    no_discord.message.target_channel_id = None;
+    no_discord.message.provider_targets =
+        Some(json!({"kakao":{"accountId":"default","friendUuids":[],"sendToSelf":true}}));
+    assert!(
+        matches!(
+            push_handoff::commit(&pool, &no_discord, Utc::now()).await,
+            Err(push_handoff::PushHandoffError::Invalid(
+                "image attachment requires a Discord target"
+            ))
+        ),
+        "image handoff must not discard bytes into a provider-only text delivery"
+    );
+    let external: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scheduled_external_delivery_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(external, 0);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "unloaded handoff must not write a text-only outbox row"
+    );
+    assert_eq!(
+        push_handoff::commit(&pool, &fire, Utc::now())
+            .await
+            .unwrap(),
+        push_handoff::PushHandoffOutcome::Committed
+    );
+    let stored: (String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT attachment_filename,attachment_content_type,attachment_data FROM message_outbox",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "snapshot.png");
+    assert_eq!(stored.1, "image/png");
+    assert_eq!(
+        stored.2, bytes,
+        "handoff must preserve the loaded snapshot bytes"
+    );
+    assert_eq!(
+        push_handoff::commit(&pool, &fire, Utc::now())
+            .await
+            .unwrap(),
+        push_handoff::PushHandoffOutcome::Canceled
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "handoff replay must preserve the original durable row"
+    );
     pool.close().await;
     pg_db.drop().await;
 }

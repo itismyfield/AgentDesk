@@ -8,7 +8,6 @@ pub(super) struct StreamChunkState<'a> {
     pub(super) tmux_session_name: &'a str,
     pub(super) channel_id: ChannelId,
     pub(super) watcher_instance_id: u64,
-    pub(super) watcher_thread_channel_id: Option<u64>,
     pub(super) source_authority: WatcherSourceAuthority,
     pub(super) retained_source: bool,
     pub(super) read_witness: Option<SourceWitness>,
@@ -16,11 +15,9 @@ pub(super) struct StreamChunkState<'a> {
     pub(super) off: u64,
     pub(super) file_identity: SourceFileIdentity,
     pub(super) current_offset: &'a mut u64,
-    pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
     pub(super) ready_for_input_tracker: &'a mut crate::services::provider::ReadyForInputIdleTracker,
     pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
     pub(super) all_data: &'a mut String,
-    pub(super) clean_decoded_provenance: &'a mut bool,
     pub(super) all_data_start_offset: &'a mut u64,
     pub(super) state: &'a mut StreamLineState,
     pub(super) full_response: &'a mut String,
@@ -62,7 +59,6 @@ pub(super) fn process_stream_chunk(
         tmux_session_name,
         channel_id,
         watcher_instance_id,
-        watcher_thread_channel_id,
         source_authority,
         retained_source,
         read_witness,
@@ -70,11 +66,9 @@ pub(super) fn process_stream_chunk(
         off,
         file_identity,
         current_offset,
-        last_activity_heartbeat_at,
         ready_for_input_tracker,
         utf8_decoder,
         all_data,
-        clean_decoded_provenance,
         all_data_start_offset,
         state,
         full_response,
@@ -118,20 +112,11 @@ pub(super) fn process_stream_chunk(
         )
     };
     *current_offset = off;
-    maybe_refresh_watcher_activity_heartbeat(
-        shared.pg_pool.as_ref(),
-        &shared.token_hash,
-        watcher_provider,
-        tmux_session_name,
-        watcher_thread_channel_id,
-        last_activity_heartbeat_at,
-    );
     ready_for_input_tracker.record_output();
     let chunk_start = current_offset.saturating_sub(chunk.len() as u64);
     let decoded_chunk =
         utf8_decoder.decode_source_for_buffer(chunk, chunk_start, authority, all_data);
     let authority = authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
-    *clean_decoded_provenance &= !decoded_chunk.mixed_read_provenance;
     // Defer forwarding until parsing attaches the terminal fence.
     let chunk_buffer_was_empty = all_data.is_empty();
     if chunk_buffer_was_empty {

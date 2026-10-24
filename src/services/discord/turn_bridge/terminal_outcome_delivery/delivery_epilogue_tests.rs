@@ -18,6 +18,8 @@ use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::G
 use crate::services::tui_o::channel_policy::SinkOp;
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(unix)]
+mod codex_empty_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
 mod recovery_retry_guard_tests;
@@ -313,10 +315,12 @@ enum DriverCall {
 /// published. Completion is counted separately, by
 /// [`TerminalDeliveryDriver::completed_publications`], and every invariant
 /// about "an answer is already out there" has to be built on THAT.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DriverObservation {
     call: DriverCall,
     marker_at_entry: bool,
+    #[cfg(unix)]
+    content: String,
 }
 
 /// What the driver's terminal replace resolves to.
@@ -378,13 +382,15 @@ impl DriverGateway {
         }
     }
 
-    fn observe(&self, call: DriverCall) {
+    fn observe(&self, call: DriverCall, _content: &str) {
         self.observations
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .push(DriverObservation {
                 call,
                 marker_at_entry: self.marker.load(Ordering::Acquire),
+                #[cfg(unix)]
+                content: _content.to_owned(),
             });
     }
 }
@@ -395,7 +401,7 @@ impl TurnGateway for DriverGateway {
         channel_id: ChannelId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
-        self.observe(DriverCall::Send);
+        self.observe(DriverCall::Send, _content);
         self.sink(channel_id, SinkOp::Post, _content);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
@@ -428,7 +434,7 @@ impl TurnGateway for DriverGateway {
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.observe(DriverCall::Edit);
+        self.observe(DriverCall::Edit, _content);
         self.sink(channel_id, SinkOp::Patch, _content);
         let yields = self.yields_per_call;
         Box::pin(async move {
@@ -442,7 +448,7 @@ impl TurnGateway for DriverGateway {
         _channel_id: ChannelId,
         _message_id: MessageId,
     ) -> GatewayFuture<'a, Result<(), String>> {
-        self.observe(DriverCall::Delete);
+        self.observe(DriverCall::Delete, "");
         let yields = self.yields_per_call;
         Box::pin(async move {
             Yields(yields).await;
@@ -456,7 +462,7 @@ impl TurnGateway for DriverGateway {
         _message_id: MessageId,
         _content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
-        self.observe(DriverCall::Replace);
+        self.observe(DriverCall::Replace, _content);
         self.sink(channel_id, SinkOp::Patch, _content);
         let (yields, behaviour) = (self.yields_per_call, self.replace);
         let completed = Arc::clone(&self.completed_publications);
@@ -1137,6 +1143,7 @@ async fn drive_bridge_stream_tick(
         (None, None, None);
     let (mut adk_heartbeat, mut long_run_heartbeat) =
         (std::time::Instant::now(), std::time::Instant::now());
+    let actor_nonce = baseline.turn_nonce.clone();
     let outcome = run_bridge_stream_tick(
         BridgeStreamTickContext {
             shared_owned: Arc::clone(&driver.shared),
@@ -1145,6 +1152,7 @@ async fn drive_bridge_stream_tick(
             provider: &ProviderKind::Claude,
             turn_id: "terminal-delivery-driver-5191",
             expected_identity: &expected,
+            captured_nonce: actor_nonce.as_deref(),
             status_interval: std::time::Duration::from_secs(3_600),
             single_message_panel_footer_mode: false,
             footer_owner:
@@ -1425,11 +1433,7 @@ async fn o_channel_cancel_uses_destination_and_holds_unknown_kind() {
         let published = driver.published_bodies.lock().unwrap();
         assert_eq!(published.len(), writes, "{name}: {published:?}");
         if writes == 1 {
-            assert!(published[0].contains(&body), "{name}: body preserved");
-            assert!(
-                published[0].contains("[Stopped]"),
-                "{name}: cancel lifecycle preserved"
-            );
+            assert_eq!(published[0], body, "{name}: cancelled body has no footer");
         }
         if held {
             assert!(

@@ -1,4 +1,5 @@
 //! Transport the admitted synthetic actor allocation, not just its nonce.
+use super::admission_fence::AdmissionFence;
 use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     self as session_actor, HookSessionActorPin,
@@ -30,15 +31,17 @@ pub(super) enum AdmissionClass {
     Construction,
     /// A row for this anchor exists: re-adopting its episode, whatever token.
     PersistedAdoption {
-        pin: InflightEpisodePin,
+        pin: Box<InflightEpisodePin>,
         row_nonce: Option<String>,
     },
 }
 
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
+
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<TestPause> =
+    Mutex::new(None);
 
 #[cfg(test)]
 pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
@@ -48,7 +51,7 @@ pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
 /// One-shot test pause: parks `channel`'s claim until the test resumes it.
 #[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay) async fn pause_for_test(
-    slot: &Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    slot: &Mutex<TestPause>,
     channel: ChannelId,
 ) {
     let pause = {
@@ -120,29 +123,36 @@ pub(super) async fn capture_session_pin(
 }
 
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static PREPARE_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+pub(in crate::services::discord::tui_prompt_relay) static PREPARE_PAUSE: Mutex<TestPause> =
+    Mutex::new(None);
 
-type Prepared = (
-    Arc<CancelToken>,
-    Option<HookSessionActorPin>,
-    AdmissionClass,
-);
+pub(super) struct PreparedAdmission<'a> {
+    pub(super) token: Arc<CancelToken>,
+    pub(super) pg_pin: Option<HookSessionActorPin>,
+    pub(super) class: AdmissionClass,
+    pub(super) fence: AdmissionFence<'a>,
+}
 
 /// Preserve a detached live allocation before entering a mailbox slot.
 /// Construction only while no row for this anchor exists; a retained or fresh
 /// token over such a row is a re-adoption of the row's episode (I21).
-pub(super) async fn prepare_admission(
-    shared: &Arc<SharedData>,
+pub(super) async fn prepare_admission<'a>(
+    shared: &'a Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
+    logical: &str,
     anchor: MessageId,
     lease: &ExternalInputRelayLease,
-) -> Result<Prepared, String> {
+    borrowed: Option<&'a tokio::sync::OwnedMutexGuard<()>>,
+) -> Result<PreparedAdmission<'a>, String> {
+    let fence =
+        AdmissionFence::capture(shared, provider, channel, logical, lease, borrowed).await?;
     let pg_pin = capture_session_pin(shared, lease.session_key.as_deref()).await?;
-    let row = super::super::super::inflight::load_inflight_state_read_only(provider, channel.get())
-        .filter(|row| row.user_msg_id == anchor.get());
+    let row = super::super::super::inflight::load_inflight_state_read_only_result(
+        provider,
+        channel.get(),
+    )?
+    .filter(|row| row.user_msg_id == anchor.get());
     let retained = row
         .as_ref()
         .map(retained_actor)
@@ -150,21 +160,21 @@ pub(super) async fn prepare_admission(
         .map_err(|()| "synthetic original actor proof changed")?;
     let class = match row {
         Some(row) => AdmissionClass::PersistedAdoption {
-            pin: InflightEpisodePin::from_state(&row),
+            pin: Box::new(InflightEpisodePin::from_state(&row)),
             row_nonce: row.turn_nonce,
         },
         None => AdmissionClass::Construction,
     };
-    // The caller admits right after this returns, with no await in between.
     #[cfg(test)]
     pause_for_test(&PREPARE_PAUSE, channel).await;
-    Ok((
-        retained
+    Ok(PreparedAdmission {
+        token: retained
             .flatten()
             .unwrap_or_else(|| Arc::new(CancelToken::new())),
         pg_pin,
         class,
-    ))
+        fence,
+    })
 }
 
 /// Enter the slot as a background turn. A re-adoption is fenced on the row's
@@ -172,13 +182,17 @@ pub(super) async fn prepare_admission(
 pub(super) async fn admit_kinded(
     shared: &Arc<SharedData>,
     channel: ChannelId,
-    token: Arc<CancelToken>,
+    prepared: &PreparedAdmission<'_>,
     owner: serenity::UserId,
     anchor: MessageId,
-    class: &AdmissionClass,
 ) -> bool {
+    if let Err(error) = prepared.fence.revalidate().await {
+        tracing::warn!(%error, "synthetic execution changed before actor admission");
+        return false;
+    }
+    let token = prepared.token.clone();
     let background = crate::services::turn_orchestrator::ActiveTurnKind::Background;
-    let AdmissionClass::PersistedAdoption { row_nonce, .. } = class else {
+    let AdmissionClass::PersistedAdoption { row_nonce, .. } = &prepared.class else {
         return super::super::super::mailbox_try_start_turn_kinded(
             shared, channel, token, owner, anchor, background,
         )
@@ -210,23 +224,64 @@ pub(super) async fn refresh_existing(
     lease: &ExternalInputRelayLease,
     relay_owner: ExternalInputRelayOwner,
     owner_kind: RelayOwnerKind,
-    admission: (Option<&Arc<CancelToken>>, bool),
+    admission: (Option<&Arc<CancelToken>>, bool, &AdmissionFence<'_>),
     pg_pin: Option<HookSessionActorPin>,
 ) -> TuiDirectSyntheticTurnClaim {
-    let (actor, freshly_admitted) = admission;
+    let (actor, freshly_admitted, fence) = admission;
     use super::super::super::inflight;
     let pg_pin = original_session_pin(&row, actor).unwrap_or(pg_pin);
+    // Pin, nonce and version of the episode as classified, fixed before any mutation below.
+    let original = row.clone();
     let expected = inflight::InflightTurnIdentity::from_state(&row);
     let start = row.turn_start_offset.unwrap_or(row.last_offset);
+    if !row_matches_fence(&row, lease, fence).await {
+        if freshly_admitted {
+            release_unrecorded_actor(shared, &row, actor, false).await;
+        }
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start);
+    }
+    if let Some((record_id, nonce)) = fence.hosted_identity() {
+        row.hosted_record_id = Some(record_id);
+        row.hosted_execution_nonce = Some(nonce);
+        if row.session_id.is_none() {
+            row.session_id = lease
+                .hosted_source
+                .as_ref()
+                .map(|pin| pin.source.session_id.clone());
+        }
+    }
     row.turn_nonce = actor.and_then(|actor| actor.turn_nonce().map(str::to_owned));
     row.set_relay_owner_kind(owner_kind);
     row.restamp_external_turn_lease(lease);
-    // Preserve the original source boundary and both consumed/delivered progress.
-    let saved = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
-        &row,
-        &expected,
-        "tui_direct_synthetic_refresh",
+    #[cfg(test)]
+    pause_for_test(&PREPARE_PAUSE, ChannelId::new(row.channel_id)).await;
+    if let Err(error) = fence.revalidate().await {
+        tracing::warn!(%error, "synthetic execution changed before row refresh");
+        if freshly_admitted {
+            release_unrecorded_actor(shared, &row, actor, false).await;
+        }
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start);
+    }
+    let anchor = (
+        ChannelId::new(row.channel_id),
+        MessageId::new(row.user_msg_id),
     );
+    let actor_current = match actor {
+        Some(actor) => actor_is_current(shared, anchor.0, anchor.1, actor).await,
+        None => false,
+    };
+    // Preserve the original source boundary and both consumed/delivered progress.
+    let saved = if !actor_current {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if row.turn_nonce == original.turn_nonce {
+        inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+            &row,
+            &expected,
+            "tui_direct_synthetic_refresh",
+        )
+    } else {
+        original.save_admitted_nonce_transition(&row, "tui_direct_synthetic_refresh")
+    };
     let claimed = if saved == GuardedSaveOutcome::Saved {
         record_admitted(shared, &row, actor, pg_pin, freshly_admitted).await
     } else {
@@ -236,6 +291,43 @@ pub(super) async fn refresh_existing(
         false
     };
     TuiDirectSyntheticTurnClaim::new(relay_owner, claimed, start)
+}
+
+async fn row_matches_fence(
+    row: &InflightTurnState,
+    lease: &ExternalInputRelayLease,
+    fence: &AdmissionFence<'_>,
+) -> bool {
+    let Some((record_id, nonce)) = fence.hosted_identity() else {
+        return row.hosted_record_id.is_none() && row.hosted_execution_nonce.is_none();
+    };
+    if row.hosted_record_id.is_some_and(|id| id != record_id)
+        || row
+            .hosted_execution_nonce
+            .as_ref()
+            .is_some_and(|saved| saved != &nonce)
+    {
+        return false;
+    }
+    let Some(pin) = lease.hosted_source.as_ref() else {
+        return false;
+    };
+    if row
+        .session_id
+        .as_ref()
+        .is_some_and(|session| session != &pin.source.session_id)
+    {
+        return false;
+    }
+    let Some(output) = row.output_path.as_deref() else {
+        return false;
+    };
+    fence
+        .matches_source(
+            Path::new(output),
+            Some(row.session_id.as_deref().unwrap_or(&pin.source.session_id)),
+        )
+        .await
 }
 
 pub(super) async fn record_admitted(
@@ -701,6 +793,42 @@ async fn capture_dormant(
     }) {
         return None;
     }
+    let mut lease = live_lease
+        .clone()
+        .unwrap_or_else(|| ExternalInputRelayLease::unassigned(Some(row.channel_id)));
+    lease.turn_id = row.external_turn_id.clone();
+    lease.session_key = row.session_key.clone();
+    lease.runtime_kind = row.runtime_kind;
+    lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+    if lease.hosted_source.is_none() {
+        lease.hosted_source = row
+            .session_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .zip(
+                row.hosted_execution_nonce
+                    .as_deref()
+                    .filter(|value| !value.is_empty()),
+            )
+            .and_then(|execution| {
+                crate::services::tui_prompt_dedupe::hosted_source::restore(
+                    provider.as_str(),
+                    tmux,
+                    row.channel_id,
+                    &(
+                        output.to_string_lossy().into_owned(),
+                        row.turn_start_offset?,
+                    ),
+                    execution,
+                )
+            });
+    }
+    let fence = AdmissionFence::capture(shared, &provider, channel, tmux, &lease, None)
+        .await
+        .ok()?;
+    if !row_matches_fence(row, &lease, &fence).await {
+        return None;
+    }
     let captured_pg_pin = capture_session_pin(shared, row.session_key.as_deref())
         .await
         .ok()?;
@@ -716,11 +844,14 @@ async fn capture_dormant(
     } else {
         current.response_sent_offset < current.full_response.len()
     };
-    if !resumable_body || current.terminal_delivery_committed {
+    if !resumable_body
+        || current.terminal_delivery_committed
+        || !row_matches_fence(current, &lease, &fence).await
+    {
         return None;
     }
     let snapshot = super::super::super::mailbox_snapshot(shared, channel).await;
-    let actor = if let Some(actor) = snapshot.cancel_token {
+    let (actor, freshly_admitted) = if let Some(actor) = snapshot.cancel_token {
         let proven = CLAIMS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -735,7 +866,7 @@ async fn capture_dormant(
         if !proven || actor.cancelled.load(Ordering::Relaxed) {
             return None;
         }
-        actor
+        (actor, false)
     } else {
         // Re-admit the original allocation while its proof remains live.
         let retained = retained_actor(row).ok()?;
@@ -751,6 +882,9 @@ async fn capture_dormant(
                 row.turn_nonce.clone(),
             ))
         });
+        if fence.revalidate().await.is_err() {
+            return None;
+        }
         if !super::super::super::mailbox_try_start_turn(
             shared,
             channel,
@@ -766,20 +900,19 @@ async fn capture_dormant(
         shared
             .turn_start_times
             .insert(channel, std::time::Instant::now());
-        actor
+        (actor, true)
     };
     let pg_pin = original_session_pin(locked.state(), Some(&actor)).unwrap_or(captured_pg_pin);
-    if !record(locked.state(), Some(&actor), pg_pin) {
-        release_unrecorded_actor(shared, locked.state(), Some(&actor), true).await;
+    #[cfg(test)]
+    pause_for_test(&PREPARE_PAUSE, channel).await;
+    if fence.revalidate().await.is_err() || !record(locked.state(), Some(&actor), pg_pin) {
+        if freshly_admitted {
+            release_unrecorded_actor(shared, locked.state(), Some(&actor), true).await;
+        }
         return None;
     }
     let current = locked.state().clone();
     drop(locked);
-    let mut lease = ExternalInputRelayLease::unassigned(Some(row.channel_id));
-    lease.turn_id = row.external_turn_id.clone();
-    lease.session_key = row.session_key.clone();
-    lease.runtime_kind = row.runtime_kind;
-    lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
     let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
         provider.as_str(),
         tmux,

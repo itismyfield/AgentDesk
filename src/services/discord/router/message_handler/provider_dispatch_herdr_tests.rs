@@ -57,6 +57,10 @@ struct Launcher {
 type PaneRead = (String, HostedLocation, std::sync::mpsc::Sender<PaneReading>);
 
 impl HerdrLaunchHost for Launcher {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        crate::config::session_hosts::EndpointMode::LegacyDedicated
+    }
+
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
         RestoreResume::Off {
             witness: ServerWitness::for_test(1),
@@ -222,13 +226,30 @@ impl Fixture {
             .unwrap();
             (db, pool)
         });
+        let rig = HerdrRig::start();
+        rig.answer(
+            "pane.read",
+            json!({
+                "type": "pane_read",
+                "read": {
+                    "pane_id": PANE,
+                    "source": "recent_unwrapped",
+                    "text": include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/tests/fixtures/tui_input/claude-2.1.293-idle.txt"
+                    )),
+                    "revision": 1,
+                    "truncated": false,
+                },
+            }),
+        );
         Self {
             ingress,
             rt,
             db: Some(db),
             pool,
             owner,
-            rig: HerdrRig::start(),
+            rig,
             cwd: tempfile::tempdir().unwrap(),
             started: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -405,7 +426,7 @@ impl Fixture {
             return;
         }
         let session = &started.session;
-        let user = json!({"type": "user", "sessionId": session,
+        let user = json!({"type": "user", "sessionId": session, "timestamp": chrono::Utc::now().to_rfc3339(),
             "message": {"role": "user", "content": "질문"}});
         append(&started.path, &[user]);
         let payload =
@@ -426,13 +447,22 @@ impl Fixture {
         ports: &Ports<'_>,
         claude: impl FnOnce(),
     ) -> (Result<(), String>, Vec<StreamMessage>) {
+        self.turn_on_token(row, ports, Arc::new(CancelToken::new()), claude)
+    }
+
+    fn turn_on_token(
+        &self,
+        row: &HostedRecord,
+        ports: &Ports<'_>,
+        cancel: Arc<CancelToken>,
+        claude: impl FnOnce(),
+    ) -> (Result<(), String>, Vec<StreamMessage>) {
         // The receiver stays on this thread; the executor takes only what it shares.
         let (rt, rig, pool) = (&self.rt, &self.rig, &self.pool);
         let (owner, endpoint, cwd) = (self.owner.clone(), self.endpoint(), self.cwd.path());
         let finished = &self.finished;
         finished.store(false, Ordering::SeqCst);
         let log_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
-        let cancel = Arc::new(CancelToken::new());
         *self.cancel.lock().unwrap() = cancel.clone();
         let token = cancel.clone();
         let (strict, attempts) = (self.strict.load(Ordering::SeqCst), &self.attempts);
@@ -1108,7 +1138,7 @@ fn a_matched_bound_execution_takes_one_prompt_pg() {
     };
     let (result, messages) = fx.turn(&record, &fx.ports(&launcher), || {
         if wait_for(&fx.finished, "the prompt", || fx.rig.sends().len() == 2) {
-            let user = json!({"type": "user", "sessionId": started.session,
+            let user = json!({"type": "user", "sessionId": started.session, "timestamp": chrono::Utc::now().to_rfc3339(),
                 "message": {"role": "user", "content": "질문"}});
             append(&started.path, &[user]);
             let answer = json!({"type": "assistant", "sessionId": started.session, "message": {
@@ -1225,6 +1255,7 @@ fn dispatch(switch: Option<bool>) -> Result<(), String> {
         system_prompt: None,
         allowed_tools: &[],
         cancel: Arc::new(CancelToken::new()),
+        codex_observation: None,
         remote_profile: None,
         tmux_session_name: Some("AgentDesk-claude-dash"),
         teardown: None,
@@ -1387,3 +1418,6 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
 
 #[path = "provider_dispatch_live_end_tests.rs"]
 pub(super) mod live_end;
+
+#[path = "provider_dispatch_herdr_start_offset_tests.rs"]
+mod start_offset_tests;

@@ -11,6 +11,7 @@ use super::{
     ChannelMailboxState, Intervention, InterventionMode, QueuePersistenceContext,
     SourceMessageQueuedGeneration, SourceMessageTextSegment,
 };
+use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
 mod queued_recovery;
@@ -320,7 +321,6 @@ fn created_at_wall_time_ms_from_instant(
         .unwrap_or(reference_wall_time);
     system_time_to_unix_millis(created_at_wall_time)
 }
-
 fn created_at_instant_from_wall_time_ms(
     created_at_wall_time_ms: Option<u64>,
     reference_wall_time: SystemTime,
@@ -348,7 +348,6 @@ fn created_at_instant_from_wall_time_ms(
             .unwrap_or(reference_instant),
     }
 }
-
 pub(super) fn pending_queue_item_from_intervention(
     intervention: &Intervention,
     channel_id: ChannelId,
@@ -365,6 +364,7 @@ pub(super) fn pending_queue_item_from_intervention(
             enqueued_at_epoch_us: owner.enqueued_at_epoch_us,
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
+            origin: owner.origin,
         })
         .collect();
     let source_text_segments: Vec<PendingQueueSourceTextSegment> = intervention
@@ -476,7 +476,7 @@ fn save_channel_queue_locked(
         ));
     }
     if queue.is_empty() && meta.is_none() {
-        return match fs::remove_file(&path) {
+        return match fs::remove_file(&path).map(|()| runtime_store::sync_removed(&path)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
@@ -509,12 +509,11 @@ fn save_channel_queue_locked(
         .collect();
     let json = super::queued_head::snapshot_json(items, meta)
         .map_err(|error| format!("serialize pending queue {}: {error}", path.display()))?;
-    let context =
-        crate::services::discord::runtime_store::AtomicWriteContext::new("discord_pending_queue")
-            .provider(provider.as_str())
-            .token_hash(token_hash)
-            .channel_id(channel_id.get());
-    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)?;
+    let context = runtime_store::AtomicWriteContext::new("discord_pending_queue")
+        .provider(provider.as_str())
+        .token_hash(token_hash)
+        .channel_id(channel_id.get());
+    runtime_store::critical_publish(&path, &json, context)?;
     #[cfg(test)]
     if post_save_fault::take(channel_id) {
         return Err(format!(
@@ -605,13 +604,11 @@ pub(crate) fn save_channel_pending_dispatch_marker(
     );
     let json = serde_json::to_string_pretty(&item)
         .map_err(|error| format!("serialize pending dispatch {}: {error}", path.display()))?;
-    let context = crate::services::discord::runtime_store::AtomicWriteContext::new(
-        "discord_pending_dispatch",
-    )
-    .provider(provider.as_str())
-    .token_hash(token_hash)
-    .channel_id(channel_id.get());
-    crate::services::discord::runtime_store::critical_atomic_write(&path, &json, context)
+    let context = runtime_store::AtomicWriteContext::new("discord_pending_dispatch")
+        .provider(provider.as_str())
+        .token_hash(token_hash)
+        .channel_id(channel_id.get());
+    runtime_store::critical_publish(&path, &json, context)
 }
 
 pub(super) fn remove_channel_pending_dispatch_marker(
@@ -622,7 +619,7 @@ pub(super) fn remove_channel_pending_dispatch_marker(
     let Some(path) = pending_dispatch_marker_file_path(provider, token_hash, channel_id) else {
         return Ok(());
     };
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| runtime_store::sync_removed(&path)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -661,7 +658,7 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
             if !path.is_file() {
                 continue;
             }
-            match fs::remove_file(&path) {
+            match fs::remove_file(&path).map(|()| runtime_store::sync_removed(&path)) {
                 Ok(()) => removed += 1,
                 Err(error) => tracing::warn!(
                     provider = provider.as_str(),
@@ -674,7 +671,6 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     }
     removed
 }
-
 pub(super) fn pending_queue_item_to_intervention(
     item: PendingQueueItem,
     reference_wall_time: SystemTime,
@@ -711,6 +707,7 @@ pub(super) fn pending_queue_item_to_intervention(
             enqueued_at_epoch_us: owner.enqueued_at_epoch_us.or(legacy_enqueued_us),
             preserve_on_cancel: owner.preserve_on_cancel,
             route: owner.route,
+            origin: owner.origin,
         })
         .collect();
     for message_id in &source_message_ids {
@@ -724,6 +721,7 @@ pub(super) fn pending_queue_item_to_intervention(
                 enqueued_at_epoch_us: legacy_enqueued_us,
                 preserve_on_cancel: false,
                 route: None,
+                origin: None,
             });
         }
     }
@@ -870,7 +868,7 @@ pub(crate) fn load_pending_dispatch_markers(
         })
         .collect()
 }
-
+#[cfg(test)]
 pub(super) fn load_channel_pending_queue(
     provider: &ProviderKind,
     token_hash: &str,

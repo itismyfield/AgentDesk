@@ -18,7 +18,7 @@ use crate::services::claude_tui::hook_server::subscribe_hook_events;
 use crate::services::memory::TokenUsage;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::tui_prompt_dedupe::{
-    ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt,
+    ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt, hosted_source,
 };
 use tracing::Instrument;
 
@@ -74,7 +74,7 @@ pub(crate) use rehydration::run_codex_rehydrate_pass_for_tests;
 
 mod anchor_completion;
 mod bridge_completion;
-mod bridge_gateway;
+pub(in crate::services::discord) mod bridge_gateway;
 use self::anchor_completion::{
     DeferredAnchorCompletionDrain, decide_deferred_anchor_completion_drain,
 };
@@ -304,12 +304,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // never needs to repair pre-publish lease/SSH state. A missing or lagged
     // receiver therefore cannot strand a local `/compact` relay lease.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
-    let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
-        tracing::debug!(
-            provider = %prompt.provider,
-            tmux_session_name = %prompt.tmux_session_name,
-            "skipping SSH-direct TUI prompt notify; no Discord channel mapping"
-        );
+    let candidate = owner_channel_for_prompt(shared, &prompt);
+    let Some(channel_id) = hosted_source::adoption_channel(shared, &prompt, candidate).await else {
         return;
     };
     if prompt.steer_echo {
@@ -428,7 +424,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // #3811: TUI-direct is an id-0 synthetic turn — clear any stale interactive 요청 anchor.
     let live_events = &shared.ui.placeholder_live_events;
     live_events.set_turn_request_anchor(channel_id, None, None);
-    let recap_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
     let mut lease = record_observed_external_turn_lease(shared, &prompt, channel_id);
     // #3041 P1-4 codex: arm an early-return RAII guard the instant the lease is
     // recorded — every failure early-return below would otherwise leave the lease set
@@ -455,34 +450,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     };
     let notify_http = task_gate.notify_http;
     let task_card_anchor = task_gate.card_anchor;
-    // A TUI-direct prompt has now been observed for this channel. Bump idle
-    // recap generation before the pre-claim clear so an in-flight recap POST job
-    // cannot persist a stale card after a deferred/local-only/aborted synthetic
-    // start path (#3296, #3878).
-    if let Some(pool) = shared.pg_pool.as_ref().cloned() {
-        if let Err(e) = super::idle_recap::bump_turn_generation(
-            &pool,
-            channel_id.get(),
-            &recap_provider,
-            lease.session_key.as_deref(),
-        )
-        .await
-        {
-            tracing::warn!(
-                error = %e,
-                channel_id = channel_id.get(),
-                provider = %recap_provider.as_str(),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                "idle_recap: failed to bump turn generation on TUI-direct observation"
-            );
-        }
-        super::idle_recap::spawn_clear_captured_idle_recap_for_channel(
-            notify_http.clone(),
-            pool,
-            channel_id.get(),
-        )
-        .await;
-    }
     // #3164 / #750 invariant: the `⏳` MUST be added by the SAME bot identity that
     // later removes it (the shared reaction remove path only removes `@me`; a
     // different bot leaves the hourglass forever). The note BODY may be any bot
@@ -654,7 +621,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
         // neutral note cannot claim the mailbox if this seam is called accidentally.
         deferred_synthetic_start = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
             shared,
-            &prompt.provider,
             channel_id,
             &prompt,
             anchor_message_id,

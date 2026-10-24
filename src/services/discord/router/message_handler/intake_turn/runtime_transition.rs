@@ -38,26 +38,9 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     ) = requeue;
     // Busy queued drains return their already owned uploads to the restore owner.
     // Fresh input keeps the durable tail enqueue and slow wake policy.
-    let admits = crate::services::discord::commands::native_clear_admits;
-    let admitted = match try_intake_runtime_transition_after_redirect(
-        shared,
-        channel_id,
-        fallback_state,
-    )
-    .await
-    {
-        Ok(mut t) => admits(
-            http,
-            shared,
-            provider,
-            channel_id,
-            &mut t.state,
-            &mut t.recovered_fresh,
-        )
+    let admitted = try_intake_runtime_transition_after_redirect(shared, channel_id, fallback_state)
         .await
-        .then_some(t),
-        Err(_) => None,
-    };
+        .ok();
     match admitted {
         Some(transition) => Ok(Some(transition)),
         None => {
@@ -103,9 +86,6 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     }
 }
 
-#[cfg(all(test, unix))]
-mod native_hold_tests;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +93,49 @@ mod tests {
         pre_admission_control_tests::{fixture, session_with},
         take_channel_input_state,
     };
+    const RUNTIME_TRANSITION: &str = include_str!("runtime_transition.rs");
+    const FORWARD_OWNED: &str = "                pending_uploads,";
+
+    /// Classification 2: production text before the unit tests, comments excluded. The
+    /// busy handoff forwards its owned uploads and never takes session input state.
+    fn handoff_ownership_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let lexed = Lexed::new(source);
+        let Some(end) = lexed.find("#[cfg(test)]") else {
+            return vec!["missing the unit-test boundary".to_string()];
+        };
+        let src = lexed.slice(0..end);
+        let mut gaps = Vec::new();
+        if src.text().contains("take_channel_input_state") {
+            gaps.push("handoff must not take session state".to_string());
+        }
+        if !src.contains(FORWARD_OWNED) {
+            gaps.push("handoff must forward its owned pending uploads".to_string());
+        }
+        gaps
+    }
+
+    #[test]
+    fn handoff_ownership_guard_ignores_comments() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        for forgery in CommentForgery::ALL {
+            let forged = forge(RUNTIME_TRANSITION, FORWARD_OWNED, forgery);
+            assert!(forged.contains(FORWARD_OWNED));
+            assert_eq!(handoff_ownership_gaps(&forged).len(), 1, "{forgery:?}");
+        }
+        let take = "take_channel_input_state(shared, channel_id)";
+        let prose = RUNTIME_TRANSITION.replacen(
+            FORWARD_OWNED,
+            &format!("{FORWARD_OWNED} // {take}\n/* outer /* {take} */ */"),
+            1,
+        );
+        assert_eq!(handoff_ownership_gaps(&prose), Vec::<String>::new());
+        let coded =
+            RUNTIME_TRANSITION.replacen(FORWARD_OWNED, &format!("{FORWARD_OWNED} {take},"), 1);
+        assert_eq!(handoff_ownership_gaps(&coded).len(), 1);
+    }
+
     fn route(target: ChannelId) -> super::super::adk_thread::Route {
         super::super::adk_thread::Route {
             target,
@@ -153,9 +176,7 @@ mod tests {
         let core = shared.core.lock().await;
         assert_eq!(core.sessions[&channel].pending_uploads, ["U2"]);
         assert!(core.sessions[&channel].cleared, "busy handoff must preserve cleared");
-        let src = include_str!("runtime_transition.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(!src.contains("take_channel_input_state"), "handoff must not take session state");
-        assert!(src.contains("                pending_uploads,"));
+        assert_eq!(handoff_ownership_gaps(RUNTIME_TRANSITION), Vec::<String>::new());
     }
     #[tokio::test]
     async fn queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads() {

@@ -16,6 +16,7 @@ mod herdr_row_end;
 mod identity;
 pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;
+mod snapshot;
 #[cfg(unix)]
 pub(in crate::services::discord) use identity::clear_admitted_restart_terminal;
 pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
@@ -41,6 +42,7 @@ pub(in crate::services::discord) use self::reconcile_gate::{
 };
 
 use super::*;
+use crate::services::discord::runtime_store::durable_publish::sync_moved;
 
 pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> bool {
     let Some(root) = inflight_runtime_root() else {
@@ -57,7 +59,7 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
         return false;
     }
     log_inflight_remove_for_path(provider, channel_id, "clear_inflight_state", &path);
-    fs::remove_file(path).is_ok()
+    fs::remove_file(&path).map(|()| sync_removed(&path)).is_ok()
 }
 
 /// Outcome of an explicit-signal cleanup attempt that is guarded against
@@ -179,18 +181,7 @@ pub(in crate::services::discord) fn clear_inflight_state_for_snapshot(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
 ) -> GuardedClearOutcome {
-    let Some(root) = inflight_runtime_root() else {
-        return GuardedClearOutcome::Missing;
-    };
-    clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
-        &root,
-        provider,
-        snapshot.channel_id,
-        &InflightTurnIdentity::from_state(snapshot),
-        snapshot.effective_finalizer_turn_id(),
-        (&snapshot.updated_at, snapshot.save_generation),
-        Some(&super::InflightEpisodePin::from_state(snapshot)),
-    )
+    GuardedClearOutcome::for_snapshot_with_detail(provider, snapshot).0
 }
 
 pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matches_identity(
@@ -286,7 +277,10 @@ pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
         &path,
     );
     match fs::rename(&path, &archive_path) {
-        Ok(()) => GuardedClearOutcome::Cleared,
+        Ok(()) => {
+            sync_moved(root.parent().unwrap_or(root), &path, &archive_path);
+            GuardedClearOutcome::Cleared
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
             tracing::warn!(
@@ -442,7 +436,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_in_root(
         "clear_inflight_state_if_matches",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -522,7 +516,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_zero_owned_i
         "clear_inflight_state_if_matches_zero_owned",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -546,7 +540,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
     expected_updated_at: &str,
     expected_save_generation: u64,
 ) -> GuardedClearOutcome {
-    clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
+    snapshot::clear_if_matches_generation_and_episode_in_root(
         root,
         provider,
         channel_id,
@@ -555,72 +549,12 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
         (expected_updated_at, expected_save_generation),
         None,
     )
-}
-
-fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
-    root: &std::path::Path,
-    provider: &ProviderKind,
-    channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_finalizer_turn_id: u64,
-    expected_generation: (&str, u64),
-    expected_episode: Option<&super::InflightEpisodePin>,
-) -> GuardedClearOutcome {
-    let (expected_updated_at, expected_save_generation) = expected_generation;
-    let path = inflight_state_path(root, provider, channel_id);
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return GuardedClearOutcome::IoError;
-    };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedClearOutcome::Missing;
-    };
-    if super::raw_before_start_receipt(&data) && !super::receipt_mutant("clear") {
-        return GuardedClearOutcome::IoError;
-    }
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedClearOutcome::Missing;
-    };
-    if state.restart_mode.is_some() {
-        return GuardedClearOutcome::PlannedRestartSkipped;
-    }
-    if state.rebind_origin {
-        return GuardedClearOutcome::RebindOriginSkipped;
-    }
-    if expected_episode.is_some_and(|episode| !episode.matches_state(&state))
-        || expected_finalizer_turn_id == 0
-        || !state.matches_finalizer_turn_id(expected_finalizer_turn_id)
-        || !expected.matches_state(&state)
-        || state.updated_at != expected_updated_at
-        || state.save_generation != expected_save_generation
-    {
-        return GuardedClearOutcome::UserMsgMismatch;
-    }
-    log_inflight_remove(
-        provider,
-        channel_id,
-        state.user_msg_id,
-        "clear_inflight_state_if_matches_identity_generation",
-        &path,
-    );
-    match remove_row(&path) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id,
-                expected_user_msg_id = expected.user_msg_id,
-                expected_finalizer_turn_id,
-                error = %error,
-                "inflight generation-guarded clear remove_file failed; treating as IoError so sweeper retries"
-            );
-            GuardedClearOutcome::IoError
-        }
-    }
+    .0
 }
 
 /// Removes a locked row's file; a peer's earlier removal is `Missing`.
 fn remove_row(path: &std::path::Path) -> std::io::Result<GuardedClearOutcome> {
-    match fs::remove_file(path) {
+    match fs::remove_file(path).map(|()| sync_removed(path)) {
         Ok(()) => Ok(GuardedClearOutcome::Cleared),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(GuardedClearOutcome::Missing)
@@ -669,7 +603,7 @@ pub(super) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evi
         "clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -748,7 +682,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
 
     let mirrored_delivery = match serde_json::to_string_pretty(&delivered_state)
         .map_err(|error| error.to_string())
-        .and_then(|json| atomic_write(&path, &json))
+        .and_then(|json| store::publish_row(&path, &json))
     {
         Ok(()) => true,
         Err(error) => {
@@ -770,7 +704,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
         "clear_inflight_state_if_matches_identity_after_delivery",
         &path,
     );
-    let outcome = match fs::remove_file(&path) {
+    let outcome = match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -836,7 +770,7 @@ pub(super) fn clear_inflight_state_if_matches_tmux_response_in_root(
         "clear_inflight_state_if_matches_tmux_response",
         &path,
     );
-    match fs::remove_file(&path) {
+    match fs::remove_file(&path).map(|()| sync_removed(&path)) {
         Ok(()) => GuardedClearOutcome::Cleared,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
         Err(error) => {
@@ -948,6 +882,6 @@ pub(super) fn refresh_inflight_last_offset_if_matches_identity_in_root(
     }
     serde_json::to_string_pretty(&state)
         .map_err(|error| error.to_string())
-        .and_then(|json| atomic_write(&path, &json))
+        .and_then(|json| store::publish_row(&path, &json))
         .is_ok()
 }

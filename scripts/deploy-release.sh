@@ -2479,7 +2479,7 @@ _schema_order_guard_before_build || exit 1
 # Ensure release dir exists
 mkdir -p "$ADK_REL"/{bin,config,data,logs}
 
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
 if setup_sccache_env; then
     echo "▸ sccache cache: $SCCACHE_DIR (size $SCCACHE_CACHE_SIZE)"
 else
@@ -3357,7 +3357,7 @@ fi
 # accept the same smoke channels; an unreadable config accepts none.
 DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO" \
     "$ADK_REL/config/agentdesk.yaml" "$POST_DEPLOY_SMOKE_RELAY_CELL" "$POST_DEPLOY_SMOKE_CODEX_TURNS_CELL")
-echo "▸ Smoke E2E channels whose reader-count alarm does not block health: ${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-none}"
+echo "▸ Smoke E2E channels whose reader-count or held-start alarm does not block health: ${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-none}"
 echo "▸ Promoting staged binary..."
 mv -f "$STAGED_BINARY" "$REL_BINARY"
 STAGED_BINARY=""

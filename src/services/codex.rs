@@ -1,3 +1,7 @@
+mod command_streaming;
+pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
+#[cfg(unix)]
+mod absence_launch;
 #[cfg(all(test, unix))]
 pub(crate) mod actual_submit_tests;
 #[cfg(unix)]
@@ -18,12 +22,18 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
+use tui_session_launch::launch_policy::codex_tui_option_args;
+#[cfg(all(test, unix))]
+pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
+#[cfg(unix)]
+use tui_session_launch::publish_codex_tui_launch_script;
+#[cfg(unix)]
+pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(unix)]
 pub(crate) use tui_session_launch::{
-    CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, tui_preflight, verified_warm_preflight,
+    CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
+    verified_warm_preflight,
 };
-#[cfg(unix)]
-use tui_session_launch::{prepare_codex_tui_incarnation, publish_codex_tui_launch_script};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
@@ -473,25 +483,6 @@ fn base_tui_args(
 pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = codex_tui_option_args(options);
     args.extend(["--".to_string(), options.prompt.to_string()]);
-    args
-}
-
-/// The TUI argv up to its prompt; a Herdr launch types the prompt into the composer instead.
-fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
-    let mut args = Vec::new();
-    if options.resume_session_id.is_some() {
-        args.push("resume".to_string());
-    }
-    append_codex_common_launch_args(&mut args, options);
-    // Startup menus must never turn a routed Enter into a global toolchain update.
-    args.extend([
-        "-c".to_string(),
-        "check_for_update_on_startup=false".to_string(),
-    ]);
-    append_codex_sandbox_args(&mut args, options.readonly_mode);
-    if let Some(session_id) = options.resume_session_id.as_deref() {
-        args.push(session_id.to_string());
-    }
     args
 }
 
@@ -1189,188 +1180,27 @@ pub fn execute_command_streaming(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    let entrypoint_supports_tui_hosting =
-        remote_profile.is_none() && tmux_session_name.is_some() && claude::is_tmux_available();
-    #[cfg(not(unix))]
-    let entrypoint_supports_tui_hosting = false;
-    let session_selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
-            &ProviderKind::Codex,
-            entrypoint_supports_tui_hosting,
+    execute_command_streaming_observed(
+        CommandStreamingRequest {
+            prompt,
+            session_id,
+            working_dir,
+            sender,
+            system_prompt,
+            allowed_tools,
+            cancel_token,
+            remote_profile,
+            tmux_session_name,
+            teardown,
             report_channel_id,
-        );
-    session_selection.log_start("codex.execute_command_streaming");
-
-    let readonly_mode = is_readonly_tool_policy(allowed_tools);
-    let developer_instructions = compose_codex_developer_instructions(system_prompt, allowed_tools);
-    let prompt = compose_codex_prompt(prompt, None, allowed_tools);
-
-    if let Some(profile) = remote_profile {
-        // Issue #2193 — remote tmux is hard-refused regardless of the
-        // remote-SSH gate. `docs/codex-remote-ssh-policy.md` lists
-        // remote tmux as a non-goal: a tmux session on the remote
-        // host can outlive the SSH owner (Codex keeps running after
-        // the SSH session drops, with no AgentDesk-side cancel path),
-        // so it needs its own ADR. Refusing it here keeps the gate's
-        // PREREQUISITES_SATISFIED flip from accidentally enabling
-        // remote tmux when only direct-SSH was implemented.
-        #[cfg(unix)]
-        {
-            let requested_remote_tmux = tmux_session_name.is_some()
-                && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
-                    .map(|value| {
-                        let normalized = value.trim().to_ascii_lowercase();
-                        normalized == "1" || normalized == "true" || normalized == "yes"
-                    })
-                    .unwrap_or(false);
-            if requested_remote_tmux {
-                tracing::warn!(
-                    provider = "codex",
-                    profile = %profile.name,
-                    doc = "docs/codex-remote-ssh-policy.md",
-                    "refusing Codex remote tmux dispatch: remote tmux is a \
-                     policy non-goal and requires a separate ADR (#2193)"
-                );
-                return Err("Remote tmux execution is a policy non-goal (#2193). \
-                     See docs/codex-remote-ssh-policy.md (non-goals)."
-                    .to_string());
-            }
-        }
-        // Issue #2193 — gate enforcement on the actual dispatch path.
-        // Bootstrap already hard-fails when `remote_ssh_enabled=true`
-        // and `PREREQUISITES_SATISFIED=false`, but the gate has to be
-        // checked here too: a future change that wires a real
-        // `services::remote` or starts populating `RemoteProfile` lists
-        // would otherwise reach `execute_streaming_remote_*` without
-        // the operator having opted in via `agentdesk.yaml`.
-        //
-        // The policy: both the runtime flag AND the compile-time
-        // prerequisites constant must agree. If either is false, the
-        // turn is refused before any SSH attempt.
-        if !(crate::services::provider_hosting::codex_remote_ssh_enabled()
-            && crate::services::codex_remote_policy::PREREQUISITES_SATISFIED)
-        {
-            tracing::warn!(
-                provider = "codex",
-                profile = %profile.name,
-                doc = "docs/codex-remote-ssh-policy.md",
-                "refusing Codex remote SSH dispatch: gate disabled or \
-                 prerequisites not satisfied (#2193)"
-            );
-            return Err("Remote SSH execution is disabled by policy (#2193). \
-                 See docs/codex-remote-ssh-policy.md."
-                .to_string());
-        }
-        log_codex_runtime_kind(
-            "codex.execute_command_streaming",
-            CodexRuntimeKind::RemoteDirect,
-        );
-        return execute_streaming_remote_direct(
-            profile,
-            session_id,
-            &prompt,
+            report_provider,
             model,
             fast_mode_enabled,
             goals_enabled,
-            working_dir,
-            sender,
-            cancel_token,
-        );
-    }
-
-    if let Some(tmux_name) = tmux_session_name {
-        #[cfg(unix)]
-        if claude::is_tmux_available() {
-            if session_selection.driver
-                == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
-            {
-                log_codex_runtime_kind(
-                    "codex.execute_command_streaming",
-                    CodexRuntimeKind::DirectTui,
-                );
-                return execute_streaming_local_tui_tmux(
-                    &prompt,
-                    session_id,
-                    model,
-                    fast_mode_enabled,
-                    goals_enabled,
-                    working_dir,
-                    sender,
-                    cancel_token,
-                    tmux_name,
-                    teardown,
-                    report_channel_id,
-                    report_provider,
-                    developer_instructions.as_deref(),
-                    readonly_mode,
-                    compact_token_limit,
-                    force_fresh_provider_session,
-                );
-            }
-            log_codex_runtime_kind(
-                "codex.execute_command_streaming",
-                CodexRuntimeKind::LegacyWrapperFallback,
-            );
-            return execute_streaming_local_tmux(
-                &prompt,
-                model,
-                fast_mode_enabled,
-                goals_enabled,
-                session_id,
-                working_dir,
-                sender,
-                cancel_token,
-                tmux_name,
-                teardown,
-                report_channel_id,
-                report_provider,
-                developer_instructions.as_deref(),
-                compact_token_limit,
-                force_fresh_provider_session,
-            );
-        }
-        #[cfg(not(unix))]
-        let _ = teardown;
-        // ProcessBackend fallback for Codex (no tmux or non-unix)
-        log_codex_runtime_kind(
-            "codex.execute_command_streaming",
-            CodexRuntimeKind::ProcessBackend,
-        );
-        return execute_streaming_local_process_codex(
-            &prompt,
-            model,
-            fast_mode_enabled,
-            goals_enabled,
-            session_id,
-            working_dir,
-            sender,
-            cancel_token,
-            tmux_name,
-            developer_instructions.as_deref(),
             compact_token_limit,
             force_fresh_provider_session,
-        );
-    }
-
-    log_codex_runtime_kind(
-        "codex.execute_command_streaming",
-        CodexRuntimeKind::DirectHeadless,
-    );
-    execute_streaming_direct(
-        &prompt,
-        session_id,
-        model,
-        fast_mode_enabled,
-        goals_enabled,
-        working_dir,
-        sender,
-        cancel_token,
-        report_channel_id,
-        report_provider,
-        developer_instructions.as_deref(),
-        readonly_mode,
-        compact_token_limit,
+        },
+        None,
     )
 }
 
@@ -1622,96 +1452,13 @@ fn execute_streaming_local_tui_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    // A Herdr channel is refused before the turn lock, warm follow-up or any session cleanup.
-    if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
-        return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
-    }
-    if verified_hold::existing_incarnation(tmux_session_name)
-        && !force_fresh_provider_session
-        && crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled()
-        && let (Some(session_id), Some(channel), Some(token)) =
-            (session_id, report_channel_id, cancel_token.as_ref())
-    {
-        return crate::services::codex_tui::warm_followup::verified_warm(
-            crate::services::codex_tui::warm_followup::VerifiedWarmRequest {
-                tmux: tmux_session_name,
-                channel,
-                session_id,
-                cwd: std::path::Path::new(working_dir),
-                prompt,
-                options: &CodexLaunchOptions::new(prompt)
-                    .with_resume_session_id(Some(session_id))
-                    .with_developer_instructions(developer_instructions)
-                    .with_model(model)
-                    .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
-                    .with_compact_token_limit(compact_token_limit)
-                    .with_readonly_mode(readonly_mode)
-                    .with_fast_mode_enabled(fast_mode_enabled)
-                    .with_goals_enabled(goals_enabled)
-                    .with_cwd(Some(working_dir)),
-                token: std::sync::Arc::clone(token),
-                sender,
-            },
-        );
-    }
-    let warm_followup_enabled =
-        match verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
-            Some(result) => return result,
-            None => crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
-        };
-    let turn_lock = warm_followup_enabled.then(|| codex_tui_session_turn_lock(tmux_session_name));
-    let _turn_guard = turn_lock
-        .as_ref()
-        .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
-    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
-        ProviderKind::Codex,
-        tmux_session_name,
-    )?;
-    let session_exists = tmux_present_bool(tmux_session_name);
-    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
-        tmux_session_name,
-        &auth_overlay.profile_id,
-    );
-    let session_id = profile_matches.then_some(session_id).flatten();
-    let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
-        session_id,
-        std::path::Path::new(working_dir),
-        None,
-        force_fresh_provider_session,
-    );
-    let reasoning_effort = codex_reasoning_effort_from_env();
-    let launch_options = CodexLaunchOptions::new(prompt)
-        .with_resume_session_id(session_selection.resume_session_id())
-        .with_developer_instructions(developer_instructions)
-        .with_model(model)
-        .with_reasoning_effort(reasoning_effort.as_deref())
-        .with_compact_token_limit(compact_token_limit)
-        .with_readonly_mode(readonly_mode)
-        .with_fast_mode_enabled(fast_mode_enabled)
-        .with_goals_enabled(goals_enabled)
-        .with_cwd(Some(working_dir));
-    let (prepared, resume_root) = tui_session_launch::preflight_codex_tui_turn(
-        tmux_session_name,
-        report_channel_id,
-        &launch_options,
-        &session_selection,
-        (session_exists, force_fresh_provider_session),
-        &auth_overlay,
-    )
-    .map_err(|error| error.to_string())?;
-    if let Some(fallback_reason) = direct_tui_material_fallback_reason(&launch_options) {
-        tracing::warn!(
-            provider = "codex",
-            unsupported_options = fallback_reason,
-            tmux_session_name,
-            "codex direct TUI launch options are unsupported; falling back to wrapper"
-        );
-        return execute_streaming_local_tmux(
+    absence_launch::execute_observed(
+        absence_launch::LocalTuiTurn {
             prompt,
+            session_id,
             model,
             fast_mode_enabled,
             goals_enabled,
-            session_id,
             working_dir,
             sender,
             cancel_token,
@@ -1720,177 +1467,18 @@ fn execute_streaming_local_tui_tmux(
             report_channel_id,
             report_provider,
             developer_instructions,
+            readonly_mode,
             compact_token_limit,
             force_fresh_provider_session,
-        );
-    }
-
-    let has_live_pane = tmux_live_pane_bool(tmux_session_name) && profile_matches;
-    let mut warm_fallback_reason = None;
-    let mut warm_fallback_pane_stopped = false;
-
-    // Disabled warm reuse keeps the existing cleanup and relaunch path.
-    if warm_followup_enabled && prepared.is_none() {
-        match crate::services::codex_tui::warm_followup::try_codex_tui_warm_followup(
-            &session_selection,
-            &launch_options,
-            force_fresh_provider_session,
-            session_exists,
-            has_live_pane,
-            prompt,
-            sender.clone(),
-            cancel_token.clone(),
-            tmux_session_name,
-            report_channel_id,
-        ) {
-            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Terminal(
-                result,
-            ) => return result,
-            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::Fallback(
-                reason,
-            ) => warm_fallback_reason = Some(reason),
-            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::FallbackAfterPaneKill(
-                reason,
-            ) => {
-                warm_fallback_reason = Some(reason);
-                warm_fallback_pane_stopped = true;
-            }
-            crate::services::codex_tui::warm_followup::CodexWarmFollowupOutcome::LegacyPath => {}
-        }
-    }
-
-    tui_preflight(
-        tmux_session_name,
-        report_channel_id,
-        &launch_options,
-        resume_root.as_deref(),
+        },
+        None,
     )
-    .map_err(|error| error.to_string())?;
-    if session_exists {
-        cleanup_existing_codex_tui_session(
-            tmux_session_name,
-            force_fresh_provider_session,
-            has_live_pane,
-            warm_fallback_reason,
-            warm_fallback_pane_stopped,
-        );
-    }
+}
 
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
-    crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
-        .cleanup_best_effort();
-
-    let prepared = match prepared {
-        Some(prepared) => prepared,
-        None => prepare_codex_tui_incarnation(
-            tmux_session_name,
-            report_channel_id,
-            &launch_options,
-            &auth_overlay,
-            resume_root.as_deref(),
-        )
-        .map_err(|error| error.to_string())?,
-    };
-
-    let CodexTuiLaunchScript {
-        prepared,
-        script_path,
-        owner_path,
-        rollout_modified_since,
-        handoff: _handoff,
-    } = publish_codex_tui_launch_script(
-        tmux_session_name,
-        session_id,
-        prompt,
-        &launch_options,
-        (report_channel_id, report_provider),
-        warm_followup_enabled,
-        (&auth_overlay, prepared),
-    )?;
-    if let Some(channel_id) = report_channel_id {
-        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
-    }
-
-    tui_preflight(
-        tmux_session_name,
-        report_channel_id,
-        &launch_options,
-        resume_root.as_deref(),
-    )
-    .map_err(|error| error.to_string())?;
-    let tmux_result = crate::services::platform::tmux::create_session(
-        tmux_session_name,
-        Some(working_dir),
-        &format!("bash {}", shell_escape(&script_path)),
-    )?;
-
-    if !tmux_result.status.success() {
-        let stderr = String::from_utf8_lossy(&tmux_result.stderr);
-        let _ = std::fs::remove_file(&owner_path);
-        let _ = std::fs::remove_file(&script_path);
-        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-            ProviderKind::Codex.as_str(),
-            tmux_session_name,
-            prompt,
-        );
-        return Err(format!("tmux error: {}", stderr));
-    }
-
-    crate::services::tmux_common::write_tmux_session_auth_profile(
-        tmux_session_name,
-        &auth_overlay.profile_id,
-    )?;
-
-    crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
-
-    // Before the spawn marker: the marker is restart evidence that these checks passed.
-    let validated_tail = crate::services::codex_tui::tail_launch::validate_selection(
-        &prepared.context,
-        &session_selection,
-    )?;
-    prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
-        tmux_session_name,
-        Some(&prepared),
-    ))?;
-
-    wire_cancel_token_to_tmux_session(cancel_token.as_ref(), tmux_session_name);
-
-    // #2172 cancel boundary: keep a clone of the cancel token so that
-    // post-tail emission (RuntimeReady / SessionDied Done) and the
-    // tail-error tmux-cleanup branch can BOTH consult `cancel_requested`
-    // without re-acquiring it. The tail call itself moves its clone into
-    // the rollout-tail thread; this clone stays in the launch frame.
-    let cancel_token_for_post_tail = cancel_token.clone();
-    crate::services::codex_tui::tail_launch::record_resume_proof(
-        &prepared.context,
-        &validated_tail,
-    )?;
-    let tail_result = crate::services::codex_tui::tail_launch::dispatch(
-        validated_tail,
-        working_dir,
-        rollout_modified_since,
-        sender.clone(),
-        cancel_token,
-        tmux_session_name,
-        prompt,
-    );
-    let tail_result = match resolve_codex_tui_tail_result(
-        tail_result,
-        cancel_token_for_post_tail.as_ref(),
-        tmux_session_name,
-    )? {
-        Some(result) => result,
-        // Cancel observed before the transcript was discovered: suppress the
-        // tail Err and defer tmux cleanup to the cancel path (return Ok(())).
-        None => return Ok(()),
-    };
-
-    emit_codex_tui_post_tail_handoff(
-        tail_result,
-        sender,
-        cancel_token_for_post_tail,
-        tmux_session_name,
-    )
+#[cfg(unix)]
+fn remove_failed_tui_launch_files(owner: &str, script: &str) {
+    let _ = std::fs::remove_file(owner);
+    let _ = std::fs::remove_file(script);
 }
 
 /// Resolve the rollout-tail result for the Codex Direct TUI launch.

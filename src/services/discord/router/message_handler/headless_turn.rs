@@ -1,4 +1,5 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
+use super::provider_dispatch::producer_panic;
 use super::*;
 use crate::services::discord::adk_session::build_namespaced_session_key;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
@@ -1007,6 +1008,15 @@ async fn start_reserved_headless_turn_admitted(
     let execution_pool = shared.pg_pool.clone();
     let producer_registration = original_registration.clone();
     let producer = {
+        let codex_observation = super::provider_dispatch::observe_codex_turn(
+            &provider,
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+            remote_profile.is_some(),
+            &turn_host,
+            &cancel_token,
+        )
+        .await;
         let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
             shared.pg_pool.as_ref(),
             &provider,
@@ -1032,6 +1042,7 @@ async fn start_reserved_headless_turn_admitted(
                                 system_prompt: Some(&system_prompt_owned),
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
+                                codex_observation: codex_observation.as_ref(),
                                 remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
@@ -1068,22 +1079,7 @@ async fn start_reserved_headless_turn_admitted(
                         let _ = tx.send(message);
                     }
                 }
-                Err(panic_info) => {
-                    let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
-                        value.clone()
-                    } else if let Some(value) = panic_info.downcast_ref::<&str>() {
-                        value.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!("  [headless streaming] PANIC: {}", msg);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: format!("Internal error (panic): {}", msg),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
-                }
+                Err(info) => drop(tx.send(producer_panic("headless streaming", info))),
             }
         })
     };
@@ -1135,83 +1131,7 @@ async fn start_reserved_headless_turn_admitted(
 }
 
 #[cfg(test)]
-mod foreign_row_refusal_tests {
-    use super::*;
-    use crate::services::discord::{inflight, mailbox_snapshot, mailbox_try_start_turn};
-    use poise::serenity_prelude::{MessageId, UserId};
-
-    fn row(provider: &ProviderKind, channel: ChannelId, user_msg_id: u64) -> InflightTurnState {
-        let prompt = "status?".to_string();
-        InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            None,
-            7,
-            user_msg_id,
-            0,
-            prompt,
-            None,
-            None,
-            None,
-            None,
-            0,
-        )
-    }
-
-    #[tokio::test]
-    async fn a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = shared.provider.clone();
-        let (free, held) = (ChannelId::new(6_245_201), ChannelId::new(6_245_202));
-        let mut external = row(&provider, held, 0);
-        external.turn_source = inflight::TurnSource::ExternalInput;
-        inflight::save_inflight_state_create_new(&external).expect("external row");
-        for (channel, refused) in [(free, false), (held, true)] {
-            let token = Arc::new(CancelToken::new());
-            let owner = (UserId::new(7), MessageId::new(11));
-            assert!(
-                mailbox_try_start_turn(&shared, channel, token.clone(), owner.0, owner.1).await
-            );
-            let mut mine = row(&provider, channel, 11);
-            mine.turn_nonce = token.turn_nonce().map(str::to_owned);
-            let created = inflight::save_inflight_state_create_new(&mine);
-            let result = super::super::foreign_row::admit_headless(
-                &shared, &provider, &mine, &token, created,
-            )
-            .await;
-            let observed = (
-                matches!(result, Err(HeadlessTurnStartError::Conflict(_))),
-                mailbox_snapshot(&shared, channel)
-                    .await
-                    .cancel_token
-                    .is_none(),
-                token.cancelled.load(std::sync::atomic::Ordering::Relaxed),
-                inflight::load_inflight_state_read_only(&provider, channel.get())
-                    .map(|r| r.user_msg_id),
-            );
-            // Refused: Conflict, mailbox released, token cancelled, the other turn's row kept.
-            let expected = if refused {
-                (true, true, true, Some(0))
-            } else {
-                (false, false, false, Some(11))
-            };
-            assert_eq!(observed, expected, "channel {channel}");
-        }
-    }
-
-    #[test]
-    fn the_row_refusal_returns_before_any_provider_or_bridge_spawn() {
-        let src = include_str!("headless_turn.rs");
-        let call = "foreign_row::admit_headless(shared, &provider, &inflight_state, &cancel_token, created)\n        .await?;";
-        let (refusal, spawn) = (src.find(call), src.find("tokio::task::spawn_blocking"));
-        assert!(
-            refusal
-                .zip(spawn)
-                .is_some_and(|(refusal, spawn)| refusal < spawn)
-        );
-    }
-}
+mod foreign_row_refusal_tests;
 
 #[cfg(test)]
 mod recovery_context_take_order_tests {
@@ -1220,6 +1140,11 @@ mod recovery_context_take_order_tests {
     };
     use super::super::super::super::settings::RoleBinding;
     use poise::serenity_prelude::ChannelId;
+    use source_guard_tests::{
+        HEADLESS_TURN, headless_profile_gaps, lifecycle_take_gaps, post_spawn_gaps, take_once_gaps,
+    };
+
+    pub(super) mod source_guard_tests;
 
     #[tokio::test(start_paused = true)]
     async fn deferred_headless_start_leaves_metadata_with_caller_and_no_foreground_queue() {
@@ -1290,97 +1215,28 @@ mod recovery_context_take_order_tests {
         drop(recovery);
     }
 
-    fn recovery_context_take_call() -> String {
-        format!(
-            "{}{}",
-            "let session_retry_context = ",
-            "take_session_retry_context(shared, channel_id, Some(&turn_id));"
-        )
-    }
-
     #[test]
     fn reserved_headless_start_has_no_post_spawn_error_path() {
-        let module_src = include_str!("headless_turn.rs");
-        let spawn_pos = module_src
-            .find("tokio::task::spawn_blocking")
-            .expect("headless provider spawn boundary exists");
-        let started_return = module_src[spawn_pos..]
-            .find("Ok(HeadlessTurnStartOutcome::started(")
-            .map(|offset| spawn_pos + offset)
-            .expect("headless Started return exists after provider spawn");
-        let post_spawn = &module_src[spawn_pos..started_return];
-        assert!(
-            !post_spawn.contains("HeadlessTurnStartError::"),
-            "post-spawn failures must flow through the bridge, never a retryable start error"
-        );
+        assert_eq!(post_spawn_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
     #[test]
     fn recovery_context_survives_headless_goal_lifecycle_consumed_return() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let module_src = include_str!("headless_turn.rs");
-        let lifecycle_pos = module_src
-            .find("if let GoalCommandKind::Lifecycle(command) = headless_goal_kind")
-            .expect("headless lifecycle command branch exists");
-        let consumed_return_pos = lifecycle_pos
-            + module_src[lifecycle_pos..]
-                .find("return Ok(HeadlessTurnStartOutcome::consumed(")
-                .expect("headless lifecycle consumed return exists");
-        let take_call = recovery_context_take_call();
-        let take_pos = module_src
-            .find(&take_call)
-            .expect("headless recovery context take exists");
-
-        assert!(
-            consumed_return_pos < take_pos,
-            "headless lifecycle Consumed return must happen before the destructive recovery-context take"
-        );
+        assert_eq!(lifecycle_take_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
     #[test]
     fn headless_real_turn_consumes_recovery_context_once_before_prompt_use() {
         let root = tempfile::tempdir().expect("create temp runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let module_src = include_str!("headless_turn.rs");
-        let take_call = recovery_context_take_call();
-        let take_positions: Vec<_> = module_src.match_indices(&take_call).collect();
-        assert_eq!(
-            take_positions.len(),
-            1,
-            "headless turn start must have exactly one destructive recovery-context take"
-        );
-        let take_pos = take_positions[0].0;
-        let reply_context_use_pos = module_src
-            .find("context_chunks.push(reply_context);")
-            .expect("headless prompt includes recovered reply context");
-        let manifest_use_pos = module_src
-            .find("let recovery_context_for_manifest =")
-            .expect("headless prompt manifest receives recovery context");
-
-        assert!(
-            take_pos < reply_context_use_pos,
-            "headless real turn must take recovery context before adding it to the prompt"
-        );
-        assert!(
-            take_pos < manifest_use_pos,
-            "headless real turn must take recovery context before prompt manifest capture"
-        );
+        assert_eq!(take_once_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
     #[test]
     fn actual_headless_assembly_selects_only_all_and_headless_shared_sections() {
-        let module_src = include_str!("headless_turn.rs");
-        let builder_pos = module_src
-            .find("let built_system_prompt = build_system_prompt_with_manifest(")
-            .expect("headless prompt assembly exists");
-        let builder_call = &module_src[builder_pos..];
-        let call_end = builder_call
-            .find("\n    );")
-            .expect("headless prompt assembly call closes");
-        let builder_call = &builder_call[..call_end];
-        assert!(builder_call.contains("PromptProfiles::headless(dispatch_profile)"));
-        assert!(!builder_call.contains("PromptProfiles::foreground"));
+        assert_eq!(headless_profile_gaps(HEADLESS_TURN), Vec::<String>::new());
 
         let runtime_root = tempfile::tempdir().expect("runtime root");
         let _runtime_guard = crate::config::set_agentdesk_root_for_test(runtime_root.path());
@@ -1570,35 +1426,10 @@ mod fresh_routine_tests {
     // `|| scheduled_snapshot_turn` to fresh_context_severance and this fails.
     #[test]
     fn scheduled_snapshot_turn_stays_out_of_channel_mutating_severance() {
-        let src = include_str!("headless_turn.rs");
-        // Needles are assembled by concatenation so their full literal never
-        // appears in this test body — otherwise `include_str!` would self-match.
-        let severance_excludes_snapshot = format!(
-            "{}{}",
-            "let fresh_context_severance = goal_fresh ", "|| fresh_routine;"
-        );
-        let severance_includes_snapshot = format!(
-            "{}{}",
-            "goal_fresh || fresh_routine ", "|| scheduled_snapshot_turn"
-        );
-        let local_cold_start = format!(
-            "{}{}",
-            "if scheduled_snapshot_turn {\n        ", "session_id = None;"
-        );
-        assert!(
-            src.contains(&severance_excludes_snapshot),
-            "fresh_context_severance must exclude scheduled_snapshot_turn"
-        );
-        assert!(
-            !src.contains(&severance_includes_snapshot),
-            "scheduled_snapshot_turn must never re-join the channel-clearing severance"
-        );
-        // Cold start is local-only: drops session_id without touching the shared
-        // channel session map or recording a channel clear boundary.
-        assert!(
-            src.contains(&local_cold_start),
-            "snapshot cold-start must null the LOCAL session_id, not wipe the channel"
-        );
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            HEADLESS_TURN, snapshot_severance_gaps,
+        };
+        assert_eq!(snapshot_severance_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
     // #4913 GO-A1: snapshot metadata must gate the legacy channel-key refresh.
@@ -1607,16 +1438,10 @@ mod fresh_routine_tests {
     // live channel row by channel_id.
     #[test]
     fn scheduled_snapshot_skips_channel_session_key_refresh() {
-        let src = include_str!("headless_turn.rs");
-        let guarded_refresh = format!(
-            "{}{}",
-            "if !scheduled_snapshot_turn\n        && ",
-            "valid_routine_metadata(metadata.as_ref()).is_some()"
-        );
-        assert!(
-            src.contains(&guarded_refresh),
-            "scheduled snapshots must not enter the channel-scoped session_key refresh"
-        );
+        use super::recovery_context_take_order_tests::source_guard_tests::{
+            HEADLESS_TURN, snapshot_refresh_gaps,
+        };
+        assert_eq!(snapshot_refresh_gaps(HEADLESS_TURN), Vec::<String>::new());
     }
 
     #[test]

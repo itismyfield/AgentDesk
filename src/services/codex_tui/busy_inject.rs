@@ -267,12 +267,27 @@ fn inject_locked(
         attempt.drop_buffer();
         return not_sent(Veto::LedgerFull);
     }
+    if let Err(error) = crate::services::tui_input::human_frame::history::register(
+        ("codex", request.session, request.nonce, request.author),
+        request.rollout,
+        offset,
+        text,
+    ) {
+        tracing::warn!(%error, "busy frame ledger registration failed");
+        ledger.withdraw();
+        attempt.drop_buffer();
+        return not_sent(Veto::LedgerFull);
+    }
     // From the paste on, absence of evidence never proves the input was not taken.
     match attempt.paste(state.size) {
         Guard::Applied => {}
         guard @ (Guard::Vetoed | Guard::Resized | Guard::Gone) => {
             attempt.drop_buffer();
             ledger.withdraw();
+            crate::services::tui_input::human_frame::history::withdraw(
+                request.nonce,
+                request.rollout,
+            );
             return not_sent(match guard {
                 Guard::Resized => Veto::UnpredictableRender,
                 Guard::Vetoed => Veto::HumanAttached,
@@ -356,6 +371,18 @@ impl Attempt<'_> {
                 rollout::submitted(request.rollout, self.offset, request.nonce)
                 && Instant::now() < deadline
             {
+                if let Some(row) = crate::services::tui_input::human_frame::history::receipt_row(
+                    request.nonce,
+                    request.rollout,
+                ) {
+                    crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                        request.session,
+                        self.text,
+                        Some(&row),
+                        observed_turn.as_deref(),
+                        chrono::Utc::now(),
+                    );
+                }
                 let joined = observed_turn.as_deref() == Some(request.target_turn);
                 return Outcome::Injected {
                     observed_turn,

@@ -24,7 +24,6 @@ struct Pair {
     io: Arc<TestHost>,
     gate: Arc<OwnershipGate>,
 }
-
 impl Pair {
     async fn new() -> Self {
         let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
@@ -48,7 +47,6 @@ impl Pair {
             gate,
         }
     }
-
     fn host(&self, io: &Arc<TestHost>) -> Vec<tokio::task::JoinHandle<()>> {
         let parts = || HostParts {
             io: Arc::clone(io),
@@ -58,16 +56,18 @@ impl Pair {
         };
         host::start(ShadowProvider::Claude, true, parts)
     }
-
-    /// Raw O and Legacy posts carrying the leg's unit; O posts nothing else.
-    fn posts(&self, io: &TestHost, leg: usize) -> (u64, u64) {
+    /// The entire O transport is empty or the exact expected body followed by its summary.
+    fn posts(&self, io: &TestHost, leg: usize, expected_body: Option<&str>) -> (u64, u64) {
         let leg = &self.legs[leg];
         let o_posts = io.posts.to(leg.channel);
+        let expected = expected_body.map_or_else(Vec::new, |body| vec![body, TURN_DONE]);
+        assert_eq!(
+            o_posts, expected,
+            "raw O posts: exact body then summary, or empty"
+        );
         let units = o_posts.iter().filter(|p| p.contains(&leg.body)).count() as u64;
-        assert_eq!(o_posts.len() as u64, units, "{o_posts:?}");
         (units, leg.legacy_posts())
     }
-
     fn init_exists(&self) -> bool {
         self.root
             .join("o_store")
@@ -75,7 +75,6 @@ impl Pair {
             .join("init")
             .exists()
     }
-
     /// Writes A's unit to its transcript, as the TUI would, without any Legacy judgement.
     fn unit_writer(&self) -> impl FnOnce() + Send + 'static {
         let (path, body) = (
@@ -89,7 +88,6 @@ impl Pair {
         }
     }
 }
-
 fn candidate(channel: u64) -> Candidate {
     let found = |boot: Option<&BootChannels>| boot.unwrap().candidate(channel).cloned();
     cutover::test_override::with_channels(found).unwrap()
@@ -116,12 +114,12 @@ async fn settle() {
 fn assert_released(pair: &Pair) {
     assert_eq!(adoption(A), Adoption::Released);
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 1),
         "A goes through Legacy only"
     );
     assert!(!pair.init_exists(), "a rejected adoption writes no init");
-    assert_eq!(pair.posts(&pair.io, 1), (0, 1), "B stays Legacy");
+    assert_eq!(pair.posts(&pair.io, 1, None), (0, 1), "B stays Legacy");
 }
 
 async fn open_intake_releases() {
@@ -230,7 +228,7 @@ async fn body_during_the_write() {
     let locked_at = paused.recv().unwrap();
     // Another channel's body judgement never takes A's lock.
     finish(&pair.legs[1]).await;
-    assert_eq!(pair.posts(&pair.io, 1), (0, 1));
+    assert_eq!(pair.posts(&pair.io, 1, None), (0, 1));
     let neighbour = locked_at.elapsed();
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
@@ -257,7 +255,7 @@ async fn body_during_the_write() {
     let hosts = pair.host(&pair.io);
     settle().await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, Some(&pair.legs[0].body)),
         (1, 0),
         "O posts the unit from offset 0"
     );
@@ -315,7 +313,7 @@ async fn failure_after_publication() {
     finish(&pair.legs[0]).await;
     settle().await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, Some(&pair.legs[0].body)),
         (1, 0),
         "O posts the unit in this process and Legacy only consumes it"
     );
@@ -333,7 +331,7 @@ async fn failure_after_publication() {
     let io = TestHost::new([(A, pair.legs[0].source())]);
     let hosts = pair.host(&io);
     settle().await;
-    assert_eq!(pair.posts(&io, 0), (0, 0), "the restart posts nothing more");
+    assert_eq!(pair.posts(&io, 0, None), (0, 0), "restart is silent");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
@@ -549,7 +547,7 @@ async fn unit_after_the_pin() {
     deliver_second(&pair.legs[0], start, &rows).await;
     settle().await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 2),
         "Legacy posts the unit from its cursor"
     );
@@ -583,7 +581,7 @@ async fn undelivered_closed_turn() {
     finish(leg).await;
     tokio::time::sleep(Duration::from_secs(2 * 60)).await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 1),
         "Legacy posts the turn once"
     );
@@ -632,11 +630,9 @@ async fn adopted_by_the_host() {
     settle().await;
     let seconds = pair.io.posts.to(A);
     assert_eq!(
-        seconds.len(),
-        1,
-        "O posts the second turn's unit only: {seconds:?}"
+        seconds,
+        [format!("{} second", pair.legs[0].body), TURN_DONE.into()]
     );
-    assert!(seconds[0].ends_with("second"), "{seconds:?}");
     assert_eq!(
         pair.legs[0].legacy_posts(),
         1,
@@ -713,11 +709,9 @@ async fn unit_after_the_recheck() {
     settle().await;
     let seconds = pair.io.posts.to(A);
     assert_eq!(
-        seconds.len(),
-        1,
-        "O posts the second turn's unit only: {seconds:?}"
+        seconds,
+        [format!("{} second", pair.legs[0].body), TURN_DONE.into()]
     );
-    assert!(seconds[0].ends_with("second"), "{seconds:?}");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
@@ -855,7 +849,7 @@ async fn row_over_delivered_history() {
     let leg = &pair.legs[0];
     retry_first_turn(leg).await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 1),
         "the retried turn is posted by neither"
     );
@@ -863,13 +857,15 @@ async fn row_over_delivered_history() {
     deliver_second(leg, start, &rows).await;
     settle().await;
     let posts = pair.io.posts.to(A);
-    assert_eq!(posts.len(), 1, "O posts the second turn once: {posts:?}");
-    assert!(posts[0].ends_with("second"), "{posts:?}");
+    assert_eq!(
+        posts,
+        [format!("{} second", leg.body), TURN_DONE.to_owned()]
+    );
     assert_eq!(leg.legacy_posts(), 1, "Legacy posted only the warm-up");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
     let io = pair.restarted().await;
-    assert_eq!(pair.posts(&io, 0), (0, 1), "a restart posts nothing more");
+    assert_eq!(pair.posts(&io, 0, None), (0, 1), "restart is silent");
     assert_eq!(*io.alarms.0.lock().unwrap(), []);
 }
 
@@ -912,7 +908,7 @@ async fn row_over_a_dead_tail() {
 
     retry_first_turn(leg).await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 0),
         "the retried tail is posted by neither"
     );
@@ -945,13 +941,15 @@ async fn row_over_a_dead_tail() {
     deliver_second(leg, start, &rows).await;
     settle().await;
     let posts = pair.io.posts.to(A);
-    assert_eq!(posts.len(), 1, "O posts the second turn once: {posts:?}");
-    assert!(posts[0].ends_with("second"), "{posts:?}");
+    assert_eq!(
+        posts,
+        [format!("{} second", leg.body), TURN_DONE.to_owned()]
+    );
     assert_eq!(leg.legacy_posts(), 0, "the abandoned turn was never posted");
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
     let io = pair.restarted().await;
-    assert_eq!(pair.posts(&io, 0), (0, 0), "a restart posts nothing more");
+    assert_eq!(pair.posts(&io, 0, None), (0, 0), "restart is silent");
     assert_eq!(
         *io.alarms.0.lock().unwrap(),
         [],
@@ -988,7 +986,7 @@ async fn tail_left_by_a_restart_drain() {
     assert_eq!(pair.o_start(), cursor);
     assert_eq!(pair.alarms(), [], "what Legacy delivered is not reported");
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, None),
         (0, 2),
         "Legacy posts the owed turn once"
     );
@@ -996,14 +994,14 @@ async fn tail_left_by_a_restart_drain() {
     deliver_second(leg, start, &rows).await;
     settle().await;
     assert_eq!(
-        pair.posts(&pair.io, 0),
+        pair.posts(&pair.io, 0, Some(&format!("{} second", leg.body))),
         (1, 2),
         "O posts the next turn once"
     );
     hosts.iter().for_each(tokio::task::JoinHandle::abort);
     drop(candidates);
     let io = pair.restarted().await;
-    assert_eq!(pair.posts(&io, 0), (0, 2), "a restart posts nothing more");
+    assert_eq!(pair.posts(&io, 0, None), (0, 2), "restart is silent");
     assert_eq!(*io.alarms.0.lock().unwrap(), []);
 }
 

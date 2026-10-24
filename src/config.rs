@@ -10,6 +10,8 @@ mod runtime_settings;
 mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
+mod agent_memory;
+pub use agent_memory::AgentDef;
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 pub(crate) mod runtime_profile;
@@ -360,42 +362,6 @@ where
                 .collect::<Vec<_>>()
         }),
     )
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct AgentDef {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub name_ko: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub aliases: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wake_word: Option<String>,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub voice_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitivity_mode: Option<BargeInSensitivity>,
-    #[serde(default, skip_serializing_if = "AgentVoiceConfig::is_default")]
-    pub voice: AgentVoiceConfig,
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default, skip_serializing_if = "AgentChannels::is_empty")]
-    pub channels: AgentChannels,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keywords: Vec<String>,
-    #[serde(default)]
-    pub department: Option<String>,
-    #[serde(default)]
-    pub avatar_emoji: Option<String>,
-    /// Cluster intake node-affinity labels (#3667). When set and non-empty,
-    /// intake for this agent's channels is routed to an online worker node whose
-    /// labels satisfy this list; `Some([])` means no preference (intake stays on
-    /// the leader). `None` (key absent from yaml) leaves any existing DB value
-    /// untouched on sync, so an out-of-band label is never wiped. Maps to the
-    /// `agents.preferred_intake_node_labels` JSONB column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_intake_node_labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1406,79 +1372,6 @@ fn default_prompt_max_bytes_user_derived() -> u64 {
     16 * 1024
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryJournalMode {
-    /// Keep the legacy delivery writer and do not emit delivery-journal rows.
-    #[default]
-    Legacy,
-    /// Emit delivery-journal observations while the legacy writer remains authoritative.
-    Shadow,
-    /// Keep emitting observations, and let explicitly wired readers treat the journal as
-    /// authoritative. Existing delivery writers remain in place until the hot-file handoff.
-    /// This mode is selected by the YAML `runtime.delivery_journal_mode` field only:
-    /// `kv_meta['runtime-config']` and `SettingsService::put_runtime_config` do not read this
-    /// key. A value placed there through the runtime-config API is stored and echoed by that API,
-    /// but the journal consumers ignore it.
-    ///
-    /// Activation is not safe by itself. The fence risk belongs to any transition that exits
-    /// `Legacy`, not to `Authority` alone: a direct `Legacy` to `Authority` transition, or a
-    /// `Legacy` to `Shadow` transition before its admission scope is warmed, can leave an
-    /// in-flight delivery permanently absent. Legacy admits with no observation, then a later
-    /// Authority settle sees `None` and is a no-op. `JournalObserver::submit` also uses bounded
-    /// `try_send`, so a full mailbox drops an observation. Cutover therefore requires Shadow
-    /// warm-up and an in-flight drain/fence; this dormant slice does not provide either one.
-    ///
-    /// `Shadow` to `Authority` prevents that same half-recorded delivery only for deliveries
-    /// actually admitted under `Shadow`. Admission is additionally gated by the cohort and
-    /// internal-channel settings (`cohort_bucket(id) < delivery_journal_cohort_percent.min(100)` unless
-    /// the channel is internal). The shipped defaults are cohort `0` and an empty internal
-    /// channel list, so the admitted scope is empty: no observation is captured, and this
-    /// transition is equivalent to `Legacy` to `Authority` (the reconciler reaches
-    /// `settle_dispatched_unknown`). Cutover requires **the entire target scope to be admitted;
-    /// cohort warm-up complete**, in addition to the drain/fence above.
-    Authority,
-}
-
-impl DeliveryJournalMode {
-    /// Both rollout modes need observations in the journal. `Authority` does not revoke an
-    /// existing writer; that handoff belongs to a later slice.
-    pub const fn records_shadow_observations(self) -> bool {
-        matches!(self, Self::Shadow | Self::Authority)
-    }
-
-    /// Only the explicit authority mode changes a reader's source of truth.
-    pub const fn reads_as_authority(self) -> bool {
-        matches!(self, Self::Authority)
-    }
-}
-
-fn is_legacy_delivery_journal_mode(mode: &DeliveryJournalMode) -> bool {
-    *mode == DeliveryJournalMode::Legacy
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum IntakeDeliverySettlementStage {
-    /// Disable fresh-turn dispatched stamping and bridge-exit settlement, and skip the schema
-    /// probe. The turn path performs no intake-delivery database work.
-    #[default]
-    Off,
-    /// Reserve the observation stage while leaving fresh turns database-neutral: no probe,
-    /// dispatched stamp, or bridge-exit settlement runs on the turn path.
-    Observe,
-    /// Probe the schema and, when ready, enable bridge-exit settlement and stale-debt sweep.
-    /// Dispatched stamping remains disabled.
-    Settle,
-    /// Probe the schema and, when ready, enable dispatched handoff stamping, bridge-exit
-    /// settlement, and stale-debt sweep.
-    Enforce,
-}
-
-fn is_off_intake_delivery_settlement(stage: &IntakeDeliverySettlementStage) -> bool {
-    *stage == IntakeDeliverySettlementStage::Off
-}
-
 /// Rollout stage for the #5071 T3 execution-identity fence.
 ///
 /// The read model behind this switch
@@ -1637,10 +1530,6 @@ pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
 /// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
 pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
 
-fn is_zero_u8(value: &u8) -> bool {
-    *value == 0
-}
-
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
     use super::*;
@@ -1663,37 +1552,7 @@ mod runtime_hook_registry_config_tests {
         // direction catches it — the negative assertions below never can.
         // This assertion preserves coverage of the serde-deserialization path.
         let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(absent.delivery_journal_mode, DeliveryJournalMode::Legacy);
-        assert_eq!(absent.delivery_journal_cohort_percent, 0);
-        assert_eq!(
-            absent.intake_delivery_settlement,
-            IntakeDeliverySettlementStage::Off
-        );
-        assert!(!absent.delivery_journal_mode.records_shadow_observations());
-        assert!(!absent.delivery_journal_mode.reads_as_authority());
         assert!(absent.is_empty());
-
-        let authority: RuntimeSettingsConfig =
-            serde_yaml::from_str("delivery_journal_mode: authority\n").unwrap();
-        assert_eq!(
-            authority.delivery_journal_mode,
-            DeliveryJournalMode::Authority
-        );
-        assert_eq!(authority.delivery_journal_cohort_percent, 0);
-        assert!(
-            authority
-                .delivery_journal_mode
-                .records_shadow_observations()
-        );
-        assert!(authority.delivery_journal_mode.reads_as_authority());
-        assert!(!authority.is_empty());
-        assert_eq!(
-            serde_yaml::from_str::<RuntimeSettingsConfig>(
-                &serde_yaml::to_string(&authority).unwrap()
-            )
-            .unwrap(),
-            authority
-        );
 
         let ttl_only = RuntimeSettingsConfig {
             tui_hook_buffer_ttl_secs: Some(45),
@@ -1737,45 +1596,6 @@ mod runtime_hook_registry_config_tests {
         assert_eq!(empty.tui_hook_buffer_ttl_secs, None);
         assert_eq!(empty.tui_unclaimed_stop_delay_ms, None);
         assert_eq!(empty.tui_hook_registry_enabled, None);
-    }
-
-    #[test]
-    fn intake_delivery_settlement_defaults_off_and_round_trips() {
-        let default = RuntimeSettingsConfig::default();
-        assert_eq!(
-            default.intake_delivery_settlement,
-            IntakeDeliverySettlementStage::Off
-        );
-        assert!(
-            !serde_yaml::to_string(&default)
-                .expect("serialize default runtime")
-                .contains("intake_delivery_settlement")
-        );
-
-        for stage in [
-            IntakeDeliverySettlementStage::Off,
-            IntakeDeliverySettlementStage::Observe,
-            IntakeDeliverySettlementStage::Settle,
-            IntakeDeliverySettlementStage::Enforce,
-        ] {
-            let yaml = format!(
-                "intake_delivery_settlement: {}\n",
-                serde_yaml::to_value(stage)
-                    .expect("serialize stage")
-                    .as_str()
-                    .expect("stage serializes as a string")
-            );
-            let parsed: RuntimeSettingsConfig =
-                serde_yaml::from_str(&yaml).expect("parse settlement stage");
-            assert_eq!(parsed.intake_delivery_settlement, stage);
-            assert_eq!(
-                serde_yaml::from_str::<RuntimeSettingsConfig>(
-                    &serde_yaml::to_string(&parsed).expect("serialize runtime")
-                )
-                .expect("reparse runtime"),
-                parsed
-            );
-        }
     }
 
     // #5071 T3-A0: an operator who never writes the key must land on `Legacy`,
@@ -2867,47 +2687,45 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
-    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
+    /// Retired `tui_o` keys still load, while writer and turn settings are kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retired-shadow-config.yaml");
         let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
              turn: {channels: [41], all_owned: true}\n\
-             repost: {enabled: true, channels: [41]}\n\
-             alert_channel_id: 42\n\
-             codex_history_adoption: false\n";
-        let settings =
-            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
+             alert_channel_id: 42\n";
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
             serde_yaml::from_str(live).unwrap();
-        let indented = settings
-            .lines()
-            .map(|line| format!("  {line}\n"))
-            .collect::<String>();
-        let data_dir = serde_json::to_string(&dir.path().join("data")).unwrap();
-        let yaml = format!(
-            concat!(
-                "server: {{}}\ndata: {{dir: {}}}\n",
-                "agents:\n  - id: retired-shadow\n    name: Retired shadow\n",
-                "    channels:\n",
-                "      claude: {{id: '41', runtime: tui}}\n",
-                "      codex: {{id: '42', runtime: tui}}\n",
-                "tui_o:\n{}"
-            ),
-            data_dir, indented
-        );
-        std::fs::write(&path, &yaml).unwrap();
-
-        let loaded = load_from_path(&path).unwrap();
-        let output = loaded.tui_o.as_ref().unwrap();
-
-        assert_eq!(output, &expected);
-        assert!(output.writer.late_adopt && output.repost.enabled);
-        let rendered = serde_yaml::to_string(output).unwrap();
-        assert_eq!(rendered, serde_yaml::to_string(&expected).unwrap());
-        assert!(!rendered.contains("shadow"), "{rendered}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        for repost in [
+            "{enabled: true, channels: [41]}",
+            "{enabled: false, channels: []}",
+            "{enabled: obsolete, channels: malformed, enabeld: true}",
+        ] {
+            let yaml = format!(
+                concat!(
+                    "server: {{}}\ndata: {{dir: {}}}\n",
+                    "agents:\n  - id: retired-shadow\n    name: Retired shadow\n",
+                    "    channels:\n",
+                    "      claude: {{id: '41', runtime: tui}}\n",
+                    "      codex: {{id: '42', runtime: tui}}\n",
+                    "tui_o:\n  shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n",
+                    "  codex_history_adoption: {enabled}\n  repost: {repost}\n  {}"
+                ),
+                serde_json::to_string(&dir.path().join("data")).unwrap(),
+                live.replace('\n', "\n  "),
+                enabled = enabled,
+                repost = repost,
+            );
+            std::fs::write(&path, &yaml).unwrap();
+            let loaded = load_from_path(&path).unwrap();
+            let output = loaded.tui_o.as_ref().unwrap();
+            assert_eq!(output, &expected);
+            assert!(output.writer.late_adopt);
+            let rendered = serde_yaml::to_string(output).unwrap();
+            assert!(!rendered.contains("repost"), "{rendered}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+        }
     }
 
     #[test]
@@ -3406,3 +3224,7 @@ mod shared_test_env_lock_tests {
 
 #[cfg(test)]
 mod writer_channels_tests;
+
+#[cfg(test)]
+#[path = "config/retired_relay_tests.rs"]
+mod retired_relay_tests;

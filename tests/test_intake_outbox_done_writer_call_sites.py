@@ -14,11 +14,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import check_durable_frontier_writer_call_sites as durable
+from scripts import skip_pin_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_intake_outbox_done_writer_call_sites.py"
 PROOF_OWNER = "src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs"
-SETTLEMENT_OWNER = "src/services/discord/turn_bridge/intake_settlement.rs"
 SPEC = importlib.util.spec_from_file_location("intake_outbox_done_writer_guard", SCRIPT)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
@@ -26,7 +26,6 @@ SPEC.loader.exec_module(guard)
 CURRENT_EXPECTED_CALL_SITES = {
     "mark_done": {"src/services/cluster/intake_worker.rs": 1},
     "mark_done_from_delivery_proof": {PROOF_OWNER: 1},
-    "settle_intake_done_from_receipt": {SETTLEMENT_OWNER: 1},
 }
 
 
@@ -99,23 +98,6 @@ class DiscriminationTests(unittest.TestCase):
                 "    )\n"
                 "}\n",
             )
-        write(
-            root,
-            SETTLEMENT_OWNER,
-            "use crate::db::intake_outbox_delivery_proof::{\n"
-            "    IntakeSettlementSource, settle_intake_done_from_receipt,\n"
-            "};\n"
-            "async fn settle_with_lock_timeout(\n"
-            "    pool: &sqlx::PgPool,\n"
-            "    outbox_id: i64,\n"
-            "    source: IntakeSettlementSource,\n"
-            ") -> Result<bool, sqlx::Error> {\n"
-            "    let mut transaction = pool.begin().await?;\n"
-            "    let won = settle_intake_done_from_receipt(&mut transaction, outbox_id, source).await?;\n"
-            "    transaction.commit().await?;\n"
-            "    Ok(won)\n"
-            "}\n",
-        )
         return root
 
     def run_guard(self, root: Path, expected=None) -> tuple[bool, str]:
@@ -207,39 +189,12 @@ class DiscriminationTests(unittest.TestCase):
             root,
             "src/services/cluster/test_only.rs",
             "#[cfg(test)]\nmod tests { fn probe() { crate::db::intake_outbox::mark_done(); } }\n"
-            "#[cfg(all(test, unix))]\nfn probe_all() { crate::db::intake_outbox::mark_done(); }\n"
-            "#[cfg(test)]\nmod settlement_tests {\n"
-            "    async fn probe() {\n"
-            "        crate::db::intake_outbox_delivery_proof::settle_intake_done_from_receipt(\n"
-            "            &mut transaction, id, IntakeSettlementSource::Committed,\n"
-            "        ).await;\n"
-            "    }\n"
-            "}\n",
+            "#[cfg(all(test, unix))]\nfn probe_all() { crate::db::intake_outbox::mark_done(); }\n",
+
         )
         ok, message = self.run_guard(root)
         self.assertTrue(ok, message)
 
-    def test_receipt_writer_wiring_deletion_is_fail_closed(self):
-        root = self.fixture()
-        write(
-            root,
-            SETTLEMENT_OWNER,
-            "use crate::db::intake_outbox_delivery_proof::{\n"
-            "    IntakeSettlementSource, settle_intake_done_from_receipt,\n"
-            "};\n"
-            "async fn settle_with_lock_timeout(\n"
-            "    pool: &sqlx::PgPool,\n"
-            "    outbox_id: i64,\n"
-            "    source: IntakeSettlementSource,\n"
-            ") -> Result<bool, sqlx::Error> {\n"
-            "    let mut transaction = pool.begin().await?;\n"
-            "    transaction.commit().await?;\n"
-            "    Ok(false)\n"
-            "}\n",
-        )
-        ok, message = self.run_guard(root)
-        self.assertFalse(ok)
-        self.assertIn("settle_intake_done_from_receipt: call site GONE", message)
 
     def test_production_possible_cfg_forms_are_scanned(self):
         for body in (
@@ -270,7 +225,7 @@ class DiscriminationTests(unittest.TestCase):
         root = self.fixture(proof=True)
         ok, message = self.run_guard(root)
         self.assertTrue(ok, message)
-        self.assertIn("3 production sites across 3 symbols", message)
+        self.assertIn("2 production sites across 2 symbols", message)
 
         write(
             root,
@@ -487,7 +442,8 @@ class SharedSkipRuleTests(unittest.TestCase):
     def test_repository_skips_match_data_resolver_pin_and_basename_rule(self):
         data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
         self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
-        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"]
+        resolver = skip_pin_registry.load(ROOT).frozensets()[1]
+        self.assertLessEqual(data["PINNED_RESOLVER_TEST_ONLY_FILES"], resolver)
         self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
         basename = {
             path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")

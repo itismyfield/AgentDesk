@@ -12,7 +12,7 @@ use poise::serenity_prelude::{ChannelId, Http, HttpBuilder};
 
 use crate::services::discord::admin_host_guard::ManagedReset;
 use crate::services::discord::commands::{
-    SoftClearNotifyMode, build_health_report, build_status_report, clear_channel_session_state,
+    build_health_report, build_status_report, clear_channel_session_state,
     reset_channel_provider_state, reset_provider_session_if_pending,
 };
 use crate::services::discord::host_defer_gate::tests::{
@@ -152,14 +152,7 @@ async fn a_clear_goes_ahead_on_any_host_while_a_reset_refuses_a_kept_session_pg(
         let alive = process(&name, n as u32 + 64_000);
         tmux.take_calls();
 
-        let clear = clear_channel_session_state(
-            &http,
-            &shared,
-            &provider,
-            channel,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-        );
+        let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear");
         clear.await.expect("a clear never refuses");
         assert!(!alive.load(Ordering::SeqCst), "{case:?}: the clear kills");
         assert!(
@@ -229,14 +222,7 @@ async fn a_nameless_channel_clears_whatever_its_own_row_says_pg() {
             .await;
         tmux.take_calls();
 
-        let clear = clear_channel_session_state(
-            &http,
-            &shared,
-            &provider,
-            channel,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-        );
+        let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear");
         clear.await.expect("a clear never refuses");
         assert!(
             !session_id(&shared, channel).await,
@@ -1067,8 +1053,7 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_resets_it_without_tm
         .await;
     tmux.take_calls();
 
-    let mode = SoftClearNotifyMode::Suppress;
-    let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear", mode);
+    let clear = clear_channel_session_state(&http, &shared, &provider, channel, "/clear");
     clear.await.expect("a configured channel's clear commits");
     let core = shared.core.lock().await;
     let session = &core.sessions[&channel];
@@ -1077,4 +1062,13 @@ async fn an_unmanaged_runtime_clear_of_a_configured_channel_resets_it_without_tm
     drop(core);
     assert_eq!(tmux.take_calls(), Vec::<String>::new(), "no tmux call");
     db.drop().await;
+}
+
+/// A bounded runtime for the replay kickoff fixtures.
+pub(in crate::services::discord) fn intake_replay_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
 }

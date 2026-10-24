@@ -4,6 +4,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use std::collections::HashSet;
 
+mod codex_launch_cause;
+
 /// Purges expired entries and drops the restore scope of a binding that just expired.
 pub(super) fn purge_expired_under_authority(
     state: &mut TuiPromptDedupeState,
@@ -89,21 +91,29 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> bool {
+    let cause = if binding.runtime_kind == RuntimeHandoffKind::CodexTui {
+        let Some(cause) = codex_launch_cause::cause(authority, channel_id, &binding) else {
+            return false;
+        };
+        cause
+    } else {
+        CauseSource::Observed
+    };
     if binding.runtime_kind == RuntimeHandoffKind::CodexTui
         && super::codex_cursor::migrate_raw_native_marker(authority, &binding).is_err()
     {
         return false;
     }
     let record = Record::Stat;
-    register_rehydrated_under_source_authority(
-        authority,
-        provider,
-        channel_id,
-        binding,
-        record,
-        CauseSource::Observed,
+    let published = register_rehydrated_under_source_authority(
+        authority, provider, channel_id, binding, record, cause,
     )
-    .is_some_and(Persisted::published)
+    .is_some_and(Persisted::published);
+    #[cfg(unix)]
+    if published && provider == "codex" {
+        crate::services::codex_tui::execution_end::producer::binding_published_under(authority);
+    }
+    published
 }
 
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;

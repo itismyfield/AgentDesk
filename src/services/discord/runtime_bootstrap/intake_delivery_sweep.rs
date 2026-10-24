@@ -1,8 +1,7 @@
 //! Periodic recovery of stale open intake-delivery debt.
 
-use super::intake_delivery_capability::SettlementCapabilities;
 use crate::db::intake_outbox_delivery_proof::{
-    DURABLE_INFLIGHT_SESSION_SCOPE_SQL, durable_inflight_liveness_case_sql, list_stale_dispatched,
+    DurableInflightLiveness, durable_inflight_liveness_sql, list_stale_dispatched,
     list_stale_spawned, open_stamp_debt_exists, settle_dispatched_unknown, settle_spawned_unknown,
 };
 use crate::services::discord::SharedData;
@@ -82,21 +81,16 @@ async fn live_signal(
     heartbeat_fresh: DateTime<Utc>,
     absence_cutoff: DateTime<Utc>,
 ) -> Result<LiveSignal, sqlx::Error> {
-    let liveness = durable_inflight_liveness_case_sql(2, 3);
-    let session_scope = DURABLE_INFLIGHT_SESSION_SCOPE_SQL;
-    let statement = format!(
-        "SELECT COALESCE(MAX({liveness}), 0)::smallint
-           FROM public.intake_outbox io
-           JOIN public.sessions s ON {session_scope}
-          WHERE io.id = $1"
-    );
-    let signal: i16 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+    let statement = durable_inflight_liveness_sql();
+    let row: (i64, i64, i16) = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .bind(outbox_id)
         .bind(heartbeat_fresh)
         .bind(absence_cutoff)
         .fetch_one(pool)
         .await?;
-    Ok(match signal {
+    let signal = DurableInflightLiveness::from(row);
+    signal.record_absence(outbox_id, "preflight");
+    Ok(match signal.grade {
         0 => LiveSignal::Absent,
         2 => LiveSignal::Live,
         _ => LiveSignal::Ambiguous,
@@ -180,25 +174,11 @@ fn note_skip(stats: &mut SweepStats, signal: LiveSignal, id: i64) -> bool {
 
 pub(super) async fn sweep_once(
     pool: &PgPool,
-    caps: SettlementCapabilities,
     cutoffs: SweepCutoffs,
     limit: i64,
 ) -> Result<SweepStats, sqlx::Error> {
-    // This is a no-debt short-circuit, NOT a stage gate, and the difference is operationally
-    // visible. `open_stamp_debt_exists` asks whether any row sits in `spawned` or `dispatched`,
-    // and `spawned` is the normal initial status of every locally admitted row
-    // (`AdmissionKind::Local => Spawned`). So on a node carrying traffic the second disjunct is
-    // true and the sweep runs at every stage, `Off` included: rows older than the cutoff are
-    // settled `unknown` whether or not settlement has been "turned on".
-    //
-    // That is the intended design -- debt already in the table has to drain after a stage is
-    // lowered or a node restarts -- and two tests pin it with `settle_and_sweep: false`:
-    // `sweep_runs_when_stage_lowered_but_open_dispatched_exists_pg` and
-    // `sweep_runs_after_restart_with_only_spawned_stamp_debt_pg`. What the disjunct buys is
-    // skipping the per-tick queries on an idle table, not holding the sweep back until the stage
-    // authorizes it. The guards that do bound the damage are the staleness cutoffs, the
-    // `live_signal` deferral, and the in-transaction cutoff recheck before each terminal CAS.
-    if !caps.settle_and_sweep && !open_stamp_debt_exists(pool).await? {
+    // Existing handoff debt still drains after fresh-turn settlement is retired.
+    if !open_stamp_debt_exists(pool).await? {
         return Ok(SweepStats::default());
     }
     let limit = limit.clamp(1, 500);
@@ -307,13 +287,7 @@ pub(super) fn spawn_intake_delivery_sweep(shared: Arc<SharedData>) {
                         .unwrap_or_else(|| Arc::new(crate::config::Config::default()));
                     let (dispatched, spawned, limit) =
                         config.runtime.intake_delivery_sweep_settings();
-                    sweep_once(
-                        &pool,
-                        shared.intake_delivery_capabilities.current(),
-                        SweepCutoffs::from_now(dispatched, spawned),
-                        limit,
-                    )
-                    .await
+                    sweep_once(&pool, SweepCutoffs::from_now(dispatched, spawned), limit).await
                 })
                 .await;
                 match tick {

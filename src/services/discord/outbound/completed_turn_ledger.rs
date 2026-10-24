@@ -239,26 +239,116 @@ fn prune_ledger(ledger: &mut CompletedTurnLedger, now_ms: u64) {
     ledger.merged_aliases = kept;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentSync {
+    Flushed,
+    Unflushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Skipped,
+    Published(ParentSync),
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+enum PublishError {
+    #[error("write failed: {0}")]
+    WriteFailed(String),
+    #[error("parent sync failed after publication: {0}")]
+    ParentSyncFailed(String),
+}
+
+/// The ledger write a log line reports, with the id that names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerOperation {
+    Append { user_msg_id: u64 },
+    MergedAlias { primary: u64 },
+}
+
+/// Logs what a publication left behind: failures as warnings, an unflushed one at debug.
+fn log_publish_outcome(
+    outcome: Result<Publication, PublishError>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    operation: LedgerOperation,
+) {
+    let provider = provider.as_str();
+    let (error, published, message) = match outcome {
+        Ok(Publication::Published(ParentSync::Unflushed)) => {
+            return tracing::debug!(
+                provider, channel_id, operation = ?operation, published = true,
+                "completed-turn ledger published without a directory flush (durability unconfirmed)"
+            );
+        }
+        Ok(_) => return,
+        Err(PublishError::ParentSyncFailed(error)) => (
+            error,
+            true,
+            "completed-turn ledger published; parent sync failed (best-effort durability unconfirmed)",
+        ),
+        Err(PublishError::WriteFailed(error)) => (
+            error,
+            false,
+            "completed-turn ledger write failed (best-effort; settlement evidence unavailable)",
+        ),
+    };
+    match operation {
+        LedgerOperation::Append { user_msg_id } => tracing::warn!(
+            provider, channel_id, user_msg_id, operation = "append", issue = "#4564",
+            error = %error, published, "{message}"
+        ),
+        LedgerOperation::MergedAlias { primary } => tracing::warn!(
+            provider, channel_id, primary, operation = "merged_alias", issue = "#6035",
+            error = %error, published, "{message}"
+        ),
+    }
+}
+
 fn mutate_at(
     path: &Path,
     now_ms: u64,
     mutate: impl FnOnce(&mut CompletedTurnLedger),
-) -> Result<(), String> {
+) -> Result<Publication, PublishError> {
+    mutate_at_with_sync(
+        path,
+        now_ms,
+        mutate,
+        runtime_store::fsync_parent_and_ancestors,
+        runtime_store::PARENT_DIR_FSYNC_FLUSHES,
+    )
+}
+
+fn mutate_at_with_sync(
+    path: &Path,
+    now_ms: u64,
+    mutate: impl FnOnce(&mut CompletedTurnLedger),
+    sync: impl FnOnce(&Path) -> std::io::Result<()>,
+    flushes: bool,
+) -> Result<Publication, PublishError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent).map_err(|e| PublishError::WriteFailed(e.to_string()))?;
     }
-    let _lock = delivery_record::lock_record_path(path)?;
+    let _lock = delivery_record::lock_record_path(path).map_err(PublishError::WriteFailed)?;
     let mut ledger = read_ledger_at(path).unwrap_or_default();
     mutate(&mut ledger);
     prune_ledger(&mut ledger, now_ms);
-    let data = serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())?;
+    let data = serde_json::to_string_pretty(&ledger)
+        .map_err(|e| PublishError::WriteFailed(e.to_string()))?;
     #[cfg(test)]
     BEFORE_PUBLISH.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
             hook();
         }
     });
-    runtime_store::atomic_write(path, &data)
+    runtime_store::atomic_write(path, &data).map_err(PublishError::WriteFailed)?;
+    // The rename is already visible; a parent-sync failure must never retry the write.
+    sync(path).map_err(|error| PublishError::ParentSyncFailed(error.to_string()))?;
+    Ok(Publication::Published(if flushes {
+        ParentSync::Flushed
+    } else {
+        ParentSync::Unflushed
+    }))
 }
 
 /// flock-guarded append deduped by `(user_msg_id, turn_nonce)`, keeping the latest commit time.
@@ -268,23 +358,47 @@ fn append_at(
     user_msg_id: u64,
     turn_nonce: Option<&str>,
     committed_at_epoch_ms: u64,
-) -> Result<(), String> {
+) -> Result<Publication, PublishError> {
+    append_at_with_sync(
+        path,
+        user_msg_id,
+        turn_nonce,
+        committed_at_epoch_ms,
+        runtime_store::fsync_parent_and_ancestors,
+        runtime_store::PARENT_DIR_FSYNC_FLUSHES,
+    )
+}
+
+fn append_at_with_sync(
+    path: &Path,
+    user_msg_id: u64,
+    turn_nonce: Option<&str>,
+    committed_at_epoch_ms: u64,
+    sync: impl FnOnce(&Path) -> std::io::Result<()>,
+    flushes: bool,
+) -> Result<Publication, PublishError> {
     if user_msg_id == 0 {
-        return Ok(());
+        return Ok(Publication::Skipped);
     }
     let turn_nonce = turn_nonce
         .filter(|nonce| !nonce.is_empty())
         .map(str::to_owned);
-    mutate_at(path, committed_at_epoch_ms, |ledger| {
-        ledger
-            .entries
-            .retain(|entry| entry.user_msg_id != user_msg_id || entry.turn_nonce != turn_nonce);
-        ledger.entries.push(CompletedTurnEntry {
-            user_msg_id,
-            committed_at_epoch_ms,
-            turn_nonce,
-        });
-    })
+    mutate_at_with_sync(
+        path,
+        committed_at_epoch_ms,
+        |ledger| {
+            ledger
+                .entries
+                .retain(|entry| entry.user_msg_id != user_msg_id || entry.turn_nonce != turn_nonce);
+            ledger.entries.push(CompletedTurnEntry {
+                user_msg_id,
+                committed_at_epoch_ms,
+                turn_nonce,
+            });
+        },
+        sync,
+        flushes,
+    )
 }
 
 fn record_alias_at(
@@ -293,14 +407,14 @@ fn record_alias_at(
     turn_nonce: &str,
     absorbed: &[u64],
     claimed_at_epoch_ms: u64,
-) -> Result<(), String> {
+) -> Result<Publication, PublishError> {
     let absorbed: Vec<u64> = absorbed
         .iter()
         .copied()
         .filter(|id| *id != 0 && *id != primary)
         .collect();
     if primary == 0 || turn_nonce.is_empty() || absorbed.is_empty() {
-        return Ok(());
+        return Ok(Publication::Skipped);
     }
     mutate_at(path, claimed_at_epoch_ms, |ledger| {
         ledger
@@ -349,15 +463,13 @@ pub(in crate::services::discord) fn append_completed_episode(
         );
         return;
     };
-    if let Err(error) = append_at(&path, user_msg_id, turn_nonce, now_epoch_ms()) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id,
-            user_msg_id,
-            error = %error,
-            "#4564 completed-turn ledger append failed (best-effort; falls through to TooOld/DLQ)"
-        );
-    }
+    let outcome = append_at(&path, user_msg_id, turn_nonce, now_epoch_ms());
+    log_publish_outcome(
+        outcome,
+        provider,
+        channel_id,
+        LedgerOperation::Append { user_msg_id },
+    );
 }
 
 /// Durably record that episode `turn_nonce` of `primary` absorbed `absorbed`, before the claim
@@ -372,15 +484,13 @@ pub(in crate::services::discord) fn record_merged_alias(
     let Some(path) = ledger_path(provider, channel_id) else {
         return;
     };
-    if let Err(error) = record_alias_at(&path, primary, turn_nonce, absorbed, now_epoch_ms()) {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id,
-            primary,
-            error = %error,
-            "#6035 merged-head alias record failed (absorbed ids stay unsettled)"
-        );
-    }
+    let outcome = record_alias_at(&path, primary, turn_nonce, absorbed, now_epoch_ms());
+    log_publish_outcome(
+        outcome,
+        provider,
+        channel_id,
+        LedgerOperation::MergedAlias { primary },
+    );
 }
 
 #[cfg(test)]
@@ -399,11 +509,44 @@ pub(in crate::services::discord) fn append_before_publish_for_tests(
     BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     let path = ledger_path(&ProviderKind::Claude, channel_id).ok_or("test ledger path missing")?;
     append_at(&path, user_msg_id, Some(nonce), committed_ms)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || Capture(output.clone()))
+            .finish();
+        crate::logging::test_capture::pin_callsite_interest();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        String::from_utf8(bytes).unwrap()
+    }
 
     fn entry(user_msg_id: u64, committed_at_epoch_ms: u64) -> CompletedTurnEntry {
         CompletedTurnEntry {
@@ -429,11 +572,195 @@ mod tests {
         }
     }
 
+    const APPEND: LedgerOperation = LedgerOperation::Append { user_msg_id: 7_001 };
+
+    #[test]
+    fn ledger_operation_logs_keep_primary_and_issue() {
+        let sync_failed = || Err(PublishError::ParentSyncFailed("eio".into()));
+        let alias = LedgerOperation::MergedAlias { primary: P };
+        let logs =
+            capture_logs(|| log_publish_outcome(sync_failed(), &ProviderKind::Codex, 1, alias));
+        for field in [
+            format!("primary={P}"),
+            "operation=\"merged_alias\"".into(),
+            "#6035".into(),
+        ] {
+            assert!(logs.contains(&field), "{field}: {logs}");
+        }
+        assert!(!logs.contains("user_msg_id"), "{logs}");
+        let logs =
+            capture_logs(|| log_publish_outcome(sync_failed(), &ProviderKind::Codex, 1, APPEND));
+        assert!(
+            logs.contains("user_msg_id=7001") && logs.contains("#4564"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn unflushed_publication_is_observable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        let unflushed = append_at_with_sync(&path, 7_001, None, 1_000, |_| Ok(()), false);
+        let logs = capture_logs(|| log_publish_outcome(unflushed, &ProviderKind::Codex, 1, APPEND));
+        assert!(
+            logs.contains("DEBUG") && logs.contains("durability unconfirmed"),
+            "{logs}"
+        );
+        assert!(
+            logs.contains("published=true") && logs.contains("7001"),
+            "{logs}"
+        );
+        let flushed = Ok(Publication::Published(ParentSync::Flushed));
+        assert!(
+            capture_logs(|| log_publish_outcome(flushed, &ProviderKind::Codex, 1, APPEND))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parent_sync_observes_published_append_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("codex/5166.json");
+        let mut syncs = 0;
+        let result = append_at_with_sync(
+            &path,
+            7_001,
+            Some("episode"),
+            1_000,
+            |published| {
+                syncs += 1;
+                assert_eq!(published, path);
+                let ledger = read_ledger_at(published);
+                assert!(ledger.is_some(), "rename must precede parent sync");
+                assert_eq!(
+                    ledger.unwrap().entries,
+                    vec![episode(7_001, "episode", 1_000)]
+                );
+                Ok(())
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(syncs, 1, "successful publication must sync its parent once");
+        assert_eq!(result, Publication::Published(ParentSync::Flushed));
+    }
+
+    #[test]
+    fn parent_sync_is_skipped_when_rename_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        append_at(&path, 7_000, None, 900).unwrap();
+        let before = fs::read(&path).unwrap();
+        let fault = runtime_store::rename_fault::Armed::new(&path);
+        let mut syncs = 0;
+        let result = append_at_with_sync(
+            &path,
+            7_001,
+            None,
+            1_000,
+            |_| {
+                syncs += 1;
+                Ok(())
+            },
+            true,
+        );
+        let error = result.expect_err("rename failure must remain a write failure");
+        assert!(matches!(&error, PublishError::WriteFailed(detail) if detail.contains("rename")));
+        let logs =
+            capture_logs(|| log_publish_outcome(Err(error), &ProviderKind::Codex, 5166, APPEND));
+        assert!(logs.contains("ledger write failed"), "{logs}");
+        assert!(logs.contains("published=false"), "{logs}");
+        assert!(!logs.contains("durability unconfirmed"), "{logs}");
+        assert_eq!(syncs, 0, "failed publication must never sync its parent");
+        assert_eq!(fault.evidence().0, 1, "one real rename was attempted");
+        assert_eq!(fault.evidence().1.len(), 1, "the OS refused the rename");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn parent_sync_failure_keeps_the_published_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        let mut retry_fault = None;
+        let mut syncs = 0;
+        let logs = capture_logs(|| {
+            let error = append_at_with_sync(
+                &path,
+                7_001,
+                None,
+                1_000,
+                |published| {
+                    syncs += 1;
+                    retry_fault = Some(runtime_store::rename_fault::Armed::new(published));
+                    Err(std::io::Error::other("injected parent sync failure"))
+                },
+                true,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                PublishError::ParentSyncFailed("injected parent sync failure".into())
+            );
+            log_publish_outcome(Err(error), &ProviderKind::Codex, 5166, APPEND);
+        });
+        assert_eq!(syncs, 1);
+        assert_eq!(
+            retry_fault.unwrap().evidence().0,
+            0,
+            "a visible entry must never be rewritten after a sync failure"
+        );
+        assert_eq!(
+            read_ledger_at(&path).unwrap().entries,
+            vec![entry(7_001, 1_000)]
+        );
+        assert!(
+            logs.contains("best-effort durability unconfirmed"),
+            "{logs}"
+        );
+        assert!(logs.contains("published=true"), "{logs}");
+        assert!(logs.contains("operation=\"append\""), "{logs}");
+        assert!(!logs.contains("ledger write failed"), "{logs}");
+        assert!(!logs.contains("delivery failed"), "{logs}");
+        assert!(!logs.contains("settlement evidence unavailable"), "{logs}");
+    }
+
+    #[test]
+    fn parent_sync_no_flush_is_classified_without_claiming_durability() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("5166.json");
+        let mut syncs = 0;
+        let result = append_at_with_sync(
+            &path,
+            7_001,
+            None,
+            1_000,
+            |published| {
+                syncs += 1;
+                assert_eq!(published, path);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(syncs, 1);
+        assert_eq!(result, Publication::Published(ParentSync::Unflushed));
+        assert_eq!(
+            read_ledger_at(&path).unwrap().entries,
+            vec![entry(7_001, 1_000)]
+        );
+    }
+
     #[test]
     fn append_then_read_roundtrips_the_user_msg_id() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("codex").join("4564.json");
-        append_at(&path, 7_001, None, 1_000).expect("append");
+        let result = append_at(&path, 7_001, None, 1_000).expect("append");
+        let expected = if runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+            ParentSync::Flushed
+        } else {
+            ParentSync::Unflushed
+        };
+        assert_eq!(result, Publication::Published(expected));
 
         let ledger = read_ledger_at(&path).expect("ledger present");
         assert_eq!(ledger.entries, vec![entry(7_001, 1_000)]);
@@ -458,7 +785,10 @@ mod tests {
     fn zero_user_msg_id_is_a_no_op_sentinel() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("codex").join("4564.json");
-        append_at(&path, 0, None, 1_000).expect("sentinel append is a no-op");
+        assert_eq!(
+            append_at(&path, 0, None, 1_000).unwrap(),
+            Publication::Skipped
+        );
         assert!(
             read_ledger_at(&path).is_none(),
             "a synthetic turn (user_msg_id == 0) must not create a ledger"

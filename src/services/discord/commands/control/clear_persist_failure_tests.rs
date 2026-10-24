@@ -5,10 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
-use super::{
-    ClearReport, SoftClearNotifyMode, clear_channel_session_state,
-    clear_channel_session_state_fenced,
-};
+use super::{ClearReport, clear_channel_session_state, clear_channel_session_state_fenced};
 use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
@@ -87,16 +84,7 @@ async fn clear(
     channel_id: ChannelId,
 ) -> anyhow::Result<ClearReport> {
     let http = Arc::new(serenity::Http::new(""));
-    clear_channel_session_state_fenced(
-        &http,
-        shared,
-        provider,
-        channel_id,
-        "/clear",
-        SoftClearNotifyMode::Suppress,
-        None,
-    )
-    .await
+    clear_channel_session_state_fenced(&http, shared, provider, channel_id, "/clear", None).await
 }
 
 pub(super) async fn session_state(
@@ -300,6 +288,8 @@ fn persisted_clear_still_resets_the_session_and_arms_no_kick() {
 fn persisted_clear_still_resets_the_managed_process() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    #[cfg(unix)]
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(6_233_104);
     let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
@@ -372,16 +362,9 @@ fn a_clear_commits_its_transcript_boundary_whatever_its_queue_write_did_pg() {
         let http = Arc::new(serenity::Http::new(""));
 
         // `/clear` and `!clear` both call this entry.
-        let report = clear_channel_session_state(
-            &http,
-            &shared,
-            &provider,
-            channel_id,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-        )
-        .await
-        .expect("a clear always commits");
+        let report = clear_channel_session_state(&http, &shared, &provider, channel_id, "/clear")
+            .await
+            .expect("a clear always commits");
 
         assert_eq!(report.failed, ["queue_publish"]);
         assert_eq!(
@@ -401,7 +384,7 @@ async fn soft_clear_notifications(pool: &sqlx::PgPool, channel_id: ChannelId) ->
         "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE target = $1 AND reason_code = $2",
     )
     .bind(format!("channel:{}", channel_id.get()))
-    .bind(super::SOFT_CLEAR_REASON_CODE)
+    .bind("lifecycle.soft_clear")
     .fetch_one(pool)
     .await
     .expect("read soft-clear notifications")
@@ -457,6 +440,8 @@ const RETRY_LANDED: &str = "⚠️ 일부 저장이 처음에 실패했지만 �
 fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+    #[cfg(unix)]
+    let _tmux = crate::services::discord::relay_recovery::tests::orphan_token_finish::MissingSessionTmux::new_after_shared_test_env_lock();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(6_233_106);
     let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
@@ -489,9 +474,8 @@ fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() 
         let clear = |shared| {
             let (http, provider) = (http.clone(), provider.clone());
             async move {
-                let notify = SoftClearNotifyMode::Enqueue;
                 let clear = clear_channel_session_state;
-                clear(&http, &shared, &provider, channel_id, "/clear", notify).await
+                clear(&http, &shared, &provider, channel_id, "/clear").await
             }
         };
 
@@ -508,7 +492,7 @@ fn a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg() 
             "the managed process is reset"
         );
         assert!(boundary_rows(&pool, channel_id).await.is_empty());
-        assert_eq!(soft_clear_notifications(&pool, channel_id).await, 1);
+        assert_eq!(soft_clear_notifications(&pool, channel_id).await, 0);
 
         trap_boundary_writes(&pool, Trap::Off).await;
         trap_boundary_writes(&pool, Trap::First).await;

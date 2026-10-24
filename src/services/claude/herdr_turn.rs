@@ -21,7 +21,7 @@ use crate::services::agent_protocol::{
     NativeTerminalKind, RuntimeHandoff, RuntimeHandoffKind, StreamMessage,
 };
 use crate::services::claude_tui::hook_server::{HookEvent, HookEventKind};
-use crate::services::claude_tui::host_input::{InputRun, run_herdr};
+use crate::services::claude_tui::host_input::InputRun;
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::cluster::stream_relay::SourceFileIdentity;
@@ -53,20 +53,51 @@ use crate::services::tui_prompt_dedupe::binding_events::{
 
 const SESSION_START_WAIT: Duration = Duration::from_secs(30);
 
+struct Boot<'a>(&'a SocketHerdrLaunchHost);
+impl HerdrLaunchHost for Boot<'_> {
+    fn mode(&self, endpoint: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        self.0.mode(endpoint)
+    }
+    fn create_permit<'a>(
+        &'a self,
+        endpoint: &'a HerdrLaunchEndpoint,
+    ) -> crate::services::herdr_launch::policy::PermitFuture<'a> {
+        self.0.create_permit(endpoint)
+    }
+    fn remember_grant(
+        &self,
+        grant: crate::services::session_host::policy::permit::LaunchAdmissionGrant,
+    ) {
+        self.0.remember_grant(grant);
+    }
+    fn grants(&self) -> &dyn crate::services::herdr_launch::policy::LaunchGrantStore {
+        self.0.grants()
+    }
+    fn current_witness(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+    ) -> Result<crate::services::session_host::ServerWitness, String> {
+        self.0.current_witness(endpoint)
+    }
+    fn create_user_default(
+        &self,
+        request: &crate::services::herdr_launch::policy::UserDefaultCreateRequest,
+    ) -> HerdrCreateOutcome {
+        self.0.create_user_default(request)
+    }
+    fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
+        self.0.restore_resume(endpoint)
+    }
+    fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
+        self.0.create(request)
+    }
+    fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
+        self.0.launch_evidence(probe)
+    }
+}
+
 /// The boot registry's launch host, on its endpoints only.
 pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
-    struct Boot(&'static SocketHerdrLaunchHost);
-    impl HerdrLaunchHost for Boot {
-        fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
-            self.0.restore_resume(endpoint)
-        }
-        fn create(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
-            self.0.create(request)
-        }
-        fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-            self.0.launch_evidence(probe)
-        }
-    }
     let host = herdr_endpoints().launch_host()?;
     Some(Arc::new(Boot(host)))
 }
@@ -320,7 +351,7 @@ fn logged_session(target: &BindingTarget) -> Option<&str> {
 }
 
 /// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
-fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+pub(crate) fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
@@ -347,17 +378,26 @@ pub(crate) enum HoldRelease {
 /// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
 /// as does a Codex cold start once its launch's own source is bound.
 pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
-    let path = match hold_path(nonce) {
-        Ok(path) => path,
+    let (path, removed) = match unlink_hold(nonce) {
+        Ok(unlinked) => unlinked,
         Err(error) => return HoldRelease::Kept(error),
     };
+    if !removed {
+        return HoldRelease::Released;
+    }
+    match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
+        Ok(()) => HoldRelease::Released,
+        Err(error) => HoldRelease::NotDurable(error.to_string()),
+    }
+}
+
+/// Unlinks the same validated nonce path for ordinary and durable hold release.
+pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
+    let path = hold_path(nonce)?;
     match std::fs::remove_file(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HoldRelease::Released,
-        Err(error) => HoldRelease::Kept(error.to_string()),
-        Ok(()) => match crate::services::discord::runtime_store::fsync_parent_dir(&path) {
-            Ok(()) => HoldRelease::Released,
-            Err(error) => HoldRelease::NotDurable(error.to_string()),
-        },
+        Ok(()) => Ok((path, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((path, false)),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -609,8 +649,9 @@ fn prompt_and_read(
         start.offset = before;
         start
     };
-    let HerdrInputRun::Ran(run) =
-        observed_input(cancel, start, || run_herdr(&attached.target, &plan, cancel))?
+    let HerdrInputRun::Ran(run) = observed_input(cancel, start, || {
+        composer::run(&attached.target, &plan, cancel)
+    })?
     else {
         if !before_start::mutant("closed_release_callsite_removed_claude") {
             before_start::release_claude_hold(&turn.owner.logical_key, &held);
@@ -627,7 +668,7 @@ fn prompt_and_read(
         tracing::warn!(logical = %turn.owner.logical_key, %error, "herdr turn: input hold kept");
     }
     run.into_legacy()?;
-    let start = super::claude_tui_turn_start_offset_after_timestamp(path, started_at, before);
+    let start = before;
     let logical = turn.owner.logical_key.as_str();
     let unread = || PromptReadinessSnapshot {
         prompt_marker_detected: false,
@@ -658,7 +699,7 @@ fn prompt_and_read(
             let ended =
                 |at| terminal_replay::ended_tail(&transcript, at, started_at, &attached.target);
             let read = read_to_provider_terminal(&transcript, start, &sender, token, ended);
-            terminal = read?.map(|terminal| (terminal, token.clone(), start));
+            terminal = read?.map(|terminal| (terminal, token.clone()));
             unconfirmed = terminal.is_none();
         } else {
             read_output_file_until_result_with_harvest(
@@ -697,8 +738,8 @@ fn prompt_and_read(
     if !attached.bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
-    if let Some((read, token, start)) = terminal.take() {
-        let _ = sender.send(read.frame(&transcript, logical, start, &token));
+    if let Some((read, token)) = terminal.take() {
+        let _ = sender.send(read.frame(&transcript, logical, &token));
     }
     // A read that ended without this turn's terminal hands no runtime to a watcher to finish.
     if unconfirmed {
@@ -717,6 +758,7 @@ fn prompt_and_read(
 /// A Herdr Claude turn's provider terminal and the record end the read stopped at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClaudeTurnTerminal {
+    pub(crate) start: u64,
     pub(crate) kind: NativeTerminalKind,
     pub(crate) end: u64,
     pub(crate) result: String,
@@ -727,20 +769,14 @@ pub(crate) struct ClaudeTurnTerminal {
 
 impl ClaudeTurnTerminal {
     /// The typed frame only bridge admission turns into a terminal; no tmux generation names it.
-    fn frame(
-        self,
-        transcript: &str,
-        logical: &str,
-        start: u64,
-        token: &Arc<CancelToken>,
-    ) -> StreamMessage {
+    fn frame(self, transcript: &str, logical: &str, token: &Arc<CancelToken>) -> StreamMessage {
         StreamMessage::ClaudeTuiTerminalDone {
             result: self.result,
             session_id: self.session_id,
             transcript_path: transcript.to_owned(),
             tmux_session_name: logical.to_owned(),
             turn_nonce: token.turn_nonce().unwrap_or_default().to_owned(),
-            source_start: start,
+            source_start: self.start,
             complete_record_end: self.end,
             generation_mtime_ns: 0,
             source_file_dev: self.file.0,
@@ -809,7 +845,7 @@ pub(crate) fn herdr_terminal_frame(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let alive = move |_| (std::time::Instant::now() >= deadline).then(String::new);
     let read = read_to_provider_terminal(transcript, start, &tx, token, alive).ok()??;
-    Some(read.frame(transcript, logical, start, token))
+    Some(read.frame(transcript, logical, token))
 }
 
 /// An assistant or result record: a turn's own output, never metadata.
@@ -848,92 +884,6 @@ fn is_turn_prompt(line: &str) -> bool {
     }
 }
 
-/// Under settlement the transcript is read to this turn's own turn-end record, returned unsent;
-/// offsets advance only over processed records. Idleness, EOF or a dead pane end no turn, but a
-/// terminal its gone writer left without a newline (`ended`) is read and ends where the file does.
-fn read_to_provider_terminal(
-    transcript: &str,
-    start: u64,
-    sender: &Sender<StreamMessage>,
-    token: &Arc<CancelToken>,
-    ended: impl Fn((u64, SourceFileIdentity)) -> Option<String>,
-) -> Result<Option<ClaudeTurnTerminal>, String> {
-    let mut lines = HerdrTurnLines::default();
-    let opened = std::cell::Cell::new(SourceFileIdentity::Unavailable);
-    let tail = std::cell::RefCell::new(None);
-    // A buffer's raw end is sent only once a later read shows all its records were processed.
-    let pending = std::cell::Cell::new(None::<u64>);
-    let (offsets, relay) = (sender.clone(), sender.clone());
-    let (local, local_rx) = std::sync::mpsc::channel();
-    let mut process = |line: &str, lines: &mut HerdrTurnLines| {
-        let processed = lines.process(line, &local);
-        // The turn's Done is the typed frame sent after the read, never the stream's own.
-        for message in local_rx.try_iter() {
-            if !matches!(message, StreamMessage::Done { .. }) {
-                let _ = relay.send(message);
-            }
-        }
-        processed
-    };
-    let mut read = poll_output_file_until_result(
-        transcript,
-        start,
-        Some(token.clone()),
-        &mut lines,
-        || {
-            let at = (pending.get().unwrap_or(start), opened.get());
-            let mut tail = tail.borrow_mut();
-            *tail = ended(at).map(|found| (at.0, found));
-            tail.is_none()
-        },
-        || false,
-        |raw_end| {
-            if let Some(processed) = pending.replace(Some(raw_end)) {
-                let _ = offsets.send(StreamMessage::OutputOffset { offset: processed });
-            }
-        },
-        &mut process,
-        |lines| lines.terminal().is_some(),
-        |_| false,
-        |_| {},
-        |file| opened.set(SourceFileIdentity::from_open_file(file)),
-    )
-    .map_err(|failure| failure.error)?;
-    if let ReadOutputResult::SessionDied { offset } = read
-        && let Some((from, tail)) = tail.take()
-        && offset == from
-    {
-        process(&tail, &mut lines);
-        read = ReadOutputResult::Completed {
-            offset: offset + tail.len() as u64,
-        };
-    }
-    let end = match read {
-        ReadOutputResult::Completed { offset }
-        | ReadOutputResult::Cancelled { offset }
-        | ReadOutputResult::SessionDied { offset } => offset,
-    };
-    if let Some(raw_end) = pending.get() {
-        let _ = sender.send(StreamMessage::OutputOffset {
-            offset: raw_end.min(end),
-        });
-    }
-    let (ReadOutputResult::Completed { .. }, Some(kind)) = (read, lines.terminal()) else {
-        return Ok(None);
-    };
-    let (result, session_id) = lines.result();
-    let file = crate::services::provider::cancel_token_claude_interrupt::opened_file_identity(
-        Some(&opened.get()),
-    );
-    Ok(Some(ClaudeTurnTerminal {
-        kind,
-        end,
-        result,
-        session_id,
-        file,
-    }))
-}
-
 /// The row turns Bound once the pane's latest logged source is this execution's; until then it
 /// stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
@@ -956,7 +906,10 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
     }
 }
 
+mod live_reader;
 mod never_attached;
+use live_reader::read_to_provider_terminal;
+pub(crate) mod start_offset;
 mod terminal_replay;
 pub(crate) use terminal_replay::{
     EndedTurn, Terminal, TurnOutput, closed_turn, ended_turn, replay_herdr_turn,
@@ -968,3 +921,8 @@ mod provider_terminal_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod coldstop_input_tests;
+
+#[cfg(all(test, unix))]
+mod boot_host_tests;
+
+mod composer;

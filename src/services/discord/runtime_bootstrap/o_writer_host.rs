@@ -242,15 +242,12 @@ impl HostIo for GatewayHost {
     /// Built for gateway and delegated hosts alike over the port's own client. Off, the turn reads
     /// nothing, and the transport is built only on the first on turn.
     fn repost(&self, channel: u64, port: &Arc<GatewayPort>) -> Option<host::RepostTurn<Self>> {
-        use crate::services::tui_o::repost::{
-            config::RepostSwitch, io::probe::evidence::RunScope, runner,
-        };
+        use crate::services::tui_o::repost::{io::probe::evidence::RunScope, runner};
         let pool = self.shared.pg_pool.clone()?;
         let sidecar = crate::config::runtime_root()?
             .join("tui_o")
             .join("repost")
             .join(format!("{channel}.jsonl"));
-        let switch = RepostSwitch::new(self.boot.as_ref(), crate::config_live_reload::subscribe());
         let holder = self.configured_id.clone();
         let run = RunScope {
             holder: holder.unwrap_or_else(|| "o-writer".into()),
@@ -259,7 +256,7 @@ impl HostIo for GatewayHost {
             evidence_generation: 1,
         };
         let sender = crate::services::tui_o::writer::DiscordPort::bot_id(&**port);
-        let runner = runner::Runner::new(switch, pool, sender, run);
+        let runner = runner::Runner::new(pool, sender, run);
         let (port, mut warned) = (Arc::clone(port), false);
         let open = move || match port.repost_http() {
             Ok(http) => Some(Arc::new(http)),
@@ -484,6 +481,8 @@ pub(super) mod test_host {
 #[cfg(test)]
 mod fence_tests {
     use super::*;
+    #[cfg(unix)]
+    mod b1b_fresh_launch_tests;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::tui_o::shadow::ShadowProvider::Claude;
 

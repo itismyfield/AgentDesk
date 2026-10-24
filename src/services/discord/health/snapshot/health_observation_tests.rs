@@ -1,0 +1,534 @@
+//! The health snapshot against mailbox actors the scheduler has not reached: each such actor
+//! lives on a runtime nothing drives until the test lets it, the shape of a busy dcserver.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use serde_json::Value;
+use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
+
+use crate::services::discord::health::{
+    HealthRegistry, build_health_snapshot, build_public_health_snapshot,
+};
+use crate::services::discord::host_teardown_gate::test_support::nameless_turn;
+use crate::services::discord::relay_health::RelayStallState;
+use crate::services::discord::{self, SharedData};
+use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+
+const BUDGET: Duration = Duration::from_secs(2);
+
+fn main_runtime() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// A runtime whose tasks run only while something drives it.
+pub(crate) fn parked_runtime() -> Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// Starts a turn on `channel` whose mailbox actor lives on `parked`.
+pub(crate) fn parked_turn(parked: &Runtime, shared: &Arc<SharedData>, channel: ChannelId) {
+    parked.block_on(nameless_turn(shared, channel));
+}
+
+/// Drives a parked runtime on its own thread from `after` until dropped, then drops it.
+pub(crate) struct Driver {
+    stop: Option<oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<Runtime>>,
+}
+
+impl Driver {
+    /// Actors on `parked` answer from `after` until the driver is dropped.
+    pub(crate) fn answer_from(parked: Runtime, after: Duration) -> Self {
+        let (stop, stopped) = oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(after);
+            parked.block_on(async move {
+                let _ = stopped.await;
+            });
+            parked
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Driver {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            drop(thread.join());
+        }
+    }
+}
+
+fn channel(base: u64, n: u64) -> ChannelId {
+    ChannelId::new(base + n)
+}
+
+async fn provider(registry: &HealthRegistry, name: &str) -> Arc<SharedData> {
+    let shared = discord::make_shared_data_for_tests();
+    registry.register(name.to_string(), shared.clone()).await;
+    shared
+}
+
+/// The detail snapshot and how long it took; a snapshot still running after 6s fails the test.
+async fn detail(registry: &HealthRegistry) -> (Value, Duration) {
+    let started = Instant::now();
+    let snapshot = tokio::time::timeout(Duration::from_secs(6), build_health_snapshot(registry))
+        .await
+        .expect("the health snapshot must finish");
+    (serde_json::to_value(snapshot).unwrap(), started.elapsed())
+}
+
+pub(crate) fn mailbox<'a>(
+    json: &'a Value,
+    provider: &str,
+    channel: ChannelId,
+) -> Option<&'a Value> {
+    json["mailboxes"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["provider"] == provider && entry["channel_id"] == channel.get())
+}
+
+/// `(provider, channel, read)` of every mailbox read the snapshot reports unanswered.
+pub(crate) fn read_failures(json: &Value) -> Vec<(String, u64, String)> {
+    json["mailbox_observation_failures"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|failure| {
+            assert_eq!(failure["observation_failure"], "unreachable");
+            (
+                failure["provider"].as_str().unwrap().to_string(),
+                failure["channel_id"].as_u64().unwrap(),
+                failure["read"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn failed(provider: &str, channel: ChannelId, read: &str) -> (String, u64, String) {
+    (provider.to_string(), channel.get(), read.to_string())
+}
+
+pub(crate) fn reasons(json: &Value) -> Vec<String> {
+    json["degraded_reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|reason| reason.as_str().map(str::to_string))
+        .collect()
+}
+
+fn provider_entry<'a>(json: &'a Value, name: &str) -> &'a Value {
+    json["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap()
+}
+
+/// Two stalled actors and three answering ones over two providers: the answering ones keep their
+/// entries, the stalled ones are named and never read as idle, and the build ends in time.
+#[test]
+fn health_snapshot_parallel_actors_keep_other_channels() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let parked = parked_runtime();
+    let registry = HealthRegistry::new();
+    let (claude, codex) = main.block_on(async {
+        (
+            provider(&registry, "claude").await,
+            provider(&registry, "codex").await,
+        )
+    });
+    let stalled = [channel(6_871_310_000, 1), channel(6_871_310_000, 2)];
+    for stalled in stalled {
+        parked_turn(&parked, &claude, stalled);
+    }
+    let answering = [
+        (&claude, "claude", channel(6_871_310_000, 3)),
+        (&claude, "claude", channel(6_871_310_000, 4)),
+        (&codex, "codex", channel(6_871_310_000, 5)),
+    ];
+    main.block_on(async {
+        for (shared, _, channel) in answering {
+            nameless_turn(shared, channel).await;
+        }
+        let (json, elapsed) = detail(&registry).await;
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        for (_, provider, channel) in answering {
+            let entry =
+                mailbox(&json, provider, channel).expect("an answering actor keeps its entry");
+            assert_eq!(entry["has_cancel_token"], true);
+        }
+        for stalled in stalled {
+            assert!(
+                mailbox(&json, "claude", stalled).is_none(),
+                "a stalled actor must not become an idle entry"
+            );
+        }
+        // The stalled first reads hold the deadline, so the answering turns' reconfirms find
+        // no time left: named as unanswered, never as a failed snapshot.
+        let mut expected: Vec<_> = stalled
+            .iter()
+            .map(|stalled| failed("claude", *stalled, "snapshot"))
+            .collect();
+        for (_, provider, channel) in answering {
+            expected.push(failed(provider, channel, "reconfirm"));
+        }
+        assert_eq!(read_failures(&json), expected);
+        let claude = provider_entry(&json, "claude");
+        assert_eq!(claude["runtime_state_complete"], false);
+        assert_eq!(
+            claude["active_turns"], 2,
+            "only answered actors are counted"
+        );
+        assert_eq!(
+            provider_entry(&json, "codex")["runtime_state_complete"],
+            true
+        );
+        assert!(reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
+        assert_ne!(json["status"], "healthy");
+        assert_eq!(json["fully_recovered"], false);
+
+        let started = Instant::now();
+        let public = build_public_health_snapshot(&registry).await;
+        assert!(
+            started.elapsed() < BUDGET,
+            "public snapshot took {:?}",
+            started.elapsed()
+        );
+        let public = serde_json::to_value(public).unwrap();
+        assert!(reasons(&public).contains(&"mailbox_snapshot_unavailable".to_string()));
+    });
+}
+
+/// An actor that answers 1.2s after the read reached it, inside the 1.5s deadline, is a live
+/// mailbox, not an unreachable one.
+#[test]
+fn health_snapshot_slow_actor_within_deadline_is_ok() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let parked = parked_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let slow = channel(6_871_320_000, 1);
+    parked_turn(&parked, &claude, slow);
+    let mut parked = Some(parked);
+    // Dropped after `block_on`: the driver hands back a runtime, which cannot drop in async code.
+    let mut driver = None;
+    main.block_on(async {
+        let mut barrier = claude.mailboxes.install_health_barrier_for_test(slow);
+        barrier.release();
+        let answer_late = async {
+            barrier.first_received().await;
+            let parked = parked.take().unwrap();
+            driver = Some(Driver::answer_from(parked, Duration::from_millis(1_200)));
+        };
+        let ((json, elapsed), ()) = tokio::join!(detail(&registry), answer_late);
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(1_150),
+            "the actor was not slow: {elapsed:?}"
+        );
+        let entry =
+            mailbox(&json, "claude", slow).expect("a slow actor that answered keeps its entry");
+        assert_eq!(entry["has_cancel_token"], true);
+        assert_eq!(read_failures(&json), Vec::new());
+        assert!(!reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
+        assert_eq!(
+            provider_entry(&json, "claude")["runtime_state_complete"],
+            true
+        );
+    });
+    drop(driver);
+}
+
+/// After a barrier's release every read of the same actors answers, here and in a new registry,
+/// and each `(channel, has turn)` the test made keeps its row and its turn's token.
+async fn assert_answers_after_release(
+    registry: &HealthRegistry,
+    shared: &Arc<SharedData>,
+    expected: &[(ChannelId, bool)],
+) {
+    let fresh = HealthRegistry::new();
+    fresh.register("claude".to_string(), shared.clone()).await;
+    for (which, registry) in [("the same registry", registry), ("a new registry", &fresh)] {
+        let (json, _) = detail(registry).await;
+        assert_eq!(read_failures(&json), Vec::new(), "{which}");
+        for (channel, turn) in expected {
+            let entry = mailbox(&json, "claude", *channel)
+                .unwrap_or_else(|| panic!("{which} lost {channel}'s row: {json}"));
+            assert_eq!(entry["has_cancel_token"], *turn, "{which}, {channel}");
+        }
+    }
+}
+
+/// A build that starts 800ms (or 350ms more) after its request set the deadline still ends by it:
+/// the reconfirm held at the barrier is cut there and the other channels keep their entries.
+#[test]
+fn health_snapshot_by_late_start_keeps_the_request_deadline() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    for (n, late) in [(1, 800), (3, 1_150)] {
+        let (silent, normal) = (channel(6_871_390_000, n), channel(6_871_390_000, n + 1));
+        main.block_on(async {
+            nameless_turn(&claude, silent).await;
+            nameless_turn(&claude, normal).await;
+            let mut barrier = claude.mailboxes.install_health_barrier_for_test(silent);
+            let started = Instant::now();
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1_500);
+            tokio::time::sleep(Duration::from_millis(late)).await;
+            let build = registry.health_snapshot_by(true, deadline);
+            let snapshot = tokio::time::timeout(Duration::from_secs(6), build)
+                .await
+                .expect("the health snapshot must finish");
+            let elapsed = started.elapsed();
+            assert!(elapsed < BUDGET, "request took {elapsed:?} (late {late}ms)");
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(
+                read_failures(&json),
+                vec![failed("claude", silent, "reconfirm")]
+            );
+            let entry = mailbox(&json, "claude", silent).expect("the first read answered");
+            assert_eq!(entry["has_cancel_token"], true);
+            assert!(mailbox(&json, "claude", normal).is_some());
+            barrier.first_answered().await;
+            barrier.release();
+            assert_answers_after_release(&registry, &claude, &[(silent, true), (normal, true)])
+                .await;
+        });
+    }
+}
+
+/// First reads answer, then a paired thread's read and an unpaired-token reconfirm stall: both
+/// end at the deadline, are named, prove nothing, and the other channels keep their entries.
+#[test]
+fn health_snapshot_actor_timeout_covers_secondary_reads() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let base = 6_871_330_000;
+    let (parent, thread, reconfirm, normal) = (
+        channel(base, 1),
+        channel(base, 2),
+        channel(base, 3),
+        channel(base, 4),
+    );
+    main.block_on(async {
+        // Each actor answers its first read and then reads nothing until released.
+        let mut barriers = Vec::new();
+        for channel in [thread, reconfirm] {
+            nameless_turn(&claude, channel).await;
+            barriers.push(claude.mailboxes.install_health_barrier_for_test(channel));
+        }
+        claude.mailboxes.handle(parent);
+        claude.dispatch.thread_parents.insert(parent, thread);
+        nameless_turn(&claude, normal).await;
+        let (json, elapsed) = detail(&registry).await;
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        let failures = read_failures(&json);
+        assert!(
+            failures.contains(&failed("claude", thread, "reconfirm")),
+            "{failures:?}"
+        );
+        assert!(
+            failures.contains(&failed("claude", parent, "thread_proof")),
+            "{failures:?}"
+        );
+        assert!(
+            failures.contains(&failed("claude", reconfirm, "reconfirm")),
+            "{failures:?}"
+        );
+        assert_eq!(
+            failures.len(),
+            3,
+            "the answering channel's reads all answered: {failures:?}"
+        );
+        let parent_entry = mailbox(&json, "claude", parent).expect("parent keeps its entry");
+        assert_eq!(
+            parent_entry["relay_health"]["thread_channel_id"],
+            thread.get()
+        );
+        assert_eq!(
+            parent_entry["relay_health"]["stale_thread_proof"], false,
+            "an unanswered thread read must not mark the proof stale"
+        );
+        let entry = mailbox(&json, "claude", reconfirm).expect("first read answered");
+        assert_eq!(entry["has_cancel_token"], true);
+        assert!(mailbox(&json, "claude", normal).is_some());
+        assert!(reasons(&json).contains(&"mailbox_snapshot_unavailable".to_string()));
+        barriers.iter_mut().for_each(|barrier| barrier.release());
+        let expected = [
+            (thread, true),
+            (reconfirm, true),
+            (normal, true),
+            (parent, false),
+        ];
+        assert_answers_after_release(&registry, &claude, &expected).await;
+    });
+}
+
+/// Stalled or missing tracked actors keep their park sources, and the read changes no actor, park
+/// source or file.
+#[test]
+fn health_snapshot_timeout_preserves_park_and_episode() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let base = 6_871_340_000;
+    let (parked_channel, row_channel) = (channel(base, 1), channel(base, 5));
+    let source = base + 90;
+    let parked = parked_runtime();
+    let queued = parked.block_on(async {
+        nameless_turn(&claude, parked_channel).await;
+        let intervention = ChannelMailboxRegistry::queued_for_test(source);
+        let enqueued = discord::mailbox_enqueue_intervention(
+            &claude,
+            &ProviderKind::Claude,
+            parked_channel,
+            intervention,
+        )
+        .await;
+        assert!(enqueued.enqueued);
+        claude
+            .mailbox_peek(parked_channel)
+            .unwrap()
+            .try_snapshot()
+            .await
+            .unwrap()
+    });
+    let row = crate::services::discord::inflight::InflightTurnState::new(
+        ProviderKind::Claude,
+        row_channel.get(),
+        None,
+        7,
+        row_channel.get() + 1,
+        row_channel.get() + 2,
+        "b2 row fixture".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    super::super::super::test_support::seed_backfill_row(&row);
+    let files_before = super::super::super::test_support::tree_fingerprint(&root);
+    let json = main.block_on(async {
+        claude.mailboxes.handle(row_channel);
+        let (json, elapsed) = detail(&registry).await;
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        json
+    });
+
+    assert_eq!(
+        read_failures(&json),
+        vec![failed("claude", parked_channel, "snapshot")]
+    );
+    assert_eq!(
+        super::super::super::test_support::tree_fingerprint(&root),
+        files_before
+    );
+    let after = parked.block_on(async {
+        claude
+            .mailbox_peek(parked_channel)
+            .unwrap()
+            .try_snapshot()
+            .await
+            .unwrap()
+    });
+    assert_eq!(after.active_user_message_id, queued.active_user_message_id);
+    assert!(
+        after.cancel_token.is_some(),
+        "health must not cancel the stalled turn"
+    );
+    assert_eq!(
+        after.intervention_queue.len(),
+        1,
+        "health must not drain the stalled queue"
+    );
+}
+
+/// The reconfirm is a fresh read: an episode replaced after the first read is not confirmed, while
+/// an unchanged one is.
+#[test]
+fn health_snapshot_reconfirm_does_not_confirm_a_replaced_episode() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = main_runtime();
+    let registry = HealthRegistry::new();
+    let claude = main.block_on(provider(&registry, "claude"));
+    let (replaced, control) = (channel(6_871_340_000, 3), channel(6_871_340_000, 4));
+    let json = main.block_on(async {
+        // Aged turns behind a watcher: a confirmed unpaired token reads `unpaired_active_token`.
+        for channel in [replaced, control] {
+            nameless_turn(&claude, channel).await;
+            let handle = claude.mailbox_peek(channel).unwrap();
+            handle
+                .age_active_turn_for_test(Duration::from_secs(700))
+                .await;
+            discord::register_resume_watcher_for_tests(
+                &claude,
+                channel,
+                &format!("b2-{}", channel.get()),
+            );
+        }
+        let mut barrier = claude.mailboxes.install_health_barrier_for_test(replaced);
+        // First sample read, then the episode replaced, then the reconfirm let through.
+        let replace = async {
+            barrier.first_answered().await;
+            let handle = barrier.actor();
+            handle.hard_stop().await;
+            let token = Arc::new(CancelToken::new());
+            let user_message = MessageId::new(replaced.get() + 2);
+            assert!(
+                handle
+                    .try_start_turn(token, UserId::new(8), user_message)
+                    .await
+            );
+            barrier.release();
+        };
+        // The replacement's own mailbox commands are bounded too, not just the snapshot.
+        let both = async { tokio::join!(detail(&registry), replace) };
+        let ((json, elapsed), ()) = tokio::time::timeout(Duration::from_secs(6), both)
+            .await
+            .expect("the snapshot and the episode replacement must finish within 6s");
+        assert!(elapsed < BUDGET, "detail snapshot took {elapsed:?}");
+        json
+    });
+    assert_eq!(read_failures(&json), Vec::new());
+    let unpaired = serde_json::to_value(RelayStallState::UnpairedActiveToken).unwrap();
+    let state = |channel| mailbox(&json, "claude", channel).unwrap()["relay_stall_state"].clone();
+    assert_eq!(
+        state(control),
+        unpaired,
+        "the unchanged episode is confirmed"
+    );
+    assert_ne!(
+        state(replaced),
+        unpaired,
+        "a replaced episode must not be confirmed"
+    );
+}

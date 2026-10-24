@@ -1,48 +1,17 @@
 //! DB-backed health diagnostics shared by the health API routes.
 //!
-//! Every Postgres await on the public `GET /api/health` path, which the
-//! self-watchdog probes, runs under
-//! [`ProbedPool`](crate::services::hang_forensics::ProbedPool) so a kill line can
-//! say whether the handler was inside one. Acquires per request, one per `sqlx`
-//! executor call (count calls, not functions, and re-derive before trusting this):
-//!
-//! | await site                             | acquires | reached when                     |
-//! |----------------------------------------|----------|----------------------------------|
-//! | `probe_server_up`                      | 1        | always                           |
-//! | `load_dispatch_outbox_stats_pg`        | 4        | always                           |
-//! | `load_auto_queue_cleanup_backlog_pg`   | 2        | always                           |
-//! | `load_config_audit_report_pg`          | 1        | always                           |
-//! | `load_pipeline_override_report_pg`     | 1        | always                           |
-//! | `load_dispatch_gate_runtime_overrides` | 1        | a `health_registry` (dcserver)   |
-//! | `is_recent_cluster_worker`             | 1        | …and a standby with no providers |
-//!
-//! Counts assume every query succeeds (an error ends that loader early). Each acquire can wait
-//! 10s against a 5s probe, so a slow database, not a deadlock, is the likeliest kill cause.
+//! Every Postgres await here runs under [`ProbedPool`](crate::services::hang_forensics::ProbedPool),
+//! so a watchdog kill line can say whether the health handler was inside one.
+
+//! Acquires per request, one per executor call: SELECT 1, outbox, cleanup and kv_meta always, the
+//! detail mailbox sessions or the standby worker lookup; N=5 at most.
 
 use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::services::hang_forensics::ProbedPool;
 
-use crate::services::health_active_session_audit::{
-    ActiveSessionAuditReport, ActiveSessionAuditSettings, RawSessionRow,
-    classify_active_session_audit,
-};
-
 pub const OUTBOX_AGE_DEGRADED_SECS: i64 = 60;
-
-pub(crate) const ACTIVE_SESSION_AUDIT_QUERY: &str =
-    "SELECT session_key, provider, status, active_dispatch_id, last_heartbeat,
-                thread_channel_id, channel_id
-           FROM sessions
-          WHERE parent_session_id IS NULL
-            AND (NULLIF($2, '') IS NULL OR instance_id IS NULL OR instance_id = $2)
-            AND (
-                status IN ('turn_active', 'working')
-                OR COALESCE(btrim(active_dispatch_id), '') <> ''
-            )
-          ORDER BY last_heartbeat ASC NULLS FIRST, id ASC
-          LIMIT $1";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DispatchOutboxStats {
@@ -113,45 +82,13 @@ pub async fn load_auto_queue_cleanup_backlog(
         return Some(injected);
     }
     let pg_pool = ProbedPool::wrap(pg_pool)?;
-    match load_auto_queue_cleanup_backlog_pg(pg_pool).await {
+    match request_batch::load_auto_queue_cleanup_backlog_pg(pg_pool).await {
         Ok(backlog) => Some(backlog),
         Err(error) => {
             tracing::warn!("[health] failed to load auto_queue_run_cleanup_tasks backlog: {error}");
             None
         }
     }
-}
-
-pub(crate) async fn load_auto_queue_cleanup_backlog_pg(
-    probed: ProbedPool<'_>,
-) -> Result<AutoQueueCleanupBacklog, String> {
-    let dead_lettered = probed
-        .probe(
-            |pool| {
-                crate::services::auto_queue::cleanup_tasks::dead_lettered_run_cleanup_task_count_pg(
-                    pool,
-                )
-            },
-            Result::is_ok,
-        )
-        .await?;
-    let pending = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM auto_queue_run_cleanup_tasks
-         WHERE dead_lettered_at IS NULL",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .map_err(|error| format!("count pending auto-queue run cleanup tasks: {error}"))?;
-    Ok(AutoQueueCleanupBacklog {
-        pending,
-        dead_lettered,
-    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,64 +113,13 @@ pub async fn probe_server_up(pg_pool: Option<&PgPool>) -> bool {
         .is_ok()
 }
 
-pub async fn load_config_audit_report_pg(pg_pool: Option<&PgPool>) -> Option<serde_json::Value> {
-    let pg_pool = ProbedPool::wrap(pg_pool)?;
-    let raw = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("config_audit_report")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-pub async fn load_pipeline_override_report_pg(
-    pg_pool: Option<&PgPool>,
-) -> Option<serde_json::Value> {
-    let pg_pool = ProbedPool::wrap(pg_pool)?;
-    let raw = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("pipeline_override_health_report")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()?;
-    serde_json::from_str(&raw).ok()
-}
-
-pub async fn load_dispatch_gate_runtime_overrides(
-    pg_pool: Option<&PgPool>,
-) -> (Option<bool>, Option<u64>) {
-    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
-        return (None, None);
-    };
-    let runtime_config = pg_pool
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, String>("SELECT value FROM kv_meta WHERE key = $1 LIMIT 1")
-                    .bind("runtime-config")
-                    .fetch_optional(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let (enabled, danger, _stale) =
-        crate::services::dispatch_gate::persisted_runtime_overrides(runtime_config.as_ref());
-    (enabled, danger)
+/// The config audit, pipeline override and runtime-config rows in one read; no pool or a
+/// failed read gives every value `None`.
+pub(crate) async fn load_health_kv_meta(pg_pool: Option<&PgPool>) -> HealthKvMeta {
+    match ProbedPool::wrap(pg_pool) {
+        Some(pg_pool) => request_batch::load_health_kv_meta(pg_pool).await,
+        None => HealthKvMeta::default(),
+    }
 }
 
 pub async fn is_recent_cluster_worker(
@@ -273,7 +159,14 @@ pub async fn is_recent_cluster_worker(
         == Some("worker")
 }
 
+#[cfg(test)]
+#[path = "health_diagnostics/pg_wire_proxy_tests.rs"]
+pub(crate) mod pg_wire_proxy;
+mod request_batch;
 mod session_state;
+#[cfg(test)]
+pub(crate) use request_batch::load_auto_queue_cleanup_backlog_pg;
+pub(crate) use request_batch::{HealthKvMeta, SessionLookups};
 
 pub async fn load_channel_session_state(
     pg_pool: Option<&PgPool>,
@@ -321,185 +214,57 @@ pub async fn mark_channel_sessions_disconnected(
     Err("postgres pool unavailable".to_string())
 }
 
-pub async fn enrich_mailbox_session_state(json: &mut serde_json::Value, pg_pool: Option<&PgPool>) {
-    session_state::enrich_with(json, |channel_id| {
-        load_channel_session_state(pg_pool, channel_id)
+/// The mailbox channels of a detail body, as [`enrich_mailbox_sessions`] reads them.
+pub(crate) fn mailbox_session_channels(json: &serde_json::Value) -> Vec<u64> {
+    session_state::mailbox_channels(json)
+}
+
+/// The latest session row of every channel in one read.
+pub(crate) async fn load_mailbox_session_states(
+    pg_pool: Option<&PgPool>,
+    channels: &[u64],
+) -> SessionLookups {
+    match ProbedPool::wrap(pg_pool) {
+        Some(pg_pool) => request_batch::load_channel_session_states(pg_pool, channels).await,
+        None => channels
+            .iter()
+            .map(|channel| (*channel, Err("postgres pool unavailable".to_string())))
+            .collect(),
+    }
+}
+
+/// One health request's session lookups; `not_started` when the deadline passed before they began.
+pub(crate) struct MailboxSessions {
+    pub(crate) lookups: SessionLookups,
+    pub(crate) not_started: bool,
+}
+
+/// Writes each mailbox row's session fields, or its `session_lookup_error`, from `sessions`.
+pub(crate) async fn enrich_mailbox_sessions(
+    json: &mut serde_json::Value,
+    sessions: &MailboxSessions,
+) {
+    let cause = sessions.not_started.then_some("not_started");
+    session_state::enrich_with(json, cause, |channel_id| {
+        std::future::ready(
+            sessions
+                .lookups
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or_else(|| Err("session lookup missing for channel".to_string())),
+        )
     })
     .await;
 }
 
-pub async fn build_active_session_audit(
-    pg_pool: Option<&PgPool>,
-    local_instance_id: Option<&str>,
-) -> ActiveSessionAuditReport {
-    let runtime = crate::config_live_reload::current().map(|cfg| {
-        (
-            cfg.runtime.active_session_audit_enabled,
-            cfg.runtime.active_session_audit_stale_secs,
-            cfg.runtime.active_session_audit_max_candidates,
-        )
-    });
-    let (enabled_override, stale_override, cap_override) = runtime.unwrap_or((None, None, None));
-    let settings =
-        ActiveSessionAuditSettings::from_overrides(enabled_override, stale_override, cap_override);
-
-    if !settings.enabled {
-        return ActiveSessionAuditReport::disabled(settings.stale_secs);
-    }
-
-    let Some(pg_pool) = ProbedPool::wrap(pg_pool) else {
-        return ActiveSessionAuditReport::disabled(settings.stale_secs);
-    };
-
-    let (rows, raw_matches_total) =
-        load_active_session_audit_rows(pg_pool, settings.max_candidates, local_instance_id).await;
-    let mut resolver = crate::services::session_activity::SessionActivityResolver::new();
-    classify_active_session_audit(
-        &rows,
-        &mut resolver,
-        settings,
-        raw_matches_total,
-        chrono::Utc::now(),
-    )
-}
-
-async fn load_active_session_audit_rows(
-    pool: ProbedPool<'_>,
-    max_candidates: u64,
-    local_instance_id: Option<&str>,
-) -> (Vec<RawSessionRow>, usize) {
-    let capped = max_candidates.min(i64::MAX as u64) as usize;
-    let limit = max_candidates.saturating_add(1).min(i64::MAX as u64) as i64;
-    let local_instance_id = local_instance_id.map(str::trim).unwrap_or("");
-    // Detail-only, off the watchdog's probe path, but bracketed: it is
-    // health-exclusive and competes for the pool the public probe acquires from.
-    let rows = match pool
-        .probe(
-            |pool| {
-                sqlx::query(ACTIVE_SESSION_AUDIT_QUERY)
-                    .bind(limit)
-                    .bind(local_instance_id)
-                    .fetch_all(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::debug!(
-                event = "active_session_audit_query_failed",
-                error = %error,
-                "active-session audit query failed; emitting empty candidate set"
-            );
-            return (Vec::new(), 0);
-        }
-    };
-    let raw_matches_seen = rows.len();
-    let mapped: Vec<RawSessionRow> = rows
-        .iter()
-        .take(capped)
-        .map(|row| RawSessionRow {
-            session_key: row.try_get("session_key").ok(),
-            provider: row.try_get("provider").ok(),
-            status: row.try_get("status").ok(),
-            active_dispatch_id: row.try_get("active_dispatch_id").ok(),
-            last_heartbeat: pg_timestamp_to_rfc3339(row, "last_heartbeat"),
-            thread_channel_id: row.try_get("thread_channel_id").ok(),
-            channel_id: row.try_get("channel_id").ok(),
-        })
-        .collect();
-    (mapped, raw_matches_seen)
-}
-
-fn pg_timestamp_to_rfc3339(row: &PgRow, column: &str) -> Option<String> {
-    if let Ok(Some(ts)) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column) {
-        return Some(ts.to_rfc3339());
-    }
-    if let Ok(Some(naive)) = row.try_get::<Option<chrono::NaiveDateTime>, _>(column) {
-        return Some(naive.format("%Y-%m-%d %H:%M:%S").to_string());
-    }
-    row.try_get::<Option<String>, _>(column).ok().flatten()
-}
-
 pub async fn load_dispatch_outbox_stats(pg_pool: Option<&PgPool>) -> Option<DispatchOutboxStats> {
     if let Some(pg_pool) = ProbedPool::wrap(pg_pool) {
-        if let Some(stats) = load_dispatch_outbox_stats_pg(pg_pool).await {
+        if let Some(stats) = request_batch::load_dispatch_outbox_stats_pg(pg_pool).await {
             return Some(stats);
         }
         tracing::warn!("[health] failed to load dispatch_outbox stats from PostgreSQL");
     }
     None
-}
-
-/// Four sequential acquires: the largest block of database work on the public
-/// health path, so the likeliest place for the handler to be when the watchdog kills.
-async fn load_dispatch_outbox_stats_pg(probed: ProbedPool<'_>) -> Option<DispatchOutboxStats> {
-    let pending = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending'",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-    let retrying = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'pending' AND retry_count > 0",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-    .ok()?;
-    let failed = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*)::BIGINT FROM dispatch_outbox WHERE status = 'failed'",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-    let oldest_pending_age = probed
-        .probe(
-            |pool| {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COALESCE(
-                     CAST(
-                         EXTRACT(
-                             EPOCH FROM (NOW() - MIN(COALESCE(next_attempt_at, created_at)))
-                         ) AS BIGINT
-                     ),
-                     0
-                 )
-                 FROM dispatch_outbox
-                 WHERE status = 'pending'
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())",
-                )
-                .fetch_one(pool)
-            },
-            Result::is_ok,
-        )
-        .await
-        .ok()?;
-
-    Some(DispatchOutboxStats {
-        pending,
-        retrying,
-        permanent_failures: failed,
-        oldest_pending_age,
-    })
 }
 
 pub async fn load_failed_dispatch_outbox_rows(
@@ -614,7 +379,7 @@ pub async fn acknowledge_failed_dispatch_outbox_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVE_SESSION_AUDIT_QUERY, AutoQueueCleanupBacklog, DispatchOutboxStats};
+    use super::{AutoQueueCleanupBacklog, DispatchOutboxStats};
     use crate::services::hang_forensics;
     use serde_json::json;
 
@@ -662,50 +427,32 @@ mod tests {
             }};
         }
 
-        // The public `GET /api/health` path from the module table.
+        // The `GET /api/health` path from the module table.
         assert_bracketed!("probe_server_up", 1, super::probe_server_up(Some(&pool)));
-        // 1, not 4: the first failed `.ok()?` returns early. The other three are
-        // covered by construction: `load_dispatch_outbox_stats_pg` only sees a `ProbedPool`.
         assert_bracketed!(
             "load_dispatch_outbox_stats",
             1,
             super::load_dispatch_outbox_stats(Some(&pool))
         );
-        // 1, not 2: the first `?` returns early.
         assert_bracketed!(
             "load_auto_queue_cleanup_backlog",
             1,
             super::load_auto_queue_cleanup_backlog(Some(&pool))
         );
         assert_bracketed!(
-            "load_config_audit_report_pg",
+            "load_health_kv_meta",
             1,
-            super::load_config_audit_report_pg(Some(&pool))
+            super::load_health_kv_meta(Some(&pool))
         );
         assert_bracketed!(
-            "load_pipeline_override_report_pg",
+            "load_mailbox_session_states",
             1,
-            super::load_pipeline_override_report_pg(Some(&pool))
-        );
-        assert_bracketed!(
-            "load_dispatch_gate_runtime_overrides",
-            1,
-            super::load_dispatch_gate_runtime_overrides(Some(&pool))
+            super::load_mailbox_session_states(Some(&pool), &[7, 7, 8])
         );
         assert_bracketed!(
             "is_recent_cluster_worker",
             1,
             super::is_recent_cluster_worker(Some(&pool), "node-1", 30)
-        );
-        // Detail-only, but bracketed.
-        assert_bracketed!(
-            "load_active_session_audit_rows",
-            1,
-            super::load_active_session_audit_rows(
-                hang_forensics::ProbedPool::wrap(Some(&pool)).expect("a Some pool wraps"),
-                10,
-                Some("node-1")
-            )
         );
     }
 
@@ -765,14 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn active_session_audit_query_filters_foreign_and_background_rows() {
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("parent_session_id IS NULL"));
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("instance_id IS NULL OR instance_id = $2"));
-        assert!(ACTIVE_SESSION_AUDIT_QUERY.contains("thread_channel_id, channel_id"));
-        assert!(!ACTIVE_SESSION_AUDIT_QUERY.contains("COALESCE(thread_channel_id, channel_id)"));
-    }
-
-    #[test]
     fn dispatch_outbox_stats_json_contract_keeps_field_names() {
         let stats = DispatchOutboxStats {
             pending: 2,
@@ -814,11 +553,5 @@ mod tests {
         assert!(super::load_dispatch_outbox_stats(None).await.is_none());
         assert!(!super::probe_server_up(None).await);
         assert!(!super::is_recent_cluster_worker(None, "node-1", 30).await);
-
-        let audit = super::build_active_session_audit(None, Some("node-1")).await;
-        assert!(!audit.enabled);
-        assert_eq!(audit.candidate_count, 0);
-        assert_eq!(audit.high_confidence_count, 0);
-        assert!(audit.candidates.is_empty());
     }
 }

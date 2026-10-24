@@ -3,8 +3,6 @@
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/db/session_transcripts_native_clear_record.rs",
-        "src/db/session_transcripts_native_clear_seed.rs",
         "src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
@@ -34,7 +32,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/server/routes/tests/preflight_harness/validation.rs",
         "src/services/discord/delivery_lease_cell/exact_lease.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/token.rs",
-        "src/services/discord/inflight/read_only_owner_snapshot.rs",
         "src/services/discord/inflight/invariant_test_capture.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",

@@ -14,6 +14,7 @@ except main's non-PG filter replay ids, which run outside the ledger as on main.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import datetime
 import fnmatch
 import hashlib
@@ -36,6 +37,7 @@ KILL_LABEL = "ci-full"
 PLAN_ENV = "ADK_TEST_SELECTION_PLAN"
 LEDGER = "scripts/known_test_failures.txt"
 MAX_PLAN_BYTES = 60_000
+SWEEP_SHARD_COUNT = 4
 # Files holding a `#[cfg(test)]` test_support module re-exported under another path, whose
 # consumers never name the file; tests/test_test_selection.py keeps this equal to the source.
 SHARED_TEST_HELPERS = (
@@ -59,7 +61,7 @@ FULL_TRIGGERS = (
     "scripts/check-ci-runner-hardening.sh", "scripts/test_lane_*",
     "scripts/test_target_integrity_*",
     "src/db/mod.rs", "src/db/postgres.rs", "src/db/postgres/*", "src/db/fixture_target.rs",
-    "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
+    "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/*", "src/services/turn_orchestrator.rs",
     "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
@@ -282,11 +284,105 @@ def make_plan(root: Path, base: str | None, head: str) -> dict:
     return plan
 
 
-def shards(ids: list[str], full: bool) -> list[int]:
-    """Every shard in full; else the planned ids' shards and shard 0, which runs continuity."""
+def shards(ids: list[str], full: bool) -> list[int | str]:
+    """PG id shards and one independent continuity leg, including narrow selections."""
     pgm = tools()[2]
-    return list(range(pgm.PG_SHARD_COUNT)) if full else sorted(
-        {0, *(pgm.pg_test_shard(test_id) for test_id in ids)})
+    if full:
+        return pgm.pg_shard_legs()
+    return [*sorted({pgm.pg_test_shard(test_id) for test_id in ids}), "continuity"]
+
+
+def sweep_population(root: Path) -> list[str]:
+    """The existing full sweep: canonical skips plus their source-verified replay ids."""
+    runner, coverage = tools()[:2]
+    runtime, errors = runner.derive_expected_selection(
+        root / "scripts/lib_test_inventory_manifest.txt", "linux", [])
+    if errors:
+        raise ValueError("; ".join(errors))
+    skips = coverage.load_non_pg_skip_args(root)[1::2]
+    replay = set(coverage.load_non_pg_filter_replay(root))
+    return sorted(test_id for test_id in runtime
+                  if test_id in replay or not any(skip in test_id for skip in skips))
+
+
+def nested_pairs(root: Path) -> tuple[tuple[str, str], ...]:
+    return _module("nested_libtest", SCRIPTS / "ci/nested_libtest.py").inherited_pairs(root)
+
+
+def sweep_runnable_groups(ids, ignored, nested):
+    """Parents sharing inherited child output must use the same primary harness."""
+    runnable = sorted(set(ids) - ignored)
+    owner = {test_id: test_id for test_id in runnable}
+
+    def find(test_id):
+        while owner[test_id] != test_id:
+            test_id = owner[test_id]
+        return test_id
+
+    children = {}
+    for parent, child in nested:
+        if parent not in ids:
+            continue
+        if child not in ids or child not in ignored:
+            raise ValueError(f"nested child {child} must be selected and declared ignored with {parent}")
+        if parent in owner:
+            children.setdefault(child, []).append(parent)
+    for parents in children.values():
+        for parent in parents[1:]:
+            owner[find(parent)] = find(parents[0])
+    groups = {}
+    for test_id in runnable:
+        groups.setdefault(find(test_id), []).append(test_id)
+    return sorted(groups.values())
+
+
+def sweep_partition(ids: list[str], ignored: set[str] | frozenset[str] = frozenset(),
+                    replay: set[str] | frozenset[str] = frozenset(),
+                    nested: tuple[tuple[str, str], ...] = ()) -> list[list[str]]:
+    """Keep each shard runnable and attach held judged ids to runnable judged ids."""
+    runnable = sorted(test_id for test_id in ids if test_id not in ignored)
+    held = sorted(test_id for test_id in ids if test_id in ignored)
+    groups = sweep_runnable_groups(ids, ignored, nested)
+    count = min(SWEEP_SHARD_COUNT, len(groups) or len(ids))
+    if not runnable:
+        return [held[index::count] for index in range(count)]
+    parts = [[test_id for group in groups[index::count] for test_id in group]
+             for index in range(count)]
+    judged_shards = [index for index, part in enumerate(parts) if set(part) - replay]
+    for test_id in held:
+        eligible = judged_shards if test_id not in replay and judged_shards else range(count)
+        required = {index for index, part in enumerate(parts)
+                    if any(parent in part and child == test_id for parent, child in nested)}
+        if len(required) > 1:
+            raise ValueError(f"nested parents for {test_id} span multiple shards")
+        target = next(iter(required)) if required else min(eligible, key=lambda index: (len(parts[index]), index))
+        parts[target].append(test_id)
+    return [sorted(part) for part in parts]
+
+
+def checked_sweep_partition(ids: list[str], ignored: set[str] | frozenset[str] = frozenset(),
+                            replay: set[str] | frozenset[str] = frozenset(),
+                            nested: tuple[tuple[str, str], ...] = ()) -> list[list[str]]:
+    """Independently prove exact union, multiplicity and runnable subrun membership."""
+    parts = sweep_partition(ids, ignored, replay, nested)
+    combined = [test_id for part in parts for test_id in part]
+    runnable = set(ids) - ignored
+    judged = runnable - replay
+    if not ids or len(set(ids)) != len(ids) or not parts or not all(parts) \
+            or len(parts) != min(SWEEP_SHARD_COUNT, len(sweep_runnable_groups(ids, ignored, nested)) or len(ids)) \
+            or Counter(combined) != Counter(ids) \
+            or (runnable and any(not (set(part) - ignored) for part in parts)) \
+            or (judged and any((set(part) & (ignored - replay)) and not (set(part) & judged)
+                               for part in parts)):
+        raise ValueError("sweep partition has missing, duplicate, extra, empty or ignored-only test sets")
+    owners = {test_id: index for index, part in enumerate(parts) for test_id in part}
+    for parent, child in nested:
+        if parent in owners and owners.get(child) != owners[parent]:
+            raise ValueError(f"nested child {child} must share the shard of {parent}")
+    print(f"SWEEP_PARTITION_OK expected={len(ids)} shards={len(parts)} "
+          f"sizes={','.join(str(len(part)) for part in parts)} "
+          f"ids={digest(chr(10).join(sorted(ids)).encode())}", file=sys.stderr)
+    return parts
 
 
 def log(plan: dict, lane: str) -> None:
@@ -321,34 +417,36 @@ def run_lane(root: Path, lane: str, ids: list[str], command: list[str], env=None
     that disagrees, an empty expectation or a run that executes none is red."""
     with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as handle:
         handle.write("\n".join(ids) + "\n")
+    summaries = 1 + len({child for parent, child in nested_pairs(root) if parent in ids})
     return subprocess.run(
-        [sys.executable, "scripts/run_test_lane.py", "--lane", lane, "--max-summaries", "4",
+        [sys.executable, "scripts/run_test_lane.py", "--lane", lane, "--max-summaries", str(summaries),
+         "--nested-declarations", str(root / "scripts/ci/nested_libtest_declarations.json"),
          "--expected-ids", handle.name, "--", *command], cwd=root, env=env,
         check=False).returncode
 
 
 def run_pg(root: Path, ids: list[str]) -> int:
-    """The shard's planned ids under run_test_lane, then shard 0's continuity recipe."""
+    """Run only this numeric shard's planned ids, or the independent continuity recipe."""
     pgm = tools()[2]
-    shard = pgm.validate_pg_shard(os.environ.get("PG_INCLUDE_SHARD", ""))
-    mine = [test_id for test_id in ids if pgm.pg_test_shard(test_id) == shard]
-    if not (mine or shard == 0) or not os.environ.get("POSTGRES_TEST_DATABASE_URL_BASE"):
-        raise ValueError(f"shard {shard} selects no test, or no PostgreSQL test server is named")
+    raw_shard = os.environ.get("PG_INCLUDE_SHARD", "")
+    if not os.environ.get("POSTGRES_TEST_DATABASE_URL_BASE"):
+        raise ValueError("no PostgreSQL test server is named")
     env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
-    if mine:
-        # Only to name a shard whose every planned id is #[ignore]; run_test_lane judges each
-        # ignored id that libtest reports against the pg ledger.
-        listed = subprocess.run(
-            ["bash", "-c", PREPARED + ' --exact "$@" --list --ignored', "bash", *mine],
-            cwd=root, env=env, check=True, stdout=subprocess.PIPE, text=True).stdout
-        ignored = set(pgm.partition_pg_test_list(listed, str(shard), allow_empty=True))
-        if ignored >= set(mine):
-            raise ValueError(f"shard {shard}: every planned id is #[ignore]")
-        command = ["bash", "-c", PREPARED + ' --exact "$@" --test-threads=1', "bash", *mine]
-        if rc := run_lane(root, "pg", mine, command, env):
-            return rc
-    return subprocess.run([*CONTINUITY], cwd=root, env=env, check=False).returncode \
-        if shard == 0 else 0
+    if raw_shard == "continuity":
+        return subprocess.run([*CONTINUITY], cwd=root, env=env, check=False).returncode
+    shard = pgm.validate_pg_shard(raw_shard)
+    mine = [test_id for test_id in ids if pgm.pg_test_shard(test_id) == shard]
+    if not mine:
+        raise ValueError(f"shard {shard} selects no test")
+    # A shard whose every planned id is #[ignore] must not become a zero-execution pass.
+    listed = subprocess.run(
+        ["bash", "-c", PREPARED + ' --exact "$@" --list --ignored', "bash", *mine],
+        cwd=root, env=env, check=True, stdout=subprocess.PIPE, text=True).stdout
+    ignored = set(pgm.partition_pg_test_list(listed, str(shard), allow_empty=True))
+    if ignored >= set(mine):
+        raise ValueError(f"shard {shard}: every planned id is #[ignore]")
+    command = ["bash", "-c", PREPARED + ' --exact "$@" --test-threads=1', "bash", *mine]
+    return run_lane(root, "pg", mine, command, env)
 
 
 def run_sweep(root: Path, ids: list[str]) -> int:
@@ -375,7 +473,10 @@ def run_sweep(root: Path, ids: list[str]) -> int:
         if bad:
             print(f"ERROR test-selection sweep: replayed ids {what}: {' '.join(bad)}",
                   file=sys.stderr)
-    return rc or int(bool(missing or undeclared))
+    empty = not judged and not (outcome.executed & set(replayed))
+    if empty:
+        print("ERROR test-selection sweep: no planned test executed", file=sys.stderr)
+    return rc or int(bool(missing or undeclared or empty))
 
 
 def declared_ignored(root: Path) -> set[str]:
@@ -389,6 +490,10 @@ def declared_ignored(root: Path) -> set[str]:
     return declared
 
 
+def sweep_partition_inputs(root: Path):
+    return declared_ignored(root), set(tools()[1].load_non_pg_filter_replay(root)), nested_pairs(root)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -398,7 +503,19 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--head", default="HEAD")
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--lane", choices=LANES, required=True)
+    run_parser.add_argument("--shard", type=int)
+    run_parser.add_argument("--full", action="store_true")
+    commands.add_parser("sweep-matrix")
     args = parser.parse_args(argv)
+    if args.command == "sweep-matrix":
+        try:
+            parts = checked_sweep_partition(sweep_population(ROOT), *sweep_partition_inputs(ROOT))
+            matrix = json.dumps({"shard": list(range(len(parts)))}, separators=(",", ":"))
+            print(matrix)
+            return 0
+        except (OSError, ValueError) as error:
+            print(f"ERROR sweep-matrix: {error}", file=sys.stderr)
+            return 1
     if args.command == "plan":
         plan = make_plan(args.root.resolve(), args.base, args.head)
         for lane in LANES:
@@ -407,14 +524,34 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         text = json.dumps(plan, separators=(",", ":"), sort_keys=True)
         matrix = json.dumps({"shard": plan["lanes"]["pg"]["shards"]}, separators=(",", ":"))
+        root = args.root.resolve()
+        ids = (sweep_population(root) if plan["lanes"]["sweep"]["mode"] == "full"
+               else Inventory(root).selected(plan["scopes"], "sweep"))
+        sweep_matrix = json.dumps({"shard": list(range(len(checked_sweep_partition(ids, *sweep_partition_inputs(root)))))},
+                                  separators=(",", ":"))
         force = str(plan["force_full"]).lower()
         if output := os.environ.get("GITHUB_OUTPUT"):
             with open(output, "a", encoding="utf-8") as handle:
-                handle.write(f"matrix={matrix}\nplan={text}\nforce_full={force}\n")
+                handle.write(f"matrix={matrix}\nsweep_matrix={sweep_matrix}\n"
+                             f"plan={text}\nforce_full={force}\n")
         else:
             print(text)
         return 0
     try:
+        if args.full and (args.lane != "sweep" or args.shard is None):
+            raise ValueError("--full requires a sweep shard")
+        if args.shard is not None:
+            if args.lane != "sweep":
+                raise ValueError("--shard is only supported for the sweep lane")
+            entry, ids = ({"mode": "full"}, []) if args.full else load_plan(ROOT, "sweep")
+            if entry["mode"] == "full":
+                ids = sweep_population(ROOT)
+            parts = checked_sweep_partition(ids, *sweep_partition_inputs(ROOT))
+            if os.environ.get("SWEEP_SHARD_TOTAL") != str(len(parts)):
+                raise ValueError(f"SWEEP_SHARD_TOTAL must match planned shard count {len(parts)}")
+            if not 0 <= args.shard < len(parts):
+                raise ValueError(f"sweep shard {args.shard} is not in this partition")
+            return run_sweep(ROOT, parts[args.shard])
         entry, ids = load_plan(ROOT, args.lane)
         if entry["mode"] == "full":
             command = [*FULL_PG] if args.lane == "pg" else ["bash", "-eo", "pipefail", "-c", FULL_SWEEP]

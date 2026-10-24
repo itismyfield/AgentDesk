@@ -215,12 +215,7 @@ pub(in crate::services::discord) async fn claim_reserved_headless_turn(
     Ok((transition, cancel_token))
 }
 
-// NOTE(#3588, #3591): idle 기반 + 턴수 기반(100턴) 세션 리셋이 모두 제거됨.
-// idle/턴수와 무관하게 provider session(claude resume id)을 보존해 다음 턴에
-// `--resume`으로 transcript를 이어간다. 컨텍스트 폭주는 auto-compact가 관리한다.
-// in-memory/tmux 메모리 회수는 `maybe_cleanup_sessions`/idle-kill이 담당하되
-// resume id는 남긴다. 명시적 초기화는 idle recap의 `새 세션 시작` 버튼
-// (idle_recap:clear) 또는 `/clear`로만 한다.
+// idle/턴수와 무관하게 resume id를 보존한다. 명시적 초기화는 !clear 또는 /clear로 한다.
 
 pub(super) fn dispatch_reset_lifecycle_code(
     reset_provider_state: bool,

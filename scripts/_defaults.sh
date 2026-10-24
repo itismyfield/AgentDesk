@@ -42,7 +42,7 @@ setup_sccache_env() {
   fi
 
   export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
-  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-40G}"
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-15G}"
   export SCCACHE_IDLE_TIMEOUT="${SCCACHE_IDLE_TIMEOUT:-0}"
   export RUSTC_WRAPPER="$sccache_bin"
   mkdir -p "$SCCACHE_DIR"
@@ -739,11 +739,14 @@ _health_json_deploy_nonblocking_ere() {
   # the fallback splits on one.
   # $5 joins smoke E2E and pre-existing reader alarm channel ids; only their
   # reader-count reason is accepted, and only for a deploy verdict.
-  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
+  # $6 is the smoke E2E channel ids alone: a held source start there is the
+  # smoke's own known failure, so it does not block a deploy verdict either.
+  local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+|turn_presence_unknown:(claude|codex):(~|([A-Za-z0-9_.-]|%[0-9A-F]{2})+):[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[1-9][0-9]*:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:deferred_hooks_backlog:[1-9][0-9]*"
   [ "${2:-0}" = "1" ] && [[ "${5:-}" =~ $ids_re ]] && ere="$ere|tui_o:too_many_readers:(${5})"
+  [ "${2:-0}" = "1" ] && [[ "${6:-}" =~ $ids_re ]] && ere="$ere|tui_o:boundary_pending:(${6})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
   printf '%s)$' "$ere"
@@ -752,7 +755,7 @@ _health_json_deploy_nonblocking_ere() {
 _health_json_deploy_nonblocking_ere_for_body() {
   # Structural proof comes from this body; deploy-release supplies the smoke
   # channels and the local reader alarms observed before restart.
-  local health_json="$1" standby=0 tui reader_ids="" ids ids_re='^[0-9]+([|][0-9]+)*$'
+  local health_json="$1" standby=0 tui reader_ids="" smoke_ids="" ids ids_re='^[0-9]+([|][0-9]+)*$'
   _health_json_field_is_true "$health_json" "cluster_standby" && standby=1
   tui=$(_health_json_tui_gateway_verified_providers "$health_json")
   for ids in "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" "${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-}"; do
@@ -760,8 +763,9 @@ _health_json_deploy_nonblocking_ere_for_body() {
       reader_ids="${reader_ids:+$reader_ids|}$ids"
     fi
   done
+  [[ "${DEPLOY_E2E_SMOKE_CHANNEL_IDS:-}" =~ $ids_re ]] && smoke_ids="$DEPLOY_E2E_SMOKE_CHANNEL_IDS"
   _health_json_deploy_nonblocking_ere "${2:-0}" "${3:-0}" "$standby" "$tui" \
-    "$reader_ids"
+    "$reader_ids" "$smoke_ids"
 }
 
 _deploy_e2e_smoke_channel_ids() {

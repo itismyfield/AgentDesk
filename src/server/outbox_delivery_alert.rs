@@ -86,6 +86,7 @@ mod tests {
             reason_code: None,
             session_key: Some("sess-1".to_string()),
             retry_count: 5,
+            attachment: Ok(None),
             claim_owner: "owner".to_string(),
             claimed_at: chrono::Utc::now(),
         };

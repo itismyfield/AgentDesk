@@ -18,8 +18,16 @@ pub mod pieces;
 pub mod resume;
 pub mod rotation;
 pub mod round_trip;
+pub(crate) mod suspension;
 pub mod switch;
+mod tool_cards;
 mod tool_results;
+pub(crate) mod turn_summary;
+#[cfg(test)]
+mod turn_summary_tests;
+
+#[cfg(test)]
+mod tool_card_tests;
 
 use std::future::Future;
 
@@ -192,6 +200,8 @@ pub trait AlarmSink: Send + Sync {
     /// No overdue work remains; a later overdue wait is a new incident.
     fn waiting_cleared(&self, _channel: u64) {}
     fn reconcile_reader_count(&self, _channel: u64, _count: usize) {}
+    /// Pending boundaries of selected sources after a successful restore or capture.
+    fn reconcile_boundary_pending(&self, _channel: u64, _count: usize) {}
     /// Whether the host will start the halted writer again after a wait.
     fn resume_pending(&self, _channel: u64, _pending: bool) {}
     /// The halt ended: a recovered writer is about to start in its place.
@@ -202,7 +212,7 @@ mod historical_hops;
 mod past_bind;
 mod renumbered;
 mod transition_cleanup;
-/// The operator route `POST /api/o/transition` is its only production sender.
+/// Only the periodic retention sweep sends production cleanup requests.
 pub(crate) mod transition_port;
 
 #[cfg(test)]

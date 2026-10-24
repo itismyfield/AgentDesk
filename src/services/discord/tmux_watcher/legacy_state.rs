@@ -1,41 +1,11 @@
 use super::*;
 
-pub(super) fn initialize_watcher_mode(
-    watcher_provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> WatcherLegacyMode {
-    let legacy_mode = WatcherLegacyMode::for_channel(watcher_provider, channel_id);
-    #[cfg(test)]
+#[cfg(test)]
+pub(super) fn record_watcher_initialized(watcher_provider: &ProviderKind, channel_id: ChannelId) {
     crate::services::discord::inflight::o_seed_observation::watcher_initialized(
         watcher_provider,
         channel_id.get(),
     );
-    legacy_mode
-}
-
-pub(super) fn mode_restored_turn(
-    legacy_mode: WatcherLegacyMode,
-    restored_turn: Option<RestoredWatcherTurn>,
-    _watcher_provider: &ProviderKind,
-    _channel_id: ChannelId,
-) -> Option<RestoredWatcherTurn> {
-    #[cfg(test)]
-    let watcher_provider = _watcher_provider;
-    #[cfg(test)]
-    let channel_id = _channel_id;
-    #[cfg(test)]
-    if !legacy_mode.is_legacy() && restored_turn.is_some() {
-        crate::services::discord::inflight::o_seed_observation::record_event(
-            watcher_provider,
-            channel_id.get(),
-            "restored_turn_argument_rejected",
-        );
-    }
-    if legacy_mode.is_legacy() {
-        restored_turn
-    } else {
-        None
-    }
 }
 
 pub(super) fn checkpoint_row(
@@ -43,25 +13,17 @@ pub(super) fn checkpoint_row(
     turn_parse_state: &TurnParseState<'_>,
     watcher_turn_nonce: &Option<String>,
 ) -> Option<InflightTurnState> {
-    let legacy_mode = context.legacy_mode;
-    let watcher_provider = context.watcher_provider;
-    let channel_id = context.channel_id;
-    legacy_mode
-        .is_legacy()
-        .then(|| {
-            crate::services::discord::inflight::load_inflight_state(
-                watcher_provider,
-                channel_id.get(),
-            )
-        })
-        .flatten()
-        .filter(|row| {
-            turn_parse_state
-                .watcher_turn_identity
-                .as_ref()
-                .is_some_and(|identity| identity.matches_state(row))
-                && &row.turn_nonce == watcher_turn_nonce
-        })
+    crate::services::discord::inflight::load_inflight_state(
+        context.watcher_provider,
+        context.channel_id.get(),
+    )
+    .filter(|row| {
+        turn_parse_state
+            .watcher_turn_identity
+            .as_ref()
+            .is_some_and(|identity| identity.matches_state(row))
+            && &row.turn_nonce == watcher_turn_nonce
+    })
 }
 
 #[cfg(test)]

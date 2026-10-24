@@ -17,7 +17,7 @@ fn active_turn_thread_channel_id(
         .or(inflight_state.thread_id)
 }
 
-pub(in crate::services::discord) fn maybe_refresh_active_turn_activity_heartbeat(
+pub(in crate::services::discord) async fn maybe_refresh_active_turn_activity_heartbeat(
     shared: &SharedData,
     provider: &ProviderKind,
     inflight_state: &InflightTurnState,
@@ -31,11 +31,12 @@ pub(in crate::services::discord) fn maybe_refresh_active_turn_activity_heartbeat
         adk_session_name,
         last_heartbeat_at,
         std::time::Instant::now(),
-    );
+    )
+    .await;
 }
 
 #[cfg(unix)]
-fn maybe_refresh_active_turn_activity_heartbeat_at(
+async fn maybe_refresh_active_turn_activity_heartbeat_at(
     shared: &SharedData,
     provider: &ProviderKind,
     inflight_state: &InflightTurnState,
@@ -60,13 +61,15 @@ fn maybe_refresh_active_turn_activity_heartbeat_at(
         provider,
         tmux_session_name,
         thread_channel_id,
-    ) {
+    )
+    .await
+    {
         *last_heartbeat_at = Some(now);
     }
 }
 
 #[cfg(not(unix))]
-fn maybe_refresh_active_turn_activity_heartbeat_at(
+async fn maybe_refresh_active_turn_activity_heartbeat_at(
     _shared: &SharedData,
     _provider: &ProviderKind,
     _inflight_state: &InflightTurnState,

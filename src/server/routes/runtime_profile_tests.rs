@@ -93,12 +93,58 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
             );
         }
         assert_eq!(
+            app.clone()
+                .oneshot(request("POST", "/sessions/example/idle-recap", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "idle recap production must be unavailable in every runtime profile"
+        );
+        assert_eq!(
             app.oneshot(request("GET", "/dispatched-sessions", true))
                 .await
                 .unwrap()
                 .status(),
             StatusCode::INTERNAL_SERVER_ERROR,
             "authorized runtime request reaches the shared PG handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn transcript_transition_operator_endpoint_is_removed_for_every_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::config::Config::default();
+    config.policies.dir = dir.path().join("policies");
+    config.policies.hot_reload = false;
+    config.data.dir = dir.path().join("data");
+    config.server.auth_token = Some("profile-test-token".into());
+    std::fs::create_dir_all(&config.policies.dir).unwrap();
+    let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+    for profile in [
+        crate::config::RuntimeProfile::Full,
+        crate::config::RuntimeProfile::Runner,
+    ] {
+        config.cluster.runtime_profile = profile;
+        let state = AppState {
+            engine: engine.clone(),
+            config: Arc::new(config.clone()),
+            pg_pool: None,
+            broadcast_tx: crate::eventbus::new_broadcast(),
+            batch_buffer: Default::default(),
+            health_registry: None,
+            cluster_instance_id: None,
+        };
+        let app = compose_api_router(state.clone()).with_state(state);
+        let response = app
+            .oneshot(request("POST", "/o/transition", true))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "[removed_transition_endpoint] {profile:?}: an authorized request reaches no cleanup route"
         );
     }
 }

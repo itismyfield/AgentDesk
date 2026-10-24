@@ -11,7 +11,7 @@ use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
-pub(crate) use super::transition_cleanup::{Request, Termination};
+pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
 use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
@@ -28,7 +28,22 @@ pub(crate) enum Operation {
     Inspect(Request),
     /// Retires each source the judgment passes, one per actor poll, while the scope is still the
     /// one whose digest the Inspect gave.
+    #[cfg(test)]
     Apply(Request, ScopeDigest),
+    /// The periodic retention policy applies an inspected scope, with a fresh idle check.
+    AutomaticApply(Request, ScopeDigest, Idle),
+}
+
+type IdleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+
+/// A runtime-owned check; a missing or unreachable mailbox never counts as idle.
+#[derive(Clone)]
+pub(crate) struct Idle(pub Arc<dyn Fn() -> IdleFuture + Send + Sync>);
+
+impl std::fmt::Debug for Idle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Idle")
+    }
 }
 
 /// The operation a job runs.
@@ -74,6 +89,14 @@ pub(crate) enum Refused {
     Unread(String),
 }
 
+/// The automatic retention policy that kept a source readable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum PolicyHold {
+    Young,
+    AgeUnknown,
+    NotIdle,
+}
+
 /// Why nothing was written for a source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Hold {
@@ -81,6 +104,8 @@ pub(crate) enum Hold {
     Stale,
     TransitionBusy,
     SourceBusy,
+    /// Age or runtime activity prevented automatic cleanup.
+    Policy(PolicyHold),
     /// A cleanup is recorded for it already, by another job or before it grew back.
     PriorCleanup,
     /// Past the candidate, hashing or time limit of one job.
@@ -184,6 +209,7 @@ impl Reply {
 /// The sending side of one run's mailbox.
 #[derive(Clone)]
 pub(crate) struct TransitionPort {
+    suspension: super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Envelope>,
@@ -201,6 +227,19 @@ pub(crate) struct Receiver {
 }
 
 impl TransitionPort {
+    pub(crate) fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
+        self.suspension = suspension;
+        self
+    }
+
+    pub(crate) fn sources_unsuspended(&self) -> bool {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-transition") {
+            return true;
+        }
+        self.suspension.is_empty()
+    }
+
     pub(crate) fn new(
         generation: u64,
         gate: Arc<OwnershipGate>,
@@ -209,6 +248,7 @@ impl TransitionPort {
     ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
         let port = Self {
+            suspension: Default::default(),
             generation,
             run: Arc::clone(&run),
             send,
@@ -250,6 +290,9 @@ impl TransitionPort {
         operation: Operation,
         context: Context,
     ) -> Result<Reply, String> {
+        if !self.sources_unsuspended() {
+            return Err("suspended_sources".into());
+        }
         let (reply, answer) = oneshot::channel();
         let envelope = Envelope {
             generation: named.generation,
@@ -260,9 +303,23 @@ impl TransitionPort {
         };
         let sent = self.send.send(envelope).await;
         sent.map_err(|_| "actor ended".to_owned())?;
-        answer
+        let reply = answer
             .await
-            .map_err(|_| "actor reply unavailable".to_owned())
+            .map_err(|_| "actor reply unavailable".to_owned())?;
+        if !self.sources_unsuspended() {
+            return Err("suspended_sources".into());
+        }
+        Ok(reply)
+    }
+}
+
+impl Operation {
+    pub(super) fn request_ref(&self) -> &Request {
+        match self {
+            Self::Inspect(request) | Self::AutomaticApply(request, _, _) => request,
+            #[cfg(test)]
+            Self::Apply(request, _) => request,
+        }
     }
 }
 
@@ -275,9 +332,7 @@ impl Receiver {
             Err(closed) => return Err(closed),
         };
         if envelope.generation != self.generation || !Arc::ptr_eq(&envelope.run, &self.run) {
-            let job = match &envelope.operation {
-                Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
-            };
+            let job = &envelope.operation.request_ref().job_id;
             let _ = (envelope.reply).send(Reply::refused(job, Refused::ForeignRun));
             return Ok(None);
         }

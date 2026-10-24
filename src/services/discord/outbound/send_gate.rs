@@ -8,8 +8,8 @@ use serenity::ChannelId;
 use sqlx::PgPool;
 
 use super::manual_delivery::{
-    ManualOutboundDeliveryId, SerenityManualOutboundClient,
-    send_resolved_manual_message_with_client,
+    ManualNotification, ManualOutboundDeliveryId, ResolvedManualMessage,
+    SerenityManualOutboundClient, send_authorized_manual_message,
 };
 use super::send_target::{
     SendTargetResolutionError, resolve_send_target_channel_id_with_backends,
@@ -129,8 +129,42 @@ pub(crate) struct ManualOutboundOptions {
     /// delivery-id namespace and inline Discord nonce rollout. This is
     /// intentionally independent from unbound-channel authorization.
     pub(crate) trusted_internal_outbox: bool,
+    pub(crate) channel_owner_provider: Option<ProviderKind>,
+    pub(crate) image_attachment:
+        Option<std::sync::Arc<crate::services::message_outbox::StoredOutboxAttachment>>,
     pub(crate) record_transcript: bool,
     pub(crate) transcript_source_label: Option<String>,
+}
+
+/// Provider-owned notices use the same channel runtime credentials as tool cards.
+async fn resolve_manual_bot_http(
+    registry: &HealthRegistry,
+    bot: &str,
+    channel_id: ChannelId,
+    options: &ManualOutboundOptions,
+) -> Result<std::sync::Arc<serenity::Http>, (&'static str, String)> {
+    if let Some(provider) = options.channel_owner_provider.as_ref() {
+        let shared = registry
+            .shared_for_provider_on_channel(provider, channel_id)
+            .await
+            .ok_or_else(|| {
+                (
+                    "503 Service Unavailable",
+                    format!(
+                        "channel provider runtime unavailable or ambiguous: {} on {}",
+                        provider.as_str(),
+                        channel_id
+                    ),
+                )
+            })?;
+        return shared.serenity_http_or_token_fallback().ok_or_else(|| {
+            (
+                "503 Service Unavailable",
+                "channel provider credentials unavailable".to_string(),
+            )
+        });
+    }
+    resolve_bot_http(registry, bot).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,6 +228,12 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
                 "error": "delivery_id correlation namespace is reserved"
             })
             .to_string(),
+        );
+    }
+    if options.image_attachment.is_some() && !options.trusted_internal_outbox {
+        return (
+            "400 Bad Request",
+            r#"{"ok":false,"error":"binary attachment requires trusted outbox"}"#.to_string(),
         );
     }
     if content.is_empty() {
@@ -264,7 +304,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         // `resolve_role_binding(channel_id, None)` above can only match
         // `byChannelId` entries; a channel registered with `byChannelName`
         // only was previously blocked even though it is legitimately mapped.
-        if let Ok(http) = resolve_bot_http(registry, bot).await {
+        if let Ok(http) = resolve_manual_bot_http(registry, bot, channel_id, &options).await {
             if let Ok(channel) = channel_id.to_channel(&*http).await {
                 target_channel_accessible = true;
                 let is_private_channel = matches!(&channel, serenity::Channel::Private(_));
@@ -353,26 +393,33 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
     }
 
     // Utility bot aliases resolve through UtilityBotRole before provider lookup.
-    let http = match resolve_bot_http(registry, bot).await {
+    let http = match resolve_manual_bot_http(registry, bot, channel_id, &options).await {
         Ok(h) => h,
         Err(resp) => return resp,
     };
 
     let outbound_client = production_manual_outbound_client(http);
-    send_resolved_manual_message_with_client(
+    send_authorized_manual_message(
         &outbound_client,
         shared_outbound_deduper(),
-        channel_id_raw,
-        target,
-        content,
-        source,
-        bot,
-        summary,
-        delivery_id,
-        pg_pool,
-        options.record_transcript,
-        options.transcript_source_label.as_deref(),
-        options.trusted_internal_outbox,
+        ResolvedManualMessage {
+            channel_id_raw,
+            target,
+            pg_pool,
+            record_transcript: options.record_transcript,
+            transcript_source_label: options.transcript_source_label.as_deref(),
+            notification: ManualNotification {
+                channel_id: &channel_id_raw.to_string(),
+                content,
+                bot,
+                source,
+                summary,
+                delivery_id,
+                headless_nonce_enabled: false,
+                attachment: None,
+            },
+        },
+        &options,
     )
     .await
 }
@@ -399,6 +446,72 @@ mod send_source_tests {
         rejects_untrusted_message_outbox_delivery_id,
     };
     use crate::services::provider::ProviderKind;
+
+    #[tokio::test]
+    async fn provider_notice_uses_channel_owner_tool_card_credentials() {
+        use crate::services::discord::{health::HealthRegistry, make_shared_data_for_tests};
+        use std::sync::Arc;
+        let registry = HealthRegistry::new();
+        let first = make_shared_data_for_tests();
+        let owner = make_shared_data_for_tests();
+        first.settings.write().await.allowed_channel_ids = vec![41];
+        owner.settings.write().await.allowed_channel_ids = vec![42];
+        first
+            .http
+            .cached_bot_token
+            .set("first-token".into())
+            .unwrap();
+        owner
+            .http
+            .cached_bot_token
+            .set("owner-token".into())
+            .unwrap();
+        registry.register("claude".into(), Arc::clone(&first)).await;
+        registry.register("claude".into(), Arc::clone(&owner)).await;
+        registry
+            .register_http(
+                "claude".into(),
+                first.serenity_http_or_token_fallback().unwrap(),
+            )
+            .await;
+        let options = super::ManualOutboundOptions {
+            trusted_internal_outbox: true,
+            channel_owner_provider: Some(ProviderKind::Claude),
+            ..Default::default()
+        };
+        let http = super::resolve_manual_bot_http(
+            &registry,
+            "claude",
+            super::ChannelId::new(42),
+            &options,
+        )
+        .await
+        .unwrap();
+        assert!(http.token().ends_with("owner-token"));
+        first.settings.write().await.allowed_channel_ids.push(42);
+        assert_eq!(
+            super::resolve_manual_bot_http(
+                &registry,
+                "claude",
+                super::ChannelId::new(42),
+                &options
+            )
+            .await
+            .unwrap_err()
+            .0,
+            "503 Service Unavailable"
+        );
+        assert!(
+            super::resolve_manual_bot_http(
+                &HealthRegistry::new(),
+                "claude",
+                super::ChannelId::new(42),
+                &options
+            )
+            .await
+            .is_err()
+        );
+    }
 
     #[test]
     fn reserved_gate_requires_explicit_outbox_authority_and_preserves_voice_delivery() {
@@ -667,3 +780,6 @@ agents:
         assert_eq!(SendCallerClass::from_header("attacker"), None);
     }
 }
+
+#[cfg(test)]
+pub(crate) use super::manual_delivery::image_delivery_tests::deliver_options_on_wire;

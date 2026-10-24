@@ -94,7 +94,7 @@ async fn the_actor_publishes_each_undelivered_responsibility_until_it_clears() {
     polls(2).await;
     assert_eq!(
         *owed.borrow(),
-        Some(owes(1, 1, 1, 1)),
+        Some(owes(2, 1, 1, 1)),
         "without ownership the piece, the torn line and the pending bind all wait"
     );
 

@@ -787,66 +787,105 @@ mod tests {
         }
     }
 
-    /// Lexical tripwire only: aliases or helper extraction can evade it. The
-    /// route-complete execution test above is the semantic proof.
+    const RECONCILE_GATE: &str = include_str!("reconcile_gate.rs");
+    const OBSERVED: [(&str, usize); 5] = [
+        ("\"epoch_route\":", 2),
+        ("\"epoch_advanced\":", 2),
+        ("epoch_route,", 2),
+        ("epoch_advanced,", 2),
+        ("ProcessGenerationAllocation", 4),
+    ];
+    const WRAPPER_CALL: &str = "clear_inflight_state_for_reconcile_in_root(root, provider, snapshot, allocation.generation)";
+    const EXACT_ITEMS: [(&str, &str); 4] = [
+        (
+            "fn clear_inflight_state_for_reconcile_with_allocation_in_root(",
+            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_inflight_state_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}",
+        ),
+        (
+            "fn clear_rebind_origin_for_reconcile_with_allocation_in_root(",
+            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_rebind_origin_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}",
+        ),
+        (
+            "pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(",
+            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_inflight_state_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_inflight_state_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
+        ),
+        (
+            "pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(",
+            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_rebind_origin_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_rebind_origin_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
+        ),
+    ];
+
+    /// Classification 2: counts and exact bodies of the code before the first coded
+    /// `#[cfg(test)]`, comments and formatting ignored. A lexical tripwire only.
+    fn observation_api_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let lexed = Lexed::new(source);
+        let Some(end) = lexed.find("#[cfg(test)]") else {
+            return vec!["missing the #[cfg(test)] production boundary".to_string()];
+        };
+        let production = lexed.slice(0..end);
+        let mut gaps: Vec<String> = OBSERVED
+            .into_iter()
+            .filter(|(needle, want)| production.count(needle) != *want)
+            .map(|(needle, want)| format!("`{needle}` must appear {want} times"))
+            .collect();
+        for (signature, body) in EXACT_ITEMS {
+            let expected = Lexed::new(&format!("{signature}{body}")).compact();
+            match production.block(signature) {
+                Some(item) if item.compact().text() == expected.text() => {}
+                _ => gaps.push(format!(
+                    "{signature} is not exactly its allocation-only body"
+                )),
+            }
+        }
+        gaps
+    }
+
     #[test]
     fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
-        let production = include_str!("reconcile_gate.rs")
-            .split_once("#[cfg(test)]")
-            .unwrap()
-            .0;
-        assert_eq!(production.matches("\"epoch_route\"").count(), 2);
-        assert_eq!(production.matches("\"epoch_advanced\"").count(), 2);
-        assert_eq!(production.matches("epoch_route,").count(), 2);
-        assert_eq!(production.matches("epoch_advanced,").count(), 2);
-        assert_eq!(production.matches("ProcessGenerationAllocation").count(), 4);
-        let between = |start, end| {
-            production
-                .split_once(start)
-                .unwrap()
-                .1
-                .split_once(end)
-                .unwrap()
-                .0
-                .trim()
-        };
-        assert_eq!(
-            between(
-                "fn clear_inflight_state_for_reconcile_with_allocation_in_root(",
-                "fn clear_rebind_origin_for_reconcile_with_allocation_in_root(",
-            ),
-            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_inflight_state_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}"
-        );
-        assert_eq!(
-            between(
-                "fn clear_rebind_origin_for_reconcile_with_allocation_in_root(",
-                "fn clear_inflight_state_for_reconcile_in_root(",
-            ),
-            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_rebind_origin_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}"
-        );
+        assert_eq!(observation_api_gaps(RECONCILE_GATE), Vec::<String>::new());
+    }
 
-        let normal_entry = production
-            .split_once("pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(")
-            .expect("normal public reconcile entry must remain present")
-            .1
-            .split_once("/// Clear a reconcile-owned rebind-origin row")
-            .expect("normal public reconcile entry must remain bounded")
-            .0;
-        assert_eq!(
-            normal_entry.trim(),
-            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_inflight_state_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_inflight_state_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
+    #[test]
+    fn observation_api_guard_rejects_commented_items_and_ignores_comment_prose() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        let inner = [
+            "#[cfg(test)]",
+            WRAPPER_CALL,
+            "let allocation = crate::services::discord::runtime_store::process_generation_binding();",
+            "\"clear_rebind_origin_for_reconcile\",",
+        ];
+        let needles = OBSERVED
+            .map(|(needle, _)| needle)
+            .into_iter()
+            .chain(EXACT_ITEMS.map(|(signature, _)| signature))
+            .chain(inner);
+        for needle in needles {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(RECONCILE_GATE, needle, forgery);
+                assert_eq!(
+                    forged.matches(needle).count(),
+                    RECONCILE_GATE.matches(needle).count(),
+                    "the raw count is blind to {forgery:?}"
+                );
+                assert!(
+                    !observation_api_gaps(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+        let noted = RECONCILE_GATE.replacen(
+            WRAPPER_CALL,
+            &format!("// allocation only\n    {WRAPPER_CALL} /* whole */"),
+            1,
         );
-
-        let rebind_entry = production
-            .split_once("pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(")
-            .expect("rebind public reconcile entry must remain present")
-            .1
-            .split_once("/// §7.2-1's refusal payload")
-            .expect("rebind public reconcile entry must remain bounded")
-            .0;
-        assert_eq!(
-            rebind_entry.trim(),
-            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_rebind_origin_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_rebind_origin_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
+        assert_eq!(observation_api_gaps(&noted), Vec::<String>::new());
+        let coded = RECONCILE_GATE.replacen(
+            WRAPPER_CALL,
+            &format!("let _ = allocation.epoch_route();\n    {WRAPPER_CALL}"),
+            1,
         );
+        assert_eq!(observation_api_gaps(&coded).len(), 1);
     }
 }

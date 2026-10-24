@@ -39,6 +39,7 @@ mod skill;
 pub(in crate::services::discord) mod stop;
 mod text_commands;
 mod tmux_recreate;
+mod tool_call;
 mod tui_passthrough;
 mod voice;
 
@@ -131,8 +132,7 @@ pub(in crate::services::discord) use config::{
 };
 pub(super) use config::{cmd_adduser, cmd_allowall, cmd_allowed, cmd_allowedtools, cmd_removeuser};
 pub(in crate::services::discord) use control::{
-    SoftClearNotifyMode, clear_channel_session_state, clear_channel_session_state_with_session_key,
-    native_clear_admits, reset_channel_provider_state, reset_managed_process_session,
+    clear_channel_session_state, reset_channel_provider_state, reset_managed_process_session,
     reset_provider_session_if_pending,
 };
 pub(super) use control::{cmd_cancel_queued, cmd_clear, cmd_down, cmd_shell, cmd_stop};
@@ -161,6 +161,7 @@ pub(super) use sidecar::cmd_sidecar;
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::{cmd_cc, cmd_skill};
 pub(in crate::services::discord) use text_commands::handle_text_command_with_uploads;
+pub(super) use tool_call::cmd_tool_call;
 pub(super) use tui_passthrough::{cmd_compact, cmd_context, cmd_cost, cmd_effort};
 pub(in crate::services::discord) use voice::{
     auto_join_voice_channels, handle_vc_text_command, join_voice_channel, notify_voice_alert,

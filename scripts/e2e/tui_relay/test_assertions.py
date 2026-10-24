@@ -1079,7 +1079,6 @@ class SessionAndCompletionChromeRegression(unittest.TestCase):
     def test_current_completion_producer_shapes_stay_chrome(self):
         for content in (
             "✅ **응답 완료**\n> **시작**: <t:1700000000:R>",
-            "📦 응답 완료 · resumed\n세션: claude · context unknown · idle 1분",
         ):
             message = _raw_bot_msg(1, content)
             self.assertEqual(assertions.is_relay_response(message), False)
@@ -1629,15 +1628,15 @@ class E35CurrentRunContract(unittest.TestCase):
         scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
         original = copy.deepcopy(scenario)
         marker = "[E2E:E35:current-run:OK]"
-        body, completion = _relay_msg(3, marker), _raw_bot_msg(6, "✅ 응답 완료")
+        body, completion = _relay_msg(3, marker), _raw_bot_msg(6, "-# ⏱️ 1초")
         cases = {
-            "current": ([body, completion], "pass"),
+            "current": ([body, completion], "pass"), "retired chrome": ([body, _raw_bot_msg(6, "✅ 응답 완료")], "fail"),
             "stale": ([_relay_msg(3, "[E2E:E35:old-run:OK]"), completion], "fail"),
             "missing": ([_relay_msg(3, "unrelated response"), completion], "fail"),
             "duplicate marker": ([body, _relay_msg(4, marker + " resent"), completion], "fail"),
             "duplicate content": ([body, _relay_msg(4, "same body"), _relay_msg(5, "same body"), completion], "fail"),
             "missing completion": ([body], "fail"),
-            "early completion": ([_raw_bot_msg(2, "✅ 응답 완료"), body], "fail"),
+            "early completion": ([_raw_bot_msg(2, "-# ⏱️ 1초"), body], "fail"),
         }
         for cell in scenario["cells"]:
             for label, (messages, expected) in cases.items():
@@ -1645,7 +1644,9 @@ class E35CurrentRunContract(unittest.TestCase):
                     client = MagicMock(base_url="http://agentdesk.test")
                     client.send_control.return_value = {"id": "1"}
                     client.send.return_value = {"id": "2"}
-                    # The real wait first sees the current marker; final edits must still pass assertions.
+                    stamp = driver.dt.datetime.now(driver.dt.timezone.utc)
+                    for message in messages:
+                        message["timestamp"] = (stamp + driver.dt.timedelta(seconds=int(message["id"]))).isoformat()
                     client.wait_for_message.return_value = (body, [body])
                     client.fetch_messages.side_effect = [messages] if cell.endswith("-herdr") else [[], [body], messages, messages]
                     args = Namespace(base_url=client.base_url, cell=cell, channel_id="42", thread_channel_id=None,
@@ -1673,7 +1674,6 @@ class E35CurrentRunContract(unittest.TestCase):
                     reset.assert_not_called()
                     hard_reset.assert_not_called()
         self.assertEqual(scenario, original)
-
 
 class UnknownCellAdmission(unittest.TestCase):
     def test_direct_cli_rejects_unknown_cell_before_side_effects(self):
@@ -1716,9 +1716,8 @@ class UnknownCellAdmission(unittest.TestCase):
             for side_effect in (config, cross, restart, mkdir, report, client, child, run):
                 side_effect.assert_not_called()
 
-
 class RequiredCompletionWait(unittest.TestCase):
-    """Real E35 driver/client/primitive composition with inert transport/clocks."""
+    """Retained old-chrome retry API, with inert E35 transport/clocks."""
 
     RUN = "offline-c6"
     MARKER = "[E2E:E35:offline-c6:OK]"
@@ -1728,7 +1727,7 @@ class RequiredCompletionWait(unittest.TestCase):
              move_at=None):
         scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/"
                                          "E-35-durable-delivery-record.yaml").read_text())
-        scenario["assertions"][-1]["completion_chrome_after_body"]["required"] = not optional
+        scenario["assertions"][-2:] = [{"completion_chrome_after_body": {"body_marker": self.MARKER, "required": not optional}}]
         if mutation == "raw_count":
             scenario["assertions"].insert(0, {"raw_message_count_between_markers": {"min": 1, "max": 36}})
         if other_failure:

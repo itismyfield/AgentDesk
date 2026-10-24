@@ -4,9 +4,6 @@
 //! write-backs so `terminal_delivery.rs` remains below its production LoC cap.
 
 use super::*;
-// #5071 T1 S4: the ONE door from this file to the `#[cfg(unix)]` journal.
-mod unix_journal;
-
 use std::sync::Arc;
 
 use super::super::gateway::TurnGateway;
@@ -18,22 +15,6 @@ use super::super::turn_finalizer::TurnKey;
 use crate::services::discord::{
     DeliveryLeaseCell, DeliveryLeaseHeartbeat, DeliveryLeaseKey, LeaseHolder, lease_now_ms,
 };
-use unix_journal::{
-    Disposition, begin_controller_terminal as journal_begin,
-    settle_controller_terminal as journal_settle,
-};
-
-#[cfg(unix)]
-#[rustfmt::skip]
-pub(super) fn begin_pinned_terminal(
-    shared: &SharedData, provider: &ProviderKind, long: bool,
-    channels: (ChannelId, ChannelId), range: (u64, u64),
-) -> impl FnOnce(Option<MessageId>, bool) {
-    let kind = if long { Disposition::LongChunks } else { Disposition::ShortReplace };
-    let mut journal = journal_begin(shared, provider, kind, channels, Some(range));
-    move |message_id, committed| drop(journal_settle(&mut journal, message_id, committed))
-}
-
 /// #3089 A5: the bridge short-replace cut-over decision, computed at the site-5
 /// lease-acquire site (mod.rs ~6134).
 ///
@@ -262,12 +243,6 @@ pub(super) async fn deliver_short_replace_via_controller(
         );
         true
     };
-    // #5071 T1 S4: open the controller family's shadow obligation BEFORE transport.
-    // `unix_journal` — the journal is `#[cfg(unix)]` and the durable frontier write
-    // below is not, so off unix these three sites are UNINSTRUMENTED.
-    #[rustfmt::skip]
-    let mut journal = unix_journal::begin_controller_terminal(shared, provider,
-        Disposition::ShortReplace, (watcher_owner_channel_id, channel_id), Some((start, end)));
     let outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
@@ -352,7 +327,6 @@ pub(super) async fn deliver_short_replace_via_controller(
         // keyed by the delivery channel (`channel_id`), NOT `watcher_owner_channel_id`.
         Some(turn.user_msg_id),
     );
-    unix_journal::settle_controller_terminal(&mut journal, Some(msg_id), delivered);
     outcome
 }
 
@@ -394,9 +368,6 @@ pub(super) async fn deliver_long_chunks_via_controller(
         true
     };
     let chunk_count = super::super::formatting::split_message(relay_text).len();
-    #[rustfmt::skip]
-    let mut journal = unix_journal::begin_controller_terminal(shared, provider,
-        Disposition::LongChunks, (watcher_owner_channel_id, channel_id), Some((start, end)));
     let outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
@@ -447,9 +418,8 @@ pub(super) async fn deliver_long_chunks_via_controller(
             // #4564: explicit inbound turn id; ledger keyed by delivery `channel_id`.
             Some(turn.user_msg_id),
         );
-        unix_journal::settle_controller_terminal(&mut journal, chunks.tail_message_id, true);
     }
-    unix_journal::settle_controller_terminal(&mut journal, None, false); // no-op if settled
+
     outcome
 }
 
@@ -564,10 +534,6 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
         BridgeLeaseAcquire::Held(lease) => Some(lease),
         _ => None,
     };
-    #[rustfmt::skip]
-    let mut journal = unix_journal::begin_controller_terminal(shared, provider,
-        Disposition::LongChunksLegacy, (watcher_owner_channel_id, channel_id),
-        lease.as_ref().map(|lease| lease.range()));
     let send = || {
         send_ordered_long_terminal_response(
             shared,
@@ -611,7 +577,6 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
                         delivered_body,
                         Some(ledger_user_msg_id),
                     );
-                    unix_journal::settle_controller_terminal(&mut journal, last_chunk_msg_id, true);
                 }
             }
         }
@@ -633,7 +598,6 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
             *locals.preserve_inflight_for_cleanup_retry = true;
         }
     }
-    unix_journal::settle_controller_terminal(&mut journal, None, false); // no-op if settled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -999,23 +963,11 @@ fn emit_bridge_replace_cleanup(
 
 #[cfg(test)]
 mod tests {
-    // Source-level wiring invariant: each controller path must mint its holder at
-    // the acquisition site. Replacing either exact call with a constant makes this red.
+    mod source_guard_tests;
+
     #[test]
     fn controller_bridge_acquire_sites_mint_fresh_attempts() {
-        let source = include_str!("terminal_controller_cutover.rs");
-        let (_, after_short) = source
-            .split_once("pub(super) async fn deliver_short_replace_via_controller(")
-            .expect("short-replace controller function");
-        let (short_body, after_long) = after_short
-            .split_once("pub(super) async fn deliver_long_chunks_via_controller(")
-            .expect("long-chunks controller function");
-        let (long_body, _) = after_long
-            .split_once("/// #3998 S1-d: borrowed long-chunk locals")
-            .expect("long-chunks controller boundary");
-        let mint = "let holder = super::terminal_delivery::next_bridge_lease_holder();";
-        assert_eq!(short_body.matches(mint).count(), 1);
-        assert_eq!(long_body.matches(mint).count(), 1);
+        source_guard_tests::controller_bridge_acquire_sites_mint_fresh_attempts();
     }
 
     // #3089 A5: the bridge short-replace cutover. These drive the REAL controller

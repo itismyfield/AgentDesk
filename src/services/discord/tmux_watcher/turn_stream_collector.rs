@@ -113,7 +113,6 @@ async fn collect_turn_stream_body(
     );
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
-    let mut clean_decoded_provenance = !decoded_data.mixed_read_provenance;
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
@@ -176,10 +175,10 @@ async fn collect_turn_stream_body(
         utf8_decoder.clear_pending();
         return CollectOutcome::ContinueWatcherLoop;
     };
-    let completion_actor = if let Some(turn) = continuation.as_ref() {
-        turn.completion_actor.clone()
+    let (completion_actor, summary_actor) = if let Some(turn) = continuation.as_ref() {
+        (turn.completion_actor.clone(), turn.summary_actor.clone())
     } else {
-        cancel_handoff::completion::capture_actor(
+        cancel_handoff::completion::capture_actors(
             &shared,
             channel_id,
             startup_inflight_snapshot.as_ref(),
@@ -420,13 +419,7 @@ async fn collect_turn_stream_body(
         stale_resume_detected |= turn.stale_resume_detected;
         assistant_text_seen |= turn.assistant_text_seen;
         fresh_assistant_text_seen |= turn.fresh_assistant_text_seen;
-        task_notification_context = if ctx.legacy_mode.is_legacy() {
-            turn.task_notification_context.clone()
-        } else if let Some(fresh) = task_notification_context.take() {
-            merge_context(turn.task_notification_context.clone(), fresh)
-        } else {
-            turn.task_notification_context.clone()
-        };
+        task_notification_context = turn.task_notification_context.clone();
         auto_compaction_lifecycle_attempted = turn.auto_compaction_lifecycle_attempted;
         monitor_auto_turn_preamble_injected = turn.monitor_auto_turn_preamble_injected;
     }
@@ -451,8 +444,7 @@ async fn collect_turn_stream_body(
     }
     #[cfg(test)]
     o_test::initial(watcher_provider.clone(), channel_id, task_notification_kind);
-    if ctx.legacy_mode.is_legacy()
-        && !monitor_auto_turn_claimed
+    if !monitor_auto_turn_claimed
         && !cancel.load(Ordering::Acquire)
         && matches!(
             task_notification_kind,
@@ -564,6 +556,15 @@ async fn collect_turn_stream_body(
 
             match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
+                    maybe_refresh_watcher_activity_heartbeat(
+                        shared.pg_pool.as_ref(),
+                        &shared.token_hash,
+                        &watcher_provider,
+                        &tmux_session_name,
+                        watcher_thread_channel_id,
+                        &mut last_activity_heartbeat_at,
+                    )
+                    .await;
                     let (auto_compacted, _chunk_forwarded_to_session_relay) =
                         match stream_chunk::process_stream_chunk(stream_chunk::StreamChunkState {
                             shared: &shared,
@@ -571,7 +572,6 @@ async fn collect_turn_stream_body(
                             tmux_session_name: &tmux_session_name,
                             channel_id,
                             watcher_instance_id: ctx.watcher_instance_id,
-                            watcher_thread_channel_id,
                             source_authority,
                             retained_source: parser.retained_source.is_some(),
                             read_witness,
@@ -579,11 +579,9 @@ async fn collect_turn_stream_body(
                             off,
                             file_identity,
                             current_offset: &mut current_offset,
-                            last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
                             ready_for_input_tracker: &mut ready_for_input_tracker,
                             utf8_decoder,
                             all_data: &mut all_data,
-                            clean_decoded_provenance: &mut clean_decoded_provenance,
                             all_data_start_offset: &mut all_data_start_offset,
                             state: &mut state,
                             full_response: &mut full_response,
@@ -618,12 +616,10 @@ async fn collect_turn_stream_body(
                             std::ops::ControlFlow::Break(()) => continue,
                             std::ops::ControlFlow::Continue(processed) => processed,
                         };
-                    if ctx.legacy_mode.is_legacy()
-                        && matches!(
-                            task_notification_kind,
-                            Some(TaskNotificationKind::MonitorAutoTurn)
-                        )
-                    {
+                    if matches!(
+                        task_notification_kind,
+                        Some(TaskNotificationKind::MonitorAutoTurn)
+                    ) {
                         if !monitor_auto_turn_claimed {
                             #[cfg(test)]
                             o_test::start(watcher_provider.clone(), channel_id);
@@ -702,7 +698,6 @@ async fn collect_turn_stream_body(
                     .await
                     {
                         idle_read::IdleReadOutcome::Break => break,
-                        idle_read::IdleReadOutcome::Continue => continue,
                         idle_read::IdleReadOutcome::Fallthrough => {}
                     }
                 }
@@ -741,7 +736,6 @@ async fn collect_turn_stream_body(
                     output_path: &output_path,
                     turn_delivered: &turn_delivered,
                     host: &ctx.host,
-                    legacy_mode: ctx.legacy_mode,
                 },
                 StreamingStatusTickTurn {
                     data_start_offset,
@@ -797,8 +791,10 @@ async fn collect_turn_stream_body(
     }
 
     commit_collect_state!();
-    #[rustfmt::skip]
-    let source_authority = WatcherSourceAuthority { source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance { None } else { source_authority.source_stamp }, ..source_authority };
+    let source_authority = WatcherSourceAuthority {
+        source_stamp: None,
+        ..source_authority
+    };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
         source_authority,
@@ -813,6 +809,7 @@ async fn collect_turn_stream_body(
         single_message_panel_footer_mode,
         startup_inflight_snapshot,
         completion_actor,
+        summary_actor,
         this_turn_status_panel_generation,
         turn_is_external_input_for_session,
         turn_identity_for_panel,

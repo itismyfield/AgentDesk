@@ -28,8 +28,16 @@ impl<B: BindingEvents> Sources<B> {
                 .prepare_cleanup_witnesses()
                 .map_err(halted("witness directory"))?;
         }
+        self.check_scoped_metadata(writer.store())?;
         self.refined.clear();
-        let resolved = writer.store().apply_resolved_boundaries();
+        let suspension = self.suspension.clone();
+        let resolved = if suspension.is_empty() {
+            writer.store().apply_resolved_boundaries()
+        } else {
+            writer
+                .store()
+                .apply_resolved_boundaries_filtered(|source| !suspension.contains(source))
+        };
         resolved.map_err(halted("resolved boundary"))?;
         renumbered::unique(writer.store().cursors()).map_err(halt)?;
         self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
@@ -41,7 +49,12 @@ impl<B: BindingEvents> Sources<B> {
                 self.restore_hops(writer, &logged.1, checkpoint)?;
             }
         }
-        let mut cursors: Vec<_> = writer.store().cursors().cloned().collect();
+        let mut cursors: Vec<_> = writer
+            .store()
+            .cursors()
+            .filter(|cursor| self.resume_selected(&cursor.source))
+            .cloned()
+            .collect();
         cursors.sort_by_key(|cursor| {
             let seq = self.rotation.link(&cursor.source).map_or(0, |l| l.seq);
             (predecessors(&self.rotation, &cursor.source), seq)
@@ -180,7 +193,9 @@ impl<B: BindingEvents> Sources<B> {
         // Clear ends published while the actor was down, and proofs boot put to sleep, apply now.
         self.clear_due = !crate::services::tui_o::store::clear_end::mutant("resume_settle_off");
         self.settle_cleared(writer)?;
-        self.wake_resumed_proofs(writer)
+        self.wake_resumed_proofs(writer)?;
+        self.reconcile_boundary_pending(writer);
+        Ok(())
     }
 
     pub fn tend<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(

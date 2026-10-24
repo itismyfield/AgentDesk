@@ -86,8 +86,9 @@ impl Fixture {
              echo \"$*\" >> \"$d/calls\"\ncase \"$(cat \"$d/mode\")\" in\n\
              missing) exit 127 ;;\n\
              nosocket) echo \"no server running on $d/socket\" >&2; exit 1 ;;\nesac\n\
-             case \"$1\" in\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
-             capture-pane) r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
+             case \"$1\" in\nsend-keys) [ -f \"$d/reject_escape\" ] && exit 1; exit 0 ;;\ndisplay-message) cat \"$d/pane_pid\"; exit 0 ;;\n\
+             list-panes) echo 0; exit 0 ;;\n\
+             capture-pane) [ -f \"$d/reject_capture\" ] && exit 1; r=\"$(cat \"$d/ready\" 2>/dev/null)\"\n\
              [ -n \"$r\" ] && case \"$*\" in *\"-t $r -S\"*) echo 'Ready for input (type message + Enter)'; exit 0 ;; esac\n\
              [ -f \"$d/pane\" ] && {{ cat \"$d/pane\"; exit 0; }}\n\
              echo '· Actioning… (4m 7s · esc to interrupt)'; exit 0 ;;\nesac\nexit 0"
@@ -149,16 +150,41 @@ impl Fixture {
         std::fs::write(self.dir.path().join("pane"), text).unwrap();
     }
 
+    pub(in super::super) fn reject_capture(&self, reject: bool) {
+        let path = self.dir.path().join("reject_capture");
+        if reject {
+            std::fs::write(path, "reject").unwrap();
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    pub(in super::super) fn reject_escape(&self, reject: bool) {
+        let path = self.dir.path().join("reject_escape");
+        if reject {
+            std::fs::write(path, "reject").unwrap();
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     pub(in super::super) fn pid(&self) -> u32 {
         self.codex.id()
     }
 
-    /// The logged tmux calls, oldest first, and clears the log.
+    pub(in super::super) fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The logged tmux calls, oldest first, and clears the log after writers finish.
     pub(in super::super) fn take_calls(&self) -> Vec<String> {
-        let log = self.dir.path().join("calls");
-        let calls = std::fs::read_to_string(&log).unwrap_or_default();
-        let _ = std::fs::remove_file(log);
-        calls.lines().map(str::to_string).collect()
+        let calls = self.calls();
+        let _ = std::fs::remove_file(self.dir.path().join("calls"));
+        calls
     }
 
     /// The SIGINTs delivered to the stand-in since the last call.

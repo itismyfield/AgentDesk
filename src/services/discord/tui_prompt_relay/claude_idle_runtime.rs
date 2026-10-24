@@ -114,6 +114,14 @@ async fn relay_legacy_claude_bodies(
         let Some(transcript_path) = transcript_path else {
             continue;
         };
+        let context_path = super::launch_script::claude_launch_observation(&tmux_session_name).1;
+        let original_context =
+            crate::services::tui_prompt_dedupe::hosted_source::scan_context_from_path(
+                "claude",
+                &tmux_session_name,
+                channel_id.get(),
+                context_path.as_deref(),
+            );
         // #3402: restore footer slots a restart wiped while tasks kept
         // running (one-shot per channel+session; footer-mode gated inside).
         shared
@@ -254,6 +262,7 @@ async fn relay_legacy_claude_bodies(
             }
             ClaudeIdleTranscriptScan::Prompt {
                 prompt,
+                prompt_start_offset,
                 line_end_offset,
                 entry_id,
                 prompt_id,
@@ -266,14 +275,28 @@ async fn relay_legacy_claude_bodies(
                 );
                 let observed_at = chrono::Utc::now();
                 // Row uuid and `promptId` suppress replay; otherwise use the content window.
+                let pin = if context_path.is_some() && original_context.is_none() {
+                    None
+                } else {
+                    crate::services::tui_prompt_dedupe::hosted_source::capture_scanned(
+                        "claude",
+                        &tmux_session_name,
+                        channel_id.get(),
+                        &transcript_path,
+                        original_context.as_ref(),
+                        crate::services::tui_prompt_dedupe::hosted_source::claude_record_created_at(
+                            &transcript_path,
+                            prompt_start_offset,
+                        ),
+                    )
+                };
                 let observation =
-                    crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_row_ids_at(
-                        ProviderKind::Claude.as_str(),
+                    crate::services::tui_prompt_dedupe::hosted_source::observe_claude_record_at(
                         &tmux_session_name,
                         &prompt,
-                        entry_id.as_deref(),
-                        prompt_id.as_deref(),
+                        (entry_id.as_deref(), prompt_id.as_deref()),
                         observed_at,
+                        pin.clone(),
                     );
                 tracing::info!(
                     tmux_session_name = %tmux_session_name,
@@ -303,14 +326,13 @@ async fn relay_legacy_claude_bodies(
                     );
                     continue;
                 }
-                let lease = record_external_turn_lease_for_output(
+                let lease = super::relay_ownership::record_source_external_turn_lease_for_output(
                     &shared,
                     &ProviderKind::Claude,
                     channel_id,
                     &tmux_session_name,
                     binding.runtime_kind,
-                    &transcript_path,
-                    observed_at,
+                    (&transcript_path, observed_at, pin),
                 );
                 tracing::info!(
                     tmux_session_name = %tmux_session_name,

@@ -1,6 +1,7 @@
 //! Periodic repair plus immediate wakeup after a committed provider-error intent.
 use super::*;
 pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKind) {
+    super::super::o_transition::automatic::spawn(Arc::clone(&registry), &provider);
     tokio::spawn(async move {
         let wake = crate::services::agent_recovery::recovery_wakeup(&provider);
         tokio::select! {
@@ -9,7 +10,6 @@ pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKin
         }
         loop {
             let cleaned = run_stall_watchdog_pass(&registry, &provider).await;
-            discord::queue_park_ledger::evaluate_provider(&registry, &provider).await;
             if cleaned > 0 {
                 tracing::info!(
                     provider = provider.as_str(),

@@ -7,9 +7,12 @@ struct Rig {
     binary: PathBuf,
     socket: PathBuf,
     trace: PathBuf,
+    _env: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 impl Rig {
     fn new() -> Self {
+        // Namespace validation compares ambient PATH/TMUX even for an explicit socket.
+        let env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let binary = PathBuf::from(tmux_command().unwrap().get_program());
         assert!(binary.is_absolute());
@@ -28,6 +31,7 @@ impl Rig {
             binary,
             socket,
             trace,
+            _env: env,
         }
     }
     fn command(&self, default: bool) -> Command {
@@ -46,7 +50,7 @@ impl Rig {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE");
         if default {
-            command.env("TMUX_TMPDIR", self.root.path());
+            command.env("TMUX_TMPDIR", self.root.path().canonicalize().unwrap());
         } else {
             command.arg("-S").arg(&self.socket);
         }

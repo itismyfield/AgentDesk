@@ -227,9 +227,18 @@ fn captured_screens_read_as_shown() {
         screen::Composer::Text("person draft text".into())
     );
     let shown = screen::read(&fixture("busy_frame_v1.ansi"));
-    assert_eq!(shown.composer, screen::Composer::Text(frame_text()));
-    assert!(screen::owns(&fixture("busy_frame_v1.ansi"), &frame_text()));
-    let other = frame(SOURCE, AUTHOR, NAME, "0ther000", BODY);
+    assert_eq!(
+        shown.composer,
+        screen::Composer::Text(crate::services::tui_input::human_frame::inject(
+            SOURCE, AUTHOR, NAME, NONCE, BODY
+        ))
+    );
+    assert!(screen::owns(
+        &fixture("busy_frame_v1.ansi"),
+        &crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, NONCE, BODY)
+    ));
+    let other =
+        crate::services::tui_input::human_frame::inject(SOURCE, AUTHOR, NAME, "0ther000", BODY);
     assert!(!screen::owns(&fixture("busy_frame_v1.ansi"), &other));
     let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
     let shown = screen::read(&fixture("busy_frame.ansi"));
@@ -330,7 +339,21 @@ impl Fake {
     }
 
     fn caps(&self, names: &[&str]) {
-        let shown: Vec<String> = names.iter().map(|name| fixture(name)).collect();
+        let shown: Vec<String> = names
+            .iter()
+            .map(|name| {
+                let shown = fixture(name);
+                if *name == "busy_frame_v1.ansi" {
+                    let old = crate::services::tui_input::human_frame::inject(
+                        SOURCE, AUTHOR, NAME, NONCE, "",
+                    );
+                    let new = crate::services::tui_input::human_frame::idle(NAME, AUTHOR, "");
+                    shown.replace(old.lines().next().unwrap(), &new)
+                } else {
+                    shown
+                }
+            })
+            .collect();
         let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
         self.answers("cap", &refs);
     }
@@ -343,7 +366,13 @@ impl Fake {
     fn accept_into(&self, turn: &str) {
         fs::write(
             self.dir.path().join("on_enter"),
-            item(turn, "UserMessage", &frame_text()),
+            format!("{}\n{}\n",
+                serde_json::json!({"type":"response_item", "payload": {
+                    "type":"message", "role":"user", "content":[{"type":"input_text", "text": frame_text()}],
+                    "internal_chat_message_metadata_passthrough":{"turn_id":turn}}}),
+                serde_json::json!({"type":"event_msg", "payload": {
+                    "type":"item_completed", "turn_id":turn, "item": {
+                        "type":"UserMessage", "id":"current-frame", "content":[{"type":"text", "text":frame_text()}]}}})),
         )
         .unwrap();
     }
@@ -393,6 +422,7 @@ impl Fake {
 /// turn the rollout names decides whether it joined the target turn.
 #[test]
 fn one_enter_and_the_rollout_names_the_turn_it_joined() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.accept_into(T);
     let ledger = FakeLedger::default();
@@ -417,6 +447,7 @@ fn one_enter_and_the_rollout_names_the_turn_it_joined() {
 /// unconfirmed. An Enter whose call fails after it applied is never sent again.
 #[test]
 fn only_the_rollout_confirms_and_enter_is_never_repeated() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi", "busy_empty.ansi"]);
     let ledger = FakeLedger::default();
@@ -435,6 +466,7 @@ fn only_the_rollout_confirms_and_enter_is_never_repeated() {
 /// ledger never hears of them.
 #[test]
 fn draft_queue_and_hidden_composer_are_refused_before_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let cases = [
         ("busy_draft.ansi", Veto::Draft),
         ("busy_queued.ansi", Veto::QueueShown),
@@ -456,6 +488,7 @@ fn draft_queue_and_hidden_composer_are_refused_before_the_paste() {
 /// or is not the caller's target refuses the paste.
 #[test]
 fn the_turn_is_rechecked_before_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let cases = [
         (records("model_turn.jsonl", 20), Veto::NotBusy),
         (records("shell_turn.jsonl", 2), Veto::NotSteerable),
@@ -480,6 +513,7 @@ fn the_turn_is_rechecked_before_the_paste() {
 /// A paste that may fold or outgrow the screen, or a pane whose size is unknown, is refused.
 #[test]
 fn unpredictable_renders_are_refused() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let render = Outcome::NotSent(Veto::UnpredictableRender);
     let fake = Fake::new();
     let rows: Vec<String> = (0..14).map(|row| format!("row {row}")).collect();
@@ -504,6 +538,7 @@ fn unpredictable_renders_are_refused() {
 /// out withdraws, while a paste of unknown effect leaves the record for a late observation.
 #[test]
 fn the_ledger_brackets_the_paste() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     let full = FakeLedger {
         refuse: true,
@@ -533,6 +568,7 @@ fn the_ledger_brackets_the_paste() {
 /// keeps the Enter back.
 #[test]
 fn attach_and_foreign_composer_text_withhold_the_enter() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let fake = Fake::new();
     fake.answers("attach", &["1,,80,24"]);
     assert_eq!(
@@ -567,6 +603,7 @@ fn with_image(capture: &str) -> String {
 /// any write, and an image that appears after the paste keeps the Enter back.
 #[test]
 fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let shown = screen::read(&with_image(&fixture("busy_empty.ansi")));
     assert_eq!(
         (shown.composer, shown.attachments),
@@ -596,6 +633,7 @@ fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
 /// write: a blank or blank-looking line, or more rows than the reader scans in a tall pane.
 #[test]
 fn bodies_the_reader_cannot_prove_are_refused_before_any_write() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tall: Vec<String> = (0..40).map(|row| format!("row {row}")).collect();
     let bodies = [
         "first\n\nsecond".to_string(),
@@ -648,4 +686,132 @@ fn unproven_roots_and_reviews_never_read_as_steerable() {
     assert_eq!(verdict(&foreign), non_steerable("t1"));
     let own = entered + &item("r1", "ExitedReviewMode", "") + &model("t1");
     assert_eq!(verdict(&own), steerable("t1"));
+}
+
+#[test]
+fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native.jsonl");
+    fs::write(&path, "").unwrap();
+    let framed = frame("discord", "720103", "ann", "ca720106", "same words");
+    let session = format!("canon-{}", uuid::Uuid::new_v4());
+    let register = crate::services::tui_input::human_frame::history::register;
+    register(("codex", &session, "ca720106", "720103"), &path, 0, &framed).unwrap();
+    let response = |id: &str| serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"user", "id":id, "content":[{"type":"input_text", "text":framed}], "internal_chat_message_metadata_passthrough":{"turn_id":"target"}}});
+    let completed = |id: &str| serde_json::json!({"type":"event_msg", "payload":{"type":"item_completed", "turn_id":"target", "item":{"type":"UserMessage", "id":id, "content":[{"type":"text", "text":framed}]}}});
+    let legacy_frame = |nonce| {
+        crate::services::tui_input::human_frame::inject(
+            "discord",
+            "720103",
+            "ann",
+            nonce,
+            "same words",
+        )
+    };
+    let mut legacy = response("legacy-row");
+    legacy["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720106"));
+    fs::write(&path, format!("{legacy}\n")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720106"),
+        None,
+        "a current plain attempt cannot be confirmed by its nonce inside an old frame"
+    );
+    let mut unregistered = legacy;
+    unregistered["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720110"));
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{unregistered}").unwrap();
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720110"),
+        Some(Some("target".into())),
+        "an unregistered historical attempt keeps the legacy reader"
+    );
+    let mut opening = response("unused-response-id");
+    opening["payload"].as_object_mut().unwrap().remove("id");
+    writeln!(file, "{opening}").unwrap();
+    assert_eq!(rollout::submitted(&path, 0, "ca720106"), None);
+    writeln!(file, "{}", completed("row-a")).unwrap();
+    drop(file);
+    assert_eq!(
+        rollout::submitted(&path, 0, "ca720106"),
+        Some(Some("target".into()))
+    );
+    let second = fs::metadata(&path).unwrap().len();
+    register(
+        ("codex", &session, "ca720107", "720103"),
+        &path,
+        second,
+        &framed,
+    )
+    .unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{}", completed("row-a")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, second, "ca720107"),
+        None,
+        "a late completion keeps the first attempt's native identity"
+    );
+    for has_id in [false, true] {
+        let mut alias = response("response-alias");
+        if !has_id {
+            alias["payload"].as_object_mut().unwrap().remove("id");
+        }
+        writeln!(file, "{alias}").unwrap();
+        assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    }
+    let mut anonymous = completed("row-anonymous");
+    anonymous["payload"]["item"]
+        .as_object_mut()
+        .unwrap()
+        .remove("id");
+    writeln!(file, "{anonymous}").unwrap();
+    assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    for extra in [
+        serde_json::json!({"type":"input_image", "image_url":"unexpected.png"}),
+        serde_json::json!({"type":"tool_result", "text":""}),
+        serde_json::json!({"type":"input_text", "text":null}),
+    ] {
+        let mut mixed = completed("row-mixed");
+        mixed["payload"]["item"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(extra);
+        writeln!(file, "{mixed}").unwrap();
+        assert_eq!(rollout::submitted(&path, second, "ca720107"), None);
+    }
+    writeln!(file, "{opening}").unwrap();
+    writeln!(file, "{}", completed("row-b")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, second, "ca720107"),
+        Some(Some("target".into()))
+    );
+}
+
+#[test]
+fn common_glyphs_use_body_confirmation_without_a_width_allowlist() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let payload = "한글 English 123 “둥근” ‘따옴표’ … — (괄호) 😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷 漢字 かな カナ （全角）、。！？".repeat(3);
+    let expected = frame(SOURCE, AUTHOR, NAME, NONCE, &payload);
+    let shown = format!(
+        "\n› {}\n\n  90% context left\n",
+        expected.replace('\n', "\n  ")
+    );
+    let fake = Fake::new();
+    fake.answers("attach", &["0,,80,50"]);
+    fake.answers("cap", &[&fixture("busy_empty.ansi"), &shown]);
+    fake.accept_into(T);
+    let on_enter = fake.dir.path().join("on_enter");
+    let record = fs::read_to_string(&on_enter).unwrap().replace(
+        &serde_json::to_string(&frame_text()).unwrap(),
+        &serde_json::to_string(&expected).unwrap(),
+    );
+    fs::write(on_enter, record).unwrap();
+    assert_eq!(
+        fake.run_with(&FakeLedger::default(), &payload),
+        Outcome::Injected {
+            observed_turn: Some(T.into()),
+            joined: true,
+        }
+    );
+    assert_eq!((fake.calls("paste-buffer"), fake.enters()), (1, 1));
 }

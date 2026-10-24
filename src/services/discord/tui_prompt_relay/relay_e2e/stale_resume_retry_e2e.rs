@@ -69,7 +69,25 @@ async fn stale_resume_retry_turns_first_placeholder_into_notice_and_answers_once
         .iter()
         .map(|(_, content)| content.as_str())
         .collect();
-    assert_eq!(contents, [RECOVERY_NOTICE, "ok"]);
+    assert_eq!(
+        contents.len(),
+        3,
+        "notice, one answer, one summary: {contents:?}"
+    );
+    assert_eq!(&contents[..2], [RECOVERY_NOTICE, "ok"]);
+    assert!(
+        regex::Regex::new(
+            concat!(
+            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
+            r"(?: · 📦 (?:100|[1-9]?[0-9])%)?",
+            r"(?: · 5h (?:100|[1-9]?[0-9])% \((?:[01][0-9]|2[0-3]):[0-5][0-9]\))?",
+            r"(?: · 7d (?:100|[1-9]?[0-9])% \((?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) (?:[01][0-9]|2[0-3]):[0-5][0-9]\))?\z"
+        )
+        )
+        .unwrap()
+        .is_match(contents[2]),
+        "the last message is a successful turn summary: {contents:?}"
+    );
     assert_eq!(
         messages[1].0,
         Some(B_MESSAGE_ID),

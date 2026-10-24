@@ -13,6 +13,7 @@ mod writer;
 mod adoption;
 
 const BODY: &str = "동일한 응답 본문 — delivered by O";
+const TURN_DONE: &str = "-# ✅ 완료";
 const CHILD: &str = "ADK_O_DELIVERY_E2E_CHILD";
 
 fn isolated(name: &str) -> bool {
@@ -307,10 +308,15 @@ async fn run(turn: Turn) {
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     stop.send(true).unwrap();
     actor.await.unwrap();
+    let expected = if codex {
+        vec![BODY]
+    } else {
+        vec![BODY, TURN_DONE]
+    };
     assert_eq!(
         writer.posts(),
-        [BODY],
-        "O must actually deliver the consumed body exactly once"
+        expected,
+        "O delivers the exact consumed body and only its eligible turn summary once"
     );
     assert_eq!(paths.each_ref().map(|p| snapshot(p)), before);
 }
@@ -463,11 +469,19 @@ async fn run_canary_pair(selected: &[u64]) {
         // The oracle is the raw list, not the ownership helper under test.
         let via_o = u64::from(selected.contains(&leg.channel));
         let o_posts = io.posts.to(leg.channel);
+        let expected = if via_o == 1 {
+            vec![leg.body.as_str(), TURN_DONE]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            o_posts, expected,
+            "the entire O transport is one body then one summary, or empty"
+        );
         let o_units = o_posts
             .iter()
             .filter(|post| post.contains(&leg.body))
             .count() as u64;
-        assert_eq!(o_posts.len() as u64, o_units, "{o_posts:?}");
         let counts = (o_units, leg.legacy_posts());
         assert_eq!(
             counts,
@@ -499,7 +513,9 @@ async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
         };
         let config = serde_json::from_value(serde_json::json!({"server": {},
             "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": []}}}));
-        crate::bootstrap::install_boot_snapshots(&config.unwrap()).unwrap();
+        crate::bootstrap::prepare_and_install_boot_snapshots(&config.unwrap(), None)
+            .await
+            .unwrap();
         run_canary_pair(&[]).await;
     }
 }
@@ -519,7 +535,9 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
         }
     }], "tui_o": {"writer": {"channels": []}}}))
     .unwrap();
-    crate::bootstrap::install_boot_snapshots(&config).unwrap();
+    crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
+        .await
+        .unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared
         .http

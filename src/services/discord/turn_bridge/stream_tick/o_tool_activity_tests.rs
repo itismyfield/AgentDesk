@@ -32,12 +32,13 @@ fn o_status_only_frame_uses_the_same_summary_and_class_renderer() {
         let expected = crate::services::discord::single_message_panel::compose_footer_status_block(
             "⠋", &panel,
         );
-        assert_eq!(frame, expected);
-        assert!(tool_label(&frame).is_some());
+        assert_eq!(frame, "⠋ 계속 처리 중");
+        assert!(tool_label(&frame).is_none());
+        assert_ne!(frame, expected, "rich renderer output remains budget-only");
         if mode == crate::config::ToolActivityDisplay::Summary {
-            assert!(frame.contains("▶ Bash  cargo test"), "{frame}");
+            assert!(expected.contains("▶ Bash  cargo test"), "{expected}");
         } else {
-            assert!(frame.contains("마지막 도구 ([Bash])") && !frame.contains("cargo test"));
+            assert!(expected.contains("마지막 도구 ([Bash])") && !expected.contains("cargo test"));
         }
     }
 }

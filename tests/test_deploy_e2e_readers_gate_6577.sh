@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The deploy and rollback health gates accept a reader-count alarm only on the
-# post-deploy smoke E2E channels, resolved from config; every other alarm blocks.
+# The deploy and rollback health gates accept a reader-count or held-start
+# (boundary_pending) alarm only on the post-deploy smoke E2E channels, resolved
+# from config; every other alarm blocks.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -134,6 +135,52 @@ if ! command -v jq >/dev/null 2>&1; then
 else
     for shape in '["tui_o:too_many_readers:111","tui_o:released:7"]' \
         '["tui_o:too_many_readers:333"]' '["tui_o:binding_pending:111"]'; do
+        b="$(body "$shape")"
+        with_jq=0; health_json_is_ready "$b" 1 1 1 1 >/dev/null 2>&1 || with_jq=1
+        without_jq=0
+        (
+            _health_json_has_jq() { return 1; }
+            health_json_is_ready "$b" 1 1 1 1 >/dev/null 2>&1
+        ) || without_jq=1
+        if [ "$with_jq" = "$without_jq" ]; then
+            pass "jq and fallback agree on $shape"
+        else
+            fail "jq said $with_jq but the fallback said $without_jq for $shape"
+        fi
+    done
+fi
+
+echo "§7 a held source start blocks only off the smoke E2E channels"
+
+DEPLOY_E2E_SMOKE_CHANNEL_IDS="$ids"
+export DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
+expect_ready "the Codex smoke channel's held start (10-21 measured)" \
+    "$(body '["tui_o:boundary_pending:222"]')"
+expect_ready "a Claude smoke channel's held start" "$(body '["tui_o:boundary_pending:111"]')"
+for reason in tui_o:boundary_pending:333 tui_o:boundary_pending:2220 \
+    tui_o:boundary_pending:22 tui_o:boundary_pending:; do
+    expect_blocked "$reason blocks" "$(body "[\"$reason\"]")"
+done
+expect_blocked "an accepted held start does not carry a halted one with it" \
+    "$(body '["tui_o:boundary_pending:222","tui_o:halted:222"]')"
+DEPLOY_E2E_SMOKE_CHANNEL_IDS=""
+export DEPLOY_PREEXISTING_READER_CHANNEL_IDS="333"
+expect_ready "a pre-existing reader alarm stays accepted" "$(body '["tui_o:too_many_readers:333"]')"
+expect_blocked "a pre-existing channel's held start still blocks" \
+    "$(body '["tui_o:boundary_pending:333"]')"
+export DEPLOY_PREEXISTING_READER_CHANNEL_IDS=""
+DEPLOY_E2E_SMOKE_CHANNEL_IDS='.*'
+expect_blocked "a value that is not a channel id list accepts no held start" \
+    "$(body '["tui_o:boundary_pending:222"]')"
+DEPLOY_E2E_SMOKE_CHANNEL_IDS="$ids"
+held="$(body '["tui_o:boundary_pending:222"]')"
+if health_json_is_ready "$held" 1 1 1 0 >/dev/null 2>&1; then
+    fail "a non-deploy caller accepted the held start"
+else
+    pass "a non-deploy caller still refuses the held start"
+fi
+if command -v jq >/dev/null 2>&1; then
+    for shape in '["tui_o:boundary_pending:222"]' '["tui_o:boundary_pending:333"]'; do
         b="$(body "$shape")"
         with_jq=0; health_json_is_ready "$b" 1 1 1 1 >/dev/null 2>&1 || with_jq=1
         without_jq=0

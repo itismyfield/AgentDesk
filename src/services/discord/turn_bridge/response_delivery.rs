@@ -226,38 +226,76 @@ mod streaming_edit_text_tests {
 
 #[cfg(test)]
 mod headless_completion_footer_tests {
-    fn compact_ws(input: &str) -> String {
-        input.split_whitespace().collect::<Vec<_>>().join(" ")
+    use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
+    use crate::test_support::CommentForgery;
+
+    const DELIVERY: &str = include_str!("terminal_outcome_delivery.rs");
+    const DISPOSITION: &str =
+        "match super::headless_delivery::headless_delivery_disposition(&delivery_outcome)";
+    const COMMIT_ARM: &str = "super::headless_delivery::HeadlessDeliveryDisposition::Commit";
+    const CLEANUP: &str = "cleanup_headless_streaming_placeholder_after_delivery(";
+    const COMMIT: &str = ".await; terminal_delivery_committed = true; terminal_body_visible = true; if single_message_panel_footer_mode { completion_footer_terminal_text = Some(delivery_response.clone()); }";
+
+    /// Classification 2: in the real headless Commit arm, the cleanup await is directly followed by
+    /// the terminal commit and footer text, comments and whitespace ignored. A lexical tripwire.
+    fn headless_footer_gaps(delivery: &str) -> Vec<String> {
+        let arm = Lexed::new(delivery)
+            .compact()
+            .block(&tight(DISPOSITION))
+            .and_then(|outcome| outcome.arm(COMMIT_ARM));
+        let Some(arm) = arm else {
+            return vec!["missing the Commit arm of the headless delivery disposition".into()];
+        };
+        match arm.find(&tight(CLEANUP)) {
+            Some(cleanup) if arm.find_after(cleanup, &tight(COMMIT)).is_some() => Vec::new(),
+            found => vec![format!(
+                "the Commit arm must commit and register the footer after its cleanup: {found:?}"
+            )],
+        }
     }
 
-    /// #4103: headless-dispatched turns (API / cron / routine, and E2E
-    /// E-1/E-22/E-23) never emitted single-message completion chrome because the
-    /// `enqueue_headless_delivery` SUCCESS arm set `terminal_delivery_committed`
-    /// / `terminal_body_visible` but NOT `completion_footer_terminal_text`, so
-    /// `note_turn_completed_footer` was never reached.
-    ///
-    /// The expected window is anchored on the `.await;` from the arm's
-    /// `cleanup_headless_streaming_placeholder_after_delivery(...).await;` — that
-    /// `.await; terminal_delivery_committed = true;` prefix occurs EXACTLY here.
-    /// The sibling non-headless replace arm produces the byte-identical footer
-    /// suffix but is prefixed by `if outcome {`, not `.await;`, so a bare-suffix
-    /// assertion would still pass off the sibling even if this write were deleted
-    /// or moved to the `Err` arm (the false-negative this anchor closes). The
-    /// searched source is only the included terminal-delivery module, so this
-    /// test's own expected literal cannot self-match.
+    fn tight(needle: &str) -> String {
+        Lexed::new(needle).compact().text().to_string()
+    }
+
+    /// Headless-dispatched turns (API, cron, routine) must reach single-message completion
+    /// chrome: the success arm sets the footer text right after its committed delivery.
     #[test]
     fn headless_enqueue_success_registers_completion_footer_text() {
-        let source = compact_ws(include_str!("terminal_outcome_delivery.rs"));
-        let expected = ".await; terminal_delivery_committed = true; \
-             terminal_body_visible = true; \
-             if single_message_panel_footer_mode { \
-             completion_footer_terminal_text = Some(delivery_response.clone()); }";
+        assert_eq!(headless_footer_gaps(DELIVERY), Vec::<String>::new());
+    }
 
-        assert!(
-            source.contains(expected),
-            "headless enqueue_headless_delivery success arm must set \
-             completion_footer_terminal_text right after its post-delivery \
-             cleanup .await + terminal_body_visible commit (#4103 completion chrome)"
-        );
+    #[test]
+    fn headless_footer_guard_rejects_commented_and_moved_footer_writes() {
+        for needle in [
+            DISPOSITION,
+            COMMIT_ARM,
+            CLEANUP,
+            "terminal_delivery_committed = true;",
+            "terminal_body_visible = true;",
+            "completion_footer_terminal_text = Some(delivery_response.clone());",
+        ] {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(DELIVERY, needle, forgery);
+                assert!(
+                    !headless_footer_gaps(&forged).is_empty(),
+                    "{forgery:?} `{needle}`"
+                );
+            }
+        }
+        let cleanup = DELIVERY.find(CLEANUP).expect("headless cleanup call");
+        let (head, tail) = DELIVERY.split_at(cleanup);
+        let commit = "terminal_delivery_committed = true;";
+        let reordered = [
+            head,
+            swap(tail, commit, "terminal_body_visible = true;").as_str(),
+        ]
+        .concat();
+        assert!(!headless_footer_gaps(&reordered).is_empty());
+        // The sibling replace arm writes the same footer; dropping it from the Commit arm still fails.
+        let footer = "                        if single_message_panel_footer_mode {\n                            completion_footer_terminal_text = Some(delivery_response.clone());\n                        }\n";
+        let at = cleanup + DELIVERY[cleanup..].find(footer).expect("Commit arm footer");
+        let dropped = [&DELIVERY[..at], &DELIVERY[at + footer.len()..]].concat();
+        assert!(!headless_footer_gaps(&dropped).is_empty());
     }
 }

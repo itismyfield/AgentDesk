@@ -73,6 +73,8 @@ pub(super) struct ParkedObservation {
     pub(super) native_turn: Option<String>,
     pub(super) entry_ids: Vec<String>,
     pub(super) observed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) hosted_source: Option<hosted_source::HostedSourcePin>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -314,6 +316,7 @@ pub(super) fn drain_parked(provider: &str, tmux: &str, parked: Vec<ParkedObserva
             entry_id,
             held.native_turn.as_deref(),
             held.observed_at,
+            held.hosted_source,
         );
         for extra in held.entry_ids.iter().skip(1) {
             record_relayed_entry_id(provider, tmux, extra);
@@ -331,6 +334,7 @@ impl TuiPromptDedupeState {
         entry_id: Option<&str>,
         native_turn: Option<&str>,
         observed_at: DateTime<Utc>,
+        hosted_source: Option<&hosted_source::HostedSourcePin>,
     ) -> bool {
         let Some(entry) = self.handoff_by_tmux.get_mut(key) else {
             return false;
@@ -341,7 +345,9 @@ impl TuiPromptDedupeState {
         }
         let parked = &mut entry.value.parked;
         let same = parked.iter_mut().find(|held| {
-            held.native_turn.as_deref() == native_turn && prompts_match(&held.prompt, prompt)
+            held.native_turn.as_deref() == native_turn
+                && held.hosted_source.as_ref() == hosted_source
+                && prompts_match(&held.prompt, prompt)
         });
         match same {
             Some(held) => {
@@ -356,6 +362,7 @@ impl TuiPromptDedupeState {
                 native_turn: native_turn.map(str::to_string),
                 entry_ids: entry_id.map(str::to_string).into_iter().collect(),
                 observed_at,
+                hosted_source: hosted_source.cloned(),
             }),
         }
         true

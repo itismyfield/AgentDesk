@@ -358,7 +358,7 @@ class GiantRealSnapshotTest(unittest.TestCase):
             if expected:
                 self.assertIn("new or growing giant", evidence["reason"])
             else:
-                self.assertIn("WARN:", err)
+                self.assertIn("WARNING:", err)
 
     def test_real_snapshot_new_giant_is_blocked(self):
         rc, evidence, _ = self.run_pr({"src/new.rs": "pub fn new() {}\n" * 1000})
@@ -380,6 +380,84 @@ class GiantRealSnapshotTest(unittest.TestCase):
         rc, evidence, _ = self.run_pr({P.METADATA: "{broken"})
         self.assertEqual(rc, 2, evidence)
         self.assertEqual(evidence["verdict"], "fail")
+
+
+class GiantProtectedMainDispatchTest(unittest.TestCase):
+    setUp, git, put, commit = (GiantRealSnapshotTest.setUp, GiantRealSnapshotTest.git,
+        GiantRealSnapshotTest.put, GiantRealSnapshotTest.commit)
+
+    def run_main(self, **overrides):
+        env = {"GFP_EVENT_NAME": "workflow_dispatch", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_CANDIDATE_SHA": self.base, "GFP_REF": "refs/heads/main",
+               "GFP_REF_PROTECTED": "true"}
+        env.update(overrides)
+        with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.object(
+                P, "EVIDENCE", self.evidence), mock.patch.object(
+                G, "giant_file_snapshot", wraps=G.giant_file_snapshot) as scan, mock.patch.object(
+                P, "archive", wraps=P.archive) as archive, mock.patch.object(
+                P, "diff_facts", wraps=P.diff_facts) as diff, redirect_stderr(io.StringIO()):
+            rc = P.main()
+        return rc, json.loads(self.evidence.read_text()), scan, archive, diff
+
+    def test_protected_main_dispatch_records_same_debt_as_push(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        dispatch_rc, dispatch, scan, archive, diff = self.run_main()
+        self.assertEqual(dispatch_rc, 0, dispatch)
+        self.assertEqual(dispatch["verdict"], "progress-pass")
+        self.assertEqual(dispatch["selector"], "main_no_regression_record")
+        self.assertEqual(dispatch["overdue"], ["src/fixture.rs"])
+        self.assertEqual(dispatch["overdue_count"], 1)
+        self.assertEqual(scan.call_count, 1)
+        archive.assert_called_once_with(self.base, mock.ANY)
+        diff.assert_not_called()
+        push_rc, push, _, _, _ = self.run_main(
+            GFP_EVENT_NAME="push", GFP_REF="", GFP_REF_PROTECTED="")
+        self.assertEqual(push_rc, 0, push)
+        for field in ("selector", "verdict", "reason", "overdue", "overdue_count",
+                      "candidate_overdue", "candidate_tree"):
+            self.assertEqual(dispatch[field], push[field], field)
+
+    def test_dispatch_rejects_wrong_ref_unprotected_branch_and_repository_before_scan(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        for overrides in ({"GFP_REF": "refs/heads/topic"}, {"GFP_REF": "refs/tags/main"},
+                          {"GFP_REF": ""}, {"GFP_REF_PROTECTED": "false"},
+                          {"GFP_REF_PROTECTED": ""},
+                          {"GFP_REPOSITORY": "other/AgentDesk"}):
+            with self.subTest(overrides=overrides):
+                rc, evidence, scan, archive, diff = self.run_main(**overrides)
+                self.assertEqual(rc, 2, evidence)
+                self.assertEqual(evidence["verdict"], "fail")
+                self.assertIn("dispatch requires protected main head", evidence["reason"])
+                scan.assert_not_called()
+                archive.assert_not_called()
+                diff.assert_not_called()
+
+    def test_dispatch_rejects_stale_candidate_and_missing_main_before_scan(self):
+        newer = self.git("commit-tree", self.git("rev-parse", self.base + "^{tree}"),
+                         "-p", self.base, "-m", "main advanced")
+        for main_sha in (newer, None):
+            with self.subTest(main_sha=main_sha):
+                if main_sha:
+                    self.git("update-ref", "refs/remotes/origin/main", main_sha)
+                else:
+                    self.git("update-ref", "-d", "refs/remotes/origin/main")
+                rc, evidence, scan, archive, diff = self.run_main()
+                self.assertEqual(rc, 2, evidence)
+                self.assertEqual(evidence["verdict"], "fail")
+                scan.assert_not_called()
+                archive.assert_not_called()
+                diff.assert_not_called()
+
+    def test_dispatch_still_requires_candidate_to_be_checked_out_head(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        self.put("docs/later.txt", "later checkout\n")
+        self.commit("different checked-out head")
+        rc, evidence, scan, archive, diff = self.run_main()
+        self.assertEqual(rc, 2, evidence)
+        self.assertIn("candidate SHA is not checked-out HEAD", evidence["reason"])
+        scan.assert_not_called()
+        archive.assert_not_called()
+        diff.assert_not_called()
 
 
 if __name__ == "__main__":

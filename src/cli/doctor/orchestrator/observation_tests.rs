@@ -531,3 +531,376 @@ fn reason_aggregation_and_human_checks_preserve_safety_restrictions() {
         FixSafety::SafeIdleTmuxRepair
     );
 }
+
+/// A real detail body whose session lookup ran past the health deadline is a measurement gap:
+/// the busy mailbox it would otherwise repair is unmeasured, and nothing is posted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn doctor_session_lookup_timeout_never_posts_repair() {
+    use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+    use tower::ServiceExt;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let seed = db.connect_and_migrate().await;
+    let proxy = PgWireProxy::start(&db.database_url, std::time::Duration::ZERO).await;
+    let pool = proxy.pool(8);
+    proxy.stall("DISTINCT ON (thread_channel_id)");
+    let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    registry
+        .register("claude".to_string(), shared.clone())
+        .await;
+    let channel = 6_871_300_001u64;
+    crate::services::discord::host_teardown_gate::test_support::nameless_turn(
+        &shared,
+        poise::serenity_prelude::ChannelId::new(channel),
+    )
+    .await;
+    let mut engine_config = crate::config::Config::default();
+    engine_config.policies.hot_reload = false;
+    let tx = crate::server::ws::new_broadcast();
+    let app = crate::server::routes::api_router_with_pg(
+        crate::engine::PolicyEngine::new(&engine_config).unwrap(),
+        crate::config::Config::default(),
+        tx.clone(),
+        crate::server::ws::spawn_batch_flusher(tx),
+        Some(registry),
+        Some(pool.clone()),
+    );
+    let mut request = axum::http::Request::builder()
+        .uri("/health/detail")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let row = body["mailboxes"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["channel_id"] == json!(channel)))
+        .unwrap_or_else(|| panic!("the busy mailbox is listed: {body}"));
+    assert_eq!(row["has_cancel_token"], true, "{row}");
+    assert_eq!(
+        row["session_lookup_error"]["safety_gate"], "measurement_unavailable",
+        "{row}"
+    );
+
+    let findings = crate::cli::doctor::mailbox::classify_mailbox_findings(&body);
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "mailbox_measurement_unavailable")
+            && findings.iter().all(|f| f.request.is_none()),
+        "{findings:?}"
+    );
+    // A lookup cut after it started is still a failed measurement, not the not-started warning.
+    let checks = check_mailbox_consistency(&snapshot(body.clone()));
+    let checks: Vec<_> = checks
+        .iter()
+        .map(|check| (check.status, check.id))
+        .collect();
+    assert!(
+        checks.contains(&(Fail, "mailbox_measurement_unavailable")),
+        "{checks:?}"
+    );
+    let mut posts = 0;
+    let actions = apply_stale_mailbox_fixes_with_post(
+        &snapshot(body.clone()),
+        &repair_response_options(RunContext::ManualCli),
+        |_, _| {
+            posts += 1;
+            Ok(json!({"status": "applied"}))
+        },
+    );
+    assert_eq!(
+        posts, 0,
+        "a session lookup cut by the deadline must not lead to a POST"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|action| action.safety_gate == "measurement_unavailable")
+    );
+
+    proxy.release();
+    pool.close().await;
+    seed.close().await;
+    drop(proxy);
+    db.drop().await;
+}
+
+/// An unanswered snapshot read withholds the active count as a warning whatever its excess, and
+/// that warning repairs nothing; a complete count's excess and each row's own finding still stand.
+#[test]
+fn unanswered_snapshot_read_withholds_only_the_active_count() {
+    let failure = |provider: &str, read: &str| {
+        json!([{"provider": provider, "channel_id": 43, "read": read,
+            "observation_failure": "unreachable"}])
+    };
+    let row_failure = (Fail, "mailbox_busy_without_active_turn");
+    let excess = (Fail, "global_active_without_active_turn");
+    let withheld = (Warn, "mailbox_observation_unavailable");
+    let options = repair_response_options(RunContext::ManualCli);
+    // `(failures, this provider complete, another provider complete, count withheld)`.
+    let cases = [
+        (
+            Some(failure("discord", "snapshot")),
+            Some(false),
+            None,
+            true,
+        ),
+        (Some(failure("discord", "snapshot")), None, None, true),
+        (None, Some(false), None, true),
+        (Some(json!({})), None, None, true),
+        // Another provider's unanswered read or incomplete state withholds the shared count.
+        (
+            Some(failure("codex", "snapshot")),
+            Some(true),
+            Some(true),
+            true,
+        ),
+        (None, Some(true), Some(false), true),
+        // A failed second read keeps its row, so the count is still complete.
+        (
+            Some(failure("discord", "reconfirm")),
+            Some(true),
+            None,
+            false,
+        ),
+        (
+            Some(failure("codex", "thread_proof")),
+            Some(true),
+            Some(true),
+            false,
+        ),
+        (None, Some(true), Some(true), false),
+        // A dcserver predating both fields.
+        (None, None, None, false),
+    ];
+    // The fixture row is one active turn, so these exceed it by 0, 1 and 49.
+    for global in [1, 2, 50] {
+        for row_fails in [true, false] {
+            for (failures, complete, other, incomplete) in cases.clone() {
+                let mut body = fixture();
+                body["global_active"] = json!(global);
+                if !row_fails {
+                    body["mailboxes"][0]["tmux_present"] = json!(true);
+                    body["mailboxes"][0]["watcher_attached"] = json!(true);
+                }
+                replace(&mut body, "mailbox_observation_failures", failures);
+                replace(
+                    &mut body["providers"][0],
+                    "runtime_state_complete",
+                    complete.map(Value::from),
+                );
+                if let Some(other) = other {
+                    let codex = json!({"name": "codex", "connected": true,
+                        "runtime_state_complete": other});
+                    body["providers"].as_array_mut().unwrap().push(codex);
+                }
+                let mut expected: Vec<_> = row_fails.then_some(row_failure).into_iter().collect();
+                if incomplete {
+                    expected.push(withheld);
+                } else if global > 1 {
+                    expected.push(excess);
+                }
+                let checks = check_mailbox_consistency(&snapshot(body.clone()));
+                let actual: Vec<_> = checks
+                    .iter()
+                    .map(|check| (check.status, check.id))
+                    .collect();
+                assert_eq!(actual, expected, "{body}");
+                let mut posted = Vec::new();
+                let actions = apply_stale_mailbox_fixes_with_post(
+                    &snapshot(body.clone()),
+                    &options,
+                    |_, request| {
+                        posted.push(request["channel_id"].clone());
+                        Ok(json!({"status": "applied"}))
+                    },
+                );
+                let own_repair: Vec<_> = row_fails.then_some(json!(42)).into_iter().collect();
+                assert_eq!(
+                    posted, own_repair,
+                    "only the row's own repair posts: {body}"
+                );
+                // `ok` means no failure, so a withheld count leaves it true and stays a warning.
+                let report =
+                    serde_json::to_value(build_json_report(&options, &checks, &actions)).unwrap();
+                let warned: Vec<_> = report["checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|check| check["id"] == withheld.1)
+                    .map(|check| (check["status"].clone(), check["fix_safety"].clone()))
+                    .collect();
+                let expected_warned: Vec<_> = incomplete
+                    .then(|| (json!("warn"), json!("not_fixable")))
+                    .into_iter()
+                    .collect();
+                assert_eq!(warned, expected_warned, "{report}");
+                let fails = row_fails || (!incomplete && global > 1);
+                assert_eq!(report["ok"], !fails, "{report}");
+                assert_eq!(
+                    report["summary"]["warned"],
+                    usize::from(incomplete),
+                    "{report}"
+                );
+            }
+        }
+    }
+}
+
+/// A session lookup the deadline never let start is a warning with no repair; one that failed,
+/// was cut after starting, or names no cause (an older dcserver) still fails without repair.
+#[test]
+fn session_lookup_not_started_is_a_warning_without_repair() {
+    let lookup_error = |cause: Option<&str>| {
+        let mut error = json!({"safety_gate": "measurement_unavailable",
+            "fix_safety": "not_fixable", "message": "health deadline elapsed"});
+        if let Some(cause) = cause {
+            error["cause"] = json!(cause);
+        }
+        error
+    };
+    for (error, expected, expected_posts) in [
+        (None, (Fail, "mailbox_busy_without_active_turn"), 1),
+        (
+            Some(lookup_error(Some("not_started"))),
+            (Warn, "mailbox_session_lookup_not_started"),
+            0,
+        ),
+        (
+            Some(lookup_error(None)),
+            (Fail, "mailbox_measurement_unavailable"),
+            0,
+        ),
+        (
+            Some(lookup_error(Some("future_cause"))),
+            (Fail, "mailbox_measurement_unavailable"),
+            0,
+        ),
+        (
+            Some(json!("query channel sessions: pool timed out")),
+            (Fail, "mailbox_measurement_unavailable"),
+            0,
+        ),
+    ] {
+        let mut body = fixture();
+        if let Some(error) = error {
+            body["mailboxes"][0]["session_lookup_error"] = error;
+        }
+        let checks = check_mailbox_consistency(&snapshot(body.clone()));
+        let actual: Vec<_> = checks
+            .iter()
+            .map(|check| (check.status, check.id))
+            .collect();
+        assert_eq!(actual, vec![expected], "{body}");
+        let mut posts = 0;
+        apply_stale_mailbox_fixes_with_post(
+            &snapshot(body.clone()),
+            &repair_response_options(RunContext::ManualCli),
+            |_, _| {
+                posts += 1;
+                Ok(json!({"status": "applied"}))
+            },
+        );
+        assert_eq!(posts, expected_posts, "{body}");
+    }
+}
+
+/// A stalled actor spends the request deadline, so the session lookup never starts: the busy
+/// channel that answered is a warning rather than a failure, and doctor posts no repair.
+#[test]
+fn doctor_stalled_actor_leaves_answered_rows_a_warning_without_repair() {
+    use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+    use poise::serenity_prelude::ChannelId;
+    use tower::ServiceExt;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let main = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    // Nothing drives `parked`, so the actor started on it never answers.
+    let parked = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    main.block_on(registry.register_worker("claude".to_string(), shared.clone()));
+    let nameless_turn = crate::services::discord::host_teardown_gate::test_support::nameless_turn;
+    parked.block_on(nameless_turn(&shared, ChannelId::new(6_871_400_001)));
+    let answered = 6_871_400_002u64;
+    main.block_on(async {
+        nameless_turn(&shared, ChannelId::new(answered)).await;
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let seed = db.connect_and_migrate().await;
+        let proxy = PgWireProxy::start(&db.database_url, std::time::Duration::ZERO).await;
+        let pool = proxy.pool(8);
+        let mut engine_config = crate::config::Config::default();
+        engine_config.policies.hot_reload = false;
+        let tx = crate::server::ws::new_broadcast();
+        let app = crate::server::routes::api_router_with_pg(
+            crate::engine::PolicyEngine::new(&engine_config).unwrap(),
+            crate::config::Config::default(),
+            tx.clone(),
+            crate::server::ws::spawn_batch_flusher(tx),
+            Some(registry),
+            Some(pool.clone()),
+        );
+        let mut request = axum::http::Request::builder()
+            .uri("/health/detail")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "127.0.0.1:8791".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let row = body["mailboxes"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["channel_id"] == json!(answered)))
+            .unwrap_or_else(|| panic!("the answered mailbox is listed: {body}"));
+        assert_eq!(row["session_lookup_error"]["cause"], "not_started", "{row}");
+
+        let checks = check_mailbox_consistency(&snapshot(body.clone()));
+        let actual: Vec<_> = checks
+            .iter()
+            .map(|check| (check.status, check.id))
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                (Warn, "mailbox_session_lookup_not_started"),
+                (Warn, "mailbox_observation_unavailable"),
+            ],
+            "{body}"
+        );
+        let mut posts = 0;
+        apply_stale_mailbox_fixes_with_post(
+            &snapshot(body),
+            &repair_response_options(RunContext::ManualCli),
+            |_, _| {
+                posts += 1;
+                Ok(json!({"status": "applied"}))
+            },
+        );
+        assert_eq!(
+            posts, 0,
+            "a lookup that never started must not lead to a POST"
+        );
+
+        pool.close().await;
+        seed.close().await;
+        drop(proxy);
+        db.drop().await;
+    });
+}

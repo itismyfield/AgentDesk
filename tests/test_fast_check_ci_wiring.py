@@ -20,17 +20,11 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6"
+    "6776e15cb5f47a558dccb179fb987a8fc54f5391cf143bf0e395391412b4457c"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+NESTED_CHECKER_STUB = "import sys\nassert sys.argv[1:] == ['check'], 'nested checker must receive check'\n"
 
-
-def load_selector():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("test_selection", REPO_ROOT / "scripts/ci/test-selection.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 MIRROR_IF = "${{ !cancelled() }}"
 MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
 RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
@@ -77,7 +71,6 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/outbound/delivery_record.rs",
     "src/services/discord/recovery_engine/restore_inflight.rs",
     "src/services/discord/recovery_engine/completion_delivery.rs",
-    "src/services/discord/recovery_engine/unix_journal.rs",
     "src/services/discord/recovery_engine/manual_rebind/mod.rs",
     "src/services/discord/recovery_paths/restart.rs",
     "src/services/discord/router/message_handler.rs",
@@ -577,6 +570,135 @@ class FastCheckCiWiringTests(unittest.TestCase):
         changed = original.replace(download, download.replace("download-artifact@v4", "upload-artifact@v4"), 1)
         self.assertNotEqual(self.run_hardening_fixture(workflow.replace(original, changed, 1)).returncode, 0)
 
+    def test_library_sweep_shards_keep_validated_matrices_and_required_names(self) -> None:
+        pr_jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
+        main_jobs = yaml.safe_load(MAIN_WORKFLOW.read_text())["jobs"]
+        for jobs, job_id, source, name in (
+            (pr_jobs, "library_sweep", "pg_shards.outputs.sweep_matrix", "Library test sweep (shard ${{ matrix.shard }})"),
+            (main_jobs, "full_non_pg", "sweep_shards.outputs.matrix", "Library test sweep (main shard ${{ matrix.shard }})"),
+        ):
+            with self.subTest(job=job_id):
+                self.assertEqual(jobs[job_id]["name"], name)
+                self.assertEqual(jobs[job_id]["strategy"], {"fail-fast": False, "matrix": "${{ fromJSON(needs." + source + ") }}"})
+                sweep = next(step for step in jobs[job_id]["steps"] if step.get("name") == "Library sweep (selection-set gated)")
+                self.assertEqual(sweep["env"]["SWEEP_SHARD_TOTAL"], "${{ strategy.job-total }}")
+        self.assertEqual(pr_jobs["pg_shards"]["outputs"]["sweep_matrix"], "${{ steps.plan.outputs.sweep_matrix }}")
+        self.assertEqual(main_jobs["sweep_shards"]["steps"][1]["run"], 'matrix=$(python3 scripts/ci/test-selection.py sweep-matrix)\necho "matrix=$matrix" >> "$GITHUB_OUTPUT"\n')
+        aggregate = main_jobs["full_non_pg_required_context"]
+        self.assertEqual(aggregate["name"], "Full tests (ubuntu-latest)")
+        self.assertEqual(aggregate["needs"], "full_non_pg")
+        self.assertEqual(aggregate["if"], "always()")
+        step = aggregate["steps"][0]
+        self.assertEqual(step["env"], {"SWEEP_RESULT": "${{ needs.full_non_pg.result }}"})
+        self.assertEqual(step["run"], 'echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\ntest "$SWEEP_RESULT" = success\n')
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            with self.subTest(result=result):
+                checked = subprocess.run(["bash", "-c", step["run"]], env={**os.environ, "SWEEP_RESULT": result}, capture_output=True)
+                self.assertEqual(checked.returncode == 0, result == "success")
+                self.assertIn(f"aggregate-only: upstream=full_non_pg result={result}\n".encode(), checked.stdout)
+        self.assertEqual(pr_jobs["library_sweep_required_context"]["name"], "Library test sweep (ubuntu-latest)")
+
+    def test_pg_shard_context_is_confined_to_the_unconditional_test_step(self) -> None:
+        for path, job_id, step_name in ((PR_WORKFLOW, "test_fast", "PostgreSQL shard tests"),
+                                        (MAIN_WORKFLOW, "postgres", "just test-postgres-shard")):
+            with self.subTest(workflow=path.name):
+                document = yaml.safe_load(path.read_text())
+                job = document["jobs"][job_id]
+                self.assertNotIn("PG_INCLUDE_SHARD", document.get("env", {}))
+                self.assertNotIn("PG_INCLUDE_SHARD", job.get("env", {}))
+                for step in job["steps"]:
+                    if step.get("name") == step_name:
+                        self.assertEqual(step["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
+                        self.assertNotIn("if", step)
+                    else:
+                        self.assertNotIn("PG_INCLUDE_SHARD", step.get("env", {}))
+
+    def test_shard_step_context_and_aggregate_marker_mutants_fail_after_repin(self) -> None:
+        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
+        gate_sha = hashlib.sha256(hardening.encode()).hexdigest()
+        pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, gate_sha)
+        main = MAIN_WORKFLOW.read_text()
+        baseline = self.run_hardening_fixture(pr)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        pg_line = '          PG_INCLUDE_SHARD: ${{ matrix.shard }}\n'
+        total_line = '          SWEEP_SHARD_TOTAL: ${{ strategy.job-total }}\n'
+        for is_pr, source, pg_job, step_name, sweep_job in (
+            (True, pr, "test_fast", "PostgreSQL shard tests", "library_sweep"),
+            (False, main, "postgres", "just test-postgres-shard", "full_non_pg"),
+        ):
+            pg = job_block(source, pg_job)
+            target = step_block(pg, step_name)
+            for label, altered_job, reason in (
+                ("missing-pg", pg.replace(pg_line, "", 1), "actual PostgreSQL shard step must set PG_INCLUDE_SHARD"),
+                ("job-pg", pg.replace(pg_line, "", 1).replace("    env:\n", "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n", 1), "must not be inherited by the PostgreSQL prelude"),
+                ("prelude-pg", pg.replace("      - name: Start PostgreSQL service\n", "      - name: Start PostgreSQL service\n        env:\n" + pg_line, 1), "must be confined to the actual PostgreSQL shard step"),
+                ("conditional-pg", pg.replace(target, target.replace("        timeout-minutes:", "        if: false\n        timeout-minutes:", 1), 1), "may not set if"),
+                ("missing-total", job_block(source, sweep_job).replace(total_line, "", 1), "exact step env" if is_pr else "exactly one unconditional full sweep shard"),
+            ):
+                with self.subTest(pr=is_pr, mutation=label):
+                    job_id = sweep_job if label == "missing-total" else pg_job
+                    original = job_block(source, job_id)
+                    self.assertNotEqual(altered_job, original)
+                    altered = source.replace(original, altered_job, 1)
+                    gate = self._repin_job_hash(hardening, altered, job_id) if is_pr else hardening
+                    result = self.run_hardening_fixture(
+                        altered.replace(gate_sha, hashlib.sha256(gate.encode()).hexdigest()) if is_pr else pr,
+                        {} if is_pr else {"ci-main.yml": altered}, hardening_script=gate)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(reason, result.stderr)
+        marker = '          echo "aggregate-only: upstream=full_non_pg result=$SWEEP_RESULT"\n'
+        altered = main.replace(marker, "", 1)
+        self.assertNotEqual(altered, main)
+        result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("original required status", result.stderr)
+
+    def test_library_sweep_matrix_and_required_status_mutants_fail_after_repin(self) -> None:
+        pr = PR_WORKFLOW.read_text()
+        main = MAIN_WORKFLOW.read_text()
+        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
+        baseline = self.run_hardening_fixture(pr)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        job = job_block(pr, "library_sweep")
+        for label, old, new, reason in (
+            ("partial-matrix", "fromJSON(needs.pg_shards.outputs.sweep_matrix)", "fromJSON(needs.pg_shards.outputs.matrix)", "validated sweep matrix"),
+            ("fail-fast", "fail-fast: false", "fail-fast: true", "validated sweep matrix"),
+            ("missing-shard", ' --shard "${{ matrix.shard }}"', "", "exact cargo/test command list"),
+        ):
+            with self.subTest(pr=label):
+                altered = pr.replace(job, job.replace(old, new, 1), 1)
+                self.assertNotEqual(altered, pr)
+                gate = self._repin_job_hash(hardening, altered, "library_sweep")
+                altered = altered.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest())
+                result = self.run_hardening_fixture(altered, hardening_script=gate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+        for job_id, old, new, reason in (
+            ("sweep_shards", "test-selection.py sweep-matrix", "test-selection.py pg-matrix", "validate and emit the canonical full sweep matrix"),
+            ("full_non_pg", "fromJSON(needs.sweep_shards.outputs.matrix)", "fromJSON(needs.pg_shards.outputs.matrix)", "validated sweep matrix"),
+            ("full_non_pg", "fail-fast: false", "fail-fast: true", "validated sweep matrix"),
+            ("full_non_pg", "run --lane sweep --full --shard", "run --lane sweep --shard", "exactly one unconditional full sweep shard"),
+            ("full_non_pg", "if: ${{ !cancelled() }}", "if: success()", "producer-failure fallback"),
+            ("full_non_pg", "continue-on-error: true", "continue-on-error: false", "download and producer-failure fallback"),
+            ("full_non_pg_required_context", "name: Full tests (ubuntu-latest)", "name: Full tests changed", "original required status"),
+            ("full_non_pg_required_context", "if: always()", "if: success()", "original required status"),
+            ("full_non_pg_required_context", 'test "$SWEEP_RESULT" = success', "true", "original required status"),
+        ):
+            with self.subTest(main=job_id, mutation=old):
+                original = job_block(main, job_id)
+                altered = main.replace(original, original.replace(old, new, 1), 1)
+                self.assertNotEqual(altered, main)
+                result = self.run_hardening_fixture(pr, {"ci-main.yml": altered})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stderr)
+        mirror = job_block(pr, "library_sweep_required_context")
+        for old, new in (("name: Library test sweep (ubuntu-latest)", "name: Sweep changed"), ("needs.library_sweep.result", "needs.lib_test_prepare.result")):
+            with self.subTest(mirror=old):
+                altered = pr.replace(mirror, mirror.replace(old, new, 1), 1)
+                result = self.run_hardening_fixture(altered)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("preserve its required status and mirror every sweep shard", result.stderr)
+
     def test_required_targeted_context_mirrors_test_fast_pg_db_gate(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         job = job_block(workflow, "fast_targeted_tests_required_context")
@@ -827,7 +949,6 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for selector in ("rust_compile", "cross_os_rust"):
             for proof_path in proof_paths:
                 self.assertEqual(filters[selector].count(proof_path), 1)
-        self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
         self.assertNotIn(proof_paths[1], job_block(workflow, "check_fast_cross_os_targets"))
         for proof_path in proof_paths:
             filter_line = f"              - '{proof_path}'"
@@ -1052,13 +1173,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(len(shared_sweep), 1)
         shared = shared_sweep[0]
         self.assertEqual(shared["env"]["ADK_LIB_TEST_ARTIFACT"], "${{ runner.temp }}/lib-test-artifact")
-        self.assertEqual(shared["run"], "python3 scripts/ci/test-selection.py run --lane sweep")
-        # The PR's full mode runs the selector's copy of main's sweep, behind the shared-lib wrapper.
-        wrapper = "python3 scripts/ci/lib-test-artifact.py run -- "
-        full_sweep = load_selector().FULL_SWEEP
-        self.assertEqual(full_sweep.count(wrapper), 1)
-        added = ("ADK_LIB_TEST_ARTIFACT", "ADK_TEST_SELECTION_PLAN")
-        normalized = {**shared, "env": {key: value for key, value in shared["env"].items() if key not in added}, "run": full_sweep.replace(wrapper, "", 1)}
+        self.assertEqual(shared["run"], 'python3 scripts/ci/test-selection.py run --lane sweep --shard "${{ matrix.shard }}"')
+        normalized = {**shared, "env": {key: value for key, value in shared["env"].items() if key != "ADK_TEST_SELECTION_PLAN"},
+                      "run": 'python3 scripts/ci/test-selection.py run --lane sweep --full --shard "${{ matrix.shard }}"'}
         self.assertEqual(named(main_jobs["full_non_pg"], sweep_step), [normalized])
         self.assertEqual(len(named(main_jobs["full_non_pg"], sweep_step)), 1)
         recipe = just_recipe_commands(justfile, "test-non-pg")
@@ -1370,11 +1487,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
         main_steps = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["scripts"]["steps"]
         main_run = next(step for step in main_steps if step.get("name") == "Run script checks")
         self.assertEqual(main_run["env"]["GFP_CANDIDATE_SHA"], "${{ github.sha }}")
+        self.assertEqual(main_run["env"]["GFP_REF"], "${{ github.ref }}")
+        self.assertEqual(main_run["env"]["GFP_REF_PROTECTED"], "${{ github.ref_protected }}")
         self.assertTrue(any(step.get("name") == "Upload giant-file progress evidence" for step in main_steps))
         for key in ("GFP_BASE_SHA", "GFP_HEAD_REPOSITORY"):
             mutated = workflow.replace(f"          {key}: {expected_pr_env[key]}\n", "", 1)
             rejected = self.run_hardening_fixture(mutated)
             self.assertNotEqual(rejected.returncode, 0, key)
+        main = MAIN_WORKFLOW.read_text()
+        for job_id in ("scripts", "scripts_guards", "scripts_contracts"):
+            block = job_block(main, job_id)
+            for key in ("GFP_REF", "GFP_REF_PROTECTED"):
+                with self.subTest(main_shard=job_id, key=key):
+                    mutated = main.replace(block, re.sub(rf"(?m)^          {key}: .*\n", "", block), 1)
+                    self.assertNotEqual(mutated, main)
+                    rejected = self.run_hardening_fixture(workflow, {"ci-main.yml": mutated})
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("Run script checks env must equal", rejected.stderr)
 
     def test_script_checks_effective_execution_contract_covers_all_yaml_scopes(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -2759,6 +2888,17 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             + hardening[job_match.end() :]
         )
 
+    def test_nested_libtest_checker_is_required_and_fails_closed(self) -> None:
+        hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
+        pr = PR_WORKFLOW.read_text().replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(hardening.encode()).hexdigest())
+        baseline = self.run_hardening_fixture(pr)
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        for label, checker in (("missing", None), ("invalid declarations", "raise SystemExit(79)\n")):
+            with self.subTest(checker=label):
+                rejected = self.run_hardening_fixture(pr, nested_checker=checker)
+                self.assertNotEqual(rejected.returncode, 0, "nested declaration checker must run and fail closed")
+                self.assertIn("nested libtest declarations must pass validation", rejected.stderr)
+
     def run_hardening_fixture(
         self,
         pr_workflow: str,
@@ -2766,6 +2906,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         workflow_symlinks: dict[str, str] | None = None,
         hardening_script: str | None = None,
         mirror_helper: str | None = None,
+        nested_checker: str | None = NESTED_CHECKER_STUB,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2796,6 +2937,11 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (root / "scripts/required-check-mirror.sh").write_text(
                 helper, encoding="utf-8"
             )
+            # Workflow fixtures isolate wiring; the real checker has its own declaration tests.
+            if nested_checker is not None:
+                checker = root / "scripts/ci/nested_libtest.py"
+                checker.parent.mkdir()
+                checker.write_text(nested_checker, encoding="utf-8")
             return subprocess.run(
                 ["bash", "scripts/check-ci-runner-hardening.sh"],
                 cwd=root,

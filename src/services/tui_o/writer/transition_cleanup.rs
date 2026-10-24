@@ -363,6 +363,10 @@ fn same_end(witness: &CleanupWitness, cursor: &Cursor) -> bool {
 }
 
 fn not_current(snapshot: &Snapshot, cursor: &Cursor) -> Result<(), Verdict> {
+    #[cfg(test)]
+    if super::actor::transition_hooks::retention_mutant("latest") {
+        return Ok(());
+    }
     let pinned =
         (snapshot.pinned.as_ref()).map_err(|e| unclear(Unclear::PinnedUnread(e.clone())))?;
     let pinned = pinned

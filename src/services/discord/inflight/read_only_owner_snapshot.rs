@@ -45,10 +45,12 @@ impl CodexEpisodeOwnerSnapshot {
         &self.episode
     }
 
+    #[cfg(test)]
     pub(crate) fn token(&self) -> &Arc<CancelToken> {
         &self.token
     }
 
+    #[cfg(test)]
     pub(crate) async fn recheck(&self) -> Result<(), &'static str> {
         (self.observe().await? == self.episode)
             .then_some(())

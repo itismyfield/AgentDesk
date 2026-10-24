@@ -1,9 +1,15 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
 use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "collection_publication_tests.rs"]
+mod collection_publication_tests;
+#[path = "effect_read_defer_tests.rs"]
+mod effect_read_defer_tests;
 
 pub(in crate::services::discord::turn_presence::activity) struct Rig {
     pub(in crate::services::discord::turn_presence::activity) shared: Arc<SharedData>,
@@ -18,58 +24,6 @@ pub(in crate::services::discord::turn_presence::activity) struct Rig {
     _live: crate::config_live_reload::TestLiveGuard,
 }
 impl Rig {
-    pub(in crate::services::discord::turn_presence::activity) async fn new(
-        id: u64,
-        hosted: bool,
-        retired: bool,
-    ) -> Self {
-        let live = crate::config_live_reload::test_live_guard(
-            crate::config::test_env_lock::acquire_shared_test_env_lock(),
-        );
-        let root = tempfile::tempdir().unwrap();
-        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
-        let root_env = set("AGENTDESK_ROOT_DIR", root.path());
-        let namespace = set("TMUX_TMPDIR", root.path());
-        let target = [(id, "test-node")];
-        let hosts = crate::config::session_hosts::force_for_test(
-            Some("test-node"),
-            if hosted { &target } else { &[] },
-        );
-        let mut config: Config = serde_yaml::from_str(&format!("server: {{}}\ncluster: {{instance_id: test-node}}\nagents:\n  - id: fixture\n    name: fixture\n    provider: claude\n    channels:\n      claude: {{id: '{id}', name: s1e-{id}, runtime: tui}}\n")).unwrap();
-        config.session_hosts =
-            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
-        crate::config_live_reload::install(config.clone());
-        let config_path = crate::runtime_layout::config_file_path(root.path());
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
-        let db = TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
-        let channel = ChannelId::new(id);
-        crate::services::discord::host_defer_gate::tests::map_channel(
-            &shared,
-            channel,
-            &format!("s1e-{id}"),
-        )
-        .await;
-        let binding = BindingRoot::enter(root.path());
-        let rig = Self {
-            shared,
-            channel,
-            config,
-            root,
-            _binding: binding,
-            _hosts: hosts,
-            _live: live,
-            _namespace: namespace,
-            _root_env: root_env,
-            _db: db,
-        };
-        if retired {
-            rig.seed_retired().await;
-        }
-        rig
-    }
     fn name(&self) -> String {
         ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{}", self.channel))
     }
@@ -175,11 +129,17 @@ async fn changed_publication(kind: Changed, id: u64) {
     let rig = Rig::new(id, false, false).await;
     let count = ChannelProbeTrace::new(id);
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(
@@ -543,11 +503,17 @@ async fn s1e_publication_rechecks_new_related_tmux_session_pg() {
     let rig = Rig::new(69_182_009, false, false).await;
     let watch = rig.watch();
     let counter = ChannelProbeTrace::new(rig.channel.get());
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -586,29 +552,52 @@ async fn s1e_publication_rechecks_new_related_tmux_session_pg() {
         socket.exists(),
         "live fixture never created its private socket"
     );
+    let channel = rig.channel.get();
+    let live = tokio::task::spawn_blocking(move || observe_inventory(channel))
+        .await
+        .unwrap();
+    assert_eq!(live.inventory, Inventory::Sessions(vec![name]));
+    let probes_before_publication = counter.calls();
     assert!(
         publish(&stamp, &watch).await.is_none(),
         "new related live tmux reused an old empty inventory at publication"
+    );
+    assert_eq!(
+        counter.calls(),
+        probes_before_publication + 1,
+        "publication did not recheck the live inventory"
     );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg() {
     let rig = Rig::new(69_182_007, false, false).await;
     let trace = ChannelProbeTrace::new(rig.channel.get());
-    let first = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let first = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(first.observed, observed(Activity::Idle, "no_session"));
     assert!(trace.calls() > 0);
     assert!(first.session().is_none() && first.source().is_none());
     assert!(first.publish_if_current(|| ()).await.is_some());
-    let second = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let second = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(second.observed.activity, Activity::Idle);
@@ -630,10 +619,16 @@ async fn s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg() {
 async fn s1e_herdr_first_create_keeps_legacy_runtime_trace_pg() {
     let rig = Rig::new(69_182_008, true, false).await;
     let count = ChannelProbeTrace::new(rig.channel.get());
-    let read = crate::services::discord::turn_presence::activity::activity_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let read = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::activity_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.reason == "superseded",
     )
     .await;
     assert_eq!(read, observed(Activity::Idle, "no_session"));
@@ -648,10 +643,16 @@ async fn s1e_herdr_first_create_keeps_legacy_runtime_trace_pg() {
         "fixture name collided with another legacy marker"
     );
     std::fs::write(&legacy.0, "claude_tui").unwrap();
-    let read = crate::services::discord::turn_presence::activity::activity_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let read = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::activity_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.reason == "superseded",
     )
     .await;
     assert_eq!(
@@ -689,10 +690,16 @@ async fn s1e_successful_unbound_reads_complete_in_reverse_order_pg() {
         counter.calls() > 0,
         "first observation never reached its successful probe"
     );
-    let second = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let second = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(second.observed, observed(Activity::Idle, "no_session"));
@@ -717,11 +724,17 @@ async fn s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg() {
     use crate::services::tui_prompt_dedupe::binding_events as p5;
     let rig = Rig::new(69_182_011, false, false).await;
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -759,11 +772,17 @@ async fn s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg() {
 async fn s1e_marker_change_during_publication_db_await_pg() {
     let rig = Rig::new(69_182_012, false, false).await;
     let watch = rig.watch();
-    let (answer, stamp) = read(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
-        watch.clone(),
+    let (answer, stamp) = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            read(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+                watch.clone(),
+            )
+        },
+        |sample| sample.0.reason == "superseded",
     )
     .await;
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
@@ -834,7 +853,7 @@ impl InventoryPause {
             quote(&finished),
             crate::services::process::shell_escape(&format!(
                 "error connecting to {} (No such file or directory)",
-                root.join("missing").display()
+                root.canonicalize().unwrap().join("missing").display()
             ))
         );
         let wrapper = bin.join("tmux");
@@ -876,10 +895,16 @@ async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
     let pause = InventoryPause::new(rig.root.path());
     let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(id);
     let trace = ChannelProbeTrace::new(id);
-    let reading = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let reading = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
@@ -1015,10 +1040,16 @@ async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
         0,
         "stale publication callback ran"
     );
-    let next = crate::services::discord::turn_presence::activity::reading_now(
-        &rig.shared,
-        &ProviderKind::Claude,
-        rig.channel,
+    let next = settled_owner_observation(
+        "A2_STABLE_OBSERVATION superseded_retries",
+        || {
+            crate::services::discord::turn_presence::activity::reading_now(
+                &rig.shared,
+                &ProviderKind::Claude,
+                rig.channel,
+            )
+        },
+        |sample| sample.observed.reason == "superseded",
     )
     .await;
     assert_eq!(next.observed.activity, Activity::Unknown);
@@ -1062,4 +1093,55 @@ async fn s1f_publication_exact_change_during_inventory_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn s1f_publication_canonical_change_during_inventory_pg() {
     hosted_row_during_publication_inventory(Changed::Canonical, 69_182_014).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unbound_notice_keeps_the_canonical_nonce_and_hold_leaf_in_its_publication_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedOwner, HostedState, tests::record,
+    };
+    use crate::services::discord::turn_presence::activity::notice_identity::ExecutionIdentity;
+    let id = 69_182_119;
+    let rig = Rig::new(id, true, false).await;
+    let name = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{id}"));
+    let owner = HostedOwner {
+        provider: "claude".into(),
+        discord_token_hash: rig.shared.token_hash.clone(),
+        channel_id: id.to_string(),
+        logical_key: name.clone(),
+        owner_node: "test-node".into(),
+        runtime_root: rig.root.path().display().to_string(),
+    };
+    let key = crate::services::discord::adk_session::build_namespaced_session_key(
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        &name,
+    );
+    let execution = record(&owner, "notice-unbound-execution", HostedState::Pending);
+    let pool: &sqlx::PgPool = rig.shared.pg_pool.as_ref().unwrap();
+    crate::services::discord::inflight::seed_session_row_hashed(
+        pool,
+        &key,
+        id,
+        &rig.shared.token_hash,
+        Some(serde_json::to_value(execution).unwrap()),
+    )
+    .await;
+    let reading = crate::services::discord::turn_presence::activity::reading_now(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+    )
+    .await;
+    assert_eq!(reading.session(), None);
+    assert_eq!(reading.observed.reason, "session_identity_unresolved");
+    let notice = reading.notice_observation();
+    assert_eq!(
+        notice.identity,
+        ExecutionIdentity::Nonce("notice-unbound-execution".into())
+    );
+    assert_eq!(notice.target_label.as_deref(), Some(name.as_str()));
+    assert_eq!(notice.hold_leaf, Some("hosted_active_or_unknown"));
+    assert!(!notice.progress);
+    assert!(reading.publish_if_current(|| ()).await.is_some());
 }

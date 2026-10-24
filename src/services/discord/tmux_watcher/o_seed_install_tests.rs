@@ -203,14 +203,12 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     assert_joined(&submitted, &observed, 1).await;
     let capsules =
         cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
+    let original_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&old_row);
     let capsule = capsules
         .iter()
-        .find(|p| p.origin.is_legacy())
-        .expect("Legacy checkpoint");
-    assert_eq!(
-        capsule.identity,
-        Some(crate::services::discord::inflight::InflightTurnIdentity::from_state(&old_row))
-    );
+        .find(|p| p.identity.as_ref() == Some(&original_identity))
+        .expect("Legacy checkpoint under the original identity");
     assert_eq!(capsule.nonce, old_row.turn_nonce);
     assert_eq!(capsule.restored_response_seed, old_row.full_response);
     assert!(
@@ -239,7 +237,6 @@ async fn legacy_control(channel: u64, n1_only: bool) {
         before,
         "Legacy compatibility backfill must remain enabled"
     );
-    assert_eq!(key.event_count("capsule_o_adopted"), 0);
     eprintln!("LEGACY_CONTROL_N1={n1_only} KEY={key:?} RAW={raw:?}");
 }
 

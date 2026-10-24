@@ -46,7 +46,6 @@ enum Case {
     AttachmentOnly,
     PendingDmReply,
     ModelPicker,
-    IdleRecap,
     NodePicker,
     Sidecar,
     HelpAllowed,
@@ -170,7 +169,7 @@ async fn discord(State(recorder): State<Recorder>, request: Request<Body>) -> Re
         && (path.ends_with("/messages") || path.starts_with("/api/v10/webhooks/"))
     {
         let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if body["content"] == "..." {
+        if matches!(body["content"].as_str(), Some("..." | "⠋ 계속 처리 중")) {
             return (
                 StatusCode::FORBIDDEN,
                 axum::Json(json!({"message": "fixture refuses provider start", "code": 50001})),
@@ -369,7 +368,6 @@ fn events(case: Case) -> Vec<serenity::FullEvent> {
         }
         Case::PendingDmReply => vec![new(message(DM, MESSAGE, "yes, ship it"))],
         Case::ModelPicker => vec![interaction(3, CHANNEL, "agentdesk:model-picker")],
-        Case::IdleRecap => vec![interaction(3, CHANNEL, "idle_recap:clear:0")],
         Case::NodePicker => vec![interaction(3, CHANNEL, "agentdesk:node-picker")],
         Case::Sidecar => vec![interaction(3, CHANNEL, "sidecar:cancel")],
         Case::HelpAllowed => vec![interaction(2, CHANNEL, "help")],
@@ -826,7 +824,7 @@ fn expect_off(case: Case, off: &Effects) -> Vec<String> {
                     .as_str()
                     .is_some_and(|context| context.contains("yes, ship it"))
         }
-        Case::ModelPicker | Case::IdleRecap | Case::NodePicker | Case::Sidecar => callbacks == 1,
+        Case::ModelPicker | Case::NodePicker | Case::Sidecar => callbacks == 1,
         Case::HelpAllowed => {
             callbacks == 1
                 && followups >= 1
@@ -922,12 +920,7 @@ fn ingress_shadow_keeps_attachment_messages_byte_identical() {
 fn ingress_shadow_keeps_components_byte_identical() {
     compare(
         "ingress_shadow_keeps_components_byte_identical",
-        &[
-            Case::ModelPicker,
-            Case::IdleRecap,
-            Case::NodePicker,
-            Case::Sidecar,
-        ],
+        &[Case::ModelPicker, Case::NodePicker, Case::Sidecar],
         without_storage,
     );
 }

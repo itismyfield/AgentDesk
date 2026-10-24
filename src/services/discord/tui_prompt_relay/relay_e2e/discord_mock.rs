@@ -37,7 +37,7 @@ pub(in crate::services::discord::tui_prompt_relay) enum NoteAnswer {
     Stall,
 }
 
-/// Counters and gates over the mock's message endpoint. A `"..."` body is the
+/// Counters and gates over the mock endpoint. An intake placeholder body is the
 /// relay's placeholder post, which the harness uses as its dispatch witness;
 /// the first one parks until released (unless `park_first_placeholder` is off)
 /// so a second turn can queue behind an occupied mailbox.
@@ -428,7 +428,7 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             .lock()
             .expect("channel posts")
             .push((channel_id, content.clone()));
-        if content == "..." {
+        if matches!(content.as_str(), "..." | "⠋ 계속 처리 중") {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
             if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
                 // Subscribe before announcing arrival so an immediate release is retained.

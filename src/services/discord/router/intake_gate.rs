@@ -8,6 +8,7 @@ use super::intake_queue_transaction::{
 
 mod busy_duplicate_notice;
 pub(super) mod busy_inject;
+mod busy_queue;
 mod component_events;
 mod gate;
 #[cfg(all(test, unix))]
@@ -305,20 +306,8 @@ pub(in crate::services::discord) async fn handle_event(
     match event {
         serenity::FullEvent::InteractionCreate { interaction } => {
             if let Some(component) = interaction.as_message_component() {
-                if component_events::handle_model_picker_component_if_applicable(
-                    ctx, component, data,
-                )
-                .await?
-                {
+                if component_events::handle_component_if_applicable(ctx, component, data).await? {
                     return Ok(());
-                }
-                if super::super::idle_recap_interaction::is_idle_recap_custom_id(
-                    &component.data.custom_id,
-                ) {
-                    return super::super::idle_recap_interaction::handle_idle_recap_interaction(
-                        ctx, component, data,
-                    )
-                    .await;
                 }
                 if super::super::commands::is_node_picker_custom_id(&component.data.custom_id) {
                     let settings_snapshot = { data.shared.settings.read().await.clone() };
@@ -784,18 +773,6 @@ pub(in crate::services::discord) async fn handle_event(
                 .await;
                 return Ok(());
             }
-            // #3148: the idle-recap card clear (and the per-channel
-            // turn-generation bump) was RELOCATED from here to
-            // `intake_turn::handle_text_message`, immediately AFTER the mailbox
-            // claim succeeds (`started == true`), mirroring the TUI path
-            // (`tui_prompt_relay` claim → bump → clear). Clearing at intake
-            // time — BEFORE the later mailbox claim — was not truly
-            // capture-at-claim: a recap POST could recheck-idle while intake had
-            // captured old/none but the claim had not happened, persist a fresh
-            // card, and the old-id-keyed clear could not remove it (Window 2).
-            // Performing the clear after the claim (and after the claim's
-            // generation bump) closes that window with the same capture-at-claim
-            // semantics the TUI path already has.
 
             // #189: Generic DM reply tracking — consume pending entry if present.
             // Keep this after auth so unauthorized DM senders cannot inject
@@ -1250,9 +1227,9 @@ pub(in crate::services::discord) async fn handle_event(
                 text,
                 reply_context: reply_context.as_deref(),
                 has_reply_boundary,
-                carries_more_than_text: !upload_records.is_empty()
-                    || !new_message.attachments.is_empty()
-                    || resolved_voice_announcement.is_some(),
+                uploads: &upload_records,
+                voice_announcement: resolved_voice_announcement.as_ref(),
+                merge_consecutive,
             };
             if busy_inject::offered(ctx, data, &live).await {
                 return Ok(());
@@ -1281,24 +1258,7 @@ pub(in crate::services::discord) async fn handle_event(
                                 new_message.author.bot,
                                 is_allowed_bot,
                             ),
-                            intervention: SoftInterventionSpec {
-                                channel_id,
-                                author_id: user_id,
-                                author_is_bot: new_message.author.bot,
-                                author_is_allowed_automation:
-                                    author_excluded_from_cancel_preservation,
-                                message_id: new_message.id,
-                                text: text.to_string(),
-                                reply_context: reply_context.clone(),
-                                has_reply_boundary,
-                                merge_consecutive,
-                                pending_uploads: upload_records.clone(),
-                                // #2266: main busy-active-turn queue path — voice transcripts that
-                                // arrive while a previous turn is running flow through here. Embed the
-                                // announcement so the queued dispatch reinserts it into the store even
-                                // if the >30s in-memory TTL expires first.
-                                voice_announcement: resolved_voice_announcement.clone(),
-                            },
+                            intervention: busy_queue::spec(&live),
                             options: IntakeQueueCommitOptions::default(),
                         },
                     )
@@ -1754,82 +1714,17 @@ mod reply_context_tests {
 /// pass that same value into both request and submission envelopes.
 #[cfg(test)]
 mod live_intake_preserve_wiring_tests {
+    pub(super) mod source_guard_tests;
+    use source_guard_tests::{INTAKE_GATE, admission_guard_gaps, preservation_gaps};
+
     #[test]
     fn live_human_preservation_precedes_stale_dispatch_suppression() {
-        let module_src = include_str!("intake_gate.rs");
-        let computation = "let preserve_on_cancel =\n                !new_message.author.bot && !author_excluded_from_cancel_preservation;";
-        let computation_pos = module_src
-            .find(computation)
-            .expect("live preservation is computed once from author identity");
-        let guard_pos = module_src[computation_pos..]
-            .find("if !preserve_on_cancel")
-            .map(|offset| computation_pos + offset)
-            .expect("stale dispatch suppression is gated by preservation");
-        let stale_lookup_pos = module_src[guard_pos..]
-            .find("stale_dispatch_turn_for_text(")
-            .map(|offset| guard_pos + offset)
-            .expect("stale dispatch lookup remains present for automation");
-        let raw_submission_pos = module_src[stale_lookup_pos..]
-            .find("origin: super::IntakeOrigin::RawAttachment,")
-            .map(|offset| stale_lookup_pos + offset)
-            .expect("raw-attachment IntakeSubmission construction exists");
-        let live_submission_pos = module_src[raw_submission_pos..]
-            .find("origin: super::IntakeOrigin::LiveMessage,")
-            .map(|offset| raw_submission_pos + offset)
-            .expect("live-message IntakeSubmission construction exists");
-        let raw_request_window = &module_src[stale_lookup_pos..raw_submission_pos];
-        let raw_submission_window = &module_src[raw_submission_pos..live_submission_pos];
-        let live_request_window = &module_src[raw_submission_pos..live_submission_pos];
-        let production_end = module_src[live_submission_pos..]
-            .find("#[cfg(test)]\nmod reply_context_tests")
-            .map(|offset| live_submission_pos + offset)
-            .expect("production intake gate ends before reply-context tests");
-        let live_submission_window = &module_src[live_submission_pos..production_end];
-
-        assert!(computation_pos < guard_pos && guard_pos < stale_lookup_pos);
-        assert!(
-            raw_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
-            "raw attachment IntakeRequest must reuse the precomputed preservation value"
-        );
-        assert!(
-            raw_submission_window.contains(
-                "origin: super::IntakeOrigin::RawAttachment,\n                    preserve_on_cancel,"
-            ),
-            "raw attachment IntakeSubmission must reuse the precomputed preservation value"
-        );
-        assert!(
-            live_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
-            "live IntakeRequest must reuse the precomputed preservation value"
-        );
-        assert!(
-            live_submission_window.contains(
-                "origin: super::IntakeOrigin::LiveMessage,\n                    preserve_on_cancel,"
-            ),
-            "live IntakeSubmission must reuse the precomputed preservation value"
-        );
+        assert_eq!(preservation_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 
     #[test]
     fn one_admission_guard_precedes_all_soft_intervention_entrypoints() {
-        let module_src = include_str!("intake_gate.rs");
-        let production_end = module_src
-            .find("#[cfg(test)]\nmod reply_context_tests")
-            .expect("production intake gate ends before unit tests");
-        let production = &module_src[..production_end];
-        let guard = "if is_allowed_bot_sender\n                && !should_admit_turn_message(";
-        let guard_pos = production
-            .find(guard)
-            .expect("all intake queue branches share the outer admission guard");
-        let first_queue_entry = production
-            .find("SoftInterventionSpec {")
-            .expect("intake gate has a soft intervention queue entrypoint");
-
-        assert!(guard_pos < first_queue_entry);
-        assert_eq!(
-            production.matches("is_allowed_turn_sender(").count(),
-            0,
-            "queue branches must not make sender decisions independently"
-        );
+        assert_eq!(admission_guard_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }
 
@@ -1837,43 +1732,8 @@ mod live_intake_preserve_wiring_tests {
 mod command_recognition_tests {
     #[test]
     fn command_outcomes_end_before_restore_and_preserve_upload_conditions() {
-        let production = include_str!("intake_gate.rs")
-            .split_once("#[cfg(test)]\nmod reply_context_tests")
-            .unwrap()
-            .0;
-        let command = production
-            .split_once("let cmd_text = strip_leading_bot_mention(text);")
-            .unwrap()
-            .1
-            .split_once("// Auto-restore session")
-            .unwrap()
-            .0;
-        let anchors = [
-            "if cmd_text.starts_with('!')",
-            "let handled = super::message_handler::handle_text_command(",
-            "&mut attachment_local_permit,",
-            ".await?;",
-            "if handled {",
-            "if (!is_skill_command || attachment_local_permit.is_some())",
-            "&& !upload_records_appended_to_session",
-        ];
-        let mut remaining = command;
-        for anchor in anchors {
-            remaining = remaining.split_once(anchor).expect(anchor).1;
-        }
-        assert!(
-            remaining
-                .trim_end()
-                .ends_with("}\n                return Ok(());\n            }")
-        );
-        let legacy = production
-            .split_once("// Legacy command boundary:")
-            .unwrap()
-            .1
-            .split_once("// Regular text")
-            .unwrap()
-            .0;
-        assert!(legacy.contains("super::message_handler::handle_shell_command_raw("));
-        assert!(legacy.trim_end().ends_with("return Ok(());\n            }"));
+        use super::live_intake_preserve_wiring_tests::source_guard_tests as guard;
+        use guard::{INTAKE_GATE, command_boundary_gaps};
+        assert_eq!(command_boundary_gaps(INTAKE_GATE), Vec::<String>::new());
     }
 }

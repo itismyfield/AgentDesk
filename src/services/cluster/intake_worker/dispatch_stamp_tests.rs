@@ -21,18 +21,50 @@ async fn seed_dispatched(pool: &PgPool) -> i64 {
     .expect("seed dispatched intake row")
 }
 
+const INTAKE_WORKER: &str = include_str!("../intake_worker.rs");
+const DONE_WRITE: &str = "let advanced = mark_done(";
+const CLASSIFY: &str = "classify_mark_done_miss(";
+
+/// Classification 2: from the Ok-arm done writer to its `Processed` return, the code mask
+/// holds one `mark_done(` and one classifier call. A lexical tripwire, not reachability.
+fn classifier_branch_gaps(source: &str) -> Vec<String> {
+    let mask = crate::test_support::rust_code_mask(source).expect("intake worker lexes");
+    let Some(start) = mask.find(DONE_WRITE) else {
+        return vec![format!("missing {DONE_WRITE}")];
+    };
+    let Some(end) = mask[start..].find("Ok(TickOutcome::Processed)") else {
+        return vec!["the done-writer branch never returns Processed".to_string()];
+    };
+    let branch = &mask[start..start + end];
+    match (
+        branch.matches("mark_done(").count(),
+        branch.matches(CLASSIFY).count(),
+    ) {
+        (1, 1) => Vec::new(),
+        counts => vec![format!(
+            "mark_done / classifier counts {counts:?}, want (1, 1)"
+        )],
+    }
+}
+
 fn assert_worker_false_branch_calls_classifier() {
-    let source = include_str!("../intake_worker.rs");
-    let start = source
-        .find("let advanced = mark_done(")
-        .expect("worker done writer exists");
-    let end = source[start..]
-        .find("Ok(TickOutcome::Processed)")
-        .map(|offset| start + offset)
-        .expect("worker Ok branch terminates");
-    let branch = &source[start..end];
-    assert_eq!(branch.matches("mark_done(").count(), 1);
-    assert_eq!(branch.matches("classify_mark_done_miss(").count(), 1);
+    assert_eq!(classifier_branch_gaps(INTAKE_WORKER), Vec::<String>::new());
+}
+
+#[test]
+fn classifier_branch_guard_rejects_commented_calls() {
+    assert_worker_false_branch_calls_classifier();
+    for needle in [DONE_WRITE, CLASSIFY] {
+        for forgery in crate::test_support::CommentForgery::ALL {
+            let forged = crate::test_support::comment_out_code(INTAKE_WORKER, needle, forgery);
+            assert!(
+                !classifier_branch_gaps(&forged).is_empty(),
+                "{forgery:?} commented `{needle}` still passes"
+            );
+        }
+    }
+    let note = INTAKE_WORKER.replacen(DONE_WRITE, &format!("// {CLASSIFY}\n{DONE_WRITE}"), 1);
+    assert_eq!(classifier_branch_gaps(&note), Vec::<String>::new());
 }
 
 #[tokio::test]

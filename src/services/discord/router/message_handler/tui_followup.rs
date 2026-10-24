@@ -6,7 +6,7 @@ mod nameless_gate;
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
 #[cfg(all(test, unix))]
 pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
-use nameless_gate::nameless_promote_blocked;
+pub(in crate::services::discord) use nameless_gate::hosted_tui_promote_readiness_blocked;
 
 use super::*;
 
@@ -19,25 +19,8 @@ pub(super) const CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE: &str =
     "📬 방금 동일한 메시지가 큐에 적재되어 중복으로 무시했습니다. 큐 결과를 기다려 주세요.";
 pub(super) const CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE: &str =
     "⚠ 내부 처리 큐에 접근하지 못해 이 메시지를 적재하지 못했습니다. 잠시 후 다시 보내 주세요.";
-pub(super) fn claude_tui_busy_followup_refusal_notice(
-    reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
-) -> &'static str {
-    use crate::services::turn_orchestrator::EnqueueRefusalReason as E;
-    match reason {
-        Some(
-            E::AlreadyActiveTurn
-            | E::AbsorbedByActiveTurn
-            | E::ClaimedSinceObservation
-            | E::SourceIdPendingOrActive,
-        ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
-        Some(E::SourceIdAlreadyQueued) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE,
-        Some(E::LastItemDedup) => CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE,
-        Some(E::ActorUnreachable | E::MailboxClosed) => {
-            CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
-        }
-        None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
-    }
-}
+mod busy_notice;
+pub(super) use busy_notice::claude_tui_busy_followup_refusal_notice;
 
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,9 +451,12 @@ pub(super) fn tui_busy_followup_diagnostic(
         return None;
     }
     let tmux_session_name = tmux_session_name?;
-    if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(tmux_session_name)
-    {
+    if nameless_gate::named_blocked(
+        provider,
+        channel_id,
+        tmux_session_name,
+        remote_profile_present,
+    ) {
         return Some(ClaudeTuiBusyFollowupDiagnostic {
             tmux_session_name: tmux_session_name.to_owned(),
             prompt_marker_detected: false,
@@ -656,110 +642,6 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
         .lock()
         .expect("hosted tui promote busy hook lock") = Some(busy);
     HostedTuiPromoteBusyHookResetForTests
-}
-
-/// Probe hosted readiness before teardown; host-kept sessions, verified Codex holds and busy panes defer.
-/// The normal post-claim path retains responsibility for message preservation and defer UX.
-pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-) -> bool {
-    let park = &shared.queue_park_ledger;
-    #[cfg(test)]
-    if let Some(busy) = *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
-        .lock()
-        .expect("hosted tui promote busy hook lock")
-    {
-        return busy;
-    }
-    // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
-    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
-        park.clear_promote_hold(channel_id, "codex_verified");
-        return false;
-    }
-
-    let (tmux_session_name, remote_profile_named, current_path, session_id) = {
-        let data = shared.core.lock().await;
-        let Some(session) = data.sessions.get(&channel_id) else {
-            drop(data);
-            return nameless_promote_blocked(shared, provider, channel_id).await;
-        };
-        let tmux_session_name = if provider.uses_managed_tmux_backend() {
-            session
-                .channel_name
-                .as_ref()
-                .map(|name| provider.build_tmux_session_name(name))
-        } else {
-            None
-        };
-        (
-            tmux_session_name,
-            session.remote_profile_name.is_some(),
-            session.current_path.clone(),
-            session.session_id.clone(),
-        )
-    };
-    let Some(tmux_session_name) = tmux_session_name else {
-        return nameless_promote_blocked(shared, provider, channel_id).await;
-    };
-    // Verified incarnations wait for source and permission before queue teardown.
-    #[cfg(unix)]
-    if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(&tmux_session_name)
-    {
-        park.note_codex_verified_hold(channel_id, &tmux_session_name);
-        return true;
-    }
-    park.clear_promote_hold(channel_id, "codex_verified");
-    // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
-    #[cfg(test)]
-    if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
-        return false;
-    }
-    let host = super::super::super::host_defer_gate::channel_session_deferred;
-    if host(shared, provider, channel_id.get(), &tmux_session_name).await {
-        return true;
-    }
-    // `remote_profile_named` (name recorded on the session) is a conservative
-    // stand-in for the intake path's settings-resolved profile: a named-but-
-    // missing profile makes the probe return `false` (fail-open to normal
-    // dispatch) instead of misclassifying a remote session as a local TUI.
-    // #4353: `tui_busy_followup_diagnostic` probes a live tmux pane, so it is
-    // cfg(unix). A platform without tmux can never host a busy TUI, and the gate
-    // fails open exactly as it does for a missing pane.
-    #[cfg(unix)]
-    let blocked = tui_busy_followup_diagnostic(
-        shared,
-        provider,
-        channel_id,
-        Some(tmux_session_name.as_str()),
-        remote_profile_named,
-        current_path.as_deref(),
-        session_id.as_deref(),
-    )
-    .is_some();
-    #[cfg(not(unix))]
-    let blocked = {
-        let _ = (
-            shared,
-            provider,
-            &tmux_session_name,
-            remote_profile_named,
-            &current_path,
-            &session_id,
-        );
-        false
-    };
-    if blocked {
-        tracing::info!(
-            channel_id = channel_id.get(),
-            provider = provider.as_str(),
-            tmux_session_name = %tmux_session_name,
-            "#4270 promote gate: hosted TUI busy before queued-turn teardown; deferring promotion"
-        );
-    }
-    blocked
 }
 
 /// #4270 A — live-dispatch promote defer: the composite the

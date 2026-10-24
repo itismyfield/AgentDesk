@@ -1,6 +1,8 @@
 //! Executes the production adoption seam; caller reachability is lexical only.
 use super::inflight::{self, GuardedSaveOutcome, InflightEpisodePin, InflightTurnState};
 use super::*;
+use crate::services::discord::router::source_guard_support::{Lexed, forge, swap};
+use crate::test_support::CommentForgery;
 
 fn raw_episode() -> InflightTurnState {
     let mut state = InflightTurnState::new(
@@ -165,55 +167,126 @@ fn actual_seam_rejects_same_anchor_successor_without_durable_mutation() {
     exercise(true);
 }
 
+const SEAM: &str = include_str!("coordinate_adoption.rs");
+const CALLER: &str = include_str!("mod.rs");
+const SEAM_FN: &str = "pub(super) async fn adopt_coordinates(";
+const ACQUIRE: &str = "adopt_and_lock_inflight_episode(";
+const HOLD: &str = "*locked_episode_from_adoption = Some(guard)";
+const SEAM_RETURN: &str = "    (\n        save_outcome,";
+const CALLER_FN: &str = "async fn rebind_inflight_for_channel_inner(";
+const HOST: &str = "let host = super::tmux::watch_host_of(";
+const HOST_LOOKUP: &str = "super::tmux::watch_host_of(";
+const ADOPTION: &str = "coordinate_adoption::adopt_coordinates(";
+const REJECTED: &str = "if !matches!(save_outcome";
+const HANDOFF: &str = "episode_handoff::commit_episode_side_effects(";
+
+// Classification 2 for the three guards below: steps are matched as written inside the
+// real seam or caller item, comments excluded. Lexical tripwires, not reachability proofs.
+
+/// Episode authority, then the guard handed to the caller, then the seam's tuple return.
+fn seam_order_gaps(seam: &str) -> Vec<String> {
+    let lexed = Lexed::new(seam);
+    let Some(body) = lexed.block(SEAM_FN) else {
+        return vec![format!("missing {SEAM_FN}")];
+    };
+    let acquire = body.find(ACQUIRE);
+    let hold = body.find(HOLD);
+    let ret = body.find_all(SEAM_RETURN).last().copied();
+    match (lexed.count(ACQUIRE), acquire, hold, ret) {
+        (1, Some(acquire), Some(hold), Some(ret)) if acquire < hold && hold < ret => Vec::new(),
+        found => vec![format!("authority → hold → return broken: {found:?}")],
+    }
+}
+
+/// The host lookup is awaited before exact adoption, which precedes the handoff.
+fn host_order_gaps(caller: &str) -> Vec<String> {
+    let lexed = Lexed::new(caller);
+    let Some(body) = lexed.block(CALLER_FN) else {
+        return vec![format!("missing {CALLER_FN}")];
+    };
+    let mut gaps = Vec::new();
+    let host_await = body
+        .find(HOST)
+        .and_then(|at| body.find_after(at, ".await;"));
+    match (host_await, body.find(ADOPTION), body.find(HANDOFF)) {
+        (Some(host), Some(adoption), Some(handoff)) if host < adoption && adoption < handoff => {}
+        found => gaps.push(format!("host await → adoption → handoff broken: {found:?}")),
+    }
+    if lexed.count(HOST_LOOKUP) != 1 {
+        gaps.push(format!("{HOST_LOOKUP} must be called once"));
+    }
+    gaps
+}
+
+/// A refused adoption result is checked before any handoff side effect.
+fn rejection_gaps(caller: &str) -> Vec<String> {
+    let Some(body) = Lexed::new(caller).block(CALLER_FN) else {
+        return vec![format!("missing {CALLER_FN}")];
+    };
+    let adoption = body.find(ADOPTION);
+    let rejected = adoption.and_then(|at| body.find_after(at, REJECTED));
+    let handoff = adoption.and_then(|at| body.find_after(at, HANDOFF));
+    match (rejected, handoff) {
+        (Some(rejected), Some(handoff)) if rejected < handoff => Vec::new(),
+        found => vec![format!("adoption refusal → handoff broken: {found:?}")],
+    }
+}
+
 #[test]
 fn actual_seam_orders_episode_authority_before_hold_and_return() {
-    let seam = include_str!("coordinate_adoption.rs");
-    assert_eq!(seam.matches("adopt_and_lock_inflight_episode(").count(), 1);
-    let acquire = seam
-        .find("adopt_and_lock_inflight_episode(")
-        .expect("authority");
-    let hold = seam
-        .find("*locked_episode_from_adoption = Some(guard)")
-        .expect("live authority handed to the caller");
-    let ret = seam
-        .rfind("    (\n        save_outcome,")
-        .expect("seam tuple return");
-    assert!(acquire < hold && hold < ret);
+    assert_eq!(seam_order_gaps(SEAM), Vec::<String>::new());
 }
 
 #[test]
 fn host_lookup_finishes_before_exact_adoption_can_hold_a_guard() {
-    let caller = include_str!("mod.rs");
-    let host = caller
-        .find("let host = super::tmux::watch_host_of(")
-        .expect("host lookup");
-    let host_await = host + caller[host..].find(".await;").expect("host awaited");
-    let adoption = caller
-        .find("coordinate_adoption::adopt_coordinates(")
-        .expect("exact adoption");
-    let handoff = caller
-        .find("episode_handoff::commit_episode_side_effects(")
-        .expect("handoff");
-    assert!(
-        host_await < adoption && adoption < handoff,
-        "host PG await must finish before exact adoption acquires the guard"
-    );
-    assert_eq!(caller.matches("super::tmux::watch_host_of(").count(), 1);
+    assert_eq!(host_order_gaps(CALLER), Vec::<String>::new());
 }
 
 #[test]
 fn actual_caller_wires_adoption_before_guarded_handoff() {
-    let caller = include_str!("mod.rs");
-    let adoption = caller
-        .find("coordinate_adoption::adopt_coordinates(")
-        .expect("actual caller adoption");
-    let rejected = caller[adoption..]
-        .find("if !matches!(save_outcome")
-        .expect("fail-closed adoption result");
-    let handoff = caller[adoption..]
-        .find("episode_handoff::commit_episode_side_effects")
-        .unwrap();
-    assert!(rejected < handoff);
+    assert_eq!(rejection_gaps(CALLER), Vec::<String>::new());
+}
+
+#[test]
+fn adoption_order_guards_reject_commented_and_reordered_steps() {
+    type Judge = fn(&str) -> Vec<String>;
+    let cases: [(Judge, &str, &[&str]); 3] = [
+        (
+            seam_order_gaps,
+            SEAM,
+            &[SEAM_FN, ACQUIRE, HOLD, SEAM_RETURN],
+        ),
+        (
+            host_order_gaps,
+            CALLER,
+            &[CALLER_FN, HOST, ADOPTION, HANDOFF],
+        ),
+        (
+            rejection_gaps,
+            CALLER,
+            &[CALLER_FN, ADOPTION, REJECTED, HANDOFF],
+        ),
+    ];
+    for (judge, source, needles) in cases {
+        for needle in needles {
+            for forgery in CommentForgery::ALL {
+                let forged = forge(source, needle, forgery);
+                assert!(
+                    !judge(&forged).is_empty(),
+                    "{forgery:?} commented `{needle}` still passes"
+                );
+            }
+        }
+    }
+    assert!(!seam_order_gaps(&swap(SEAM, ACQUIRE, HOLD)).is_empty());
+    assert!(!host_order_gaps(&swap(CALLER, HOST, ADOPTION)).is_empty());
+    assert!(!rejection_gaps(&swap(CALLER, REJECTED, HANDOFF)).is_empty());
+    let lookup = format!("let _ = {HOST_LOOKUP}shared);");
+    let prose = CALLER.replacen(HANDOFF, &format!("// {lookup}\n{HANDOFF}"), 1);
+    assert_ne!(prose, CALLER);
+    assert_eq!(host_order_gaps(&prose), Vec::<String>::new());
+    let coded = CALLER.replacen(HANDOFF, &format!("{lookup}\n{HANDOFF}"), 1);
+    assert_eq!(host_order_gaps(&coded).len(), 1);
 }
 
 /// Stops one channel's blocking adoption before it takes the episode lock.

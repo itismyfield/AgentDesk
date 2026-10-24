@@ -960,7 +960,6 @@ mod tests {
         }
         install_provider_hosting_config(&Config::default());
     }
-
     fn test_agent_with_claude_channel_runtime(channel_id: &str, runtime: Option<&str>) -> AgentDef {
         AgentDef {
             id: "adk-dashboard-e2e".to_string(),
@@ -985,9 +984,9 @@ mod tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
-
     fn test_agent_with_claude_channel(channel_id: &str, tui_hosting: Option<bool>) -> AgentDef {
         AgentDef {
             id: "adk-dashboard-e2e".to_string(),
@@ -1012,6 +1011,7 @@ mod tests {
             department: None,
             avatar_emoji: None,
             preferred_intake_node_labels: None,
+            memory_group: None,
         }
     }
 }

@@ -1207,10 +1207,7 @@ pub fn handle_dcserver(token: Option<String>) {
                 }
             }
         };
-        if let Err(error) = crate::bootstrap::install_boot_snapshots(&ad_config) {
-            eprintln!("  ✖ Failed to install boot snapshots: {error:#}");
-            std::process::exit(1);
-        }
+        crate::bootstrap::prepare_dcserver_boot(&ad_config, &discord_pg_pool).await;
         crate::services::termination_audit::init_audit_db(Some(discord_pg_pool.clone()));
 
         // Start axum HTTP server (background task) — now serves all API

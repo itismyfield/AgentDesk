@@ -9,6 +9,7 @@ mod herdr {
     pub(crate) mod model;
     pub(crate) mod observe;
     pub(crate) mod pane_probe;
+    pub(crate) mod policy;
     pub(crate) mod provenance;
     // Unix-socket only; no Windows transport exists.
     #[cfg(unix)]
@@ -16,11 +17,11 @@ mod herdr {
     pub(crate) mod wire;
 }
 mod consumer_guard;
-#[cfg(unix)]
-mod herdr_clear_adapter;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+#[cfg(all(test, unix))]
+pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
 // The operator terminate path against real Herdr servers its runner starts; ignored otherwise.
@@ -40,13 +41,10 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+#[cfg(all(test, unix))]
+pub(crate) use herdr::model::HerdrEndpoint;
+pub(crate) use herdr::policy;
 pub(crate) use herdr_gate::legacy_return;
-// A channel clear's Herdr side, run by the clear command through the native clear helper.
-#[cfg(unix)]
-pub(crate) use herdr_clear_adapter::{
-    ClearSession, HerdrClear, HerdrClearPlan, HerdrClearRefusal, plan_clear,
-    recovery_composer_empty,
-};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{

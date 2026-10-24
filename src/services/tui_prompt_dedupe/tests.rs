@@ -1,5 +1,34 @@
 use super::*;
 
+// A private process gives lock-state probes their own registry, including unguarded readers.
+pub(super) fn run_with_private_registry(test_name: &str) -> bool {
+    let test_name = test_name
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .expect("crate-qualified test name");
+    const CHILD_TEST: &str = "ADK_DEDUPE_PRIVATE_REGISTRY_TEST";
+    if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+        return false;
+    }
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--format=pretty", "--color=never"])
+        .env(CHILD_TEST, test_name)
+        .output()
+        .expect("start private registry test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout
+                .lines()
+                .any(|line| line == format!("test {test_name} ... ok"))
+            && stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "private registry test {test_name} failed ({status}):\n{stdout}\n{stderr}",
+        status = output.status,
+    );
+    true
+}
+
 fn reset_state() {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     *state = TuiPromptDedupeState::default();
@@ -1360,6 +1389,7 @@ fn external_input_turn_lease_carries_owner_and_trace_fields() {
             relay_owner: ExternalInputRelayOwner::SessionBoundRelay,
             runtime_kind: Some(RuntimeHandoffKind::CodexTui),
             generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+            hosted_source: None,
         },
     );
 
@@ -1392,6 +1422,7 @@ fn clear_external_input_relay_lease_if_matches_preserves_newer_turn() {
         relay_owner: ExternalInputRelayOwner::BridgeAdapter,
         runtime_kind: Some(RuntimeHandoffKind::CodexTui),
         generation: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        hosted_source: None,
     };
     let newer = ExternalInputRelayLease {
         turn_id: Some("external:codex:42:tmux-trace:2".to_string()),
@@ -1690,6 +1721,7 @@ fn local_compact_entry_id_is_recorded_only_after_a_successful_note_delivery() {
         row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
+        hosted_source: None,
     });
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1758,6 +1790,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
         row_prompt_id: None,
         native_turn_id: None,
         steer_echo: false,
+        hosted_source: None,
     };
 
     record_local_only_entry_id_after_note_delivery(&nonlocal);
@@ -2820,10 +2853,9 @@ fn touch_anchor_on_activity_evicts_expired_anchor_without_resurrecting_it() {
     {
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         assert!(
-            state
+            !state
                 .prompt_anchor_by_tmux
-                .get(&PromptKey::new(provider, tmux))
-                .is_none(),
+                .contains_key(&PromptKey::new(provider, tmux)),
             "the over-ceiling anchor was evicted, not resurrected"
         );
     }
@@ -2916,6 +2948,12 @@ fn extract_yields_none_entry_id_when_uuid_absent() {
 // test fails if the acquisition is moved after the read.
 #[test]
 fn reconcile_holds_source_authority_across_read_decision_and_replacement() {
+    if run_with_private_registry(concat!(
+        module_path!(),
+        "::reconcile_holds_source_authority_across_read_decision_and_replacement"
+    )) {
+        return;
+    }
     // The authority key follows the runtime root env, so no other test may move it mid-probe.
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _guard = TEST_LOCK

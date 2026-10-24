@@ -3,7 +3,9 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::services::tui_input::actor::gate::{claude_border_row, claude_prompt_row};
+use crate::services::tui_input::actor::gate::{
+    claude_border_row, claude_prompt_row, own_wrapped_draft,
+};
 
 /// Draft chips whose payload is not measured to survive a stash round trip.
 const UNMEASURED_CHIPS: [&str; 3] = [
@@ -308,10 +310,86 @@ fn renders_flat(frame: &str, width: usize, height: usize) -> bool {
 /// How Claude shows a paste in an empty composer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Drawn {
+    /// Wrapping is unknown; only the full captured body can prove this paste.
+    Body,
     /// A `[Pasted text #N …]` placeholder.
     Folded,
     /// Every row, the prompt and continuation indent removed.
     Rows(Vec<String>),
+}
+
+/// Wrap predictions are optional for ownership; an unfolded body must remain fully visible.
+pub(super) fn direct(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> {
+    let (width, height) = size?;
+    if width < 6
+        || height <= 10
+        || frame
+            .split('\n')
+            .any(|line| line.chars().any(char::is_control))
+    {
+        return None;
+    }
+    if let Some(drawn) = drawn(frame, size) {
+        return Some(drawn);
+    }
+    let columns = width - 4;
+    let mut rows = 0;
+    let mut shown = Vec::new();
+    for line in frame.split('\n') {
+        match wrap(line, columns) {
+            Some(wrapped) => {
+                rows += wrapped.len();
+                shown.extend(wrapped);
+            }
+            None => {
+                // Word wrapping may use half a row; only unknown lines need this upper bound.
+                let bound: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+                rows += if bound <= columns {
+                    1
+                } else {
+                    2 * bound.div_ceil(columns) + 1
+                };
+                shown.push(line.to_owned());
+            }
+        }
+    }
+    if shown[1..].iter().any(|row| chrome_row(row)) {
+        return None;
+    }
+    (rows <= height.saturating_sub(10) / 2).then_some(Drawn::Body)
+}
+
+/// Proves the complete body or an exact placeholder; multiline pastes may fold before predicted.
+pub(super) fn owns_direct(capture: &str, frame: &str, drawn: &Drawn) -> bool {
+    let Composer::Text(rows) = read(capture).composer else {
+        return false;
+    };
+    if matches!(drawn, Drawn::Rows(expected) if own_wrapped_draft(capture, expected))
+        || rows
+            .iter()
+            .flat_map(|row| row.chars())
+            .filter(|c| !c.is_whitespace())
+            .eq(frame.chars().filter(|c| !c.is_whitespace()))
+    {
+        return true;
+    }
+    let [row] = rows.as_slice() else {
+        return false;
+    };
+    let lines = frame.matches('\n').count();
+    if !matches!(drawn, Drawn::Folded) && lines == 0 {
+        return false;
+    }
+    let Some(rest) = row.strip_prefix("[Pasted text #") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0
+        && if lines == 0 {
+            &rest[digits..] == "]"
+        } else {
+            rest[digits..] == format!(" +{lines} lines]")
+        }
 }
 
 /// Measured on Claude Code 2.1.293: a paste folds as in [`renders_flat`]; otherwise each line
@@ -336,15 +414,16 @@ pub(super) fn drawn(frame: &str, size: Option<(usize, usize)>) -> Option<Drawn> 
         }
         rows.extend(wrap(line, width.checked_sub(4).filter(|&c| c >= 2)?)?);
     }
-    // A row the composer reader would take for the prompt or a border could not prove the paste.
-    let misread = |row: &String| {
-        let shown = format!("  {row}");
-        claude_prompt_row(&shown) || claude_border_row(&shown)
-    };
-    if rows[1..].iter().any(misread) {
+    if rows[1..].iter().any(|row| chrome_row(row)) {
         return None;
     }
     (rows.len() <= height.saturating_sub(10) / 2).then_some(Drawn::Rows(rows))
+}
+
+// A row the composer reader takes for a prompt or border cannot prove the paste.
+fn chrome_row(row: &str) -> bool {
+    let shown = format!("  {row}");
+    claude_prompt_row(&shown) || claude_border_row(&shown)
 }
 
 /// One line as wrap-ansi `hard` without trim lays it out; Claude drops the leading spaces of each
@@ -425,7 +504,7 @@ fn may_join(c: char) -> bool {
 /// paste whose rows differ is still proven by its whitespace-free body.
 fn measured_width(c: char) -> Option<usize> {
     match c {
-        ' '..='~' | '\u{b7}' => Some(1),
+        ' '..='~' | '\u{b7}' | '\u{2192}' => Some(1),
         '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' | '\u{1f4f1}' => Some(2),
         _ => None,
     }

@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Port {
+    suspension: super::super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Request>,
@@ -45,6 +46,13 @@ pub(crate) struct Request {
 struct CommandFailure {
     error: StoreError,
     reason: PersistenceReason,
+}
+
+fn suspended_failure() -> CommandFailure {
+    CommandFailure {
+        error: StoreError::Rejected("suspended_sources".into()),
+        reason: PersistenceReason::ActorUnavailable,
+    }
 }
 
 #[derive(Debug)]
@@ -103,6 +111,22 @@ impl DenyRecorded {
 }
 
 impl Port {
+    pub(crate) fn with_suspension(
+        mut self,
+        suspension: super::super::suspension::Suspension,
+    ) -> Self {
+        self.suspension = suspension;
+        self
+    }
+
+    pub(crate) fn sources_unsuspended(&self) -> bool {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission") {
+            return true;
+        }
+        self.suspension.is_empty()
+    }
+
     pub(crate) fn new(generation: u64) -> (Self, Receiver) {
         let run = Arc::new(());
         let (send, receive) = mpsc::channel(4);
@@ -113,6 +137,7 @@ impl Port {
         };
         (
             Self {
+                suspension: Default::default(),
                 generation,
                 run,
                 send,
@@ -127,6 +152,9 @@ impl Port {
     }
 
     async fn request_inner(&self, operation: Operation) -> Result<Reply, CommandFailure> {
+        if !self.sources_unsuspended() {
+            return Err(suspended_failure());
+        }
         let (reply, receive) = oneshot::channel();
         self.send
             .send(Request {
@@ -139,10 +167,14 @@ impl Port {
                 error: StoreError::Rejected("actor ended".into()),
                 reason: PersistenceReason::ActorUnavailable,
             })?;
-        receive.await.map_err(|_| CommandFailure {
+        let answer = receive.await.map_err(|_| CommandFailure {
             error: StoreError::Rejected("actor reply unavailable".into()),
             reason: PersistenceReason::ActorUnavailable,
-        })?
+        })?;
+        if !self.sources_unsuspended() {
+            return Err(suspended_failure());
+        }
+        answer
     }
 
     pub(crate) async fn request(&self, operation: Operation) -> Result<Reply, String> {
@@ -234,7 +266,13 @@ impl Receiver {
         let mut read_back = None;
         let mut deny = None;
         let mut typed_failure = None;
-        let result = if !Arc::ptr_eq(&self.run, &request.run) {
+        let suspended = !writer.suspension.is_empty();
+        #[cfg(test)]
+        let suspended = suspended
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission-apply");
+        let result = if suspended {
+            Err(StoreError::Rejected("suspended_sources".into()))
+        } else if !Arc::ptr_eq(&self.run, &request.run) {
             Err(StoreError::Rejected("foreign actor command".into()))
         } else {
             match request.operation {
@@ -336,6 +374,10 @@ impl Receiver {
         let _ = request.reply.send(reply);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_submission_tests.rs"]
+pub(super) mod scoped_tests;
 
 impl crate::services::tui_o::writer::host::Readiness {
     /// Actor waits precede source/Live re-entry; the callback only consumes owned evidence.

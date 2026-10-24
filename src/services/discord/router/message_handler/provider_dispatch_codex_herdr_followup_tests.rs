@@ -536,3 +536,6 @@ fn a_settled_herdr_reconnect_is_not_attached_again_pg() {
 
 #[path = "provider_dispatch_codex_herdr_activation_tests.rs"]
 mod activation;
+
+#[path = "provider_dispatch_codex_t14_composed_tests.rs"]
+mod t14_composed;

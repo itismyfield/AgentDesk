@@ -9,9 +9,7 @@ use super::*;
 use crate::services::claude_tui::composer_lock::{
     DraftGuard, DraftRecoveryHold, admit_composer_write, guard_draft,
 };
-use crate::services::claude_tui::host_input::{
-    SpyGuard, SpyState, capture_draft_with, native_clear_composer_empty,
-};
+use crate::services::claude_tui::host_input::{SpyGuard, SpyState, capture_draft_with};
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
 };
@@ -189,13 +187,14 @@ fn relay(tui: &Tui, text: &str, blind: bool) -> (StatusCode, serde_json::Value) 
 fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
     let session = tui.session();
     let pane = Pane::with_program(&session, tui.dir.path().join("tmux"));
+    let nonce = tui.next_nonce();
     let request = Request {
         session: &session,
         transcript: &tui.transcript,
         source: "iMessage",
         author: "200",
         name: "ann",
-        nonce: NONCE,
+        nonce: &nonce,
         text: TEXT,
     };
     match listed {
@@ -204,10 +203,10 @@ fn run_on(tui: &Tui, channel: Option<u64>, listed: Option<&[u64]>) -> Report {
     }
 }
 
-/// The hold covers the follow-up submit, the cleanup lock and a native `/clear` until a capture
-/// shows the stash gone and the composer empty.
+/// Follow-up submission and cleanup stay held until the stash is gone and the composer is empty.
 #[test]
-fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
+fn a_held_pane_keeps_the_follow_up_out_until_recovered() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     let got = tui.run();
@@ -218,11 +217,10 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
             Delivery::Observed
         )
     );
-    // The turn ends; the draft stays stashed under a bare empty prompt that /clear would accept.
+    // The turn ends; the draft stays stashed under a bare empty prompt.
     tui.put("placeholder", "");
     tui.put("head", IDLE_HEAD);
     let held = tui.capture();
-    assert!(native_clear_composer_empty(&held));
     let (session, idle) = (tui.session(), idle(&tui));
 
     let guard = spy(&[&held, &held, &held, BUSY], None);
@@ -274,6 +272,7 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
 /// `/tui/send` sends nothing to a pane in recovery, read or not, and submits once after it.
 #[test]
 fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     // The Enter is withheld: B, the external input, waits in the composer over A in the stash.
     tui.person_after_capture(3, "attach 300; detach");
@@ -307,6 +306,7 @@ fn the_tui_send_endpoint_keeps_off_a_pane_in_recovery() {
 
 #[test]
 fn uncertain_attached_direct_input_holds_every_later_automatic_writer() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("");
     tui.put("attached", "4");
     tui.person_after_capture(1, "type_text 'person typed '");
@@ -336,6 +336,7 @@ fn uncertain_attached_direct_input_holds_every_later_automatic_writer() {
 /// or that cannot be read, sends nothing; an empty composer takes it once.
 #[test]
 fn the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("head", IDLE_HEAD);
     let (status, body) = relay(&tui, "C", false);
@@ -361,9 +362,11 @@ fn the_tui_send_endpoint_never_submits_a_new_message_over_an_unseen_draft() {
 /// any write, a busy input stashes it again, and once the person sends it the follow-up goes in.
 #[test]
 fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     let restored = report(Outcome::Injected, DraftState::RestoredObserved);
     assert_eq!(tui.run(), restored);
+    let first_nonce = tui.get("attempt.nonce").unwrap();
     tui.put("head", IDLE_HEAD);
     let (ended, calls) = warm_follow_up(&tui, &tui.capture());
     assert_requeued(&ended, &calls);
@@ -373,6 +376,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 
     tui.put("head", WORKING_HEAD);
     assert_eq!(tui.run_text("again", &FAST), restored);
+    assert_ne!(tui.get("attempt.nonce").unwrap(), first_nonce);
     let again = frame("iMessage", "200", "ann", NONCE, "again");
     assert_eq!(tui.records(), [framed(), again]);
     assert_eq!(tui.drafts(), ("human draft A".to_string(), None));
@@ -394,6 +398,7 @@ fn a_restored_draft_is_never_sent_with_the_next_follow_up() {
 /// A draft the person brought back from the stash by hand is protected the same way.
 #[test]
 fn a_draft_brought_back_by_hand_is_never_sent_with_the_next_follow_up() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let tui = Tui::new("human draft A");
     tui.put("restore_after", "never");
     assert_eq!(tui.run(), report(Outcome::Injected, DraftState::Unknown));
@@ -413,6 +418,7 @@ fn a_draft_brought_back_by_hand_is_never_sent_with_the_next_follow_up() {
 /// still shows that dialog.
 #[test]
 fn a_startup_dialog_is_dismissed_only_where_no_draft_is_protected() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dismiss = |session: &str, captures: &[&str]| {
         let token = Arc::new(CancelToken::new());
         let guard = spy(captures, Some(("capture", 6, token.clone())));
@@ -439,6 +445,7 @@ fn a_startup_dialog_is_dismissed_only_where_no_draft_is_protected() {
 /// owner says; the switch never lifts a protection.
 #[test]
 fn only_an_allowlisted_channel_takes_the_stash_path() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let (e2e, other) = (1_509_350_490_461_180_105, 7);
     let tui = Tui::new("human draft A");
     let queued = report(Outcome::NotSent(Veto::Draft), DraftState::Unchanged);
@@ -480,6 +487,7 @@ fn only_an_allowlisted_channel_takes_the_stash_path() {
 
 #[test]
 fn configured_stash_channels_are_scoped_and_use_the_resolved_input_channel() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let (channel, other) = (18_003_000_001, 18_003_000_002);
     let first = StashChannelGuard::new(channel);
     let second = StashChannelGuard::new(other);

@@ -9,8 +9,8 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 
 use super::super::SESSION_CLEARED_RESPONSE;
+use super::clear_channel_session_state;
 use super::clear_persist_failure_tests::{queue_len, seed_backlog, session_state};
-use super::{SoftClearNotifyMode, clear_channel_session_state};
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -26,8 +26,8 @@ fn cleared(discarded: usize) -> String {
 
 async fn clear(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> String {
     let http = Arc::new(serenity::Http::new(""));
-    let notify = SoftClearNotifyMode::Suppress;
-    let clear = clear_channel_session_state(&http, shared, provider, channel, "/clear", notify);
+
+    let clear = clear_channel_session_state(&http, shared, provider, channel, "/clear");
     clear.await.expect("a clear always commits").reply()
 }
 
@@ -343,8 +343,7 @@ fn a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg() {
 
 const HERDR_RETIRED_CHANNEL: u64 = 1_479_671_305_341_200_002;
 
-// A Herdr channel whose execution already retired still ends the managed tmux and process it
-// left behind, and closes no pane.
+// A Retired execution cannot authorize managed fallback; an unmatched owner stays Held.
 #[test]
 fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
     use crate::services::session_host::herdr_termination_rig as herdr;
@@ -377,13 +376,38 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
         let _switches = rig
             .bind(&pool, &shared.token_hash, &key, herdr::HostedState::Retired)
             .await;
+        let mut foreign = rig.record_as(
+            (&shared.token_hash, &key),
+            herdr::HostedState::Retired,
+            provider.as_str(),
+        );
+        foreign.owner.runtime_root = "another-runtime".into();
+        foreign
+            .source_ref
+            .runtime_root
+            .clone_from(&foreign.owner.runtime_root);
+        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE session_key = $2")
+            .bind(serde_json::to_value(foreign).unwrap())
+            .bind(&key)
+            .execute(&pool)
+            .await
+            .unwrap();
         let managed = Managed::launch(&shared, &provider, (channel, "p11-clear")).await;
 
         let reply = clear(&shared, &provider, channel).await;
 
-        assert_eq!(reply, cleared(0));
+        assert!(reply.contains("대기 메시지 0건을 비웠어요."), "{reply}");
+        assert!(
+            reply.contains("이전 Herdr 실행은 정리하지 못했어요."),
+            "{reply}"
+        );
+        assert!(reply.contains("local owner or endpoint differs"), "{reply}");
         assert!(rig.writes().is_empty(), "no pane is closed");
-        assert!(managed.ended(), "the managed tmux and process end");
+        assert!(!managed.ended(), "a Retired row grants no managed fallback");
+        assert_eq!(
+            herdr::row(&pool, &key).await,
+            Some((herdr::HostedState::Retired, herdr::EXECUTION.to_string()))
+        );
         pool.close().await;
         db.drop().await;
     });

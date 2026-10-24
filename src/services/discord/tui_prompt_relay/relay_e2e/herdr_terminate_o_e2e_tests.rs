@@ -839,6 +839,10 @@ fn successor_stamps(nonce: &str, provider: &str) -> ExpectedExecution {
 struct Successor(&'static str);
 
 impl HerdrLaunchHost for Successor {
+    fn mode(&self, _: &HerdrLaunchEndpoint) -> crate::config::session_hosts::EndpointMode {
+        crate::config::session_hosts::EndpointMode::LegacyDedicated
+    }
+
     fn restore_resume(&self, _: &HerdrLaunchEndpoint) -> RestoreResume {
         RestoreResume::Off {
             witness: ServerWitness::for_test(1),

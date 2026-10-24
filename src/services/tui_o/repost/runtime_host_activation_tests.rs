@@ -261,12 +261,11 @@ impl HostIo for RealHost {
 }
 
 #[tokio::test]
-async fn f6_off_host_has_zero_pg_statements_with_on_positive_control_pg() {
+async fn f6_default_host_reaches_repost_pg_statements_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::channel_policy::{Adoption, Candidate};
     use crate::services::tui_o::ownership::OwnershipGate;
-    use crate::services::tui_o::repost::config::RepostConfig;
     use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 
     let _live = crate::config_live_reload::test_live_guard(
@@ -291,106 +290,88 @@ async fn f6_off_host_has_zero_pg_statements_with_on_positive_control_pg() {
     assert!(statements.simple.load(Ordering::SeqCst) > 0);
     statements.armed.store(false, Ordering::SeqCst);
 
-    for enabled in [false, true] {
-        let channel = 63250701 + u64::from(enabled);
-        let root = runtime.path().join(channel.to_string());
-        std::fs::create_dir_all(&root).unwrap();
-        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
-            .unwrap()
-            .unwrap();
-        store
-            .begin_era(&[channel], chrono::Utc::now(), |channel| {
-                Ok(Initialized {
-                    channel,
-                    sources: Vec::new(),
-                    initial_anchor: 100,
-                    build_digest: "d4act".into(),
-                    at: chrono::Utc::now(),
-                })
-            })
-            .unwrap();
-        let mut config = crate::config::Config::default();
-        config.tui_o = Some(TuiOConfig {
-            repost: RepostConfig {
-                enabled,
-                channels: [channel].into_iter().collect(),
-            },
-            ..TuiOConfig::default()
-        });
-        crate::config_live_reload::install(config);
-        let shared =
-            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-        let io = Arc::new(RealHost {
-            gateway: GatewayHost {
-                shared,
-                alarms: Arc::new(AlarmRouter::for_process(None, None)),
-                self_id_wait: Duration::ZERO,
-                configured_id: None,
-                turn: TurnConfig::default(),
-                rest: None,
-                boot: None,
-            },
-            port: Arc::new(GatewayPort::new(
-                Arc::new(serenity::Http::new("test-token")),
-                42,
-            )),
-            completed: Arc::new(AtomicUsize::new(0)),
-            notice: Arc::new(Notify::new()),
-            measure: Arc::new(Notify::new()),
-            send: None,
-            wire_turns: None,
-        });
-        let gate = Arc::new(OwnershipGate::default());
-        gate.acquired();
-        let ready = Arc::new(host::Readiness::default());
-        statements.armed.store(false, Ordering::SeqCst);
-        let mut handles = host::start_managed(
-            ShadowProvider::Claude,
-            true,
-            vec![(
+    let channel = 63250701;
+    let root = runtime.path().join(channel.to_string());
+    std::fs::create_dir_all(&root).unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, &root)
+        .unwrap()
+        .unwrap();
+    store
+        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
                 channel,
-                Some(ClaudeTui),
-                Some(Candidate::new(Adoption::Committed)),
-            )],
-            || host::HostParts {
-                io: Arc::clone(&io),
-                runtime_root: Some(root),
-                gate,
-                readiness: Arc::clone(&ready),
-            },
-        );
-        assert_eq!(handles.len(), 1);
-        tokio::time::timeout(Duration::from_secs(5), io.notice.notified())
-            .await
-            .expect("real host re-post turn completed");
-        assert!(
-            io.completed.load(Ordering::SeqCst) > 0,
-            "the actor must reach the real factory hook"
-        );
-        let warmup_turns = io.completed.load(Ordering::SeqCst);
-        // The host adopted its store and warmed the re-post turn before measurement begins.
-        statements.reset();
-        io.measure.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while io.completed.load(Ordering::SeqCst) == warmup_turns {
-                io.notice.notified().await;
-            }
+                sources: Vec::new(),
+                initial_anchor: 100,
+                build_digest: "d4act".into(),
+                at: chrono::Utc::now(),
+            })
         })
+        .unwrap();
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let io = Arc::new(RealHost {
+        gateway: GatewayHost {
+            shared,
+            alarms: Arc::new(AlarmRouter::for_process(None, None)),
+            self_id_wait: Duration::ZERO,
+            configured_id: None,
+            turn: TurnConfig::default(),
+            rest: None,
+            boot: None,
+        },
+        port: Arc::new(GatewayPort::new(
+            Arc::new(serenity::Http::new("test-token")),
+            42,
+        )),
+        completed: Arc::new(AtomicUsize::new(0)),
+        notice: Arc::new(Notify::new()),
+        measure: Arc::new(Notify::new()),
+        send: None,
+        wire_turns: None,
+    });
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let ready = Arc::new(host::Readiness::default());
+    statements.armed.store(false, Ordering::SeqCst);
+    let mut handles = host::start_managed(
+        ShadowProvider::Claude,
+        true,
+        vec![(
+            channel,
+            Some(ClaudeTui),
+            Some(Candidate::new(Adoption::Committed)),
+        )],
+        || host::HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(root),
+            gate,
+            readiness: Arc::clone(&ready),
+        },
+    );
+    assert_eq!(handles.len(), 1);
+    tokio::time::timeout(Duration::from_secs(5), io.notice.notified())
         .await
-        .expect("a fresh real-host re-post turn completed while observed");
-        let observed = statements.count();
-        if enabled {
-            assert!(
-                observed > 0,
-                "on must execute re-post statements in the same harness"
-            );
-        } else {
-            assert_eq!(observed, 0, "off must execute zero re-post statements");
+        .expect("real host re-post turn completed");
+    assert!(
+        io.completed.load(Ordering::SeqCst) > 0,
+        "the actor must reach the real factory hook"
+    );
+    let warmup_turns = io.completed.load(Ordering::SeqCst);
+    // The host adopted its store and warmed the re-post turn before measurement begins.
+    statements.reset();
+    io.measure.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while io.completed.load(Ordering::SeqCst) == warmup_turns {
+            io.notice.notified().await;
         }
-        handles.pop().unwrap().stop_and_join().await.unwrap();
-        statements.armed.store(false, Ordering::SeqCst);
-        assert!(!ready.is_hosted(channel));
-    }
+    })
+    .await
+    .expect("a fresh real-host re-post turn completed while observed");
+    let observed = statements.count();
+    assert!(observed > 0, "default host must execute re-post statements");
+    handles.pop().unwrap().stop_and_join().await.unwrap();
+    statements.armed.store(false, Ordering::SeqCst);
+    assert!(!ready.is_hosted(channel));
     pool.close().await;
     proxy.abort();
     fixture.drop().await;
@@ -472,18 +453,6 @@ fn host_run() -> crate::services::tui_o::repost::io::probe::evidence::RunScope {
     }
 }
 
-fn on_switch(channel: u64) -> crate::services::tui_o::repost::config::RepostSwitch {
-    use crate::services::tui_o::repost::config::{RepostConfig, RepostSwitch};
-    let on = TuiOConfig {
-        repost: RepostConfig {
-            enabled: true,
-            channels: [channel].into_iter().collect(),
-        },
-        ..TuiOConfig::default()
-    };
-    RepostSwitch::new(Some(&on), watch::channel(None).1)
-}
-
 impl RepostHook<RealWriter> for SendOnce {
     fn turn<'a>(&'a mut self, writer: &'a mut RealWriter) -> Turned<'a, ()> {
         use crate::services::tui_o::repost::dispatch::Admission;
@@ -497,7 +466,6 @@ impl RepostHook<RealWriter> for SendOnce {
                 return;
             }
             writer.set_live(true);
-            writer.bind_switch(Arc::new(|| true));
             let row = o_piece_delivery::load(&self.pool, &self.key)
                 .await
                 .unwrap()
@@ -507,16 +475,8 @@ impl RepostHook<RealWriter> for SendOnce {
                 .unwrap();
             let scope = EvidenceScope::of(&row, &spent, &host_run()).unwrap();
             let intent = DispatchIntent::Auto(Box::new(absent_evidence(scope, host_run())));
-            let mut runner = Runner::new(
-                on_switch(self.key.unit().channel_id),
-                self.pool.clone(),
-                42,
-                host_run(),
-            );
-            let admission = runner
-                .try_next_dispatch(writer, OriginalGate::Admitted, intent)
-                .await
-                .unwrap();
+            let mut runner = Runner::new(self.pool.clone(), 42, host_run());
+            let admission = runner.try_next_dispatch(writer, intent).await.unwrap();
             let Admission::Granted { permit, lease } = admission else {
                 panic!("real-host ready candidate must grant");
             };
@@ -590,8 +550,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
         )
         .unwrap();
         let mut provenance = ProvenanceLog::open(&root.join("seed.jsonl")).unwrap();
-        let mut on = on_switch(channel);
-        let admitter = Admitter::when_on(&mut on, &pool, "host-node", 42).unwrap();
+        let admitter = Admitter::new(&pool, "host-node", 42);
         admitter
             .adopt_uncertain(
                 &mut provenance,
@@ -882,57 +841,6 @@ impl WireServer {
     }
 }
 
-#[derive(Clone, Copy)]
-enum RollbackStep {
-    Off,
-    Wait,
-    Scan,
-    Decide,
-}
-
-fn rollback_steps() -> Vec<RollbackStep> {
-    let runbook = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("docs/tui-o-writer-canary-runbook.md"),
-    )
-    .unwrap();
-    let Some((_, section)) = runbook.split_once("## 8. Roll back after re-post activation") else {
-        return Vec::new();
-    };
-    section
-        .lines()
-        .take_while(|line| !line.starts_with("## "))
-        .filter_map(|line| {
-            let (number, action) = line.split_once(". ")?;
-            number.parse::<usize>().ok()?;
-            match action {
-                "Confirm effective OFF." => Some(RollbackStep::Off),
-                "Wait for in-flight requests and writer quiescence." => Some(RollbackStep::Wait),
-                "Inspect all activated channel ledgers." => Some(RollbackStep::Scan),
-                "Decide whether the older binary may run." => Some(RollbackStep::Decide),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-fn validated_repost(path: &std::path::Path, enabled: bool, channel: u64) -> bool {
-    std::fs::write(
-        path,
-        format!("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n    channels: [{channel}]\n"),
-    )
-    .unwrap();
-    matches!(
-        crate::config_live_reload::reload_from_path(path),
-        crate::config_live_reload::ReloadOutcome::Applied { .. }
-    ) && crate::config_live_reload::current().is_some_and(|config| {
-        config
-            .tui_o
-            .as_ref()
-            .is_some_and(|o| o.repost.enabled == enabled)
-    })
-}
-
 struct WireCase {
     first_posts: usize,
     posts: usize,
@@ -952,7 +860,7 @@ struct WireCase {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
+async fn d4act2_gateway_repost_host_stop_and_rollback_quiescence_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::channel_policy::{Adoption, Candidate};
@@ -980,12 +888,9 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
     );
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate().await;
-    let documented = rollback_steps();
     let mut activated_ledgers = Vec::new();
     let mut cases = Vec::new();
-    let mut reloads_applied = true;
-    for case in 0..3 {
-        let enabled = case != 0;
+    for case in 1..=2 {
         let channel = 63250731 + case;
         let root = runtime.path().join(channel.to_string());
         std::fs::create_dir_all(&root).unwrap();
@@ -1053,9 +958,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         provenance
             .append(ProvenanceEntry::intent(0, &original, generation).unwrap())
             .unwrap();
-        let mut on = on_switch(channel);
-        Admitter::when_on(&mut on, &pool, "o-writer", 42)
-            .unwrap()
+        Admitter::new(&pool, "o-writer", 42)
             .adopt_uncertain(
                 &mut provenance,
                 &OriginalAttempt {
@@ -1068,9 +971,21 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             .await
             .unwrap();
         drop(provenance);
-        let config_path = runtime.path().join(format!("{channel}.yaml"));
-        reloads_applied &= validated_repost(&config_path, enabled, channel);
         let server = WireServer::start(channel, &key).await;
+        // Unrelated listener reads cannot count as permission/history evidence.
+        for _ in 0..2 {
+            let mut socket = TcpStream::connect(server.base.strip_prefix("http://").unwrap())
+                .await
+                .unwrap();
+            socket
+                .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        }
+        assert_eq!(server.probe_reads.load(Ordering::SeqCst), 0);
         let http = Arc::new(serenity::Http::new(&format!("loopback-{channel}")));
         let turns = Arc::new(WireTurns::default());
         let shared =
@@ -1114,27 +1029,18 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         );
         let mut handle = handles.pop();
         turns.wait(1).await;
-        if enabled {
-            tokio::time::pause();
-            tokio::time::advance(FIRST_PASS_AFTER).await;
-            tokio::time::resume();
-        }
+        tokio::time::pause();
+        tokio::time::advance(FIRST_PASS_AFTER).await;
+        tokio::time::resume();
         turns.proceed.notify_one();
         turns.wait(2).await;
-        if enabled {
-            tokio::time::pause();
-            tokio::time::advance(SECOND_PASS_AFTER).await;
-            tokio::time::resume();
-        }
+        tokio::time::pause();
+        tokio::time::advance(SECOND_PASS_AFTER).await;
+        tokio::time::resume();
         turns.proceed.notify_one();
-        let reached = if enabled {
-            tokio::select! {
-                () = server.first_429.notified() => true,
-                () = turns.wait(3) => false,
-            }
-        } else {
-            turns.wait(3).await;
-            false
+        let reached = tokio::select! {
+            () = server.first_429.notified() => true,
+            () = turns.wait(3) => false,
         };
         let first_posts = server.posts.load(Ordering::SeqCst);
         let (mut early_tags, mut allow_old, mut queue_pending, mut rate_headers) =
@@ -1186,69 +1092,39 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
                 }
                 turns.wait(3).await;
             }
-            let canonical = [
-                RollbackStep::Off,
-                RollbackStep::Wait,
-                RollbackStep::Scan,
-                RollbackStep::Decide,
-            ];
-            let steps = if documented.len() == 4 {
-                &documented[..]
-            } else {
-                &canonical[..]
-            };
-            let mut scanned = None;
-            let mut off_confirmed = false;
-            let mut joined = false;
-            for step in steps {
-                match step {
-                    RollbackStep::Off => {
-                        off_confirmed = validated_repost(&config_path, false, channel);
-                        reloads_applied &= off_confirmed;
-                        assert!(
-                            scan_activated_ledgers(
-                                &activated_ledgers,
-                                off_confirmed,
-                                joined,
-                                true,
-                                fixture_not_sent_tags,
-                            )
-                            .is_err()
-                        );
-                        // This early observation cannot authorize rollback before the writer joins.
-                        early_tags = fixture_not_sent_tags(&ledger_path).unwrap();
-                    }
-                    RollbackStep::Wait => {
-                        if let Some(waiter) = queued.take() {
-                            let guard = waiter.await;
-                            rate_headers = guard.limit() == 17
-                                && guard.remaining() == 0
-                                && guard.reset_after() == Some(Duration::from_secs(2))
-                                && guard.reset().is_some();
-                            drop(guard);
-                        }
-                        turns.wait(3).await;
-                        if let Some(writer) = handle.take() {
-                            writer.stop_and_join().await.unwrap();
-                        }
-                        joined = !readiness.is_hosted(channel) && handle.is_none();
-                    }
-                    RollbackStep::Scan => {
-                        scanned = scan_activated_ledgers(
-                            &activated_ledgers,
-                            off_confirmed,
-                            joined,
-                            true,
-                            fixture_not_sent_tags,
-                        )
-                        .ok()
-                        .map(|reads| reads.iter().any(|(_, tags)| !matches!(tags, Ok(0))));
-                    }
-                    RollbackStep::Decide => {
-                        allow_old = Some(scanned == Some(false));
-                    }
-                }
+            // Stop closes the live request guard immediately, before waiting for the 429 sleep.
+            let stopping = handle.take().unwrap().stop_and_join();
+            assert!(
+                scan_activated_ledgers(
+                    &activated_ledgers,
+                    true,
+                    false,
+                    true,
+                    fixture_not_sent_tags,
+                )
+                .is_err()
+            );
+            early_tags = fixture_not_sent_tags(&ledger_path).unwrap();
+            if let Some(waiter) = queued.take() {
+                let guard = waiter.await;
+                rate_headers = guard.limit() == 17
+                    && guard.remaining() == 0
+                    && guard.reset_after() == Some(Duration::from_secs(2))
+                    && guard.reset().is_some();
+                drop(guard);
             }
+            turns.wait(3).await;
+            stopping.await.unwrap();
+            let joined = !readiness.is_hosted(channel);
+            let reads = scan_activated_ledgers(
+                &activated_ledgers,
+                true,
+                joined,
+                true,
+                fixture_not_sent_tags,
+            )
+            .unwrap();
+            allow_old = Some(reads.iter().all(|(_, tags)| matches!(tags, Ok(0))));
             if let Some(waiter) = queued.take() {
                 drop(waiter.await);
             }
@@ -1267,29 +1143,25 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             first_posts,
             posts: server.posts.load(Ordering::SeqCst),
             valid_posts: server.valid_posts.load(Ordering::SeqCst),
-            reads: server.reads.load(Ordering::SeqCst),
+            reads: server.probe_reads.load(Ordering::SeqCst),
             early_tags,
             late_tags: fixture_not_sent_tags(&ledger_path).unwrap(),
             allow_old,
             queue_pending,
             rate_headers,
             quiescent: !readiness.is_hosted(channel),
-            old_bytes: if case == 0 {
-                bytes == old_bytes
-            } else {
-                bytes.starts_with(&old_bytes)
-            },
+            old_bytes: bytes.starts_with(&old_bytes),
             spent,
         });
         server.task.abort();
         let _ = server.task.await;
-        if enabled && !reached {
+        if !reached {
             break;
         }
     }
     pool.close().await;
     fixture.drop().await;
-    for case in cases.iter().skip(1) {
+    for case in &cases {
         assert_eq!(
             case.first_posts, 1,
             "the third production turn must reach the actual first POST"
@@ -1297,23 +1169,15 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
     }
     assert_eq!(
         cases.len(),
-        3,
-        "all three cases use the same real factory harness"
-    );
-    assert!(
-        reloads_applied,
-        "every switch change came from a validated reload"
+        2,
+        "both cases use the same real factory harness"
     );
     assert!(cases.iter().all(|case| case.quiescent && case.old_bytes));
     assert!(
         cases.iter().all(|case| case.valid_posts == case.posts),
         "each actual POST, including the first 429, carried the original payload and identifiers"
     );
-    assert_eq!(
-        (cases[0].posts, cases[0].reads, cases[0].late_tags),
-        (0, 0, 0)
-    );
-    for case in cases.iter().skip(1) {
+    for case in &cases {
         assert!(
             case.queue_pending && case.rate_headers,
             "the factory's route hook really waited on 429"
@@ -1324,13 +1188,13 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         );
         assert_eq!(
             case.early_tags, 0,
-            "an effective OFF inspection can precede terminal recording"
+            "an early stop inspection can precede terminal recording"
         );
     }
-    assert_eq!((cases[1].posts, cases[1].late_tags), (2, 0));
-    assert_eq!((cases[2].posts, cases[2].late_tags), (1, 1));
+    assert_eq!((cases[0].posts, cases[0].late_tags), (2, 0));
+    assert_eq!((cases[1].posts, cases[1].late_tags), (1, 1));
     assert!(
-        std::fs::read(&activated_ledgers[2])
+        std::fs::read(&activated_ledgers[1])
             .unwrap()
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
@@ -1338,31 +1202,26 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         "late NotSent belongs to the new re-post; old Prepared/NotFound remain intact"
     );
     assert_eq!(
-        cases[1].spent,
+        cases[0].spent,
         vec![
             (0, Some(AttemptResult::Uncertain)),
             (1, Some(AttemptResult::Created))
         ]
     );
     assert_eq!(
-        cases[2].spent,
+        cases[1].spent,
         vec![
             (0, Some(AttemptResult::Uncertain)),
             (1, Some(AttemptResult::NotSent))
         ]
     );
     assert_eq!(
-        documented.len(),
-        4,
-        "the runbook must supply all four rollback operations"
-    );
-    assert_eq!(
-        cases[1].allow_old,
+        cases[0].allow_old,
         Some(true),
         "quiescent ledgers without the tag permit compatibility assessment"
     );
     assert_eq!(
-        cases[2].allow_old,
+        cases[1].allow_old,
         Some(false),
         "REFUSE an older reader after late NotSent; do not reuse an early scan"
     );

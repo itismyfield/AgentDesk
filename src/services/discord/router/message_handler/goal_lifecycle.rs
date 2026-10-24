@@ -267,56 +267,84 @@ mod codex_goal_lifecycle_unit_tests {
         );
     }
 
-    fn durable_boundary_call() -> String {
-        format!("{}{}", "record_fresh_session_", "context_boundary(")
+    const INTAKE_TURN: &str = include_str!("intake_turn.rs");
+    const HEADLESS_TURN: &str = include_str!("headless_turn.rs");
+    const GOAL_LIFECYCLE: &str = include_str!("goal_lifecycle.rs");
+    const INTAKE_BRANCH: &str =
+        "let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);";
+    const HEADLESS_BRANCH: &str =
+        "let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);";
+    const BOUNDARY: &str = "record_fresh_session_context_boundary(";
+    const PROVIDER_CLEAR: &str = "clear_codex_goal_start_provider_session(";
+    const HELPER: &str = "pub(super) async fn record_fresh_session_context_boundary(";
+    const DB_BOUNDARY: &str = "crate::db::session_transcripts::record_channel_clear_boundary(";
+
+    /// Classification 2: after the goal-fresh branch, the durable boundary is called as
+    /// written before the provider clear, comments excluded. A lexical tripwire.
+    fn boundary_before_clear_gaps(source: &str, branch_start: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let source = Lexed::new(source);
+        let Some(branch) = source.find(branch_start) else {
+            return vec![format!("missing goal-fresh branch: {branch_start}")];
+        };
+        match (
+            source.find_after(branch, BOUNDARY),
+            source.find_after(branch, PROVIDER_CLEAR),
+        ) {
+            (Some(boundary), Some(clear)) if boundary < clear => Vec::new(),
+            found => vec![format!(
+                "durable boundary must precede provider clear: {found:?}"
+            )],
+        }
     }
 
-    fn assert_goal_fresh_records_before_provider_clear(source: &str, branch_start: &str) {
-        let branch = source
-            .find(branch_start)
-            .unwrap_or_else(|| panic!("missing goal-fresh branch: {branch_start}"));
-        let boundary = source[branch..]
-            .find(&durable_boundary_call())
-            .map(|offset| branch + offset)
-            .expect("goal-fresh branch must record a durable transcript boundary");
-        let provider_clear = source[branch..]
-            .find("clear_codex_goal_start_provider_session(")
-            .map(|offset| branch + offset)
-            .expect("goal-fresh branch must clear the provider session");
-
-        assert!(
-            boundary < provider_clear,
-            "durable /goal fresh boundary must be recorded before provider state is cleared"
-        );
+    /// The helper body itself, not a later item, persists the durable channel boundary.
+    fn helper_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        match Lexed::new(source).block(HELPER) {
+            Some(helper) if helper.contains(DB_BOUNDARY) => Vec::new(),
+            _ => vec!["fresh-session helper must persist the durable channel boundary".into()],
+        }
     }
 
     #[test]
     fn goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear() {
-        assert_goal_fresh_records_before_provider_clear(
-            include_str!("intake_turn.rs"),
-            "let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);",
+        let none = Vec::<String>::new();
+        assert_eq!(boundary_before_clear_gaps(INTAKE_TURN, INTAKE_BRANCH), none);
+        assert_eq!(
+            boundary_before_clear_gaps(HEADLESS_TURN, HEADLESS_BRANCH),
+            none
         );
-        assert_goal_fresh_records_before_provider_clear(
-            include_str!("headless_turn.rs"),
-            "let goal_fresh = matches!(headless_goal_kind, GoalCommandKind::FreshStart);",
-        );
+        assert_eq!(helper_gaps(GOAL_LIFECYCLE), none);
+    }
 
-        let helper_source = include_str!("goal_lifecycle.rs");
-        let helper_start = format!(
-            "{}{}",
-            "pub(super) async fn record_fresh_session_", "context_boundary("
-        );
-        let helper = helper_source
-            .find(&helper_start)
-            .expect("fresh-session boundary helper exists");
-        let db_boundary_call = format!(
-            "{}{}",
-            "crate::db::session_transcripts::record_channel_", "clear_boundary("
-        );
-        assert!(
-            helper_source[helper..].contains(&db_boundary_call),
-            "fresh-session helper must persist the durable channel boundary"
-        );
+    #[test]
+    fn goal_fresh_guards_reject_commented_and_reordered_boundaries() {
+        use crate::services::discord::router::source_guard_support::{forge, swap};
+        use crate::test_support::CommentForgery;
+        for forgery in CommentForgery::ALL {
+            for (source, branch) in [
+                (INTAKE_TURN, INTAKE_BRANCH),
+                (HEADLESS_TURN, HEADLESS_BRANCH),
+            ] {
+                for needle in [branch, BOUNDARY, PROVIDER_CLEAR] {
+                    let forged = forge(source, needle, forgery);
+                    assert!(forged.contains(needle));
+                    let gaps = boundary_before_clear_gaps(&forged, branch);
+                    assert!(!gaps.is_empty(), "{forgery:?} `{needle}` passes");
+                }
+            }
+            for needle in [HELPER, DB_BOUNDARY] {
+                let forged = forge(GOAL_LIFECYCLE, needle, forgery);
+                assert!(forged.contains(needle));
+                assert!(
+                    !helper_gaps(&forged).is_empty(),
+                    "{forgery:?} `{needle}` passes"
+                );
+            }
+        }
+        let clear_first = swap(INTAKE_TURN, BOUNDARY, PROVIDER_CLEAR);
+        assert!(!boundary_before_clear_gaps(&clear_first, INTAKE_BRANCH).is_empty());
     }
 }
 

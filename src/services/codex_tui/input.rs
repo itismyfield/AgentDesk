@@ -2279,6 +2279,7 @@ mod tests {
         snapshot
     }
 
+    mod source_guard_tests;
     mod startup_update_tests;
 
     #[test]
@@ -2322,17 +2323,8 @@ mod tests {
 
     #[test]
     fn codex_steering_production_path_uses_confirmed_submit() {
-        let module_src = include_str!("input.rs");
-        let steering_entry = module_src
-            .find("pub(crate) fn inject_steering_prompt(")
-            .expect("Codex steering entry point exists");
-        let steering_body = module_src[steering_entry..]
-            .split_once("\n}\n")
-            .expect("steering entry has an explicit function boundary")
-            .0;
-
-        assert!(steering_body.contains("submit_codex_followup_prompt_under_lock("));
-        assert!(!steering_body.contains("run_actions_with_executor("));
+        let gaps = source_guard_tests::steering_submit_gaps(source_guard_tests::INPUT);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]

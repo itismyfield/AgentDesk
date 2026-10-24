@@ -211,16 +211,38 @@ async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
         serde_json::json!({"type": "event_msg", "timestamp": Utc::now().to_rfc3339(),
         "payload": {"type": "task_complete", "turn_id": "t1"}}),
     );
+    let opener = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|record| {
+            record
+                .pointer("/payload/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("task_started")
+        })
+        .unwrap();
+    let closing: serde_json::Value = serde_json::from_slice(&end).unwrap();
+    let timestamp = |record: &serde_json::Value| {
+        DateTime::parse_from_rfc3339(record["timestamp"].as_str().unwrap()).unwrap()
+    };
+    let elapsed = timestamp(&closing)
+        .signed_duration_since(timestamp(&opener))
+        .num_milliseconds();
+    let expected = [
+        "the answer".to_owned(),
+        crate::services::turn_summary_line::render(
+            crate::services::turn_summary_line::Outcome::Completed,
+            u64::try_from(elapsed).ok(),
+            None,
+            None,
+        ),
+    ];
     append(&path, &[answer("msg_1", "the answer"), end].concat());
     polls(3).await;
-    assert_eq!(
-        harness.port.posts(),
-        ["the answer"],
-        "{:?}",
-        io.alarms.halted()
-    );
+    assert_eq!(harness.port.posts(), expected, "{:?}", io.alarms.halted());
     polls(3).await;
-    assert_eq!(harness.port.posts(), ["the answer"]);
+    assert_eq!(harness.port.posts(), expected);
 }
 
 /// A Legacy body sent after the baseline, finished or not, skips the rollout bound next without

@@ -14,7 +14,7 @@ const DISPLAY_LIMIT: usize = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     id: Option<String>,
-    class: &'static str,
+    class: String,
     summary: Option<String>,
     started: Instant,
     started_unix: i64,
@@ -93,7 +93,7 @@ impl ToolActivityRing {
                         result: None,
                         elapsed: None,
                         unconfirmed: false,
-                        background: matches!(class(name), "Task" | "Bash")
+                        background: matches!(class(name).as_str(), "Task" | "Bash")
                             && input
                                 .as_deref()
                                 .map(super::status_events::tool_input_value)
@@ -242,7 +242,10 @@ impl ToolActivityRing {
                 None => format!("  시작 <t:{}:R>", row.started_unix),
                 _ => String::new(),
             };
-            lines.push(format!("{glyph} {}{summary}{time}", row.class));
+            lines.push(format!(
+                "{glyph} {}{summary}{time}",
+                row.class.replace('_', "\\_")
+            ));
         }
         if self.total > selected.len() {
             lines.push(format!("… 외 {}개", self.total - selected.len()));

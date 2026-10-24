@@ -23,10 +23,8 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-#[cfg(not(test))]
-use crate::services::discord::execute_intake_turn_core;
 use crate::services::discord::{IntakeExecution, IntakeRequest, SharedData, TurnKind};
-use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::tui_o::cutover::intake_route;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
 use sqlx::PgPool;
@@ -34,9 +32,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-#[cfg(test)]
-use test_executor::execute_intake_turn_core;
-
+mod o_input;
+#[cfg(unix)]
+pub(crate) use o_input::{BeforeEffects, take_before_effects};
+use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[derive(Default)]
 struct MarkDoneMissCounters {
     stamp_handoff_observed: AtomicU64,
@@ -282,7 +281,9 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
-    let mut held = intake_route::held_channels(provider);
+    let mut held = intake_route::held_input_channels(provider)
+        .await
+        .map_err(sqlx::Error::Protocol)?;
     held.sort_unstable();
     held.dedup();
     let claimed =
@@ -328,7 +329,17 @@ pub(crate) async fn run_intake_worker_tick(
             return Ok(TickOutcome::Processed);
         }
     };
-    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+    if hold_off_o_gateway(
+        pool,
+        &row,
+        claim_owner,
+        provider,
+        request.channel_id,
+        target_instance_id,
+        "preaccept",
+    )
+    .await?
+    {
         return Ok(TickOutcome::Held);
     }
 
@@ -401,7 +412,17 @@ pub(crate) async fn run_intake_worker_tick(
     }
 
     // Readiness may have changed while the runtime and uploads resolved.
-    if hold_off_o_gateway(pool, &row, claim_owner, provider, request.channel_id).await? {
+    if hold_off_o_gateway(
+        pool,
+        &row,
+        claim_owner,
+        provider,
+        request.channel_id,
+        target_instance_id,
+        "final",
+    )
+    .await?
+    {
         return Ok(TickOutcome::Held);
     }
 
@@ -447,6 +468,7 @@ pub(crate) async fn run_intake_worker_tick(
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
+        &row,
         &runtime.http,
         &runtime.shared,
         &runtime.token,
@@ -454,7 +476,6 @@ pub(crate) async fn run_intake_worker_tick(
         uploads,
     )
     .await;
-
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
     let outcome = match result {
@@ -518,33 +539,6 @@ async fn release_cancelled_claim(
         );
     }
     Ok(())
-}
-
-/// Returns an O channel's claim to pending unless this node's writer can take it right now, so the
-/// row waits for its gateway instead of running here or failing into a retry. A delegated row
-/// also waits unless this node holds the home at the row's epoch with intake open.
-async fn hold_off_o_gateway(
-    pool: &PgPool,
-    row: &IntakeOutboxRow,
-    claim_owner: &str,
-    provider: &str,
-    channel_id: ChannelId,
-) -> Result<bool, sqlx::Error> {
-    let home = super::channel_home::intake_hold(&row.channel_id, row.home_epoch);
-    let Some(detail) = home.or_else(|| match intake_route::route(provider, channel_id.get()) {
-        IntakeRoute::Hold(detail) => Some(detail),
-        IntakeRoute::Unselected | IntakeRoute::Gateway => None,
-    }) else {
-        return Ok(false);
-    };
-    let released = return_claimed_to_pending(pool, row.id, claim_owner).await?;
-    tracing::warn!(
-        row_id = row.id,
-        channel_id = row.channel_id,
-        released,
-        "[intake_worker] O channel held before accept: {detail}"
-    );
-    Ok(true)
 }
 
 /// Run the poll loop forever. Returns when the shutdown probe reads true.
@@ -801,74 +795,21 @@ mod tests {
         }
     }
 
+    mod source_guard_tests;
+
     #[test]
     fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
-        let executor_source =
-            include_str!("../discord/router/message_handler/intake_turn/worker_entry.rs");
-        let start = executor_source
-            .find("pub(crate) async fn execute_intake_turn_core(")
-            .expect("worker executor exists");
-        let executor = &executor_source[start..];
-        let call_start = executor
-            .find("super::handle_text_message(")
-            .expect("worker delegates to the intake body");
-        let call_end = executor[call_start..]
-            .find("\n    .await")
-            .map(|offset| call_start + offset)
-            .expect("worker awaits the intake body");
-        let forwarding_call = &executor[call_start..call_end];
-
-        assert!(
-            forwarding_call.contains("request.preserve_on_cancel,\n        request,"),
-            "worker executor must pass the preservation bit restored from the durable row"
-        );
-        assert!(
-            !forwarding_call.contains("\n        false,\n        request,"),
-            "worker executor must not restore the historical hardcoded false"
-        );
+        let gaps =
+            source_guard_tests::preservation_forwarding_gaps(source_guard_tests::WORKER_ENTRY);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]
     fn worker_ok_branch_textually_contains_done_writer_once_and_err_branch_contains_none() {
-        // This is a source contract because exercising `run_intake_worker_tick`
-        // requires a production-shaped SharedData + Discord executor harness,
-        // while this module's lane intentionally remains PG-free and synchronous.
-        // It pins the current T2 precondition: the executor's `Ok(())` branch
-        // textually contains the intake lifecycle's `mark_done` call.
-        // This test does not strip comments or strings; the Python call-site
-        // gate owns that filtering layer.
-        let worker_source = include_str!("intake_worker.rs");
-        let tick_start = worker_source
-            .find("pub(crate) async fn run_intake_worker_tick(")
-            .expect("worker tick exists");
-        let tick_end = worker_source
-            .find("\nasync fn release_cancelled_claim(")
-            .expect("worker tick has its next symbol boundary");
-        let tick = &worker_source[tick_start..tick_end];
-        let result_start = tick
-            .find("let result = execute_intake_turn_core(")
-            .expect("worker invokes the executor");
-        let result = &tick[result_start..];
-        let ok_start = result
-            .find("Ok(IntakeExecution::Executed) => {")
-            .expect("executor Ok branch exists");
-        let err_start = result
-            .find("Err(error) => {")
-            .expect("executor Err branch exists");
-
-        assert!(ok_start < err_start, "Ok branch must precede Err branch");
-        assert_eq!(
-            result[ok_start..err_start].matches("mark_done(").count(),
-            1,
-            "execute_intake_turn_core Ok(()) must textually contain mark_done exactly once; \
-             for a T2 migration, update this test and the gate allowlist together"
-        );
-        assert_eq!(
-            result[err_start..].matches("mark_done(").count(),
-            0,
-            "execute_intake_turn_core Err must not textually contain mark_done; for a T2 migration, \
-             update this test and the gate allowlist together"
-        );
+        // A source contract: running the tick needs a production SharedData + Discord
+        // harness, while this lane stays PG-free. Comment-free judge in source_guard_tests.
+        let gaps = source_guard_tests::done_writer_gaps(source_guard_tests::INTAKE_WORKER);
+        assert_eq!(gaps, Vec::<String>::new());
     }
 
     #[test]

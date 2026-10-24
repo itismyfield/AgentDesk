@@ -51,7 +51,7 @@ class NonPgTestFilter(unittest.TestCase):
         result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
                                 check=True, capture_output=True, text=True)
         membership = load_membership_module()
-        self.assertEqual(json.loads(result.stdout), {"shard": list(range(membership.PG_SHARD_COUNT))})
+        self.assertEqual(json.loads(result.stdout), {"shard": [*range(membership.PG_SHARD_COUNT), "continuity"]})
 
     def test_failed_list_cannot_run_an_unsharded_selection(self) -> None:
         membership = load_membership_module()
@@ -121,7 +121,9 @@ bash -euo pipefail -c "$PROGRAM"
             jobs = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text("utf-8"))["jobs"]
             self.assertEqual(jobs[job_id]["strategy"], {
                 "fail-fast": False, "matrix": "${{ fromJSON(needs.pg_shards.outputs.matrix) }}"})
-            self.assertEqual(jobs[job_id]["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
+            self.assertNotIn("PG_INCLUDE_SHARD", jobs[job_id]["env"])
+            pg_step = next(step for step in jobs[job_id]["steps"] if step.get("name") == ("just test-postgres-shard" if filename == "ci-main.yml" else "PostgreSQL shard tests"))
+            self.assertEqual(pg_step["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
             plan = jobs["pg_shards"]["steps"][1]["run"]
             # The PR plan's full matrix is main's: every shard of the shared partition.
             self.assertIn("--pg-shard-matrix" if filename == "ci-main.yml" else "test-selection.py plan", plan)
@@ -276,6 +278,8 @@ bash -euo pipefail -c "$1"
             rc, whole = run("just test-postgres", None)
             self.assertEqual(rc, 0)
             shards = [run(command, str(index)) for index in range(membership.PG_SHARD_COUNT)]
+            continuity_rc, continuity_calls = run(command, "continuity")
+            self.assertEqual(continuity_rc, 0)
             for shard in ("", str(membership.PG_SHARD_COUNT)):
                 with self.subTest(shard=shard):
                     rc, calls = run(command, shard)
@@ -292,7 +296,7 @@ bash -euo pipefail -c "$1"
                  + " --nocapture --test-threads=1"],
             )
         self.assertEqual(
-            sorted(line for _, commands in shards for line in commands if not line.startswith(selection)),
+            sorted(line for _, commands in shards for line in commands if not line.startswith(selection)) + sorted(continuity_calls),
             targeted,
         )
 
@@ -323,7 +327,7 @@ bash -euo pipefail -c "$PROGRAM"
             listed, log = Path(temp) / "list", Path(temp) / "calls"
             listed.write_text("".join(name + ": test\n" for name in ids) + f"\n{len(ids)} tests, 0 benchmarks\n")
             calls = []
-            for shard in ("0", "1"):
+            for shard in ("0", "1", "continuity"):
                 log.write_text("")
                 env = {**os.environ, "ADK_LIB_TEST_ARTIFACT": temp, "PG_LIST": str(listed),
                        "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard, "CONTINUITY": continuity,
@@ -335,8 +339,10 @@ bash -euo pipefail -c "$PROGRAM"
             for shard in (0, 1):
                 self.assertEqual(calls[shard][0], "cargo test --lib -- " + " ".join(expected[shard])
                                  + " --nocapture --test-threads=1")
-            self.assertEqual(len(calls[0]), 8)
+            self.assertEqual(len(calls[0]), 1)
             self.assertEqual(len(calls[1]), 1)
+            self.assertEqual(len(calls[2]), 7)
+            self.assertTrue(all("--exact" not in call for call in calls[2]))
             log.write_text("")
             env.pop("PG_INCLUDE_SHARD")
             env["PROGRAM"] = "source scripts/ci/non-pg-test-filter.sh; run_non_pg_filter_replay"

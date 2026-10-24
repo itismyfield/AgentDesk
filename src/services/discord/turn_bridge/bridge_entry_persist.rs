@@ -5,6 +5,11 @@ use super::chunk_compose::body_mutation_telemetry::{
 };
 use super::context::BridgeCompletionSignal;
 use super::*;
+use identity_and_owner::{
+    live_watcher_relay_observation, reconciled_watcher_owner_channel_id, relay_owner_flags,
+};
+
+mod identity_and_owner;
 
 pub(in crate::services::discord) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
@@ -76,51 +81,6 @@ pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) status_panel_generation: &'a mut u64,
-}
-
-struct LiveWatcherRelayObservation {
-    incarnation: WatcherClaimIncarnation,
-}
-
-fn live_watcher_relay_observation(
-    shared: &SharedData,
-    owner_channel_id: ChannelId,
-) -> Option<LiveWatcherRelayObservation> {
-    let watcher = shared.tmux_watchers.get(&owner_channel_id)?;
-    if watcher.cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        return None;
-    }
-    Some(LiveWatcherRelayObservation {
-        incarnation: WatcherClaimIncarnation::from_handle(owner_channel_id, &watcher),
-    })
-}
-
-fn relay_owner_flags(
-    owner_kind: crate::services::discord::inflight::RelayOwnerKind,
-    watcher_registered: bool,
-) -> (bool, bool, bool) {
-    use crate::services::discord::inflight::RelayOwnerKind;
-
-    let watcher_owns_assistant_relay = matches!(owner_kind, RelayOwnerKind::Watcher);
-    let watcher_relay_available_for_turn = watcher_owns_assistant_relay && watcher_registered;
-    let standby_relay_owns_output = matches!(
-        owner_kind,
-        RelayOwnerKind::StandbyRelay | RelayOwnerKind::SessionBoundRelay | RelayOwnerKind::Unknown
-    );
-    (
-        watcher_owns_assistant_relay,
-        watcher_relay_available_for_turn,
-        standby_relay_owns_output,
-    )
-}
-
-fn reconciled_watcher_owner_channel_id(
-    durable_owner_channel_id: Option<u64>,
-    delivery_channel_id: u64,
-) -> ChannelId {
-    durable_owner_channel_id
-        .and_then(crate::services::discord::inflight::opt_channel_id)
-        .unwrap_or_else(|| ChannelId::new(delivery_channel_id))
 }
 
 pub(super) fn bridge_stream_relay_suppressed(
@@ -364,6 +324,7 @@ pub(super) fn persist_bridge_entry_inflight_state(
     shared: &SharedData,
     runtime: &mut BridgeEntryRuntimeState<'_>,
     placeholder_clear_applied: &mut bool,
+    captured_nonce: Option<&str>,
 ) -> crate::services::discord::inflight::GuardedSaveOutcome {
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, patch_bridge_entry_state_if_identity_unchanged,
@@ -371,7 +332,12 @@ pub(super) fn persist_bridge_entry_inflight_state(
     };
 
     const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
-    let outcome = if before.long_running_placeholder_active
+    // The actor's start nonce, not the possibly replaced local, decides whose row this patches.
+    let outcome = if !before.owned_by_turn_nonce(captured_nonce)
+        || !runtime.inflight_state.owned_by_turn_nonce(captured_nonce)
+    {
+        GuardedSaveOutcome::SuccessorOwned
+    } else if before.long_running_placeholder_active
         && !runtime.inflight_state.long_running_placeholder_active
     {
         patch_bridge_entry_state_tracking_placeholder_clear(
@@ -416,6 +382,7 @@ pub(super) struct BridgeEntryAuthorityContext<'a> {
     pub(super) bridge_created_placeholder: &'a mut Option<MessageId>,
     pub(super) last_edit_text: &'a mut String,
     pub(super) resumed_placeholder_clear_applied: &'a mut bool,
+    pub(super) captured_nonce: Option<&'a str>,
 }
 
 /// Proves durable bridge authority, then materializes an absent Discord anchor. Guards may be
@@ -430,6 +397,7 @@ pub(super) async fn establish_bridge_entry_authority(
         ctx.shared,
         &mut runtime,
         ctx.resumed_placeholder_clear_applied,
+        ctx.captured_nonce,
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     *ctx.entry_was_rowless =
@@ -448,6 +416,7 @@ pub(super) async fn establish_bridge_entry_authority(
         &ctx.shared.token_hash,
         ctx.bridge.channel_id,
         &identity,
+        ctx.captured_nonce,
         runtime.current_msg_id,
         ctx.bridge_created_placeholder,
         runtime.inflight_state,
@@ -826,6 +795,7 @@ mod tests {
         let channel_id = ChannelId::new(4_259_701);
         let mut state = rowless_entry_state(channel_id.get());
         let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let nonce = state.turn_nonce.clone();
         let mut detached = detached_current_msg_id_from_durable(state.current_msg_id);
         let anchor_present = durable_current_msg_id_from_detached(detached) != 0;
         assert!(!anchor_present, "this turn has no anchor to continue onto");
@@ -838,6 +808,7 @@ mod tests {
                 "entry-rowless-token",
                 channel_id,
                 &identity,
+                nonce.as_deref(),
                 &mut detached,
                 &mut created,
                 &mut state,
@@ -877,7 +848,9 @@ mod tests {
         let mut cleared = false;
         let runtime = &mut harness.runtime;
 
-        let outcome = persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared);
+        let nonce = before.turn_nonce.as_deref();
+        let outcome =
+            persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared, nonce);
 
         assert_eq!(outcome, GuardedSaveOutcome::RowAbsent);
         assert_eq!(
@@ -1057,6 +1030,7 @@ mod tests {
         let harness = ReconcileHarness::new(&mut durable, channel);
         let (mut rowless, mut created, mut last_edit, mut cleared) =
             (false, None, String::new(), false);
+        let nonce = bridge.inflight_state.turn_nonce.clone();
         let ctx = BridgeEntryAuthorityContext {
             entry_was_rowless: &mut rowless,
             bridge,
@@ -1064,6 +1038,7 @@ mod tests {
             bridge_created_placeholder: &mut created,
             last_edit_text: &mut last_edit,
             resumed_placeholder_clear_applied: &mut cleared,
+            captured_nonce: nonce.as_deref(),
         };
         let Err(notice) =
             establish_bridge_entry_authority(ctx, harness.runtime, "processing").await
@@ -1221,125 +1196,11 @@ mod tests {
         }
     }
 
+    mod source_guard_tests;
+
     #[test]
     fn bridge_entry_failure_gate_precedes_emit_stream_and_finalize() {
-        let normalize_ws = |source: &str| source.split_whitespace().collect::<Vec<_>>().join(" ");
-        let caller = normalize_ws(include_str!("mod.rs"));
-        let helper = normalize_ws(include_str!("bridge_entry_persist.rs"));
-        let spawn = caller
-            .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
-            .expect("production bridge entry remains present");
-        let authority = caller[spawn..]
-            .find("if let Err(notice) = bridge_entry_persist::establish_bridge_entry_authority")
-            .map(|offset| spawn + offset)
-            .expect("production caller establishes authority");
-        let guards = caller[authority..]
-            .find("let (mut completion_guard, mut inflight_guard) = make_bridge_guards(")
-            .map(|offset| authority + offset)
-            .expect("production caller constructs guards");
-        let entry_owner = caller[authority..guards]
-            .find("let mut bridge_entry_watcher_owner_epoch_current = inflight_state .effective_relay_owner_kind()")
-            .map(|offset| authority + offset)
-            .expect("post-authority relay owner snapshot remains explicit");
-        let guard_call = &caller[guards
-            ..caller[guards..]
-                .find(");")
-                .map(|offset| guards + offset + 2)
-                .expect("guard call remains bounded")];
-        let notice_decision = caller[guards..]
-            .find("resumed_long_running_placeholder_notice_message_id(")
-            .map(|offset| guards + offset)
-            .expect("restart notice is decided from the post-authority merge");
-        let notice_edit = caller[notice_decision..]
-            .find("resumed_msg_id,")
-            .map(|offset| notice_decision + offset)
-            .expect("restart notice edits only the predicate-approved anchor");
-        let emit = caller[notice_edit..]
-            .find("crate::services::observability::emit_turn_started")
-            .map(|offset| notice_edit + offset)
-            .expect("turn-start emit remains present");
-        let stream = caller[emit..]
-            .find("stream_loop::run_stream_loop")
-            .map(|offset| emit + offset)
-            .expect("stream loop remains present");
-        let finalize = caller[stream..]
-            .find("post_loop_finalize::run_post_loop_finalize")
-            .map(|offset| stream + offset)
-            .expect("post-loop finalize remains present");
-        let finalize_context = &caller[finalize..];
-
-        let establish = helper
-            .find("pub(super) async fn establish_bridge_entry_authority")
-            .expect("authority helper remains present");
-        let persist = helper[establish..]
-            .find("let outcome =")
-            .map(|offset| establish + offset)
-            .expect("authority helper persists first");
-        let gate = helper[persist..]
-            .find("if !bridge_entry_disposition_continues(")
-            .map(|offset| persist + offset)
-            .expect("authority helper gates persistence");
-        let anchor = helper[gate..]
-            .find("if !ensure_bridge_current_message_anchor")
-            .map(|offset| gate + offset)
-            .expect("authority helper guarded-binds an absent anchor");
-        let refresh = helper[anchor..]
-            .find("reconcile_runtime_locals_from_inflight_state")
-            .map(|offset| anchor + offset)
-            .expect("post-await durable anchor state refreshes detached locals");
-
-        assert!(persist < gate && gate < anchor && anchor < refresh);
-        assert!(
-            helper[anchor..refresh]
-                .contains("signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);")
-                && helper[anchor..refresh].contains("return Err(None);"),
-            "failed anchor materialization must signal EntryAborted and return before guards"
-        );
-        let abort = helper
-            .find("pub(super) fn signal_bridge_entry_abort_completion")
-            .unwrap();
-        let reconcile = helper[abort..]
-            .find("pub(super) fn reconcile_runtime_locals_from_inflight_state")
-            .unwrap()
-            + abort;
-        assert!(!helper[abort..reconcile].contains("register_start"));
-        assert!(!helper[abort..reconcile].contains("InflightSignal::Completed"));
-        assert!(
-            authority < entry_owner
-                && entry_owner < guards
-                && guards < notice_decision
-                && notice_decision < notice_edit
-                && notice_edit < emit
-                && emit < stream
-                && stream < finalize
-        );
-        assert!(
-            helper[gate..anchor].contains("signal_bridge_entry_abort_completion")
-                && helper[gate..anchor].contains("return Err(capture_entry_abort_notice("),
-            "failed persistence must signal only the waiter and abort"
-        );
-        assert!(
-            helper[gate..anchor]
-                .contains("bridge_entry_disposition_continues(outcome, !anchor_was_absent)")
-                && !helper[gate..anchor].contains("cohort"),
-            "the entry gate must take the live anchor precondition and no rollout cohort read"
-        );
-        assert!(
-            !caller[spawn..authority].contains("make_bridge_guards("),
-            "pre-authority path must not register a finalizer or broadcast guard"
-        );
-        assert!(
-            !caller[spawn..authority].contains("send_message"),
-            "pre-authority path must not create a Discord placeholder"
-        );
-        assert!(
-            guard_call.contains("&inflight_state"),
-            "finalizer and cleanup guards must use the exact post-authority merge"
-        );
-        assert!(
-            finalize_context.contains("bridge_entry_watcher_owner_epoch_current,"),
-            "post-loop recovery classification must receive the entry owner epoch verdict"
-        );
+        source_guard_tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize();
     }
 
     #[test]
@@ -1368,37 +1229,7 @@ mod tests {
 
     #[test]
     fn stream_authority_loss_relinquishes_guards_before_visible_finalization() {
-        let caller = include_str!("mod.rs");
-        let outcome_match = caller
-            .find("match stream_loop_output.outcome")
-            .expect("stream-loop outcome remains handled");
-        let authority_lost = caller[outcome_match..]
-            .find("StreamLoopOutcome::AuthorityLost")
-            .map(|offset| outcome_match + offset)
-            .expect("authority loss remains explicit");
-        let relinquish = caller[authority_lost..]
-            .find("completion_guard.relinquish_bridge_authority()")
-            .map(|offset| authority_lost + offset)
-            .expect("authority loss suppresses the stale completion broadcast");
-        let defuse = caller[relinquish..]
-            .find("inflight_guard.defuse()")
-            .map(|offset| relinquish + offset)
-            .expect("authority loss suppresses stale durable cleanup");
-        let early_return = caller[defuse..]
-            .find("return;")
-            .map(|offset| defuse + offset)
-            .expect("authority loss exits the bridge immediately");
-        let finalize = caller[outcome_match..]
-            .find("post_loop_finalize::run_post_loop_finalize")
-            .map(|offset| outcome_match + offset)
-            .expect("normal bridge still has visible finalization");
-
-        assert!(
-            authority_lost < relinquish
-                && relinquish < defuse
-                && defuse < early_return
-                && early_return < finalize
-        );
+        source_guard_tests::stream_authority_loss_relinquishes_guards_before_visible_finalization();
     }
 
     struct ReconcileHarness<'a> {
@@ -1716,4 +1547,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "entry_abort_mailbox_tests.rs"]
-mod entry_abort_mailbox_tests;
+pub(super) mod entry_abort_mailbox_tests;

@@ -29,7 +29,7 @@ fn rows(text: &str, size: Option<(usize, usize)>) -> Option<Vec<String>> {
             assert_eq!(rows[0], HEADER);
             Some(rows[1..].to_vec())
         }
-        Drawn::Folded => None,
+        Drawn::Folded | Drawn::Body => None,
     }
 }
 
@@ -227,12 +227,13 @@ fn plan_for(capture: &str, text: &str, size: (usize, usize)) -> Result<Option<Ve
 #[test]
 fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits() {
     let source = "discord:1479671298497183835:1561196979327869080";
+    let name = "0hbujang ".repeat(10);
     let frame = super::frame(
         source,
         "343742347365974026",
-        "0hbujang",
+        &name,
         "abcdef12",
-        "status?",
+        "status?\nfollow up",
     );
     let Some(Drawn::Rows(rows)) = drawn(&frame, PANE) else {
         panic!("an unpredictable header vetoes every direct paste: {frame}");
@@ -244,6 +245,36 @@ fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits
     assert_eq!(plan_for(&draft, &frame, (46, 37)), Err(Veto::Draft));
     let fits = plan_for(&draft, &frame, (160, 37));
     assert_eq!(fits, Ok(Some(vec!["js".to_string()])));
+}
+
+#[test]
+fn an_attachment_arrow_wraps_one_cell_without_admitting_other_unmeasured_symbols() {
+    assert_eq!(unicode_width::UnicodeWidthChar::width('→'), Some(1));
+    assert_eq!(
+        rows(&format!("{}→x", x(75)), PANE),
+        Some(vec![format!("{}→", x(75)), "x".into()])
+    );
+    assert_eq!(rows(&format!("{}↔x", x(75)), PANE), None);
+    let frame = super::frame(
+        "discord:7196:7201",
+        "200",
+        "lane-user",
+        "abcdef12",
+        "[File uploaded] one.txt → /tmp/i7196-one.txt (3 bytes)",
+    );
+    let expected = vec![
+        "[User: lane-user (ID: 200)] [File uploaded] one.txt → /tmp/i7196-one.txt (3".to_string(),
+        "bytes)".to_string(),
+    ];
+    assert_eq!(drawn(&frame, PANE), Some(Drawn::Rows(expected.clone())));
+    let border = "─".repeat(80);
+    let capture = format!("{border}\n❯ {}\n  {}\n{border}\n", expected[0], expected[1]);
+    assert!(own_wrapped_draft(&capture, &expected));
+    assert!(!own_wrapped_draft(
+        &capture.replace("  bytes)", "  bytes)X"),
+        &expected
+    ));
+    assert!(!own_wrapped_draft(&capture.replace('→', "↔"), &expected));
 }
 
 #[test]
@@ -305,4 +336,46 @@ fn only_status_rows_and_a_whole_footer_may_follow_the_box() {
         assert_eq!(read(at, 0, &[row]), unknown, "{row}");
     }
     assert_eq!(read(foot, 0, &["  › stashed"]), (draft, Stash::Unknown));
+}
+
+#[test]
+fn common_glyph_plans_accept_direct_and_preserve_the_flat_stash_boundary() {
+    let draft = BUSY_DRAFT.replace(TOAST, "");
+    for corpus in [
+        "한글 English 123 'plain' \"quotes\"",
+        "“둥근” ‘따옴표’ … — – (괄호) [대괄호] {중괄호}",
+        "😀 🚀 👍🏻 👨‍👩‍👧‍👦 ❤️ 🇰🇷",
+        "漢字 かな カナ （全角）、。！？",
+    ] {
+        for (count, size) in [(1, (46, 37)), (3, (160, 40)), (20, (160, 40))] {
+            let frame = super::frame("discord", "200", "ann", "abcd1234", &corpus.repeat(count));
+            assert_eq!(plan_for(BUSY, &frame, size), Ok(None), "{corpus} x{count}");
+        }
+        let flat = super::frame("discord", "200", "ann", "abcd1234", corpus);
+        assert_eq!(
+            plan_for(&draft, &flat, (400, 37)),
+            Ok(Some(vec!["js".into()]))
+        );
+    }
+}
+
+#[test]
+fn common_glyph_body_plans_require_all_unfolded_rows_to_be_visible() {
+    let payload = format!("“{}”", "가".repeat(300));
+    let frame = super::frame("discord", "200", "ann", "abcd1234", &payload);
+    assert!(frame.encode_utf16().count() <= 800);
+    assert_eq!(
+        plan_for(BUSY, &frame, (46, 37)),
+        Err(Veto::UnpredictableRender)
+    );
+    assert_eq!(plan_for(BUSY, &frame, (160, 40)), Ok(None));
+    let measured = super::frame("discord", "200", "ann", "abcd1234", &"가".repeat(300));
+    assert_eq!(
+        plan_for(BUSY, &measured, (46, 37)),
+        Err(Veto::UnpredictableRender)
+    );
+    // Exact rows for the measured line leave room for the unknown line's upper bound.
+    let mixed = format!("{}\n“{}”", "가".repeat(63), "가".repeat(80));
+    let frame = super::frame("discord", "200", "ann", "abcd1234", &mixed);
+    assert_eq!(plan_for(BUSY, &frame, (46, 37)), Ok(None));
 }

@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import herdr_restart, http_auth  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -1012,11 +1012,9 @@ STEP_OPTIONS = {
     "deliver_prompt": {"text", "source"}, "restart_dcserver": {"target", "require_status", "allowed_degraded_reasons"},
     "kill_pane": {"reverify_session_name_substring"}, "poison_claude_tui_relay_offset": set(),
     "capture_session_identity": {"label"}, "assert_session_preserved": {"label"},
-    "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"},
-    "replay_fixture": {"kind", "provider", "frames"},
+    "send_prompts_concurrent": {"prompts"}, "fixture_followup_probe": {"prompt"}, "replay_fixture": {"kind", "provider", "frames"},
     "local_control_then_prompt": {"control", "notice", "prompt", "notice_timeout_s", "admission_timeout_s", "quiet_s", "poll_interval_s"},
-    "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"},
-    "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
+    "send_timed_response_prompt": {"before_marker", "after_marker", "hold_seconds"}, "send_provider_hold_prompt": {"ok_marker", "marker", "late_marker", "hold_seconds"},
     "wait_for_provider_hold_state": {"ok_marker", "marker", "late_marker", "timeout_s", "poll_interval_s"},
     "cancel_turn": {"force", "timeout_s"}, "delete_status_panel": {"panel_regex"},
     "inject_discord_failure": {"operation", "count"}, "clear_discord_failure": {"operation"},
@@ -1027,24 +1025,18 @@ ASSERTION_OPTIONS = {
     **{k: None for k in ("text_present", "provider_text_present", "raw_text_present", "no_duplicate_marker", "ordered_text_present",
                          "no_duplicate_content", "no_resume_prompt_chrome", "no_suppressed_label_chrome",
                          "no_control_chars", "body_not_overwritten", "fixture_followup_ready",
-                         "fixture_no_health_degradation", "no_placeholder_left")},
-    "message_count_between_markers": {"min", "max"},
-    "raw_message_count_between_markers": {"min", "max", "include_our_send"},
+                         "fixture_no_health_degradation", "no_placeholder_left", "no_status_chrome")},
+    "message_count_between_markers": {"min", "max"}, "raw_message_count_between_markers": {"min", "max", "include_our_send"},
     "relay_latency_within": {"max_seconds"}, "body_complete": {"head", "tail"},
-    "chrome_count": {"text", "regex", "min", "max", "exact", "include_our_send"},
-    "raw_text_absent": {"needle", "text", "include_our_send"},
-    "marker_absent": {"marker", "surface", "include_our_send"},
-    "provider_hold_marker_seen": {"marker", "ok_marker"},
+    "chrome_count": {"text", "regex", "min", "max", "exact", "include_our_send"}, "raw_text_absent": {"needle", "text", "include_our_send"},
+    "marker_absent": {"marker", "surface", "include_our_send"}, "provider_hold_marker_seen": {"marker", "ok_marker"},
     "status_panel_after_body": {"body_marker", "panel_regex"}, "single_status_panel": {"panel_regex"},
-    "completion_chrome_after_body": {"body_marker", "required"},
-    "relay_bodies_after_local_control": {"containing", "exact"},
-    "fixture_task_notification": {"source", "kind", "status"},
-    "fixture_finalized": {"finalized", "result_text_source", "active_turn"},
-    "fixture_task_complete_finalized": {"result_text_source", "turn_id"},
-    "fixture_state": {"followup_probe_accepted"},
+    "completion_chrome_after_body": {"body_marker", "required"}, "relay_bodies_after_local_control": {"containing", "exact"},
+    "fixture_task_notification": {"source", "kind", "status"}, "fixture_finalized": {"finalized", "result_text_source", "active_turn"},
+    "fixture_task_complete_finalized": {"result_text_source", "turn_id"}, "fixture_state": {"followup_probe_accepted"},
     "no_duplicate_marker_with_known_gap": {"marker", "known_gap"},
     "deliver_result": {"delivery", "inject_veto"}, "completion_per_turn": {"exact", "marker"},
-    "autonomous_background_turn": {"armed_marker", "auto_marker"},
+    "turn_summary_after_body": {"body_marker", "header", "before_marker", "tool_label", "output_owner"}, "autonomous_background_turn": {"armed_marker", "auto_marker"},
 }
 
 
@@ -1082,7 +1074,7 @@ def validate_scenario_schema(scenario):
                 raise ValueError(f"{action} requires mapping options")
             if action in {"send_prompt", "send_discord_prompt", "send_keys", "send_keys_no_enter", "wait_for_discord_text", "wait_for_raw_discord_text", "provider_text_present"} and not isinstance(value, str):
                 raise ValueError(f"{action} requires text")
-            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome"} and value is not True:
+            if action in {"no_placeholder_left", "no_duplicate_content", "no_control_chars", "no_resume_prompt_chrome", "no_suppressed_label_chrome", "no_status_chrome"} and value is not True:
                 raise ValueError(f"{action} must be true")
             if "post_send_sleep_s" in entry:
                 delay = entry["post_send_sleep_s"]
@@ -2132,12 +2124,7 @@ def _read_health_detail(base_url: str, *, timeout: float = 5.0) -> dict[str, Any
 
 
 def _health_reason_allowed(reason: str, allowed: tuple[str, ...]) -> bool:
-    for pattern in allowed:
-        if pattern.endswith("*") and reason.startswith(pattern[:-1]):
-            return True
-        if reason == pattern:
-            return True
-    return False
+    return health_readiness.reason_allowed(reason, allowed)
 
 
 def _health_ready_violations(
@@ -2145,33 +2132,10 @@ def _health_ready_violations(
     *,
     allowed_statuses: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
+    target_channel: str | None = None,
 ) -> list[str]:
-    status = str(payload.get("status") or "").lower()
-    allowed_status_set = {s.lower() for s in allowed_statuses}
-    strict_healthy = allowed_status_set == {"healthy"}
-    violations: list[str] = []
-    if status not in allowed_status_set:
-        violations.append(f"status={status or '<missing>'}")
-    if strict_healthy and payload.get("ok") is False:
-        violations.append("ok=false")
-    if strict_healthy and payload.get("degraded") is True:
-        violations.append("degraded=true")
-    # Startup recovery is its own readiness axis; allowing degraded status does not waive it.
-    if payload.get("fully_recovered") is False:
-        violations.append("fully_recovered=false")
-
-    degraded_reasons = payload.get("degraded_reasons") or []
-    if isinstance(degraded_reasons, list):
-        blocked = [
-            str(reason)
-            for reason in degraded_reasons
-            if not _health_reason_allowed(str(reason), allowed_degraded_reasons)
-        ]
-        if blocked:
-            violations.append(f"degraded_reasons={blocked}")
-    elif degraded_reasons:
-        violations.append(f"degraded_reasons={degraded_reasons!r}")
-    return violations
+    return health_readiness.ready_violations(payload, allowed_statuses=allowed_statuses,
+        allowed_degraded_reasons=allowed_degraded_reasons, target_channel=target_channel)
 
 
 def _health_summary(
@@ -2282,7 +2246,8 @@ def _assert_health_once(
 ) -> dict[str, Any]:
     """Single health probe attempt for assert_health polling."""
 
-    status_code, health = _read_api_json(base_url, "/api/health", timeout=5)
+    status_code, health, from_detail = health_readiness.read_health(
+        _read_api_json, base_url, _as_string_tuple(options.get("allowed_degraded_reasons")))
     if not isinstance(health, dict):
         raise assertions.AssertionError(
             f"assert_health /api/health returned non-object HTTP {status_code}: "
@@ -2300,13 +2265,15 @@ def _assert_health_once(
     if "allowed_degraded_reasons" in options:
         allowed_degraded_reasons = _as_string_tuple(options.get("allowed_degraded_reasons"))
     elif forbidden_reasons and {s.lower() for s in required_statuses} != {"healthy"}:
-        allowed_degraded_reasons = tuple(str(reason) for reason in degraded_reasons)
+        allowed_degraded_reasons = tuple(str(reason) for reason in degraded_reasons
+                                        if not health_readiness.unknown_family(reason))
     else:
         allowed_degraded_reasons = ()
     violations = _health_ready_violations(
         health,
         allowed_statuses=required_statuses,
         allowed_degraded_reasons=allowed_degraded_reasons,
+        target_channel=channel_id,
     )
 
     blocked_reasons = [
@@ -2321,10 +2288,10 @@ def _assert_health_once(
     needs_detail = any(
         key in options for key in ("global_active_max", "global_finalizing_max")
     )
-    detail: dict[str, Any] | None = None
+    detail: dict[str, Any] | None = health if from_detail else None
     target_idle = None
     if needs_detail:
-        detail = _read_health_detail(base_url)
+        detail = detail if detail is not None else _read_health_detail(base_url)
         counter_payloads.insert(0, detail)
         if any(
             type(options[key]) is int and options[key] == 0
@@ -4531,6 +4498,7 @@ def wait_for_health(
     poll_interval_s: float = 2.0,
     allowed_statuses: tuple[str, ...] = ("healthy",),
     allowed_degraded_reasons: tuple[str, ...] = (),
+    target_channel: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_http_status: int | None = None
@@ -4540,7 +4508,7 @@ def wait_for_health(
     observation = "none"
     while time.monotonic() < deadline:
         try:
-            http_status, payload = _read_api_json(base_url, "/api/health", timeout=5)
+            http_status, payload, _ = health_readiness.read_health(_read_api_json, base_url, allowed_degraded_reasons)
             observation = "readable"
             last_http_status = http_status
             if isinstance(payload, dict):
@@ -4549,6 +4517,7 @@ def wait_for_health(
                     payload,
                     allowed_statuses=allowed_statuses,
                     allowed_degraded_reasons=allowed_degraded_reasons,
+                    target_channel=target_channel,
                 )
                 if 200 <= http_status < 300 and not last_violations:
                     return
@@ -4714,6 +4683,7 @@ def restart_dcserver_for_e2e(
         timeout_s=90,
         allowed_statuses=require_status,
         allowed_degraded_reasons=allowed_degraded_reasons,
+        target_channel=channel_id,
     )
 
 
@@ -4741,11 +4711,7 @@ def _assert_provider_hold_marker_seen(
     )
 
 
-# Completed-panel chrome; the idle-recap card is a separate post, not the turn's panel.
-_PANEL_COMPLETION_PATTERNS = tuple(
-    pattern for pattern in assertions._COMPLETION_CHROME_PATTERNS
-    if pattern is not assertions._IDLE_RECAP_COMPLETION_PATTERN
-)
+_PANEL_COMPLETION_PATTERNS = assertions._COMPLETION_CHROME_PATTERNS
 
 
 def completed_panel_in_place(window: assertions.Window) -> None:
@@ -4829,6 +4795,14 @@ def run_assertion(
         if not hasattr(assertions, "no_placeholder_left"):
             raise assertions.AssertionError("assertion not available yet: no_placeholder_left")
         assertions.no_placeholder_left(window)
+    elif spec.get("no_status_chrome"):
+        assertions.no_status_chrome(window)
+    elif "turn_summary_after_body" in spec:
+        params = {key: expand_marker(value) for key, value in spec["turn_summary_after_body"].items()}
+        owner = params.pop("output_owner", None)
+        if owner is not None and (owner not in {"o", "legacy"} or (record or {}).get("durable_record_probe", {}).get("status") != "evaluated" or record["durable_record_probe"].get("output_owner") != owner):
+            raise HarnessEvidenceError("turn summary output owner lacks matching evaluated durable receipt")
+        assertions.turn_summary_after_body(window, **params)
     elif "completion_per_turn" in spec:
         if not hasattr(assertions, "completion_per_turn"):
             raise assertions.AssertionError("assertion not available yet: completion_per_turn")

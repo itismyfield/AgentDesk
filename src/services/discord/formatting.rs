@@ -41,6 +41,7 @@ mod rollback_journal;
 
 use self::long_send_rollback::delete_rollback_channel_message;
 pub(in crate::services::discord) use self::long_send_rollback::message_ids_from_receipts;
+#[cfg(test)]
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_reference_rollback_returning_receipts;
 pub(in crate::services::discord) use self::long_send_rollback::send_long_message_raw_with_rollback;
@@ -208,6 +209,9 @@ pub(super) use self::streaming_status::{
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
+pub(crate) use super::placeholder_live_events::tool_summary::{
+    class as tool_class, safe_tool_summary,
+};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;
@@ -242,23 +246,23 @@ mod status_panel_v2_formatter_tests;
 mod replace_long_message;
 
 pub(in crate::services::discord) use self::replace_long_message::ReplaceLastChunkAnchor;
-// #5071 T1 S3a: the deferred receipt variant gained a production consumer — the
-// watcher's cutover short-replace arm, which needs the tail-continuation receipt
-// its `_with_outcome_` sibling does not surface.
-pub(in crate::services::discord) use self::replace_long_message::replace_long_message_raw_deferred_returning_receipt;
 pub(in crate::services::discord) use self::replace_long_message::{
     DeferredReplaceLongMessageOutcome, ReplaceLongMessageOutcome,
     cleanup_replace_continuations_after_failure, replace_long_message_outcome_to_result,
     replace_long_message_raw, replace_long_message_raw_deferred,
-    replace_long_message_raw_with_outcome, replace_long_message_raw_with_outcome_returning_receipt,
-    watcher_completion_footer_anchor,
+    replace_long_message_raw_with_outcome, watcher_completion_footer_anchor,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use self::replace_long_message::{
+    replace_long_message_raw_deferred_returning_receipt,
+    replace_long_message_raw_with_outcome_returning_receipt,
 };
 
 #[cfg(test)]
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {
-        use super::replace_long_message_raw_deferred as _;
+        let _ = super::replace_long_message_raw_deferred;
     }
 }
 

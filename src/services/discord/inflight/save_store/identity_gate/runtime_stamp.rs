@@ -129,7 +129,7 @@ fn admit_codex_terminal_range_in_root(
         || local.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
         || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
         || local.response_sent_offset != 0
-        || result.trim().is_empty()
+        || !captured_terminal_admission::body_admissible(result)
         || end <= start
     {
         return Err(GuardedSaveOutcome::AuthorityPinned);
@@ -146,9 +146,8 @@ fn admit_codex_terminal_range_in_root(
     if !expected.matches_state(&fresh)
         || fresh.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
         || fresh.tmux_session_name.as_deref() != Some(tmux)
-        || nonempty(fresh.turn_nonce.as_deref()) != Some(nonce)
-        || fresh.turn_start_offset != Some(start)
-        || fresh.last_offset != start
+        || !captured_terminal_admission::nonce_matches(&fresh, nonce)
+        || !captured_terminal_admission::range_matches(&fresh, start)
         || fresh.response_sent_offset != 0
         || fresh.restart_mode.is_some()
         || fresh.rebind_origin
@@ -157,31 +156,8 @@ fn admit_codex_terminal_range_in_root(
     {
         return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
     }
-    let (canonical, file_len) =
-        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::AuthorityPinned)?;
-    if file_len < end || !marker_matches(tmux, &canonical, session, start) {
-        return Err(GuardedSaveOutcome::AuthorityPinned);
-    }
-    // A dead prelaunch session deliberately persists no wrapper path. At the
-    // first raw range (`start == 0`), allow that representation only after the
-    // exact row/frame nonce and marker path/session/start checks above; retain
-    // the legacy wrapper-path form for live seeds.
-    let cold = start == 0
-        && fresh
-            .output_path
-            .as_deref()
-            .is_none_or(|path| path == tmux_runtime_paths(tmux).0);
-    let warm = fresh
-        .output_path
-        .as_deref()
-        .and_then(|path| std::fs::canonicalize(path).ok())
-        .as_deref()
-        == Some(canonical.as_path())
-        && binding_matches(tmux, &canonical, session, [start, end]);
-    let generation = tmux_generation_file_mtime_ns(tmux);
-    if (!cold && !warm) || generation == 0 {
-        return Err(GuardedSaveOutcome::AuthorityPinned);
-    }
+    let (canonical, generation) =
+        captured_terminal_admission::legacy_source(&fresh, rollout, tmux, session, (start, end))?;
     persist_terminal_range(
         root,
         &path,
@@ -513,58 +489,32 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
     let Some(provider) = requested.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
+    let captured_nonce = requested.turn_nonce.as_deref();
+    if baseline
+        .as_ref()
+        .is_some_and(|row| !row.owned_by_turn_nonce(captured_nonce))
+    {
+        return GuardedSaveOutcome::SuccessorOwned;
+    }
     let path = inflight_state_path(root, &provider, requested.channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let mut on_disk = match read_inflight_state_for_guarded_write(
+    let mut on_disk = match read_owned_row_for_guarded_write(
         &path,
         &provider,
         requested.channel_id,
         expected,
+        captured_nonce,
         caller,
     ) {
         Ok(on_disk) => on_disk,
         Err(outcome) => return outcome,
     };
-    let durable = InflightTurnIdentity::from_state(&on_disk);
-    if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_identity = ?expected,
-            durable_identity = ?durable,
-            "runtime-handoff stamp skipped because offsetless id-0 snapshot cannot safely match a durable row"
-        );
-        return GuardedSaveOutcome::Unnameable;
-    }
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
+    if let Some(refusal) =
+        stamp_guard::stamp_identity_refusal(&provider, &requested, expected, &on_disk, caller)
     {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_identity = ?expected,
-            durable_identity = ?durable,
-            durable_restart_mode = ?on_disk.restart_mode,
-            durable_rebind_origin = on_disk.rebind_origin,
-            "runtime-handoff stamp skipped because durable row authority changed"
-        );
-        return GuardedSaveOutcome::from_durable_authority(&on_disk);
-    }
-    if expected.tmux_session_name.is_some()
-        && requested.tmux_session_name != expected.tmux_session_name
-    {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_tmux_session_name = ?expected.tmux_session_name,
-            requested_tmux_session_name = ?requested.tmux_session_name,
-            "runtime-handoff stamp skipped because an established runtime session changed"
-        );
-        return GuardedSaveOutcome::AuthorityPinned;
+        return refusal;
     }
 
     if !hosted_binding_write_admitted(&on_disk, &requested) {
@@ -1439,6 +1389,9 @@ impl InflightTurnState {
 #[cfg(all(test, unix))]
 #[path = "runtime_stamp/claude_terminal_tests.rs"]
 mod claude_terminal_tests;
+
+#[path = "runtime_stamp/stamp_guard.rs"]
+mod stamp_guard;
 
 #[path = "runtime_stamp/captured_terminal_admission.rs"]
 mod captured_terminal_admission;

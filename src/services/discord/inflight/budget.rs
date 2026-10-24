@@ -95,7 +95,7 @@ pub(in crate::services::discord) fn bump_recovery_relay_attempts_if_matches_iden
     let Ok(json) = serde_json::to_string_pretty(&on_disk) else {
         return GuardedSaveOutcome::IoError;
     };
-    match super::atomic_write(&path, &json) {
+    match super::store::publish_row(&path, &json) {
         Ok(()) => GuardedSaveOutcome::Saved,
         Err(error) => {
             tracing::warn!(

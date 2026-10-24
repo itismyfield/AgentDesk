@@ -10,6 +10,7 @@ pub(super) async fn queued_attempt(
     expected: QueueIdentity,
     parent: Option<ChannelId>,
     gate: fn(ChannelId, Option<ChannelId>) -> bool,
+    source: Option<(String, SourceGuard)>,
 ) -> InjectAttempt {
     // A head already proven taken is consumed before the busy check, so an idle pane is no veto.
     if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
@@ -17,7 +18,11 @@ pub(super) async fn queued_attempt(
     }
     // Named before the session transition is held, which nothing then waits on.
     let primary = expected.primary;
-    let name = match author_name(shared, request.channel_id, primary, request.author_id).await {
+    let named = match source.as_ref() {
+        Some((name, _)) => Ok(name.clone()),
+        None => author_name(shared, request.channel_id, primary, request.author_id).await,
+    };
+    let name = match named {
         Ok(name) => name,
         Err(veto) => return InjectAttempt::NotSent(veto),
     };
@@ -37,6 +42,7 @@ pub(super) async fn queued_attempt(
     };
     // The detached owner outlives a cancelled request through claim, pane I/O and durable settle.
     let owner = async move {
+        let _source = source;
         let mailbox = shared.mailbox(request.channel_id);
         let persistence = crate::services::discord::queue_persistence_context(
             &shared,
@@ -60,6 +66,7 @@ pub(super) async fn queued_attempt(
             _ => return InjectAttempt::HandbackFailed("queued_head_blocked"),
         };
         let item = held.item();
+        let source_generations = item.source_message_queued_generations();
         let turn_id = Some(format!(
             "discord:{}:{}",
             request.channel_id, item.message_id
@@ -179,6 +186,17 @@ pub(super) async fn queued_attempt(
                     turn_id,
                     detail: "queued_settle_unknown",
                 };
+            }
+            // Pane and actor settlement are complete; reaction I/O must not hold the next input.
+            drop(target);
+            if matches!(attempt, InjectAttempt::Injected { .. }) {
+                super::catch_up_race::confirmed(
+                    &shared,
+                    &request.provider,
+                    request.channel_id,
+                    &source_generations,
+                )
+                .await;
             }
             // A committed NotSent is the actor's proof that the head is back at the queue front.
             if let (InjectAttempt::NotSent(veto), Some(turn_id)) = (&attempt, turn_id) {

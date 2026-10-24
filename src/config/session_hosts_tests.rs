@@ -2,6 +2,91 @@ use super::*;
 use crate::config::load_from_path;
 
 #[test]
+fn boot_selection_logs_once_per_value_even_with_concurrent_readers() {
+    const CHILD: &str = "ADK_BOOT_SELECTION_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::session_hosts::tests::boot_selection_logs_once_per_value_even_with_concurrent_readers", "--nocapture"])
+            .env(CHILD, "1")
+            .env_remove(GUARD_ENV)
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink::default();
+    let writer = sink.clone();
+    crate::logging::test_capture::pin_callsite_interest();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let count = || {
+        String::from_utf8(sink.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("Claude submit guard boot selection"))
+            .count()
+    };
+    let mut config: Config = serde_yaml::from_str("server: {}\nagents:\n  - id: fixture\n    name: fixture\n    channels:\n      claude: {id: '41', runtime: tui}\n").unwrap();
+    let run = |config: &Config| {
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let barrier = &barrier;
+                let dispatch = &dispatch;
+                scope.spawn(move || {
+                    tracing::dispatcher::with_default(dispatch, || {
+                        barrier.wait();
+                        for _ in 0..16 {
+                            let boot = BootSessionHosts::from_config(config).unwrap();
+                            assert_eq!(
+                                boot.config().claude_guard_channels,
+                                config.session_hosts.claude_guard_channels
+                            );
+                        }
+                    })
+                });
+            }
+        });
+    };
+    run(&config);
+    assert_eq!(
+        count(),
+        1,
+        "identical concurrent selections must emit one INFO"
+    );
+    config.session_hosts.claude_guard_channels.insert(41);
+    run(&config);
+    assert_eq!(count(), 2, "a changed selection must emit one new INFO");
+    config.session_hosts.claude_guard_channels.clear();
+    run(&config);
+    assert_eq!(
+        count(),
+        3,
+        "returning to an earlier value is a new transition"
+    );
+}
+
+#[test]
 fn cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list() {
     const CELL: &str = "CG_D1_BOOT_CASE";
     const ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
@@ -335,6 +420,7 @@ fn guard_and_herdr_checks_read_provider_keys_as_the_installed_resolver_does() {
         load_from_path(&path).unwrap()
     };
     let herdr_endpoint = EndpointConfig {
+        mode: EndpointMode::LegacyDedicated,
         execution_node: "mac-mini".into(),
         socket_path: root.path().join("herdr.sock"),
         herdr_home: root.path().join("herdr"),

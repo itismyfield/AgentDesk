@@ -1,6 +1,7 @@
 //! Which persisted episodes a recovery re-mint may still re-open, and which queue files a live
 //! actor may still read after a clear could not remove them.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{ChannelMailboxRegistry, QueuePersistenceContext};
@@ -18,6 +19,7 @@ pub(super) struct RemintFence {
     /// The latest episode this mailbox started, until its own exact release.
     latest_started: Option<(Option<MessageId>, Option<String>)>,
     clear: ClearTrust,
+    discarded: BTreeSet<MessageId>,
 }
 
 /// A queue-file namespace: the provider and the bot token hash.
@@ -96,6 +98,14 @@ pub(super) struct FenceCell(Arc<Mutex<RemintFence>>);
 impl FenceCell {
     fn with<T>(&self, f: impl FnOnce(&mut RemintFence) -> T) -> T {
         f(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(super) fn note_discarded(&self, ids: &[MessageId]) {
+        self.with(|fence| fence.discarded.extend(ids.iter().copied()));
+    }
+
+    pub(super) fn refuses_discarded(&self, ids: &[MessageId]) -> bool {
+        self.with(|fence| ids.iter().any(|id| fence.discarded.contains(id)))
     }
 
     pub(super) fn note_started(

@@ -117,7 +117,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 
 | 경계 | 좌표 | 부수효과 |
 |---|---|---|
-| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, idle recap, node picker, sidecar |
+| component interaction | `src/services/discord/router/intake_gate.rs:298–355` | model picker, node picker, sidecar |
 | slash command | `src/services/discord/runtime_bootstrap/gateway_runtime.rs:56–83` | Poise `command_check`와 event handler가 별개 |
 | live 메시지 | `src/services/discord/router/intake_gate.rs:356–650` | 로컬 message-ID dedup, thread 문맥, raw/effective 채널 |
 | DM·첨부 | `src/services/discord/router/intake_gate.rs:650–930` | pending DM 회신 소비, checkpoint, 첨부 admission |
@@ -150,7 +150,9 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/cluster/channel_home/ingress_snapshot.rs` | 관측 | `try_sample`·`sample_gate`: registry·local·inner gate를 `try_lock` 한 번씩 읽어 복사만 한다. expire·prune·close·초기화 없음 |
 | `src/services/cluster/channel_ingress.rs` | 관측 | 이 계약. 호출자는 shadow worker뿐 |
 | `src/services/cluster/intake_router_hook.rs` | readiness·라우팅 | `home_availability::refusal` :130, `read_home` :135 → `route_to_home` :162 |
+| `src/services/cluster/intake_router_hook/o_input.rs` | readiness·입력 placement | `home_availability::refusal` :10, 매 입력 `read_home` :15 → `route_to_home` :17을 fresh writer admission보다 먼저 확인 |
 | `src/services/cluster/intake_worker.rs` | admission | accept 전 `intake_hold` :558 |
+| `src/services/cluster/intake_worker/o_input.rs` | claimed 입력 admission | exact SQL claim 재확인 뒤 `channel_home::intake_hold` :46을 first/final O eligibility보다 먼저 확인; 거절은 해당 claim만 pending으로 반환 |
 | `src/services/discord/ingress_shadow.rs` | 관측 | 설정·descriptor·bounded 제출. `HomeProvider::parse`로 provider만 정규화 |
 | `src/services/discord/ingress_shadow/worker.rs` | 관측 | `read_home_at` → `ingress_snapshot::try_sample` → `observe` → 로그. 쓰기 없음 |
 | `src/services/discord/commands/control.rs` | admission | `home_fence::admit` :354·:641, `home_fence::refused` :582·:637 |
@@ -159,7 +161,12 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/restart.rs` | admission | `admit_command` :196·:257 |
 | `src/services/discord/commands/skill.rs` | admission | `admit_command` :183 |
 | `src/services/discord/commands/stop.rs` | admission | `home_fence::admit` :122 |
+| `src/services/discord/commands/tool_call.rs` | admission | `home_fence::admit` :162. on/off 저장과 공개 응답 완료까지 command permit을 보유한다(:80–87) |
 | `src/services/discord/commands/text_commands.rs` | admission | `current_command` :37, `admit_command` :389·:1300 |
+| `src/services/discord/commands/text_commands/native_stop.rs` | admission | `admit_command` :10, `command_scope` :14; !stop preflight·ACK·종료 확인이 같은 permit 안에서 실행된다 |
+| `src/services/discord/turn_bridge/tmux_runtime/native_stop.rs` | command context | `current_command`·`command_scope`; 전달 task가 caller 취소 뒤에도 받은 permit을 I/O 완료까지 보유한다 |
+| `src/services/discord/herdr_terminate/root_replaced.rs` | admission | `admit_command` :226 뒤 같은 permit을 proof·retirement·cleanup까지 보유. blocking proof :265·:290와 cleanup :347은 `command_worker_scope`를 복원하며 새 home 권위를 만들지 않음 |
+| `src/services/discord/herdr_terminate/http_force.rs` | command context | `command_scope` :46: 넘겨받은 permit을 detached 종료·후처리 task가 결과 기록까지 보유한다. 새 home 권위를 만들지 않음 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
@@ -175,8 +182,10 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/turn_lease.rs` | admission | `registered_channel` → `admit_recovery` :155 |
 | `src/services/tui_o/writer/actor/transition_snapshot.rs` | 관측 | `home_now` :155: `registered_channel`로 요청 epoch의 home이 열려 있는지만 읽는다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/transition_port.rs` | admission | 전환 요청이 `CommandPermit` :40을 운반한다. 발급은 `admit_command` |
-| `src/services/discord/health/o_transition.rs` | admission | 운영자 전환 요청의 Context 조달 `home_admission` :109: 같은 home lock 아래 `registered_channel`·`ownership`으로 epoch를 확인하고 `admit_at_epoch(…, recovery=false)`로 `CommandPermit`을 받는다. row·gate를 쓰지 않는다 |
-| `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :243, `admit_command` :501 |
+| `src/services/discord/health/o_transition.rs` | admission | 자동 transcript 정리의 Context 조달 `home_admission`: 같은 home lock 아래 `registered_channel`·`ownership`으로 epoch를 확인하고 `admit_at_epoch(…, recovery=false)`로 `CommandPermit`을 받는다. row·gate를 쓰지 않는다 |
+| `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :106·:110, `admit_command` :353 |
+| `src/services/queue/http_force.rs` | command context | `current_command` :52: 강제 취소가 받은 `cancel_turn` permit을 clone해 Herdr 종료 어댑터에 넘긴다. 새 admission 없음 |
+| `src/services/dispatched_sessions/herdr_kill.rs` | admission | `admit_command` :46: HTTP 세션 강제 종료의 Herdr 팔만 permit을 받아 Herdr 종료 어댑터에 넘긴다. Legacy 팔·CLI direct는 admission 없음 |
 | `src/services/session_forwarding/home_stop.rs` | 라우팅·admission | sender `read_home` :176, receiver `read_home` :335 → `registered` :368 |
 | `src/services/turn_host.rs` | admission·readiness | `home_refusal` :118, `for_turn` :130, `refusal_before_turn` :155 |
 | `src/services/tui_o/cutover.rs` | admission | `delegated` → `registered` :121 |

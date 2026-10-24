@@ -351,6 +351,8 @@ if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; 
 # per-file count; the script docstring declares its lexical limits.
 "$PYTHON" scripts/check_tui_o_writer_census.py
 "$PYTHON" -m unittest tests.test_check_tui_o_writer_census
+"$PYTHON" -m unittest tests.test_terminal_notice_census
+"$PYTHON" -m unittest tests.test_retired_panel_boot_wiring
 fi
 
 if run_check guards "Dormant boot retirement census"; then
@@ -424,6 +426,7 @@ if run_check guards "PR infrastructure failure rerun classifier (#4392/#5207)"; 
 # tests/test_infra_failure_classifier_5207.sh (tests/*.sh loop below) carries
 # the discriminating matrix and proves drift detection actually discriminates.
 ./scripts/ci/infra-failure-rerun.sh --self-test
+"$PYTHON" -m unittest tests.test_known_flaky_retry
 bash scripts/main-ci-triage.sh --self-test
 
 # Nightly notification contract (#6006).
@@ -464,7 +467,12 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_discord_client \
   scripts.e2e.tui_relay.test_driver_health \
   scripts.e2e.tui_relay.test_herdr_observe \
+  scripts.e2e.tui_relay.test_presence_health \
   scripts.e2e.tui_relay.test_durable_delivery \
+  scripts.e2e.tui_relay.test_durable_delivery_tool_cards \
+  scripts.e2e.tui_relay.test_tool_cards \
+  scripts.e2e.tui_relay.test_turn_summary \
+  scripts.e2e.tui_relay.test_footer_retirement \
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
   scripts.e2e.tui_relay.test_matrix_runner \
@@ -504,7 +512,7 @@ fi
 fi
 
 if run_check contracts "PR test selection plan (main runs every lane in full)"; then
-"$PYTHON" -m unittest tests.test_test_selection
+"$PYTHON" -m unittest tests.test_test_selection tests.test_nested_libtest
 fi
 
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
@@ -695,7 +703,7 @@ if run_check cargo "Generate env + CLI reference docs (README source-of-truth ta
 fi
 
 if run_check cargo "Inventory prod/test split regression tests (#4394)"; then
-"$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split
+"$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split tests.test_giant_deadline_entrypoints
 fi
 
 if run_check contracts "Structural Clippy allow occurrence ratchet (#4519)"; then

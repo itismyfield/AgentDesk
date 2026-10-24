@@ -16,8 +16,14 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
-    publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
-        .is_some_and(Persisted::published)
+    let published =
+        publish_runtime_binding(authority, binding, None, CauseSource::Launch, Record::Stat)
+            .is_some_and(Persisted::published);
+    #[cfg(unix)]
+    if published {
+        crate::services::codex_tui::execution_end::producer::binding_published_under(authority);
+    }
+    published
 }
 
 /// A Herdr Codex pane before its first prompt: the hook that records its source finds a Codex pane

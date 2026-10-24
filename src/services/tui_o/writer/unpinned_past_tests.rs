@@ -1,7 +1,7 @@
 //! A past source bound before O started is held when bound again unless it was pinned.
 
 use super::*;
-use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom};
+use crate::services::tui_o::store::rotation::Boundary;
 
 /// A channel adopted over `t.jsonl` after it rotated from `p.jsonl`, which holds two old units
 /// and is pinned at its end only when `pinned`.
@@ -157,11 +157,7 @@ async fn a_held_past_source_resolved_at_its_end_posts_only_later_records_across_
     let pending = WriterAlarm::BoundaryPending { source: p.clone() };
     assert_eq!(harness.alarms.taken(), [pending]);
     let end = std::fs::metadata(&p_path).unwrap().len();
-    let path = p_path.display().to_string();
-    let from = ResolveFrom::Offset(end);
-    let resolved = harness
-        .store
-        .record_boundary_resolved(CHANNEL, &path, &from, "op");
+    let resolved = harness.store.seed_boundary_resolved(CHANNEL, &p, end);
     assert_eq!(resolved.unwrap(), (p.clone(), end));
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
     append(&p_path, &row("p4", "after the resolution"));

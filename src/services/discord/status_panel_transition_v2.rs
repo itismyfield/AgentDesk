@@ -588,23 +588,55 @@ mod tests {
         );
     }
 
+    const TRANSITION_V2: &str = include_str!("status_panel_transition_v2.rs");
+    const AUTHORITY_SURFACES: [&str; 7] = [
+        "serenity",
+        "reqwest",
+        "std::fs",
+        "tokio::fs",
+        "status_panel_orphan_store",
+        "status_panel_singleton_store",
+        "inflight::",
+    ];
+
+    /// Classification 2: code before the first coded `#[cfg(test)]` holds no authority
+    /// surface; comments (the module doc names them) are excluded, literals still count.
+    fn authority_surface_gaps(source: &str) -> Vec<String> {
+        use crate::services::discord::router::source_guard_support::Lexed;
+        let lexed = Lexed::new(source);
+        let Some(end) = lexed.find("#[cfg(test)]") else {
+            return vec!["missing the #[cfg(test)] production boundary".to_string()];
+        };
+        let production = &lexed.text()[..end];
+        AUTHORITY_SURFACES
+            .into_iter()
+            .filter(|surface| production.contains(surface))
+            .map(|surface| format!("forbidden production authority surface: {surface}"))
+            .collect()
+    }
+
     #[test]
     fn proof_model_has_no_legacy_or_io_authority_surface() {
-        let source = include_str!("status_panel_transition_v2.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
-        for forbidden in [
-            "serenity",
-            "reqwest",
-            "std::fs",
-            "tokio::fs",
-            "status_panel_orphan_store",
-            "status_panel_singleton_store",
-            "inflight::",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "forbidden production authority surface: {forbidden}"
-            );
+        assert_eq!(authority_surface_gaps(TRANSITION_V2), Vec::<String>::new());
+    }
+
+    #[test]
+    fn authority_surface_guard_counts_coded_surfaces_but_not_comments() {
+        use crate::services::discord::router::source_guard_support::forge;
+        use crate::test_support::CommentForgery;
+        for forgery in CommentForgery::ALL {
+            let forged = forge(TRANSITION_V2, "#[cfg(test)]", forgery);
+            assert!(!authority_surface_gaps(&forged).is_empty(), "{forgery:?}");
+        }
+        let item = "pub(super) fn transition(";
+        for surface in AUTHORITY_SURFACES {
+            let prose = format!("// {surface}\n/* outer /* {surface} */ */\n{item}");
+            let prose = TRANSITION_V2.replacen(item, &prose, 1);
+            assert_ne!(prose, TRANSITION_V2);
+            assert_eq!(authority_surface_gaps(&prose), Vec::<String>::new());
+            let coded = format!("use {surface} as _;\n{item}");
+            let coded = TRANSITION_V2.replacen(item, &coded, 1);
+            assert_eq!(authority_surface_gaps(&coded).len(), 1, "{surface}");
         }
     }
 

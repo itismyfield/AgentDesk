@@ -240,6 +240,8 @@ fn abort_cleanup_records_marker_and_keeps_hourglass() {
 
     let shared = super::super::make_shared_data_for_tests();
     let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
+        hosted_source: None,
+        hosted_source_checked: false,
         provider: "claude".to_string(),
         channel_id: 4242,
         tmux_session_name: "tmux-4242".to_string(),
@@ -848,6 +850,7 @@ async fn task_notification_status_only_preserves_existing_turn_request_anchor() 
         Some("1469870512812462284".into()),
     );
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "<task-notification><status>killed</status></task-notification>".to_string(),
@@ -1814,6 +1817,7 @@ fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
 
 fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPrompt {
     ObservedTuiPrompt {
+        hosted_source: None,
         provider: "claude".to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: body.to_string(),
@@ -2456,6 +2460,7 @@ fn bridge_adapter_tail_guard_clears_only_current_external_lease() {
     let tmux = "AgentDesk-codex-bridge-guard";
     let channel_id = ChannelId::new(940_000_000_000_003);
     let original = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:codex:940000000000003:bridge-guard:1".to_string()),
         session_key: Some("host:AgentDesk-codex-bridge-guard".to_string()),
@@ -2540,6 +2545,7 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
     let tmux = "AgentDesk-claude-bridge-dedup-skip";
     let channel_id = ChannelId::new(940_000_000_000_004);
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:940000000000004:dedup-skip:2".to_string()),
         session_key: Some("host:AgentDesk-claude-bridge-dedup-skip".to_string()),
@@ -2610,6 +2616,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
     let tmux = "AgentDesk-claude-bridge-no-binding";
     let channel_id = ChannelId::new(940_000_000_000_005);
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "direct input without runtime binding".to_string(),
@@ -2625,6 +2632,7 @@ async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
         steer_echo: false,
     };
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:940000000000005:no-binding:1".to_string()),
         session_key: Some("host:AgentDesk-claude-bridge-no-binding".to_string()),
@@ -2686,6 +2694,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
     let tmux = "AgentDesk-task-card-repeat-lease";
     let channel_id = ChannelId::new(950_000_000_000_001);
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
             provider: ProviderKind::Claude.as_str().to_string(),
             tmux_session_name: tmux.to_string(),
         prompt: "<task-notification><task-id>repeat-x</task-id><status>completed</status></task-notification>".to_string(),
@@ -2701,6 +2710,7 @@ fn task_notification_repeat_clears_its_recorded_external_lease() {
             steer_echo: false,
         };
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:950000000000001:repeat:1".to_string()),
         session_key: Some("host:AgentDesk-task-card-repeat-lease".to_string()),
@@ -2751,6 +2761,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
     let tmux = "AgentDesk-task-card-repeat-newer";
     let channel_id = ChannelId::new(950_000_000_000_002);
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: ProviderKind::Claude.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "<task-notification><task-id>repeat-y</task-id></task-notification>".to_string(),
@@ -2766,6 +2777,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
         steer_echo: false,
     };
     let repeat_lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:950000000000002:repeat:1".to_string()),
         session_key: Some("host:AgentDesk-task-card-repeat-newer".to_string()),
@@ -3675,6 +3687,7 @@ fn idle_stream_commit_offset_only_on_successful_delivery() {
 fn bridge_adapter_inflight_marks_external_input_as_bridge_owned() {
     let output_path = PathBuf::from("/tmp/adk-bridge-adapter.jsonl");
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(42),
         turn_id: Some("external:codex:42:tmux:1".to_string()),
         session_key: Some("token:AgentDesk-codex-owner-split".to_string()),
@@ -3715,6 +3728,7 @@ fn drain_wait_does_not_block_on_own_synthetic_inflight() {
     // ExternalInput + same tmux session => our own => non-blocking.
     let output_path = PathBuf::from("/tmp/adk-selfblock.jsonl");
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(7),
         turn_id: Some("external:claude:7:tmux:1".to_string()),
         session_key: Some("token:AgentDesk-claude-self".to_string()),
@@ -3772,6 +3786,7 @@ fn drain_wait_does_not_block_on_own_synthetic_inflight() {
 fn synthetic_watcher_inflight_marks_existing_tui_turn_without_prompt_resubmit() {
     let output_path = PathBuf::from("/tmp/adk-tui-direct-watcher.jsonl");
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(42),
         turn_id: Some("external:codex:42:tmux:2".to_string()),
         session_key: Some("token:AgentDesk-codex-owner-split".to_string()),
@@ -3816,6 +3831,7 @@ fn synthetic_watcher_inflight_marks_existing_tui_turn_without_prompt_resubmit() 
 
 fn s1_lease_5833(turn_id: Option<&str>) -> ExternalInputRelayLease {
     ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(42),
         turn_id: turn_id.map(str::to_string),
         session_key: Some("token:AgentDesk-claude-s1".to_string()),
@@ -3869,6 +3885,7 @@ fn s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only() {
     inflight::save_inflight_state(&synthetic).expect("save authoritative synthetic row");
     let before = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
     bridge.started_at = before.started_at.clone();
+    bridge.turn_nonce = before.turn_nonce.clone();
     bridge.external_turn_id = Some("bridge-must-not-restamp-durable-key".into());
     assert!(matches!(
         inflight::patch_bridge_entry_state_if_identity_unchanged(
@@ -3978,11 +3995,9 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
         &ProviderKind::Claude,
         channel,
         tmux,
-        "prompt",
-        anchor,
+        ("prompt", anchor),
         &original_lease,
-        None,
-        None,
+        (None, None),
     )
     .await;
     assert!(initial.claimed);
@@ -4229,7 +4244,7 @@ fn s5833_s1t3_moved_builder_is_behaviour_identical() {
     );
     assert_eq!(state.user_msg_id, 101);
     assert_eq!(state.current_msg_id, 202);
-    assert_eq!(state.current_msg_len, "...".len());
+    assert_eq!(state.current_msg_len, "⠋ 계속 처리 중".len());
     assert_eq!(state.user_text, "typed in TUI");
     assert_eq!(state.session_id, None);
     assert_eq!(
@@ -4665,6 +4680,7 @@ fn external_turn_test_lease(
     tmux_session_name: &str,
 ) -> ExternalInputRelayLease {
     ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some(format!(
             "external:claude:{}:{tmux_session_name}:test",
@@ -4765,6 +4781,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
     let prompt_text = "This session is being continued from a previous conversation that ran out of context.\n\
          Summary: compacted transcript body";
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: provider.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: prompt_text.to_string(),
@@ -4791,14 +4808,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
 
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
-        &shared,
-        provider.as_str(),
-        channel_id,
-        &prompt,
-        anchor_id,
-        false,
-        &decision,
-        &mut lease,
+        &shared, channel_id, &prompt, anchor_id, false, &decision, &mut lease,
     )
     .await;
     assert!(
@@ -4846,6 +4856,7 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let notification_anchor_id = MessageId::new(940_000_000_004_183);
     let placeholder_anchor_id = MessageId::new(940_000_000_004_283);
     let prompt = ObservedTuiPrompt {
+        hosted_source: None,
         provider: provider.as_str().to_string(),
         tmux_session_name: tmux.to_string(),
         prompt: "please review PR #1234".to_string(),
@@ -4890,7 +4901,6 @@ async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let mut lease = external_turn_test_lease(channel_id, tmux);
     let deferred = synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
         &shared,
-        provider.as_str(),
         channel_id,
         &prompt,
         anchor_id,
@@ -5978,6 +5988,7 @@ fn observed_lease_early_return_guard_clears_recorded_lease_on_drop() {
     let tmux = "AgentDesk-early-return-guard-clear";
     let channel_id = ChannelId::new(960_000_000_000_001);
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:960000000000001:early:1".to_string()),
         session_key: Some("host:AgentDesk-early-return-guard-clear".to_string()),
@@ -6033,6 +6044,7 @@ fn observed_lease_early_return_guard_disarm_preserves_lease() {
     let tmux = "AgentDesk-early-return-guard-disarm";
     let channel_id = ChannelId::new(960_000_000_000_002);
     let lease = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:960000000000002:early:1".to_string()),
         session_key: Some("host:AgentDesk-early-return-guard-disarm".to_string()),
@@ -6080,6 +6092,7 @@ fn observed_lease_early_return_guard_does_not_clobber_newer_lease() {
     let tmux = "AgentDesk-early-return-guard-noclobber";
     let channel_id = ChannelId::new(960_000_000_000_003);
     let base = ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel_id.get()),
         turn_id: Some("external:claude:960000000000003:early:1".to_string()),
         session_key: Some("host:AgentDesk-early-return-guard-noclobber".to_string()),
@@ -6361,6 +6374,7 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
 
     // Axis 3: both identities record into the ONE `(provider, tmux)` slot.
     let contending_lease = |turn_id: &str| ExternalInputRelayLease {
+        hosted_source: None,
         channel_id: Some(channel.get()),
         turn_id: Some(turn_id.to_string()),
         session_key: Some(format!("token:{tmux}")),
@@ -6425,6 +6439,12 @@ mod retired_pending_start_claim_tests;
 
 #[cfg(unix)]
 mod pending_start_worker_claim_tests;
+
+#[cfg(unix)]
+mod herdr_synthetic_transition_tests;
+
+#[cfg(unix)]
+mod herdr_synthetic_claim_window_tests;
 
 #[cfg(unix)]
 mod relayerless_claim_tests {

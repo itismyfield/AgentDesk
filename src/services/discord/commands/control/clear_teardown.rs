@@ -6,17 +6,21 @@ use poise::serenity_prelude as serenity;
 use tokio::sync::OwnedMutexGuard;
 
 use super::super::super::SharedData;
+use super::super::super::turn_bridge::stop_active_turn_with_outcome;
 use super::{ClearReport, ManagedSessionClearBehavior, managed_session_clear_behavior};
 use crate::db::session_transcripts;
-use crate::services::provider::ProviderKind;
+use crate::services::provider::{CancelToken, ProviderKind};
 
 #[cfg(unix)]
 mod clear_end_record;
 #[cfg(all(test, unix))]
 mod clear_end_record_tests;
+#[cfg(unix)]
+mod codex_end_record;
+#[cfg(all(test, unix))]
+mod codex_end_tests;
 
-/// Advances the channel's transcript clear boundary, retried once; it also supersedes any
-/// unresolved native clear boundary, so no older clear holds the next input.
+/// Advances the channel's transcript clear boundary, retried once.
 pub(super) async fn write_boundary(
     shared: &SharedData,
     channel_id: serenity::ChannelId,
@@ -87,6 +91,9 @@ pub(super) async fn end_session(
         #[cfg(unix)]
         let clear_end =
             clear_end_record::capture_for(provider, channel_id.get(), name, &transition);
+        #[cfg(unix)]
+        let codex_end =
+            codex_end_record::capture_for(provider, channel_id.get(), name, &transition);
         let ended = super::managed_reset::end_managed_process_session(name);
         if ended.tmux_unconfirmed {
             tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
@@ -98,6 +105,8 @@ pub(super) async fn end_session(
         }
         #[cfg(unix)]
         clear_end_record::commit_confirmed(clear_end, (ended.reset, ended.tmux_unconfirmed)).await;
+        #[cfg(unix)]
+        codex_end_record::commit_confirmed(codex_end, (ended.reset, ended.tmux_unconfirmed)).await;
     } else if tmux.is_none()
         && matches!(provider, ProviderKind::Codex)
         && channel_id.get() == crate::services::codex_tui::canary::CANARY_CHANNEL
@@ -172,4 +181,19 @@ async fn end_herdr(
         report.end_unconfirmed = true;
     }
     true
+}
+
+/// Uses the canonical stop ordering; a host refusal leaves the released turn unconfirmed.
+pub(super) async fn stop_released_turn(
+    provider: &ProviderKind,
+    token: Option<Arc<CancelToken>>,
+    clear_source: &str,
+) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    let policy = super::super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+    let stop = stop_active_turn_with_outcome(provider, &token, policy, clear_source).await;
+    // Only a legacy settlement says the stop reached the turn's host.
+    stop.may_clear_inflight()
 }

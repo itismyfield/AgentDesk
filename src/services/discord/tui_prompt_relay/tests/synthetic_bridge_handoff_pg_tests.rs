@@ -95,19 +95,37 @@ enum EmptyTailCase {
 }
 
 #[cfg(unix)]
+type SyntheticBridgeHandoffParameters = (
+    bool,
+    bool,
+    bool,
+    bool,
+    Option<bool>,
+    bool,
+    bool,
+    Option<EmptyTailCase>,
+    bool,
+    bool,
+    bool,
+    Option<ProviderKind>,
+);
+
+#[cfg(unix)]
 fn synthetic_bridge_handoff_fixture(
-    delayed_save: bool,
-    foreign_actor: bool,
-    wrong_source: bool,
-    postgres: bool,
-    recovery: Option<bool>,
-    failed_save: bool,
-    source_retry: bool,
-    empty_tail: Option<EmptyTailCase>,
-    postgres_race: bool,
-    admission_race: bool,
-    prefix_read_error: bool,
-    native_tail: Option<ProviderKind>,
+    (
+        delayed_save,
+        foreign_actor,
+        wrong_source,
+        postgres,
+        recovery,
+        failed_save,
+        source_retry,
+        empty_tail,
+        postgres_race,
+        admission_race,
+        prefix_read_error,
+        native_tail,
+    ): SyntheticBridgeHandoffParameters,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -119,7 +137,7 @@ fn synthetic_bridge_handoff_fixture(
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async {
+        .block_on(Box::pin(async {
             if postgres { let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::INFO).try_init(); }
             let database = if postgres {
                 Some(crate::db::auto_queue::test_support::TestPostgresDb::create().await)
@@ -182,7 +200,7 @@ fn synthetic_bridge_handoff_fixture(
                 *synthetic_start::bridge_handoff::ADMISSION_PAUSE.lock().unwrap() =
                     Some((channel.get(), entered.clone(), resume.clone()));
                 let attempt = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
-                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease, None, None,
+                    &shared, &provider, channel, tmux, ("handoff prompt", anchor), &lease, (None, None),
                 );
                 let replace = async {
                     entered.notified().await;
@@ -209,6 +227,7 @@ fn synthetic_bridge_handoff_fixture(
                     // An existing directory makes the actual guarded atomic save fail.
                     std::fs::create_dir_all(&inflight_path).unwrap();
                     let observed = ObservedTuiPrompt {
+                        hosted_source: None,
                         provider: provider.as_str().into(), tmux_session_name: tmux.into(),
                         prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
                         source_event_id: None, external_input_lease_generation: lease.generation,
@@ -219,7 +238,7 @@ fn synthetic_bridge_handoff_fixture(
                     };
                     let mut inline_lease = lease.clone();
                     assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
-                        &shared, provider.as_str(), channel, &observed, anchor, true,
+                        &shared, channel, &observed, anchor, true,
                         &relay_observed_prompt_injected_prompt_decision(&observed.prompt),
                         &mut inline_lease,
                     ).await, "failed inline save must hand its retry to the pending worker");
@@ -654,6 +673,13 @@ fn synthetic_bridge_handoff_fixture(
                 std::fs::OpenOptions::new().append(true).open(&output).unwrap().write_all(format!("{terminal}\n").as_bytes()).unwrap();
                 let (tx, rx) = mpsc::channel();
                 let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                let resume_from = {
+                    let bodies = gateway.bodies.lock().unwrap();
+                    let sites = gateway.sites.lock().unwrap();
+                    assert_eq!(bodies.len(), sites.len(), "paired pre-resume history: {sites:?} {bodies:?}");
+                    assert!(bodies.iter().all(|sent| !sent.starts_with("-# ") && !sent.contains("DEFERRED_READER_FAILURE")), "reader failure cannot post a terminal summary or error: {sites:?} {bodies:?}");
+                    bodies.len()
+                };
                 let reader = spawn_handoff_reader(&output, retained.last_offset, tmux, tx, end_tx);
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
                     &shared, provider.clone(), channel,
@@ -664,12 +690,31 @@ fn synthetic_bridge_handoff_fixture(
                     (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
-                let bodies = gateway.bodies.lock().unwrap();
-                // Legacy streaming status quotes the last response line; count
-                // the completed publication, whose footer has been removed.
-                let terminal_body = bodies.last().expect("resumed terminal publication");
-                assert!(terminal_body.contains(body.trim()), "terminal must retain the complete saved Unicode body: {terminal_body:?}");
-                assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again; observed bodies={bodies:#?}");
+                let bodies = gateway.bodies.lock().unwrap().clone();
+                let sites = gateway.sites.lock().unwrap().clone();
+                assert_eq!(bodies.len(), sites.len(), "paired resumed history: {sites:?} {bodies:?}");
+                let resumed_sites = &sites[resume_from..];
+                let resumed_bodies = &bodies[resume_from..];
+                assert!(resumed_sites.len() >= 2, "terminal body and summary must both publish: {sites:?} {bodies:?}");
+                let terminal_index = resumed_sites.len() - 2;
+                // Streaming edits may precede the terminal; only the final replace settles it.
+                assert!(resumed_sites[..terminal_index].iter().all(|site| *site == "edit_message"), "no extra terminal replace or POST: {sites:?} {bodies:?}");
+                assert_eq!(&resumed_sites[terminal_index..], ["replace_message_with_outcome", "send_message"], "terminal body precedes one summary: {sites:?} {bodies:?}");
+                for streamed in &resumed_bodies[..terminal_index] {
+                    assert_eq!(streamed, &body, "resumed streaming preserves the saved body: {sites:?} {bodies:?}");
+                }
+                let terminal_body = &resumed_bodies[terminal_index];
+                assert_eq!(terminal_body, &body, "terminal must retain the exact saved Unicode body: {sites:?} {bodies:?}");
+                assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again: {sites:?} {bodies:?}");
+                let summary = &resumed_bodies[terminal_index + 1];
+                let summary_shape = regex::Regex::new(concat!(
+            r"\A-# ⏱️ (?:[0-9]+초|[0-9]+분(?: [0-9]+초)?|[0-9]+시간 [0-9]+분)",
+            r"(?: · 📦 (?:100|[1-9]?[0-9])%)?",
+            r"(?: · 5h (?:100|[1-9]?[0-9])% \((?:[01][0-9]|2[0-3]):[0-5][0-9]\))?",
+            r"(?: · 7d (?:100|[1-9]?[0-9])% \((?:0[1-9]|1[0-2])/(?:0[1-9]|[12][0-9]|3[01]) (?:[01][0-9]|2[0-3]):[0-5][0-9]\))?\z"
+        )).unwrap();
+                assert!(summary_shape.is_match(summary), "one completed summary after the terminal body: {sites:?} {bodies:?}");
+                assert!(bodies.iter().all(|sent| !sent.contains("DEFERRED_READER_FAILURE")), "reader error is never published: {sites:?} {bodies:?}");
             } else {
                 delivered.expect("actual idle adapter terminal publication completes");
             }
@@ -724,53 +769,53 @@ fn synthetic_bridge_handoff_fixture(
                 gateway.deleted.lock().unwrap().is_empty(),
                 "no foreign anchor is deleted"
             );
-        });
+        }));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         true, false, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, true, false, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, true, false, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, true, None, false, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -783,13 +828,13 @@ fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -802,29 +847,29 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, true, false, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, true, None, false, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -837,8 +882,8 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         None,
-    );
-    synthetic_bridge_handoff_fixture(
+    ));
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -851,13 +896,13 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false,
         false,
         false,
@@ -870,38 +915,38 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         false,
         false,
         None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, true, None, false, false, None, true, false, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, true, false, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
-    synthetic_bridge_handoff_fixture(
+    synthetic_bridge_handoff_fixture((
         false, false, false, false, None, false, false, None, false, false, true, None,
-    );
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor() {
     for provider in [ProviderKind::Claude, ProviderKind::Codex] {
-        synthetic_bridge_handoff_fixture(
+        synthetic_bridge_handoff_fixture((
             false,
             false,
             false,
@@ -914,6 +959,9 @@ fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor(
             false,
             false,
             Some(provider),
-        );
+        ));
     }
 }
+
+#[cfg(unix)]
+mod herdr_synthetic_identity_pg_tests;

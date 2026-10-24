@@ -34,6 +34,18 @@ class ScheduledMessagesCiWiringTest(unittest.TestCase):
                     f"{filter_name} must cover scheduled_messages submodules",
                 )
 
+    def test_route_submodules_trigger_high_risk_lane(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("- 'src/server/routes/scheduled_messages/**'",
+                      filter_block(workflow, "high_risk_recovery", "pg_db"))
+
+    def test_image_outbox_children_trigger_high_risk_lane(self) -> None:
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        block = filter_block(workflow, "high_risk_recovery", "pg_db")
+        for path in ("src/services/message_outbox/**", "src/server/outbox_worker.rs", "src/server/outbox_worker/**"):
+            with self.subTest(path=path):
+                self.assertIn(f"- '{path}'", block)
+
 
 if __name__ == "__main__":
     unittest.main()

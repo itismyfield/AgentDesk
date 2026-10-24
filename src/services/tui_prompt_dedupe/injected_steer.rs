@@ -99,6 +99,7 @@ pub(super) fn claim_injected_steer(
     tmux_session_name: &str,
     prompts: &[String],
     native_turn: Option<&str>,
+    entry_id: Option<&str>,
 ) -> Option<Claim> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
@@ -107,12 +108,28 @@ pub(super) fn claim_injected_steer(
         .native_turn_by_tmux
         .get(&key)
         .map(|slot| slot.value.turn.clone());
-    let ledger = state.injected_steer_by_tmux.get_mut(&key)?;
+    use crate::services::tui_input::human_frame::history::{ObservedAttempt, observed_attempt};
+    let observed = observed_attempt(provider, tmux_session_name, prompts, entry_id);
+    if provider == "claude" && !matches!(&observed, ObservedAttempt::None) {
+        return Some(Claim::Joined { first: false });
+    }
+    let Some(ledger) = state.injected_steer_by_tmux.get_mut(&key) else {
+        return (!matches!(observed, ObservedAttempt::None)).then_some(Claim::Deferred);
+    };
     let carries = |entry: &TimedValue<InjectedSteer>| {
         let marker = marker(&entry.value.nonce);
         prompts.iter().any(|prompt| prompt.contains(&marker))
     };
-    let entry = ledger.iter_mut().find(|entry| carries(entry))?;
+    let entry = match observed {
+        ObservedAttempt::Known(id) => {
+            let Some(entry) = ledger.iter_mut().find(|entry| entry.value.nonce == id) else {
+                return Some(Claim::Deferred);
+            };
+            Some(entry)
+        }
+        ObservedAttempt::Pending => return Some(Claim::Deferred),
+        ObservedAttempt::None => ledger.iter_mut().find(|entry| carries(entry)),
+    }?;
     let claim = match (entry.value.settled, native_turn) {
         (Some(Settled::Joined), _) => return Some(Claim::Joined { first: false }),
         (Some(Settled::Handed), _) => return Some(Claim::HandedBefore),

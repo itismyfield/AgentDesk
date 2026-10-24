@@ -3,17 +3,21 @@ use serenity::{CreateAttachment, MessageId};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::services::provider::{CancelToken, ProviderKind};
+#[cfg(test)]
+use crate::services::provider::CancelToken;
+use crate::services::provider::ProviderKind;
 
 use super::super::admin_host_guard::ManagedReset;
 use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backlog;
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::stop_active_turn_with_outcome;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
+use clear_teardown::stop_released_turn;
 mod clear_report;
 mod clear_teardown;
+#[cfg(unix)]
+mod herdr_recovery;
 pub(in crate::services::discord) use clear_report::ClearReport;
 pub(in crate::services::discord) mod home_fence;
 mod managed_reset;
@@ -24,7 +28,6 @@ pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
 pub(in crate::services::discord) mod native;
-pub(in crate::services::discord) use native::native_clear_admits;
 
 use super::config::{
     clear_codex_goals_reset_pending_for_channel, clear_fast_mode_reset_pending_for_provider,
@@ -35,32 +38,6 @@ use super::config::{
 enum ManagedSessionClearBehavior {
     ResetManagedProcess,
     Noop,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::services::discord) enum SoftClearNotifyMode {
-    Enqueue,
-    Suppress,
-}
-
-impl SoftClearNotifyMode {
-    fn should_enqueue(self) -> bool {
-        matches!(self, Self::Enqueue)
-    }
-}
-
-const SOFT_CLEAR_REASON_CODE: &str = "lifecycle.soft_clear";
-
-fn soft_clear_lifecycle_notify_row(
-    clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
-) -> Option<(&'static str, String)> {
-    notify_mode.should_enqueue().then(|| {
-        (
-            SOFT_CLEAR_REASON_CODE,
-            format!("🧹 세션 클리어 ({clear_source})"),
-        )
-    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,7 +269,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
 ) -> anyhow::Result<ClearReport> {
     clear_channel_session_state_with_session_key(
         http,
@@ -300,7 +276,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
         provider,
         channel_id,
         clear_source,
-        notify_mode,
         None,
     )
     .await
@@ -312,7 +287,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
     clear_channel_session_state_fenced(
@@ -321,27 +295,9 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         provider,
         channel_id,
         clear_source,
-        notify_mode,
         explicit_session_key,
     )
     .await
-}
-
-/// Keep all stop sites converging on `stop_active_turn` so the
-/// abort-key-then-SIGKILL ordering can never regress to the legacy pattern.
-/// False when the released turn's host refused the stop, so it may still run.
-async fn stop_released_turn(
-    provider: &ProviderKind,
-    token: Option<Arc<CancelToken>>,
-    clear_source: &str,
-) -> bool {
-    let Some(token) = token else {
-        return true;
-    };
-    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-    let stop = stop_active_turn_with_outcome(provider, &token, policy, clear_source).await;
-    // Only a legacy settlement says the stop reached the turn's host.
-    stop.may_clear_inflight()
 }
 
 /// Only a channel another node holds is refused; past that the clear always commits.
@@ -351,7 +307,6 @@ async fn clear_channel_session_state_fenced(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
     let permit = home_fence::admit(channel_id, provider.as_str())?;
@@ -370,7 +325,6 @@ async fn clear_channel_session_state_fenced(
             provider,
             channel_id,
             clear_source,
-            notify_mode,
             explicit_session_key,
         ),
     )
@@ -385,7 +339,6 @@ async fn clear_channel_session_state_body(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     clear_source: &str,
-    notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<ClearReport> {
     home_fence::pause("clear").await;
@@ -408,18 +361,31 @@ async fn clear_channel_session_state_body(
             .and_then(|s| s.channel_name.as_ref())
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
-
+    #[cfg(unix)]
+    if herdr_recovery::clear(
+        shared,
+        provider,
+        channel_id,
+        transition_guard.as_ref().ok(),
+        &mut report,
+    )
+    .await
+    {
+        return Ok(report);
+    }
     // The clear commits here, in memory: no write below can restore what it discarded.
     let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }
     report.absorb(&cleared);
+    #[cfg(unix)]
+    report
+        .settle_consents(shared, provider, channel_id, &cleared)
+        .await;
     clear_teardown::write_boundary(shared, channel_id, &mut report).await;
-
     native::clear_session_memory(shared, channel_id).await;
     native::clear_process_reset_pending(shared, channel_id).await;
-
     if !stop_released_turn(provider, cleared.removed_token, clear_source).await {
         report.stop_unconfirmed = true;
     }
@@ -465,29 +431,13 @@ async fn clear_channel_session_state_body(
     )
     .await;
 
-    if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
-    {
-        let content = match report.warning() {
-            Some(warning) => format!("{content}\n{warning}"),
-            None => content,
-        };
-        // Notify bot message for clear paths that have no direct provider reply.
-        crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-            shared.pg_pool.as_ref(),
-            &format!("channel:{}", channel_id.get()),
-            session_key.as_deref(),
-            reason_code,
-            &content,
-        );
-    }
-
     Ok(report)
 }
 
 /// /stop — Cancel in-progress AI request
 ///
-/// Judges the turn's host before any write, then cancels it; token.cancelled
-/// triggers turn_bridge loop exit → mailbox_finish_turn canonical cleanup
+/// Interrupts the current turn while preserving its session. Native TUI turns
+/// remain observed until termination before mailbox cancellation is published.
 #[poise::command(slash_command, rename = "stop")]
 pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id;
@@ -500,6 +450,8 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     if !super::enforce_slash_command_policy(&ctx, "/stop").await? {
         return Ok(());
     }
+
+    ctx.defer().await?;
 
     log_command_received!(ctx.channel_id().get(), user_name, "/stop");
 
@@ -667,7 +619,6 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
             &ctx.data().provider,
             ctx.channel_id(),
             "/clear",
-            SoftClearNotifyMode::Suppress,
         )
         .await?;
 
@@ -702,24 +653,7 @@ async fn clear_with_reply_scope<F: std::future::Future>(
 mod soft_clear_notify_tests {
     use poise::serenity_prelude::MessageId;
 
-    use super::{
-        SOFT_CLEAR_REASON_CODE, SoftClearNotifyMode, choose_clear_session_key,
-        parse_queued_message_id, soft_clear_lifecycle_notify_row,
-    };
-
-    #[test]
-    fn slash_and_text_clear_suppress_soft_clear_notify_row() {
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("/clear", SoftClearNotifyMode::Suppress),
-            None,
-            "`/clear` and `!clear` already reply with the shared clear response and must not enqueue a duplicate `lifecycle.soft_clear` notify row"
-        );
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("!clear", SoftClearNotifyMode::Suppress),
-            None,
-            "`!clear` should leave the provider reply as the single user-visible completion surface"
-        );
-    }
+    use super::{choose_clear_session_key, parse_queued_message_id};
 
     #[test]
     fn queued_cancel_parser_accepts_exact_nonzero_ids_only() {
@@ -729,19 +663,7 @@ mod soft_clear_notify_tests {
     }
 
     #[test]
-    fn idle_recap_clear_keeps_soft_clear_notify_row() {
-        assert_eq!(
-            soft_clear_lifecycle_notify_row("idle_recap_clear", SoftClearNotifyMode::Enqueue),
-            Some((
-                SOFT_CLEAR_REASON_CODE,
-                "🧹 세션 클리어 (idle_recap_clear)".to_string(),
-            )),
-            "idle recap clear has no provider reply, so it must keep the single user-visible `lifecycle.soft_clear` notify row"
-        );
-    }
-
-    #[test]
-    fn explicit_recap_session_key_wins_over_recomputed_channel_key() {
+    fn explicit_session_key_wins_over_recomputed_channel_key() {
         assert_eq!(
             choose_clear_session_key(
                 Some("claude/token/host:AgentDesk-claude-old-channel"),
@@ -749,7 +671,7 @@ mod soft_clear_notify_tests {
             )
             .as_deref(),
             Some("claude/token/host:AgentDesk-claude-old-channel"),
-            "idle recap clear must drop the exact session row that owns the recap card, even when channel-name drift changes the recomputed key"
+            "an explicit session key must win even when channel-name drift changes the recomputed key"
         );
     }
 

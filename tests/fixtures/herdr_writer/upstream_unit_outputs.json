@@ -1,0 +1,27 @@
+[
+  {
+    "upstream_test": "upsert_top_level_bool_replaces_existing_value",
+    "operation": "top_bool",
+    "input": "onboarding = true\n[keys]\nprefix = \"ctrl+b\"\n",
+    "key": "onboarding",
+    "value": false,
+    "expected": "onboarding = false\n[keys]\nprefix = \"ctrl+b\"\n"
+  },
+  {
+    "upstream_test": "upsert_section_bool_adds_missing_section",
+    "operation": "upsert_bool",
+    "input": "",
+    "section": "ui.toast",
+    "key": "enabled",
+    "value": true,
+    "expected": "[ui.toast]\nenabled = true\n"
+  },
+  {
+    "upstream_test": "remove_section_key_removes_matching_key_from_section",
+    "operation": "remove_key",
+    "input": "[ui.toast]\nenabled = true\ndelivery = \"herdr\"\n[ui.sound]\nenabled = true\n",
+    "section": "ui.toast",
+    "key": "enabled",
+    "expected": "[ui.toast]\ndelivery = \"herdr\"\n[ui.sound]\nenabled = true\n"
+  }
+]

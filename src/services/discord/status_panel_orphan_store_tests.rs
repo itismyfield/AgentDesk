@@ -382,6 +382,12 @@ fn flag_off_status_panel_orphan_enqueue_preserves_original_store_behavior() {
         root, false, true, &provider, "tok", 100, 5001,
     );
 
+    assert!(load_pending_in_root(root, &provider, "tok").is_empty());
+
+    enqueue_in_root(root, &provider, "tok", 100, 5001);
+    enqueue_separate_status_panel_orphan_in_root_for_flags(
+        root, false, true, &provider, "tok", 100, 5002,
+    );
     assert_eq!(
         load_pending_in_root(root, &provider, "tok"),
         vec![(100, 5001)]

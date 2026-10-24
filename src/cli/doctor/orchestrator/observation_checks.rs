@@ -22,7 +22,11 @@ pub(super) fn check_mailbox_consistency(snapshot: &HealthSnapshot) -> Vec<Check>
                 let mut check = unmeasured_check(finding.id, issue).with_evidence(finding.evidence.clone());
                 check.group = CheckGroup::ProviderRuntime;
                 check.subsystem = "provider_runtime";
-                if finding.id == "mailbox_observation_unavailable" {
+                // Reads the request deadline left unread are warnings; a failed read stays a failure.
+                if matches!(
+                    finding.id,
+                    "mailbox_observation_unavailable" | "mailbox_session_lookup_not_started"
+                ) {
                     check.status = CheckStatus::Warn;
                     check.severity = Severity::Warning;
                 }

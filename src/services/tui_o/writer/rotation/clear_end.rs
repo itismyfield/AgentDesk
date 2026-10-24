@@ -2,6 +2,10 @@
 //! ended execution wrote, into the session a fresh launch was prepared for.
 
 use super::*;
+use crate::services::claude_tui::source_verify::{
+    FirstRecord, OpenedTranscript, observe_transcript,
+};
+use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::clear_end::{ClearEnd, mutant};
 use crate::services::tui_prompt_dedupe::binding_context::{
@@ -13,7 +17,7 @@ struct Hop<'a> {
     key: &'a str,
     seq: u64,
     pane: &'a str,
-    new_session: &'a str,
+    source: &'a SourceId,
 }
 
 impl<B: BindingEvents> Sources<B> {
@@ -60,6 +64,7 @@ impl<B: BindingEvents> Sources<B> {
         let host = stable_host_identity();
         let store: &ChannelStore = writer.store();
         let mut proved = Vec::new();
+        let mut retry = false;
         for (key, next) in &self.rotation.successors {
             if next.proof.is_some() {
                 continue;
@@ -73,24 +78,23 @@ impl<B: BindingEvents> Sources<B> {
                 _ => continue,
             };
             let (seq, pane) = made;
-            let new_session = self.names.session(&next.source);
             let hop = Hop {
                 key,
                 seq,
                 pane,
-                new_session,
+                source: &next.source,
             };
             if self.old_settled(store, key) && !mutant("missing_old") {
                 continue;
             }
-            let proven = records
-                .iter()
-                .rev()
-                .any(|record| self.proves(store, record, &hop, &events, host.as_deref()));
+            let proven = records.iter().rev().any(|record| {
+                self.proves(store, record, &hop, &events, host.as_deref(), &mut retry)
+            });
             if proven {
                 proved.push((key.clone(), seq));
             }
         }
+        self.clear_due |= retry;
         if proved.is_empty() {
             return Ok(());
         }
@@ -137,6 +141,7 @@ impl<B: BindingEvents> Sources<B> {
         hop: &Hop<'_>,
         events: &[BindingEvent],
         host: Option<&str>,
+        retry: &mut bool,
     ) -> bool {
         let ours = record.provider == "claude"
             && record.channel == self.channel
@@ -172,12 +177,18 @@ impl<B: BindingEvents> Sources<B> {
         if nonce.is_empty() || (nonce == record.execution_nonce && !mutant("same_nonce")) {
             return false;
         }
-        self.fresh_launch(nonce, hop)
+        self.fresh_launch(store, nonce, hop, retry)
     }
 
     /// The bind's execution was launched fresh in this pane for exactly the hop's new session, so
     /// it cannot be one that resumed the old source without logging a bind.
-    fn fresh_launch(&self, nonce: &str, hop: &Hop<'_>) -> bool {
+    fn fresh_launch(
+        &self,
+        store: &ChannelStore,
+        nonce: &str,
+        hop: &Hop<'_>,
+        retry: &mut bool,
+    ) -> bool {
         if mutant("context_off") {
             return true;
         }
@@ -185,12 +196,84 @@ impl<B: BindingEvents> Sources<B> {
             return false;
         };
         let fresh = context.launch_mode == "fresh" || mutant("resume_ok");
-        let expected = context.expected_native_session_id.as_deref() == Some(hop.new_session)
-            || mutant("any_expected");
+        let new_session = self.names.session(hop.source);
+        let expected = if new_session.is_empty() {
+            context
+                .expected_native_session_id
+                .as_deref()
+                .filter(|expected| !expected.is_empty())
+                .is_some_and(|expected| {
+                    Self::transcript_session(store, hop.source, retry)
+                        .is_some_and(|session| session == expected)
+                })
+        } else {
+            context.expected_native_session_id.as_deref() == Some(new_session)
+                || mutant("any_expected")
+        };
         fresh
             && expected
             && context.tmux_session == hop.pane
             && context.channel_id == Some(self.channel)
+    }
+
+    /// Empty binding names need the first complete record of the bound file. Incomplete or
+    /// unreadable records schedule another poll even when no new binding arrives.
+    fn transcript_session(
+        store: &ChannelStore,
+        source: &SourceId,
+        retry: &mut bool,
+    ) -> Option<String> {
+        #[cfg(not(unix))]
+        let _ = store;
+        let (file, first) = match observe_transcript(&source.path) {
+            Ok(OpenedTranscript::Opened { file, first }) => (file, first),
+            Ok(OpenedTranscript::Missing) | Err(_) => {
+                *retry = true;
+                return None;
+            }
+        };
+        let session = match first {
+            FirstRecord::Session(session) => session,
+            FirstRecord::NotWritten => {
+                *retry = true;
+                return None;
+            }
+            FirstRecord::Unnamed => return None,
+        };
+        let same = match file {
+            #[cfg(unix)]
+            SourceFileIdentity::Unix { dev, ino } => {
+                use crate::services::tui_o::shadow::capture::{FileMatch, file_match};
+                match file_match(source, (dev, ino)) {
+                    FileMatch::Exact => true,
+                    FileMatch::Other => false,
+                    FileMatch::Renumbered => {
+                        let cursor = store.cursor(source)?;
+                        // A changed dev still needs the stored prefix, and that recheck must
+                        // open the very file whose first record was observed.
+                        match reopen(cursor) {
+                            Ok(capture) => match capture.fingerprint() {
+                                Ok(checked) => (checked.dev, checked.ino) == (dev, ino),
+                                Err(_) => {
+                                    *retry = true;
+                                    false
+                                }
+                            },
+                            Err(Reopen::Unread(_)) => {
+                                *retry = true;
+                                false
+                            }
+                            Err(Reopen::Changed) => false,
+                        }
+                    }
+                }
+            }
+            SourceFileIdentity::Unavailable => {
+                *retry = true;
+                false
+            }
+        };
+        same.then_some(session)
     }
 
     /// Re-arms the configured reader of each newly proven hop, as a provider proof does.
