@@ -242,6 +242,10 @@ trait Effects: Send + Sync + 'static {
     fn idle(&self, channel: u64);
     fn kickoff(&self, channel: u64);
     async fn legacy_gate_blocked(&self, channel: u64) -> bool;
+    /// The durable row's hold on the channel's queue, when a prior process's Herdr turn owns it.
+    async fn row_hold(&self, _channel: u64) -> Option<&'static str> {
+        None
+    }
     async fn notice(&self, channel: u64, text: String) -> Result<(), String>;
     /// The tmux session and transcript a busy inject would pick, by the same candidate order.
     async fn inject_target(&self, channel: u64) -> Option<(String, String)>;
@@ -450,9 +454,10 @@ impl<E: Effects> Supervisor<E> {
                 self.effects.kickoff(channel);
             }
             Action::CheckHeld(head) => {
-                let reason = match self.effects.legacy_gate_blocked(channel).await {
-                    true => "legacy_tui_gate",
-                    false => "unknown",
+                let reason = match self.effects.row_hold(channel).await {
+                    Some(reason) => reason,
+                    None if self.effects.legacy_gate_blocked(channel).await => "legacy_tui_gate",
+                    None => "unknown",
                 };
                 let mut presence = lock(presence);
                 let still = presence.activity == Activity::Idle
@@ -679,6 +684,10 @@ fn held_notice(reason: &str) -> String {
             "{} 진행 표시는 끝났지만 대기열이 Legacy TUI 판정에 막혀 있습니다.",
             clock()
         ),
+        "restarted_herdr_row" | "restarted_herdr_row_unread" => format!(
+            "{} 진행 표시는 끝났지만 대기열이 재시작 전 턴의 정리를 기다리고 있습니다.",
+            clock()
+        ),
         _ => format!("{} 대기열이 진행되지 않아 확인이 필요합니다.", clock()),
     };
     crate::services::discord::session_notice::subtext("⚠️", &text)
@@ -772,6 +781,14 @@ impl Effects for LiveEffects {
     async fn legacy_gate_blocked(&self, channel: u64) -> bool {
         let blocked = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
         blocked(&self.shared, &self.provider, ChannelId::new(channel)).await
+    }
+
+    #[cfg(unix)]
+    async fn row_hold(&self, channel: u64) -> Option<&'static str> {
+        let hold =
+            crate::services::discord::recovery_engine::herdr_row_end::owner::restarted_herdr_hold;
+        let generation = self.shared.restart.current_generation;
+        hold(&self.provider, channel, generation).map(|hold| hold.reason())
     }
 
     async fn notice(&self, channel: u64, text: String) -> Result<(), String> {
