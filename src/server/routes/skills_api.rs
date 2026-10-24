@@ -61,6 +61,7 @@ struct DiscoveredSkill {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SkillRootKind {
     ManagedDirectory,
+    CachedDirectory,
     Directory,
     MarkdownFile,
 }
@@ -93,7 +94,7 @@ pub(super) fn skill_roots(
             &mut roots,
             &mut seen_roots,
             crate::runtime_layout::managed_skills_root(&runtime_root),
-            SkillRootKind::ManagedDirectory,
+            SkillRootKind::CachedDirectory,
         );
     }
     if let Some(home) = home {
@@ -109,7 +110,7 @@ pub(super) fn skill_roots(
             &mut roots,
             &mut seen_roots,
             home.join(".adk").join("release").join("skills"),
-            SkillRootKind::Directory,
+            SkillRootKind::CachedDirectory,
         );
         push_skill_root(
             &mut roots,
@@ -162,9 +163,9 @@ fn discover_skills_from_disk() -> DiscoveryResult {
                         None
                     }
                 }
-                SkillRootKind::Directory | SkillRootKind::ManagedDirectory => {
-                    codex_skill_file(&path)
-                }
+                SkillRootKind::Directory
+                | SkillRootKind::ManagedDirectory
+                | SkillRootKind::CachedDirectory => codex_skill_file(&path),
             };
             let Some(skill_path) = skill_path else {
                 continue;
@@ -174,7 +175,9 @@ fn discover_skills_from_disk() -> DiscoveryResult {
                 SkillRootKind::MarkdownFile => {
                     skill_path.file_stem().and_then(|stem| stem.to_str())
                 }
-                SkillRootKind::Directory | SkillRootKind::ManagedDirectory => skill_path
+                SkillRootKind::Directory
+                | SkillRootKind::ManagedDirectory
+                | SkillRootKind::CachedDirectory => skill_path
                     .parent()
                     .and_then(|parent| parent.file_name())
                     .and_then(|stem| stem.to_str()),

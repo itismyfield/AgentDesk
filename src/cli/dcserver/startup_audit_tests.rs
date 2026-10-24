@@ -36,7 +36,10 @@ async fn stale_agent_and_unlisted_skill_emit_one_boot_warning_in_same_process() 
                     ids.clone(),
                     Some(ids.clone()),
                     Some(ids),
-                    vec![manifest],
+                    vec![(
+                        manifest,
+                        crate::server::routes::skills_manifest_audit::DirectoryScope::OwnManifest,
+                    )],
                 ))
                 .warning()
             },
@@ -77,7 +80,10 @@ async fn clean_audit_emits_no_boot_warning_and_scheduling_never_waits_for_inspec
                 ids.clone(),
                 Some(ids.clone()),
                 Some(ids),
-                vec![manifest],
+                vec![(
+                    manifest,
+                    crate::server::routes::skills_manifest_audit::DirectoryScope::OwnManifest,
+                )],
             ))
             .warning()
         },

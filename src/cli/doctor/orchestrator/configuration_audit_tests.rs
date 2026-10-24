@@ -81,7 +81,10 @@ fn skill_fixture_reports_stale_agent_and_unlisted_directory_and_clean_has_zero()
             ids.clone(),
             Some(ids.clone()),
             Some(ids.clone()),
-            vec![manifest.clone()],
+            vec![(
+                manifest.clone(),
+                crate::server::routes::skills_manifest_audit::DirectoryScope::OwnManifest,
+            )],
         ))
     };
     std::fs::write(
@@ -110,4 +113,156 @@ fn skill_fixture_reports_stale_agent_and_unlisted_directory_and_clean_has_zero()
     let clean = skill_manifest_check(&audit());
     assert!(clean.status == CheckStatus::Pass);
     assert_eq!(clean.evidence.unwrap()["findings"], serde_json::json!([]));
+}
+
+#[test]
+fn runtime_cache_copies_of_vault_listed_skills_are_not_unlisted() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let home = temp.path().join("home");
+    let cache = crate::runtime_layout::managed_skills_root(&runtime);
+    let vault = home.join("ObsidianVault/RemoteVault/99_Skills");
+    for dir in [&cache, &vault] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(
+        cache.join("manifest.json"),
+        r#"{"skills":{"memory-read":{}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        vault.join("manifest.json"),
+        r#"{"skills":{"named":{}},"create-issue":{"agents":["*"]},"global_core_skills":["core"]}"#,
+    )
+    .unwrap();
+    for dir in [
+        cache.join("create-issue"),
+        cache.join("named"),
+        cache.join("core"),
+        vault.join("create-issue"),
+    ] {
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "skill").unwrap();
+        assert!(
+            !std::fs::symlink_metadata(&dir)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    let audit = || {
+        let ids: BTreeSet<String> = ["live".to_string()].into();
+        skills::audit_skill_manifest_agents(skills::build_manifest_audit_request(
+            ids.clone(),
+            Some(ids),
+            Some(BTreeSet::new()),
+            skills::skill_manifest_paths(Some(runtime.clone()), Some(home.clone())),
+        ))
+    };
+    let clean = audit();
+    assert_eq!(clean.to_json()["findings"], serde_json::json!([]));
+    assert_eq!(clean.warning(), None);
+    assert!(skill_manifest_check(&clean).status == CheckStatus::Pass);
+    let orphan = cache.join("orphan");
+    std::fs::create_dir(&orphan).unwrap();
+    std::fs::write(orphan.join("SKILL.md"), "skill").unwrap();
+    let bad = audit();
+    assert_eq!(bad.to_json()["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        bad.to_json()["findings"][0]["path"],
+        orphan.display().to_string()
+    );
+    assert!(skill_manifest_check(&bad).status == CheckStatus::Warn);
+    assert!(bad.warning().is_some());
+}
+
+#[test]
+fn source_directories_still_require_their_own_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let home = temp.path().join("home");
+    let cache = crate::runtime_layout::managed_skills_root(&runtime);
+    let vault = home.join("ObsidianVault/RemoteVault/99_Skills");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(vault.join("borrowed")).unwrap();
+    std::fs::write(cache.join("manifest.json"), r#"{"skills":{"borrowed":{}}}"#).unwrap();
+    std::fs::write(vault.join("manifest.json"), "{}").unwrap();
+    std::fs::write(vault.join("borrowed/SKILL.md"), "skill").unwrap();
+    let ids: BTreeSet<String> = ["live".to_string()].into();
+    let report = skills::audit_skill_manifest_agents(skills::build_manifest_audit_request(
+        ids.clone(),
+        Some(ids),
+        Some(BTreeSet::new()),
+        skills::skill_manifest_paths(Some(runtime), Some(home)),
+    ));
+    assert_eq!(report.to_json()["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report.to_json()["findings"][0]["path"],
+        vault.join("borrowed").display().to_string()
+    );
+}
+
+#[test]
+fn boot_warning_caps_sample_but_doctor_and_api_keep_all_findings() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("manifest.json");
+    std::fs::write(&manifest, "{}").unwrap();
+    for i in 0..10 {
+        let dir = temp.path().join(format!("skill{i:02}"));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "skill").unwrap();
+    }
+    let ids: BTreeSet<String> = ["live".to_string()].into();
+    let report = skills::audit_skill_manifest_agents(skills::build_manifest_audit_request(
+        ids.clone(),
+        Some(ids),
+        Some(BTreeSet::new()),
+        vec![(manifest, skills::DirectoryScope::OwnManifest)],
+    ));
+    let warning = report.warning().unwrap();
+    assert!(warning.contains("findings=10 skipped=[]"));
+    let sample: serde_json::Value =
+        serde_json::from_str(warning.split_once(" sample=").unwrap().1).unwrap();
+    assert_eq!(sample.as_array().unwrap().len(), 5);
+    assert!(!warning.contains("skill09"));
+    assert_eq!(report.to_json()["findings"].as_array().unwrap().len(), 10);
+    let check = skill_manifest_check(&report);
+    assert_eq!(
+        check.evidence.unwrap()["findings"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+    assert!(check.detail.contains("skill09"));
+}
+
+#[test]
+fn sleeping_prompt_checker_is_timed_out_and_reported_unavailable() {
+    let (_temp, repo, prompts) = prompt_fixture();
+    std::fs::write(
+        repo.join("scripts/check_prompt_api_routes.py"),
+        "import time\ntime.sleep(1)\nprint('finished')\n",
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    let check =
+        prompt_api_routes_check_with_timeout(&repo, &prompts, std::time::Duration::from_millis(40));
+    assert!(check.status == CheckStatus::Warn);
+    assert!(check.detail.contains("inspection_unavailable: timeout"));
+    assert!(start.elapsed() < std::time::Duration::from_millis(600));
+}
+
+#[test]
+fn prompt_checker_stdout_is_drained_before_child_exit() {
+    let (_temp, repo, prompts) = prompt_fixture();
+    std::fs::write(
+        repo.join("scripts/check_prompt_api_routes.py"),
+        "print('x' * 200000)\n",
+    )
+    .unwrap();
+    let check =
+        prompt_api_routes_check_with_timeout(&repo, &prompts, std::time::Duration::from_secs(2));
+    assert!(check.status == CheckStatus::Pass);
+    assert!(check.detail.len() >= 200000);
 }

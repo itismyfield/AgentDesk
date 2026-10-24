@@ -23,12 +23,18 @@ const UNREADABLE_SKILL_DIRECTORY: &str = "unreadable_skill_directory";
 /// The distributor does not walk this workspace. A manually created, renamed
 /// or deleted directory is indistinguishable from a dead id, so this is a skip.
 const NESTED_ID_MISMATCH: &str = "nested_workspace_id_mismatch";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectoryScope {
+    OwnManifest,
+    AnyManifest,
+}
+
 /// `None` means "source failed", which is not an empty set and never becomes one.
 #[derive(Debug, Default)]
 pub(crate) struct ManifestAuditRequest {
     roster: Option<BTreeSet<String>>,
     distributed_workspaces: Option<BTreeSet<String>>,
-    manifests: Vec<PathBuf>,
+    manifests: Vec<(PathBuf, DirectoryScope)>,
 }
 
 #[derive(Debug, Default)]
@@ -53,7 +59,12 @@ impl ManifestAuditReport {
         if self.findings.is_empty() && self.skipped.is_empty() {
             return None;
         }
-        Some(format!("skill manifest audit: {}", self.to_json()))
+        Some(format!(
+            "skill manifest audit: findings={} skipped={} sample={}",
+            self.findings.len(),
+            json!(&self.skipped),
+            json!(self.findings.iter().take(5).collect::<Vec<_>>()),
+        ))
     }
 
     fn unavailable(&mut self, reason: &'static str, path: &std::path::Path) {
@@ -78,6 +89,17 @@ struct AuditManifest {
     legacy: BTreeMap<String, AuditEntry>,
 }
 
+impl AuditManifest {
+    fn skill_names(&self) -> BTreeSet<String> {
+        self.skills
+            .keys()
+            .chain(self.legacy.keys())
+            .chain(self.global_core_skills.iter())
+            .cloned()
+            .collect()
+    }
+}
+
 /// Workspace selectors and agent selectors have separate namespaces.
 #[derive(Debug, Default, Deserialize)]
 struct AuditEntry {
@@ -100,7 +122,10 @@ fn pinned_agent_ids(raw: &[String]) -> BTreeSet<String> {
 
 /// Only directory roots carry a `manifest.json`; the markdown-file root must not.
 /// The runtime manifest is required; an installed vault source also needs its manifest.
-fn skill_manifest_paths(runtime_root: Option<PathBuf>, home: Option<PathBuf>) -> Vec<PathBuf> {
+pub(crate) fn skill_manifest_paths(
+    runtime_root: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Vec<(PathBuf, DirectoryScope)> {
     let required = runtime_root
         .as_ref()
         .map(|root| crate::runtime_layout::managed_skills_manifest_path(root));
@@ -112,7 +137,14 @@ fn skill_manifest_paths(runtime_root: Option<PathBuf>, home: Option<PathBuf>) ->
             (Some(&path) == required.as_ref()
                 || path.try_exists().unwrap_or(true)
                 || (kind == SkillRootKind::ManagedDirectory && root.try_exists().unwrap_or(true)))
-            .then_some(path)
+            .then_some((
+                path,
+                if kind == SkillRootKind::CachedDirectory {
+                    DirectoryScope::AnyManifest
+                } else {
+                    DirectoryScope::OwnManifest
+                },
+            ))
         })
         .collect()
 }
@@ -123,7 +155,7 @@ fn manifest_path_sources() -> (Option<PathBuf>, Option<PathBuf>) {
     (crate::config::runtime_root(), dirs::home_dir())
 }
 
-fn default_manifest_paths() -> Vec<PathBuf> {
+fn default_manifest_paths() -> Vec<(PathBuf, DirectoryScope)> {
     let (runtime_root, home) = manifest_path_sources();
     skill_manifest_paths(runtime_root, home)
 }
@@ -134,7 +166,7 @@ pub(crate) fn build_manifest_audit_request(
     config_agent_ids: BTreeSet<String>,
     db_agent_ids: Option<BTreeSet<String>>,
     distributed_workspaces: Option<BTreeSet<String>>,
-    manifests: Vec<PathBuf>,
+    manifests: Vec<(PathBuf, DirectoryScope)>,
 ) -> ManifestAuditRequest {
     ManifestAuditRequest {
         roster: db_agent_ids.map(|db| config_agent_ids.union(&db).cloned().collect()),
@@ -204,7 +236,9 @@ pub(crate) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
     if request.manifests.is_empty() {
         report.skipped.insert(NO_MANIFEST);
     }
-    for path in &request.manifests {
+    let mut parsed = Vec::new();
+    let mut listed_anywhere = BTreeSet::new();
+    for (path, scope) in &request.manifests {
         let Ok(raw) = std::fs::read_to_string(path) else {
             report.unavailable(
                 if matches!(path.try_exists(), Ok(false)) {
@@ -220,7 +254,16 @@ pub(crate) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
             report.unavailable(UNPARSABLE_MANIFEST, path);
             continue;
         };
-        audit_skill_directories(path, &manifest, &mut report);
+        listed_anywhere.extend(manifest.skill_names());
+        parsed.push((path, scope, manifest));
+    }
+    for (path, scope, manifest) in parsed {
+        let own_names = manifest.skill_names();
+        let listed = match scope {
+            DirectoryScope::OwnManifest => &own_names,
+            DirectoryScope::AnyManifest => &listed_anywhere,
+        };
+        audit_skill_directories(path, listed, &mut report);
         for (skill, entry) in manifest.skills.iter().chain(manifest.legacy.iter()) {
             if let Some(roster) = roster {
                 for selector in entry
@@ -255,7 +298,7 @@ pub(crate) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
 
 fn audit_skill_directories(
     path: &std::path::Path,
-    manifest: &AuditManifest,
+    listed: &BTreeSet<String>,
     report: &mut ManifestAuditReport,
 ) {
     let Some(root) = path.parent() else { return };
@@ -279,15 +322,7 @@ fn audit_skill_directories(
             continue;
         }
         match std::fs::metadata(dir.join("SKILL.md")) {
-            Ok(metadata)
-                if metadata.is_file()
-                    && !manifest.skills.contains_key(name)
-                    && !manifest.legacy.contains_key(name)
-                    && !manifest
-                        .global_core_skills
-                        .iter()
-                        .any(|skill| skill == name) =>
-            {
+            Ok(metadata) if metadata.is_file() && !listed.contains(name) => {
                 report.findings.push(
                     json!({"kind": "unlisted_skill", "manifest": path.display().to_string(),
                     "skill": name, "path": dir.display().to_string()}),

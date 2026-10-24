@@ -22,7 +22,10 @@ fn audit(
         ids(config),
         db.map(ids),
         workspaces.map(ids),
-        manifests,
+        manifests
+            .into_iter()
+            .map(|path| (path, DirectoryScope::OwnManifest))
+            .collect(),
     ))
 }
 
@@ -187,7 +190,13 @@ fn skill_manifest_paths_takes_directory_roots_only() {
         Some(runtime.path().to_path_buf()),
         Some(home.path().to_path_buf()),
     );
-    assert_eq!(selected, vec![managed, codex]);
+    assert_eq!(
+        selected,
+        vec![
+            (managed, DirectoryScope::AnyManifest),
+            (codex, DirectoryScope::OwnManifest)
+        ]
+    );
 }
 
 #[test]
@@ -202,7 +211,12 @@ fn a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip() {
     let staged = std::fs::read_to_string(&manifest).is_err();
     let selected = skill_manifest_paths(Some(runtime.path().to_path_buf()), None);
     let roster = Some(&["agentdesk"][..]);
-    let report = audit(&["agentdesk"], roster, roster, selected.clone());
+    let report = audit_skill_manifest_agents(build_manifest_audit_request(
+        ids(&["agentdesk"]),
+        roster.map(ids),
+        roster.map(ids),
+        selected.clone(),
+    ));
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
     // A euid the mode bits do not bind cannot stage an unreadable file at all.
     if !staged {
@@ -212,7 +226,7 @@ fn a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip() {
     // `is_file()` answered `false` to the `PermissionDenied` stat and dropped
     // the path, so an existing manifest read as `no_manifest` - the one state
     // that means the file is not there. It reaches its own skip now.
-    assert_eq!(selected, vec![manifest]);
+    assert_eq!(selected, vec![(manifest, DirectoryScope::AnyManifest)]);
     assert_eq!(skips(&report), vec![UNREADABLE_MANIFEST]);
     assert_eq!(report.to_json()["audited"], serde_json::json!(false));
 }
@@ -325,11 +339,19 @@ fn missing_required_or_installed_source_manifest_is_unavailable_and_never_passes
     assert_eq!(
         selected,
         vec![
-            crate::runtime_layout::managed_skills_manifest_path(runtime.path()),
-            vault.join("manifest.json")
+            (
+                crate::runtime_layout::managed_skills_manifest_path(runtime.path()),
+                DirectoryScope::AnyManifest
+            ),
+            (vault.join("manifest.json"), DirectoryScope::OwnManifest)
         ]
     );
-    let report = audit(&["live"], Some(&["live"]), Some(&[]), selected);
+    let report = audit_skill_manifest_agents(build_manifest_audit_request(
+        ids(&["live"]),
+        Some(ids(&["live"])),
+        Some(ids(&[])),
+        selected,
+    ));
     assert_eq!(skips(&report), vec![NO_MANIFEST]);
     assert_eq!(report.to_json()["audited"], false);
     assert_eq!(

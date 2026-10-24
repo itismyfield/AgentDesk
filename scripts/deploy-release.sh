@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+# --strict-prompts: prompt 0건 = inspection unavailable(exit 2); release deploy stops.
 # Under a build-token holder, refuse before detach and the deploy lock: waiting for the lock
 # would deadlock against a deploy that holds it and waits for the token. Only 73 refuses.
 if [ -n "${ADK_BUILD_TOKEN_HOLDER:-}" ]; then

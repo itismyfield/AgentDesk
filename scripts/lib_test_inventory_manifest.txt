@@ -138,9 +138,14 @@ cli::doctor::orchestrator::api_exposure::tests::rejected_tokenless_non_loopback_
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
+cli::doctor::orchestrator::configuration_audit::tests::boot_warning_caps_sample_but_doctor_and_api_keep_all_findings
 cli::doctor::orchestrator::configuration_audit::tests::mirror_prompt_fixture_reports_file_and_unknown_path_and_clean_has_zero
 cli::doctor::orchestrator::configuration_audit::tests::missing_unreadable_prompt_or_inventory_is_unavailable_instead_of_pass
+cli::doctor::orchestrator::configuration_audit::tests::prompt_checker_stdout_is_drained_before_child_exit
+cli::doctor::orchestrator::configuration_audit::tests::runtime_cache_copies_of_vault_listed_skills_are_not_unlisted
 cli::doctor::orchestrator::configuration_audit::tests::skill_fixture_reports_stale_agent_and_unlisted_directory_and_clean_has_zero
+cli::doctor::orchestrator::configuration_audit::tests::sleeping_prompt_checker_is_timed_out_and_reported_unavailable
+cli::doctor::orchestrator::configuration_audit::tests::source_directories_still_require_their_own_manifest
 cli::doctor::orchestrator::dispatch_outbox::tests::doctor_dispatch_outbox_missing_block_is_unmeasured
 cli::doctor::orchestrator::health_snapshot::tests::legacy_doctor_fetches_no_checker_evidence_and_user_default_uses_only_doctor_response
 cli::doctor::orchestrator::herdr_policy::tests::doctor_keeps_checker_raw_only_in_evidence_and_health_excerpt_only_in_detail

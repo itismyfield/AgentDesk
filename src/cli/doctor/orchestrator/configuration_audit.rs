@@ -18,6 +18,14 @@ pub(super) fn checks(cfg: &crate::config::Config) -> Vec<Check> {
 }
 
 fn prompt_api_routes_check(repo: &Path, prompts: &Path) -> Check {
+    prompt_api_routes_check_with_timeout(repo, prompts, std::time::Duration::from_secs(10))
+}
+
+fn prompt_api_routes_check_with_timeout(
+    repo: &Path,
+    prompts: &Path,
+    timeout: std::time::Duration,
+) -> Check {
     // Invoke deploy staging's checker from the same checkout as its inventory.
     let output = std::process::Command::new("python3")
         .arg(repo.join("scripts/check_prompt_api_routes.py"))
@@ -25,12 +33,48 @@ fn prompt_api_routes_check(repo: &Path, prompts: &Path) -> Check {
         .arg(repo)
         .arg("--prompts")
         .arg(prompts)
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
     let (code, detail) = match output {
-        Ok(output) => (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ),
+        Ok(mut child) => {
+            let Some(mut stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return prompt_result(None, "inspection_unavailable: stdout".into());
+            };
+            let reader = std::thread::spawn(move || {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).map(|_| bytes)
+            });
+            let started = std::time::Instant::now();
+            let outcome = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) if started.elapsed() < timeout => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    result => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(match result {
+                            Err(error) => format!("inspection_unavailable: {error}"),
+                            _ => "inspection_unavailable: timeout".into(),
+                        });
+                    }
+                }
+            };
+            let bytes = reader.join().ok().and_then(Result::ok);
+            match (outcome, bytes) {
+                (Ok(status), Some(bytes)) => (
+                    status.code(),
+                    String::from_utf8_lossy(&bytes).trim().to_string(),
+                ),
+                (Err(error), _) => (None, error),
+                _ => (None, "inspection_unavailable: stdout read".into()),
+            }
+        }
         Err(error) => (None, format!("inspection_unavailable: {error}")),
     };
     prompt_result(code, detail).with_path(prompts.display().to_string())
@@ -105,11 +149,11 @@ fn skill_manifest_check(report: &skills::ManifestAuditReport) -> Check {
             "Skill Manifest",
             "findings=0",
         ),
-        Some(detail) => Check::warn(
+        Some(_) => Check::warn(
             "skill_manifest",
             CheckGroup::Core,
             "Skill Manifest",
-            detail,
+            format!("skill manifest audit: {evidence}"),
             "Review manifest agents and unlisted SKILL.md directories; audit_skipped/inspection_errors mean inspection unavailable.",
         ),
     };
