@@ -163,6 +163,75 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn codex_prepare_unknown_preserves_nonce_component_in_stats_and_log() {
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new(false);
+    std::fs::remove_file(tc::session_temp_path(
+        &fixture.context.tmux_session,
+        "spawn_nonce",
+    ))
+    .unwrap();
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = recorded.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || Log(writer.clone()))
+        .finish();
+    let _tracing = tracing::subscriber::set_default(subscriber);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let shared = fixture.shared(None);
+        shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+        let registry = HealthRegistry::new();
+        registry.register("codex".into(), shared).await;
+        crate::services::tui_o::writer::tests::with_ready_codex(
+            fixture.source.clone(),
+            CHANNEL,
+            |ready| async move {
+                use super::super::automatic::test_support;
+                assert!(
+                    test_support::codex_sweep_for_test(&registry, &ready, CHANNEL)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    test_support::codex_skips_for_test(),
+                    std::collections::BTreeMap::from([(
+                        "codex_context_unavailable:nonce_marker".into(),
+                        1
+                    )])
+                );
+            },
+        )
+        .await;
+    });
+    let text = String::from_utf8(recorded.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains("[tui_o] Codex retention observation unknown"),
+        "{text}"
+    );
+    assert!(
+        text.contains("nonce_marker") && text.contains("channel=7"),
+        "{text}"
+    );
+    assert!(text.contains("current spawn nonce unavailable"), "{text}");
+}
+
+#[test]
 fn legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed() {
     let fixture = Fixture::new(false);
     let runtime = tokio::runtime::Builder::new_current_thread()

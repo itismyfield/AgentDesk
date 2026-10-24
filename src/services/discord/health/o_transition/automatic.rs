@@ -363,6 +363,11 @@ pub(crate) mod test_support {
 
     thread_local! {
         static CODEX_REPLIES: std::cell::RefCell<Vec<Reply>> = const { std::cell::RefCell::new(Vec::new()) };
+        static CODEX_SKIPS: std::cell::RefCell<BTreeMap<String, usize>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(crate) fn codex_skips_for_test() -> BTreeMap<String, usize> {
+        CODEX_SKIPS.with(|slot| slot.borrow().clone())
     }
 
     pub(super) fn record_codex_reply(reply: Reply) {
@@ -376,7 +381,13 @@ pub(crate) mod test_support {
     ) -> Result<Reply, &'static str> {
         CODEX_REPLIES.with(|slot| slot.borrow_mut().clear());
         let mut stats = Stats::default();
-        channel_sweep(registry, ready, &ProviderKind::Codex, channel, &mut stats).await?;
+        let result =
+            channel_sweep(registry, ready, &ProviderKind::Codex, channel, &mut stats).await;
+        if let Err(reason) = result {
+            stats.skip(reason);
+        }
+        CODEX_SKIPS.with(|slot| *slot.borrow_mut() = stats.skipped);
+        result?;
         CODEX_REPLIES
             .with(|slot| slot.borrow_mut().pop())
             .ok_or("no Codex Inspect was sent")

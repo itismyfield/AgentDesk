@@ -788,6 +788,21 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
     )) {
         return;
     }
+    scope_during_transition(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm"
+    )) {
+        return;
+    }
+    scope_during_transition(true).await;
+}
+
+async fn scope_during_transition(inspect: bool) {
     let _environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -846,6 +861,7 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
         )),
         CANARY_TMUX,
         &n3_context.execution_nonce,
+        inspect,
         || {
             assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
             assert!(selection.contains(&n2));
@@ -855,18 +871,30 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
             context.execution_nonce
         },
         || {
-            assert_eq!(alarm_count(), 1, "a held exact root raises one alarm");
+            assert_eq!(
+                alarm_count(),
+                usize::from(!inspect),
+                "only Apply holds a fresh root"
+            );
             assert_eq!(
                 harness.alarms.cleared.load(Ordering::SeqCst),
                 0,
                 "new_root_waiting must not clear while the transition job still exists"
             );
             assert_eq!(harness.port.posts(), ["Q1 before transition", "-# ✅ 완료"]);
-            assert_eq!(
-                selection.nonce().as_deref(),
-                Some(n3_context.execution_nonce.as_str()),
-                "a held root must not change the installed selection"
-            );
+            if inspect {
+                assert_ne!(
+                    selection.nonce().as_deref(),
+                    Some(n3_context.execution_nonce.as_str()),
+                    "Inspect must allow the new selection while its quiet probe still waits"
+                );
+            } else {
+                assert_eq!(
+                    selection.nonce().as_deref(),
+                    Some(n3_context.execution_nonce.as_str()),
+                    "Apply must not change the installed selection"
+                );
+            }
         },
     )
     .await;
@@ -882,11 +910,15 @@ async fn new_root_waiting_alarm_clears_once_after_transition_job_finishes() {
             "-# ✅ 완료"
         ]
     );
-    assert_eq!(alarm_count(), 1, "resolving the hold must not re-alarm");
+    assert_eq!(
+        alarm_count(),
+        usize::from(!inspect),
+        "Inspect must raise no waiting alarm"
+    );
     assert_eq!(
         harness.alarms.cleared.load(Ordering::SeqCst),
-        1,
-        "installing the new root must clear its own waiting incident exactly once"
+        usize::from(!inspect),
+        "only an actual Apply hold leaves a waiting incident to clear"
     );
     assert_eq!(harness.channel().cursor(&n2), Some(&old_cursor));
     assert_eq!(std::fs::read(&n2.path).unwrap(), old_bytes);

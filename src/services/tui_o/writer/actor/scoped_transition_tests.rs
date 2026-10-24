@@ -85,6 +85,7 @@ pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
     bindings: Arc<B>,
     tmux: &str,
     initial_nonce: &str,
+    inspect: bool,
     next_root: impl FnOnce() -> String,
     held: impl Fn(),
 ) -> String
@@ -156,7 +157,8 @@ where
             reason: "finish an existing transition before selecting a new root".into(),
             termination: None,
         },
-        apply: false,
+        // Apply is a synthetic pre-existing job; Codex mailbox Apply remains refused.
+        apply: !inspect,
         automatic: None,
         scope: None,
         stopping: stopped,
@@ -174,26 +176,90 @@ where
         hashed: 0,
         outcomes: BTreeMap::new(),
     });
-    let nonce = next_root();
-    for _ in 0..3 {
-        assert!(actor.transitions.has_job());
-        assert!(
-            !actor.rescope(),
-            "a live transition job must hold the new root"
+    if inspect {
+        let cursor = actor
+            .writer
+            .store()
+            .cursors()
+            .find(|cursor| !actor.writer.suspension.contains(&cursor.source))
+            .expect("the proven current source is readable")
+            .clone();
+        let key = source_key(&cursor.source);
+        let token = actor.token(&cursor);
+        let job = actor.transitions.job.as_mut().unwrap();
+        job.probes.insert(
+            key.clone(),
+            Probe {
+                token,
+                earlier: None,
+                later: None,
+                last_dialogue: None,
+            },
         );
-        assert_eq!(actor.scope_hold, Some("new_root_waiting"));
-        actor.observe_waiting(false);
+        job.queue.push_back(key);
+        // Reach Quiet through the production worker/probe state machine, without advancing time.
+        for _ in 0..4 {
+            let mut job = actor.transitions.job.take().unwrap();
+            assert!(!actor.step(&mut job, &watch::channel(None).0).await);
+            let quiet = matches!(job.stage, Stage::Quiet(until) if until > now());
+            actor.transitions.job = Some(job);
+            test_hooks::settle_workers();
+            if quiet {
+                break;
+            }
+        }
+        let job = actor.transitions.job.as_ref().unwrap();
+        assert!(matches!(job.stage, Stage::Quiet(until) if until > now()));
+        assert!(!job.apply);
+        assert!(job.probes.values().all(|probe| probe.earlier.is_some()));
+    }
+    let nonce = next_root();
+    assert!(actor.transitions.has_job());
+    if inspect {
+        assert!(
+            actor.rescope(),
+            "a read-only Inspect in Quiet must not delay a proven fresh root"
+        );
+        assert_eq!(actor.scope_hold, None);
+        assert_eq!(
+            actor.writer.suspension.nonce().as_deref(),
+            Some(nonce.as_str())
+        );
+        assert!(matches!(
+            actor.transitions.job.as_ref().unwrap().stage,
+            Stage::Quiet(_)
+        ));
         held();
+    } else {
+        for _ in 0..3 {
+            assert!(
+                !actor.rescope(),
+                "an Apply job must still hold the new root"
+            );
+            assert_eq!(actor.scope_hold, Some("new_root_waiting"));
+            actor.observe_waiting(false);
+            held();
+        }
     }
     let mut job = actor.transitions.job.take().unwrap();
-    assert!(actor.step(&mut job, &watch::channel(None).0).await);
+    if inspect {
+        tokio::time::advance(RETIRE_QUIET).await;
+    }
+    for _ in 0..4 {
+        if actor.step(&mut job, &watch::channel(None).0).await {
+            break;
+        }
+        test_hooks::settle_workers();
+    }
     actor.finish(job);
     assert!(completed.await.unwrap().refused.is_none());
     assert!(!actor.transitions.has_job());
-    assert!(
-        actor.rescope(),
-        "finishing the job must permit the exact new root"
-    );
+    if !inspect {
+        assert!(
+            actor.rescope(),
+            "finishing Apply must permit the exact new root"
+        );
+    }
     assert_eq!(actor.scope_hold, None);
     actor.observe_waiting(false);
     actor
