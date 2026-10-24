@@ -580,7 +580,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
         attempt_no: next_attempt,
     })
 }
-
+pub(crate) mod consent_handoff;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
@@ -623,8 +623,8 @@ pub(crate) async fn list_recent_rows(
         .await
     }
 }
-
 /// Whether the channel still has an intake row in an open status; that row owes Legacy execution.
+#[cfg(test)]
 pub(crate) async fn channel_has_open_row(
     pool: &PgPool,
     channel_id: &str,

@@ -9,6 +9,7 @@ mod herdr {
     pub(crate) mod model;
     pub(crate) mod observe;
     pub(crate) mod pane_probe;
+    pub(crate) mod policy;
     pub(crate) mod provenance;
     // Unix-socket only; no Windows transport exists.
     #[cfg(unix)]
@@ -19,6 +20,8 @@ mod consumer_guard;
 mod herdr_gate;
 mod herdr_host;
 mod herdr_registry;
+#[cfg(all(test, unix))]
+pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
 // The operator terminate path against real Herdr servers its runner starts; ignored otherwise.
@@ -38,6 +41,9 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+#[cfg(all(test, unix))]
+pub(crate) use herdr::model::HerdrEndpoint;
+pub(crate) use herdr::policy;
 pub(crate) use herdr_gate::legacy_return;
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]

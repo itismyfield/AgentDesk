@@ -23,8 +23,6 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-#[cfg(not(test))]
-use crate::services::discord::execute_intake_turn_core;
 use crate::services::discord::{IntakeExecution, IntakeRequest, SharedData, TurnKind};
 use crate::services::tui_o::cutover::intake_route;
 use poise::serenity_prelude as serenity;
@@ -34,12 +32,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-#[cfg(test)]
-use test_executor::execute_intake_turn_core;
-
 mod o_input;
-use o_input::hold_off_o_gateway;
-
+#[cfg(unix)]
+pub(crate) use o_input::{BeforeEffects, take_before_effects};
+use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[derive(Default)]
 struct MarkDoneMissCounters {
     stamp_handoff_observed: AtomicU64,
@@ -472,6 +468,7 @@ pub(crate) async fn run_intake_worker_tick(
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
+        &row,
         &runtime.http,
         &runtime.shared,
         &runtime.token,
@@ -479,7 +476,6 @@ pub(crate) async fn run_intake_worker_tick(
         uploads,
     )
     .await;
-
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
     let outcome = match result {

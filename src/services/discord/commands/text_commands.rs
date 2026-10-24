@@ -95,15 +95,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
     preloaded_uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
     admitted_attachment_permit: &mut Option<LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
+    #[cfg(unix)]
+    if super::super::router::herdr_consent::retry(ctx, msg, data, channel_id, text).await? {
+        return Ok(true);
+    }
     let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();
     let cmd = parts[0];
     let arg1 = parts.get(1).unwrap_or(&"");
     let arg2 = parts.get(2).unwrap_or(&"");
-
-    // Issue #1005: Before any command-specific handling, classify the command
-    // by risk tier and apply the owner guard. This runs BEFORE the allow_all
-    // branch inside individual arms so that high-risk commands are never
-    // unlocked by `allow_all_users=true`.
+    // Issue #1005: high-risk arms need owner + env opt-in (never allow_all_users); consent retry above is owner-only.
     let classified = TextCommandId::from_str(cmd);
     let risk = super::command_risk(cmd, arg1);
     let (is_owner, high_risk_enabled) = if classified.is_some() && risk.is_high_risk() {

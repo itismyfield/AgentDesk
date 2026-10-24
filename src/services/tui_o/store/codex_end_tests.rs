@@ -399,6 +399,120 @@ fn seal_write_failure_reopens_unsealed_and_unsynced_retry_reestablishes_durabili
 }
 
 #[test]
+fn durable_read_rejects_published_unsynced_seal_until_the_same_evidence_is_durable() {
+    let root = tempfile::tempdir().unwrap();
+    let mut end = record(7, 1);
+    let unsealed = record(7, 3);
+    let candidate = successor(&end);
+    append(root.path(), &end).unwrap();
+    append(root.path(), &unsealed).unwrap();
+    let dir = root.path().join(DIR_NAME);
+    let sync = fault::plant(&dir, Step::ReplaceDirSync, ErrorKind::Other, None);
+    assert!(matches!(
+        seal(root.path(), 7, &end.end_id, &candidate),
+        Ok(Appended::PublishedUnsynced(_))
+    ));
+    end.successor = Some(candidate);
+    let expected = vec![end, unsealed];
+    let before = fs::read(path(root.path(), 7)).unwrap();
+    assert_eq!(read(root.path(), 7).unwrap(), expected);
+    for _ in 0..2 {
+        assert!(read_durable(root.path(), 7).is_err());
+        assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+    }
+    drop(sync);
+    assert_eq!(read_durable(root.path(), 7).unwrap(), expected);
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+}
+
+#[test]
+fn durable_read_requires_a_synced_write_and_preserves_the_exact_existing_file() {
+    let root = tempfile::tempdir().unwrap();
+    let mut end = record(7, 1);
+    let candidate = successor(&end);
+    append(root.path(), &end).unwrap();
+    seal(root.path(), 7, &end.end_id, &candidate).unwrap();
+    end.successor = Some(candidate);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path(), 7)).unwrap()).unwrap();
+    let before = serde_json::to_vec_pretty(&raw).unwrap();
+    fs::write(path(root.path(), 7), &before).unwrap();
+    let write = fault::plant(
+        &root.path().join(DIR_NAME),
+        Step::Write,
+        ErrorKind::StorageFull,
+        None,
+    );
+    assert!(read_durable(root.path(), 7).is_err());
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+    drop(write);
+    assert_eq!(read_durable(root.path(), 7).unwrap(), [end]);
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+}
+
+#[test]
+fn durable_read_leaves_absent_unsealed_and_corrupt_records_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(read_durable(root.path(), 7).unwrap().is_empty());
+    assert!(!root.path().join(DIR_NAME).exists());
+    let end = record(7, 1);
+    append(root.path(), &end).unwrap();
+    let before = fs::read(path(root.path(), 7)).unwrap();
+    let write = fault::plant(
+        &root.path().join(DIR_NAME),
+        Step::Write,
+        ErrorKind::StorageFull,
+        None,
+    );
+    assert_eq!(read_durable(root.path(), 7).unwrap(), [end]);
+    assert_eq!(fs::read(path(root.path(), 7)).unwrap(), before);
+    let mut foreign: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    foreign["records"][0]["channel"] = 8.into();
+    let mut unknown: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    unknown["records"][0]["source"]["future_field"] = true.into();
+    for bytes in [
+        b"{broken".to_vec(),
+        serde_json::to_vec(&foreign).unwrap(),
+        serde_json::to_vec(&unknown).unwrap(),
+        vec![b' '; MAX_BYTES as usize + 1],
+    ] {
+        fs::write(path(root.path(), 7), &bytes).unwrap();
+        assert!(read_durable(root.path(), 7).is_err());
+        assert_eq!(fs::read(path(root.path(), 7)).unwrap(), bytes);
+    }
+    drop(write);
+}
+
+#[test]
+#[cfg(unix)]
+fn channel_read_uses_its_own_store_root_and_reopened_reads_keep_the_durable_boundary() {
+    use crate::services::tui_o::store::tests::{enabled, sealed};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = enabled(root.path());
+    let era = sealed(&store, &[7]);
+    let channel = store.open_channel(&era, 7).unwrap().unwrap();
+    let mut end = record(7, 1);
+    let candidate = successor(&end);
+    append(root.path(), &end).unwrap();
+    seal(root.path(), 7, &end.end_id, &candidate).unwrap();
+    end.successor = Some(candidate);
+    assert_eq!(channel.codex_ends().unwrap(), [end.clone()]);
+    let sync = fault::plant(
+        &root.path().join(DIR_NAME),
+        Step::ReplaceDirSync,
+        ErrorKind::Other,
+        None,
+    );
+    assert!(channel.durable_codex_ends().is_err());
+    let reopened = store.open_channel(&era, 7).unwrap().unwrap();
+    assert_eq!(reopened.codex_ends().unwrap(), [end.clone()]);
+    assert!(reopened.durable_codex_ends().is_err());
+    drop(sync);
+    assert_eq!(reopened.durable_codex_ends().unwrap(), [end]);
+}
+
+#[test]
 fn stale_seal_never_recreates_missing_or_evicted_end() {
     let root = tempfile::tempdir().unwrap();
     let end = record(7, 1);

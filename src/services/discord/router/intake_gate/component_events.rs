@@ -9,11 +9,15 @@ pub(super) fn is_model_picker_component_custom_id(
         .is_some()
 }
 
-pub(super) async fn handle_model_picker_component_if_applicable(
+pub(super) async fn handle_component_if_applicable(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
     data: &Data,
 ) -> Result<bool, Error> {
+    #[cfg(unix)]
+    if super::super::herdr_consent::component(ctx, component, data).await? {
+        return Ok(true);
+    }
     if !is_model_picker_component_custom_id(&component.data.custom_id, component.channel_id) {
         return Ok(false);
     }
