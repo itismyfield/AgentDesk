@@ -968,7 +968,7 @@ async fn bound_live_hook_without_watcher(
     let pool = h.shared.pg_pool.clone().unwrap();
     h.answer_placeholders_immediately();
     h.cache_relay_transport();
-    h.use_mock_notify_bot(WAIT).await;
+    h.use_mock_provider_bot(WAIT).await;
     let endpoint = crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).unwrap();
     let logical = "herdr-prompt-registry-miss";
     let nonce = "00112233445566778899aabbccddee13";
