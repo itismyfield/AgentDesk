@@ -56,63 +56,6 @@ async fn assert_card_deleted(run: &Run) {
 
 const HOLD: u64 = 1_479_671_399_000_121;
 
-/// What the real queued start needs here: the intake's host-named session key, the channel's
-/// session and workspace, O's seeded store, the pane's attached source and local routing.
-async fn real_start(run: &Run) -> crate::config::TestEnvVarGuard {
-    let routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
-        "ADK_INTAKE_ROUTING_MODE",
-        "disabled".as_ref(),
-    );
-    run.mock
-        .park_first_placeholder
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    let _ = run.shared.http.cached_bot_token.set("rig-token".into());
-    let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
-    crate::services::discord::host_defer_gate::tests::map_channel(
-        &run.shared,
-        run.channel,
-        "row-end",
-    )
-    .await;
-    if let Some(session) = run.shared.core.lock().await.sessions.get_mut(&run.channel) {
-        session.current_path = Some(root.display().to_string());
-    }
-    let key = crate::services::discord::adk_session::build_adk_session_key(
-        &run.shared,
-        run.channel,
-        &run.provider,
-        None,
-    )
-    .await
-    .unwrap();
-    sqlx::query("UPDATE sessions SET session_key = $1 WHERE session_key = $2")
-        .bind(&key)
-        .bind(&run.key)
-        .execute(&run.pool)
-        .await
-        .unwrap();
-    let (store, era) = crate::services::herdr_launch::o_store_for_test(&root, &[run.channel.get()]);
-    let mut seeded = store
-        .open_channel(&era, run.channel.get())
-        .unwrap()
-        .unwrap();
-    seeded.set_binding_checkpoint(3).unwrap();
-    let offset = std::fs::metadata(&run.source).unwrap().len();
-    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-        &run.logical,
-        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-            output_path: run.source.display().to_string(),
-            relay_output_path: None,
-            input_fifo_path: None,
-            session_id: Some("session-row-end".into()),
-            last_offset: offset,
-            relay_last_offset: Some(offset),
-        },
-    );
-    routing
-}
-
 /// Idle right after a held pass (t0) with input queued: the edge's kick ends the row silently by
 /// t0 + 5 s, the kickoff follows within 1 s, and the real start begins the input's turn by 15 s.
 #[test]
@@ -136,7 +79,7 @@ fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
                 },
             )
             .await;
-            let _routing = real_start(&run).await;
+            let _routing = run.real_start().await;
             run.mock.seed_message(run.row.current_msg_id, SPINNER);
             run.relay.set(|pane| pane.screen = Some(BUSY.into()));
             // The queued input stays for the real kickoff: the sentinel's own taking hook is dropped.
@@ -211,6 +154,13 @@ fn a_queue_hold_ends_a_relayed_restarted_turn_before_the_next_input_pg() {
                 "no notice: {texts:?}"
             );
             assert_card_deleted(&run).await;
+            // The input's turn ends with the test: its reader would otherwise outlive the runtime.
+            let active = crate::services::discord::mailbox_snapshot(&run.shared, run.channel).await;
+            if let Some(token) = active.cancel_token {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             run.close().await;
         },
     );

@@ -316,11 +316,11 @@ impl Run {
         shared.http.cached_serenity_ctx.set(ctx).unwrap();
         let provider = setup.provider;
         let logical = provider.build_tmux_session_name("row-end");
-        let key = format!(
-            "{}/{}/{}:{logical}",
-            provider.as_str(),
-            shared.token_hash,
-            herdr::NODE
+        // This host's namespaced key, the one the intake derives for the channel's next input.
+        let key = crate::services::discord::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &provider,
+            &logical,
         );
         let token = shared.token_hash.clone();
         let restarted = std::env::var(PHASE).as_deref() == Ok("after");
@@ -457,6 +457,57 @@ impl Run {
             self.shared.clone(),
             self.provider.clone(),
         );
+    }
+
+    /// What the real queued start needs here: the channel's session and workspace, O's seeded
+    /// store, the pane's attached source and local routing.
+    async fn real_start(&self) -> crate::config::TestEnvVarGuard {
+        let routing = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "ADK_INTAKE_ROUTING_MODE",
+            "disabled".as_ref(),
+        );
+        self.mock
+            .park_first_placeholder
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.shared.http.cached_bot_token.set("rig-token".into());
+        let root = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+        crate::services::discord::host_defer_gate::tests::map_channel(
+            &self.shared,
+            self.channel,
+            "row-end",
+        )
+        .await;
+        if let Some(session) = self
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&self.channel)
+        {
+            session.current_path = Some(root.display().to_string());
+        }
+        let (store, era) =
+            crate::services::herdr_launch::o_store_for_test(&root, &[self.channel.get()]);
+        let mut seeded = store
+            .open_channel(&era, self.channel.get())
+            .unwrap()
+            .unwrap();
+        seeded.set_binding_checkpoint(3).unwrap();
+        let offset = std::fs::metadata(&self.source).unwrap().len();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &self.logical,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: self.source.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("session-row-end".into()),
+                last_offset: offset,
+                relay_last_offset: Some(offset),
+            },
+        );
+        routing
     }
 
     /// One end pass, returning once every task it started has finished.
