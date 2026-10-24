@@ -65,6 +65,7 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── build_info.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
