@@ -198,7 +198,7 @@ assert_class "F1 reverse: the real outage fingerprint at 0 steps is still infras
 # REPO_CONFIG_FAULT_REGEX: a repo-configuration fault whose wording is NOT in
 # that list is still labelled infrastructure and still auto-retried. The fixture
 # is an unrecognised string standing for ~15 measured real cases. The cost, and
-# the limit of the `run_attempt >= 3` containment argument (it bounds only
+# the limit of the `run_attempt >= 2` containment argument (it bounds only
 # DETERMINISTIC faults), are stated once — at that constant.
 NOVEL_OUTAGE_LOG="$(write_log novel-outage.log \
   'Error: a transient failure wording that no pattern here knows yet')"
@@ -370,33 +370,17 @@ assert_class "F3 end-to-end: the produced 0 reaches the structural signal" \
 # any call it is not given a fixture for, so a case that reached the rerun would
 # fail here rather than touch a repository.
 #
-# ★ #5207 (r5, D4) — WHAT THIS HARNESS DOES NOT REACH. The classifier consumes
-# FOUR read-only endpoints, not three. The stub serves three of them:
-#   1. `repos/{repo}/actions/runs/{id}/attempts/{n}`        (script :527)
-#   2. `repos/{repo}/actions/runs/{id}/attempts/{n}/jobs`   (script :541)
-#   3. `repos/{repo}/actions/jobs/{job-id}/logs`            (script :571)
-# The fourth, `repos/{repo}/actions/runs/{id}` — the freshness re-check in
-# `latest_attempt_is_still_failed` (script :494) — is DELIBERATELY NOT SERVED.
-# It sits past the `RERUN_DRY_RUN=1` early return (script :618-622), so no case
-# here reaches it, and leaving it unserved means an accidental live-path escape
-# lands in `refused.log` instead of hitting the API.
-# The price is stated rather than hidden: everything downstream of that early
-# return is UNVERIFIED by this suite. Three `run_classifier` branches have ZERO
-# coverage — `no-op:stale-attempt`, `no-op:rerun-request-failed`, and
-# `rerun-requested:infra` (script :624-639). Do not read the E2E cases below as
-# evidence about them.
+# The stub serves attempt, jobs, logs, latest-run and current-PR evidence.
+# Live-path cases below record rerun requests locally; no GitHub transport runs.
 E2E_BIN="$WORK_DIR/e2e-bin"
 mkdir -p "$E2E_BIN"
 cat >"$E2E_BIN/gh" <<'GH_STUB'
 #!/usr/bin/env bash
-# #5207 (r4) `gh` stand-in. Serves fixtures for three of the FOUR read-only
-# endpoints the classifier consumes; the fourth -- `repos/.../actions/runs/<id>`,
-# the freshness re-check that lives past the dry-run early return -- is refused
-# on purpose, along with every other invocation, `gh run rerun` above all.
-# See the r5/D4 note above for the branches that consequently go unverified.
+# Rerun writes are recorded only when the case explicitly permits them.
 set -u
 if [ "${1-}" = "api" ]; then
   case "${2-}" in
+    */pulls/*) src="$GH_FIXTURE_DIR/pull.json" ;;
     */attempts/*/jobs*) src="$GH_FIXTURE_DIR/jobs.json" ;;
     */attempts/*) src="$GH_FIXTURE_DIR/attempt.json" ;;
     */actions/jobs/*/logs)
@@ -430,8 +414,9 @@ new_e2e_case() {
   E2E_CASE="$WORK_DIR/e2e-$E2E_N"
   mkdir -p "$E2E_CASE"
   printf '%s\n' \
-    '{"name":"CI PR","event":"pull_request","status":"completed","conclusion":"failure","run_attempt":1}' \
+    '{"name":"CI PR","event":"pull_request","status":"completed","conclusion":"failure","run_attempt":1,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pull_requests":[{"number":42}]}' \
     >"$E2E_CASE/attempt.json"
+  printf '%s\n' '{"state":"open","head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}' >"$E2E_CASE/pull.json"
   : >"$E2E_CASE/refused.log"
   : >"$E2E_CASE/summary.md"
 }

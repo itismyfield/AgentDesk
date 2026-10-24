@@ -5,7 +5,6 @@ use crate::services::discord::router::source_guard_support::{Lexed, forge, swap}
 use crate::test_support::CommentForgery;
 
 pub(crate) const INTAKE_TURN: &str = include_str!("../../intake_turn.rs");
-pub(crate) const RUNTIME_TRANSITION: &str = include_str!("../runtime_transition.rs");
 pub(crate) const BUSY_RETRY: &str = include_str!("../../busy_retry.rs");
 pub(crate) const TUI_FOLLOWUP: &str = include_str!("../../tui_followup.rs");
 pub(crate) const STALE_GUARD: &str = include_str!("../stale_dispatch_guard.rs");
@@ -15,8 +14,7 @@ const TRANSITION: [&str; 2] = [
     "    let Some((route, bootstrapped_fresh_thread_session))",
     "    let (mut session_id, mut memento_context_loaded",
 ];
-const NATIVE_CLEAR_PROVIDER: &str = "(http, shared, token, &provider)";
-const RECOVERED_FRESH: &str = "&mut t.recovered_fresh";
+const TRANSITION_PROVIDER: &str = "(http, shared, token, &provider)";
 const BUSY_LOG: &str =
     "claude_tui follow-up queued because hosted TUI is busy before prompt submission";
 const FINALIZE: &str = "busy_retry::finalize_enqueue(";
@@ -73,9 +71,8 @@ fn need(present: bool, label: &str) -> Vec<String> {
     }
 }
 
-/// The role-override transition keeps the original provider for native clear, and the
-/// runtime transition forwards the recovered fresh flag.
-pub(crate) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<String> {
+/// Role overrides keep the original provider through the intake runtime transition.
+pub(crate) fn transition_provider_gaps(intake: &str) -> Vec<String> {
     let src = match item(intake, HANDLER) {
         Ok(src) => src,
         Err(gaps) => return gaps,
@@ -88,15 +85,11 @@ pub(crate) fn transition_provider_gaps(intake: &str, runtime: &str) -> Vec<Strin
     };
     let mut gaps = need(
         !transition.text().contains("let provider ="),
-        "role override must not shadow the original native-clear provider",
+        "role override must not shadow the original transition provider",
     );
     gaps.extend(need(
-        transition.contains(NATIVE_CLEAR_PROVIDER),
-        "runtime transition and native clear retain settings.provider",
-    ));
-    gaps.extend(need(
-        Lexed::new(runtime).contains(RECOVERED_FRESH),
-        "runtime transition must forward recovered_fresh",
+        transition.contains(TRANSITION_PROVIDER),
+        "runtime transition retains settings.provider",
     ));
     gaps
 }
@@ -329,11 +322,11 @@ fn handler_guards_reject_commented_steps() {
     let busy = |src: &str| busy_enqueue_view_gaps(src, BUSY_RETRY);
     let abort = |src: &str| abort_branch_gaps(STALE_GUARD, src);
     let param = |src: &str| preserve_param_gaps(src, STALE_GUARD);
-    let transition = |src: &str| transition_provider_gaps(src, RUNTIME_TRANSITION);
+    let transition = transition_provider_gaps;
     let cases: [(DynJudge<'_>, &[&str]); 8] = [
         (
             &transition,
-            &[HANDLER, TRANSITION[0], TRANSITION[1], NATIVE_CLEAR_PROVIDER],
+            &[HANDLER, TRANSITION[0], TRANSITION[1], TRANSITION_PROVIDER],
         ),
         (&busy, &[FINALIZE]),
         (
@@ -399,8 +392,6 @@ fn helper_guards_reject_commented_steps() {
     );
     let param = |src: &str| preserve_param_gaps(INTAKE_TURN, src);
     assert_rejects(STALE_GUARD, &param, &[PRESERVE_GATE]);
-    let transition = |src: &str| transition_provider_gaps(INTAKE_TURN, src);
-    assert_rejects(RUNTIME_TRANSITION, &transition, &[RECOVERED_FRESH]);
 }
 
 #[test]
@@ -422,12 +413,9 @@ fn intake_guards_reject_reordered_steps_and_count_coded_bans() {
     let insert = |text: &str| format!("{}{text}{}", &INTAKE_TURN[..at], &INTAKE_TURN[at..]);
     let prose = insert(" = /* let provider = x; */ // let provider = x;\n");
     let none = Vec::<String>::new();
-    assert_eq!(transition_provider_gaps(&prose, RUNTIME_TRANSITION), none);
+    assert_eq!(transition_provider_gaps(&prose), none);
     let coded = insert(" = { let provider = x; };\n");
-    assert_eq!(
-        transition_provider_gaps(&coded, RUNTIME_TRANSITION).len(),
-        1
-    );
+    assert_eq!(transition_provider_gaps(&coded).len(), 1);
 
     let at = Lexed::new(BUSY_RETRY)
         .find(PENDING_REACTION)

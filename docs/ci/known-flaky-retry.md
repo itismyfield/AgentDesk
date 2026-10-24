@@ -13,7 +13,12 @@ job and failing step report the expected upstream-failure diagnostic, their
 upstream job already passed the named-test classification, and Changed paths
 succeeded. Independent mirror failures, failed pins, and mismatched upstreams
 block retry. A workflow-contract test keeps these explicit mappings in sync.
-The existing PostgreSQL infrastructure classifier remains the fallback.
+Both classifiers check the current open PR head against the failed run's SHA
+immediately before requesting a retry. Missing PR evidence or an advanced head
+blocks the request. The PostgreSQL classifier repeats this check for each shard.
+The existing PostgreSQL infrastructure classifier remains the fallback even if
+the flaky step fails with an exception; cancellation or a handled flaky retry
+suppresses that fallback.
 Attempt 2 never requests another automatic retry, even if it fails differently.
 
 After a root-cause fix passes ten consecutive runs under load, remove its

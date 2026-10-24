@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::session_hosts::EndpointMode;
+
 use crate::services::session_host::model::{HostError, HostKind, HostLiveness, HostPresence};
 
 pub(crate) const HERDR_PROTOCOL: u32 = 22;
@@ -27,6 +29,7 @@ pub(crate) struct HerdrEndpoint {
     herdr_session: String,
     /// Directory of the dedicated server's own config; without it E7 never reads Off.
     herdr_home: Option<PathBuf>,
+    mode: EndpointMode,
 }
 
 impl HerdrEndpoint {
@@ -50,6 +53,7 @@ impl HerdrEndpoint {
             socket_path: socket_path.to_path_buf(),
             herdr_session: herdr_session.to_string(),
             herdr_home: None,
+            mode: EndpointMode::LegacyDedicated,
         })
     }
 
@@ -62,6 +66,14 @@ impl HerdrEndpoint {
             herdr_home: Some(herdr_home.to_path_buf()),
             ..self
         })
+    }
+
+    pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
+        Self { mode, ..self }
+    }
+
+    pub(crate) fn mode(&self) -> EndpointMode {
+        self.mode
     }
 
     pub(crate) fn execution_node(&self) -> &str {

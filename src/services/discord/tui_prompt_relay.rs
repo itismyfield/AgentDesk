@@ -18,7 +18,7 @@ use crate::services::claude_tui::hook_server::subscribe_hook_events;
 use crate::services::memory::TokenUsage;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
 use crate::services::tui_prompt_dedupe::{
-    ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt,
+    ExternalInputRelayLease, ExternalInputRelayOwner, ObservedTuiPrompt, hosted_source,
 };
 use tracing::Instrument;
 
@@ -303,12 +303,8 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // never needs to repair pre-publish lease/SSH state. A missing or lagged
     // receiver therefore cannot strand a local `/compact` relay lease.
     let relay_prompt_decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
-    let Some(channel_id) = owner_channel_for_prompt(shared, &prompt) else {
-        tracing::debug!(
-            provider = %prompt.provider,
-            tmux_session_name = %prompt.tmux_session_name,
-            "skipping SSH-direct TUI prompt notify; no Discord channel mapping"
-        );
+    let candidate = owner_channel_for_prompt(shared, &prompt);
+    let Some(channel_id) = hosted_source::adoption_channel(shared, &prompt, candidate).await else {
         return;
     };
     if prompt.steer_echo {

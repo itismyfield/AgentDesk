@@ -139,6 +139,14 @@ fn reply(request: &Value, version: &str, scripted: Option<Value>, gone: bool) ->
             "pane_id": PANE, "shell_pid": SHELL, "foreground_process_group_id": PROVIDER,
             "foreground_processes": [{"pid": PROVIDER, "name": "claude"}, {"pid": CHILD, "name": "node"}]
         }}),
+        "pane.read" if !gone && request["params"]["pane_id"] == PANE => {
+            json!({"type": "pane_read", "read": {
+                "pane_id": PANE, "source": request["params"]["source"],
+                "text": include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/tui_input/claude-2.1.293-idle.txt")),
+                "revision": 7, "truncated": false
+            }})
+        }
         "session.snapshot" => json!({"type": "session_snapshot", "snapshot": {
             "version": "0.9.3", "protocol": 22, "workspaces": [], "tabs": [], "layouts": [],
             "agents": [], "panes": panes
@@ -887,7 +895,7 @@ fn m0_close_effect_positive() {
     let mutations = rig.server.mutations();
     assert_eq!(mutations.len(), 1);
     assert_eq!(result, HerdrTerminateResult::Acknowledged);
-    assert_eq!(mutations[0]["method"], "pane.close");
+    assert_closed_method(&mutations[0]["method"]);
     assert_eq!(mutations[0]["params"], json!({"pane_id": PANE}));
     assert!(rig.server.conns().iter().all(|seen| seen.after_reply == 0));
     assert!(matches!(
@@ -962,6 +970,10 @@ fn m0_close_witness_mismatch_zero_bytes() {
         write.request.is_none() && write.after_reply == 0,
         "{write:?}"
     );
+}
+
+fn assert_closed_method(method: &Value) {
+    assert_eq!(method.as_str(), Some("pane.close"));
 }
 
 #[test]
@@ -2475,3 +2487,6 @@ pub(crate) mod p11 {
 
 #[path = "herdr_gate/root_replaced_tests.rs"]
 mod root_replaced_tests;
+
+#[path = "herdr_gate/policy_tests.rs"]
+mod policy;

@@ -21,6 +21,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENSURE_SWAP = REPO_ROOT / ".github/actions/ensure-swap/ensure-swap.sh"
 MEM_MEASURE = REPO_ROOT / "scripts/ci/mem-measure.sh"
+SAMPLER_KILL_GRACE_SECONDS = 5
 SWAP_ACTION = "./.github/actions/ensure-swap"
 
 # Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
@@ -433,14 +434,21 @@ class MemMeasureBehavior(unittest.TestCase):
     def test_a_sampler_that_will_not_stop_is_killed_with_its_children_in_bounded_time(self) -> None:
         proc = self.fake_proc(((101, "cargo", 500),))
         pids = proc.parent / "stuck.pids"
+        delays = proc.parent / "stop-delays"
         stuck_cat = (
             f'case "$*" in */status*) echo $$ >> {shlex.quote(str(pids))}; exec python3 -c "import threading; threading.Event().wait()" ;; esac\n'
             'exec /bin/cat "$@"\n'
         )
         command = f'while [ ! -s {shlex.quote(str(pids))} ]; do sleep 0.05; done; exit 0'
-        result = self.run_measure(command, gnu_time=True, proc_root=proc, tools={"cat": stuck_cat})
+        sleep = (
+            f'case "$1" in 0.1) printf "%s\\n" "$1" >> {shlex.quote(str(delays))} ;; esac\n'
+            'exec /bin/sleep "$@"\n'
+        )
+        result = self.run_measure(command, gnu_time=True, proc_root=proc, tools={"cat": stuck_cat, "sleep": sleep})
         self.assertEqual(result.returncode, 0)
         self.assertIn(b" peak_sampler=killed ", result.stderr)
+        # Count requested shutdown delays; scheduler stalls belong to the watchdog.
+        self.assertLessEqual(sum(float(delay) for delay in delays.read_text().split()), SAMPLER_KILL_GRACE_SECONDS)
         stuck = [int(line) for line in pids.read_text("utf-8").split()]
         self.assertTrue(stuck)
         deadline = time.monotonic() + 30

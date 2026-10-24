@@ -513,7 +513,9 @@ async fn an_empty_writer_list_leaves_both_channels_to_legacy() {
         };
         let config = serde_json::from_value(serde_json::json!({"server": {},
             "agents": [channel(640020), channel(640021)], "tui_o": {"writer": {"channels": []}}}));
-        crate::bootstrap::install_boot_snapshots(&config.unwrap()).unwrap();
+        crate::bootstrap::prepare_and_install_boot_snapshots(&config.unwrap(), None)
+            .await
+            .unwrap();
         run_canary_pair(&[]).await;
     }
 }
@@ -533,7 +535,9 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
         }
     }], "tui_o": {"writer": {"channels": []}}}))
     .unwrap();
-    crate::bootstrap::install_boot_snapshots(&config).unwrap();
+    crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
+        .await
+        .unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared
         .http
