@@ -18,8 +18,32 @@ where
     F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
+    with_ready_provider(source, channel, ShadowProvider::Codex, Arc::default(), run).await
+}
+
+/// Both actual actors share one readiness registry while their provider sweeps run.
+pub(crate) async fn with_ready_codex_and_claude<T, F, Fut>(source: SourceId, run: F) -> T
+where
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    with_ready_provider(source.clone(), 7, ShadowProvider::Codex, Arc::default(), |ready| async move {
+        with_ready_provider(source, 8, ShadowProvider::Claude, ready, run).await
+    }).await
+}
+
+async fn with_ready_provider<T, F, Fut>(
+    source: SourceId,
+    channel: u64,
+    provider: ShadowProvider,
+    ready: Arc<crate::services::tui_o::writer::host::Readiness>,
+    run: F,
+) -> T
+where
+    F: FnOnce(Arc<crate::services::tui_o::writer::host::Readiness>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
     use crate::services::tui_o::writer::binding::ChannelBindingLog;
-    use crate::services::tui_o::writer::host::Readiness;
     use sha2::{Digest, Sha256};
 
     let harness = Harness::build_channel(channel, |_| {
@@ -39,7 +63,7 @@ where
         Arc::new(SystemTime::now),
         stopping.clone(),
     );
-    let port = port.with_provider(ShadowProvider::Codex);
+    let port = port.with_provider(provider);
     let projections = (stopped, resumed, watch::channel(None).0, Owing::default());
     let config = WriterConfig { enabled: true };
     let task = transition_port::spawning(receiver, || {
@@ -47,8 +71,8 @@ where
             &config,
             None,
             harness.writer(),
-            ShadowProvider::Codex,
-            Arc::new(ChannelBindingLog::new(channel, ShadowProvider::Codex)),
+            provider,
+            Arc::new(ChannelBindingLog::new(channel, provider)),
             projections,
         )
     })
@@ -64,7 +88,6 @@ where
         "the actor restored from the actual P5 log"
     );
     polls(3).await;
-    let ready = Arc::new(Readiness::default());
     let _hosted = ready.host_port_for_test(channel, &harness.gate, port, (ready_state, stopping));
     let directory = harness
         ._runtime

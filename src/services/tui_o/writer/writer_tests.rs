@@ -969,4 +969,6 @@ async fn a_gateway_return_ends_the_pause_in_process_health() {
     assert_eq!(health_reasons(), paused);
 }
 
-pub(crate) use actor::rotation::retire_tests::transition_actor_tests::bo::with_ready_codex;
+pub(crate) use actor::rotation::retire_tests::transition_actor_tests::bo::{
+    with_ready_codex, with_ready_codex_and_claude,
+};

@@ -219,7 +219,7 @@ async fn channel_sweep(
         };
         let reply = send(ready, channel, &port, Operation::Inspect(request), context).await?;
         #[cfg(test)]
-        LAST_CODEX_REPLY.with(|slot| *slot.borrow_mut() = Some(reply.clone()));
+        test_support::record_codex_reply(reply.clone());
         if !stats.actor_refused(&reply) {
             tracing::info!(channel, diagnostics = ?reply.diagnostics, execution = ?reply.execution,
                 "[tui_o] Codex retention observation");
@@ -358,20 +358,118 @@ async fn ended(pane: String) -> bool {
 }
 
 #[cfg(test)]
-thread_local! {
-    static LAST_CODEX_REPLY: std::cell::RefCell<Option<Reply>> = const { std::cell::RefCell::new(None) };
-}
+pub(crate) use test_support::codex_sweep_for_test;
 
 #[cfg(test)]
-pub(crate) async fn codex_sweep_for_test(
-    registry: &HealthRegistry,
-    ready: &Readiness,
-    channel: u64,
-) -> Result<Reply, &'static str> {
-    LAST_CODEX_REPLY.with(|slot| slot.borrow_mut().take());
-    let mut stats = Stats::default();
-    channel_sweep(registry, ready, &ProviderKind::Codex, channel, &mut stats).await?;
-    LAST_CODEX_REPLY
-        .with(|slot| slot.borrow_mut().take())
-        .ok_or("no Codex Inspect was sent")
+mod test_support {
+    use super::*;
+
+    thread_local! {
+        static CODEX_REPLIES: std::cell::RefCell<Vec<Reply>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_codex_reply(reply: Reply) {
+        CODEX_REPLIES.with(|slot| slot.borrow_mut().push(reply));
+    }
+
+    pub(crate) async fn codex_sweep_for_test(
+        registry: &HealthRegistry,
+        ready: &Readiness,
+        channel: u64,
+    ) -> Result<Reply, &'static str> {
+        CODEX_REPLIES.with(|slot| slot.borrow_mut().clear());
+        let mut stats = Stats::default();
+        channel_sweep(registry, ready, &ProviderKind::Codex, channel, &mut stats).await?;
+        CODEX_REPLIES
+            .with(|slot| slot.borrow_mut().pop())
+            .ok_or("no Codex Inspect was sent")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_ticks_only_observe_the_matching_ready_actor() {
+        use crate::services::discord::health::o_transition::codex_context::tests::Fixture;
+        let fixture = Fixture::new(false);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = HealthRegistry::new();
+            for (provider, channel) in [("codex", 7), ("claude", 8)] {
+                let shared = fixture.shared(None);
+                shared.settings.write().await.allowed_channel_ids = vec![channel];
+                registry.register(provider.into(), shared).await;
+            }
+            crate::services::tui_o::writer::tests::with_ready_codex_and_claude(
+                fixture.source.clone(),
+                |ready| async move {
+                    let mut channels = ready.transition_channels();
+                    channels.sort();
+                    assert_eq!(
+                        channels,
+                        [7, 8],
+                        "both providers are ready during both ticks"
+                    );
+                    CODEX_REPLIES.with(|slot| slot.borrow_mut().clear());
+                    let mut claude = Stats::default();
+                    for channel in &channels {
+                        let result = channel_sweep(
+                            &registry,
+                            &ready,
+                            &ProviderKind::Claude,
+                            *channel,
+                            &mut claude,
+                        )
+                        .await;
+                        assert_eq!(
+                            result,
+                            if *channel == 8 {
+                                Err("target_unavailable")
+                            } else {
+                                Ok(())
+                            },
+                            "Claude visits only its own ready actor, without requiring PG for Codex"
+                        );
+                    }
+                    assert!(CODEX_REPLIES.with(|slot| slot.borrow().is_empty()));
+                    let mut codex = Stats::default();
+                    for channel in &channels {
+                        assert_eq!(
+                            channel_sweep(
+                                &registry,
+                                &ready,
+                                &ProviderKind::Codex,
+                                *channel,
+                                &mut codex
+                            )
+                            .await,
+                            Ok(())
+                        );
+                    }
+                    let replies =
+                        CODEX_REPLIES.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+                    assert_eq!(
+                        replies.len(),
+                        1,
+                        "the Codex tick must not target the Claude actor"
+                    );
+                    let reply = &replies[0];
+                    assert!(reply.refused.is_none(), "{reply:?}");
+                    let diagnostics =
+                        serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
+                    assert!(
+                        diagnostics["codex"]["Complete"].is_object(),
+                        "{diagnostics}"
+                    );
+                    assert_eq!(codex.skipped.get("codex_inspect_only"), Some(&1));
+                    assert!(
+                        codex.targets.is_empty() && claude.targets.is_empty(),
+                        "observation grants no retirement authority"
+                    );
+                },
+            )
+            .await;
+        });
+    }
 }
