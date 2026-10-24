@@ -607,7 +607,7 @@ pub(super) async fn bootstrap_thread_session(
     let effective_path = {
         let provider_str = shared.settings.read().await.provider.as_str().to_string();
         // `git worktree add` can block up to the git runner timeout; a burst of thread
-        // bootstraps must not stall the runtime workers (#7348 P2).
+        // bootstraps must not stall the runtime workers.
         let (repo, channel) = (parent_path.to_string(), ch.clone());
         let created = tokio::task::spawn_blocking(move || {
             let (wt_path, branch) = create_git_worktree(&repo, &channel, &provider_str)?;

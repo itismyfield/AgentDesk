@@ -268,7 +268,7 @@ async fn rebind_inflight_for_channel_inner(
     };
 
     // Only a pane tmux confirms alive may be rebound; a failed probe or another host is refused.
-    // The retry sleeps up to 2s around tmux calls; keep it off the runtime workers (#7348 P2).
+    // The retry sleeps up to 2s around tmux calls; keep it off the runtime workers.
     let probe_name = tmux_session_name.clone();
     let observed = tokio::task::spawn_blocking(move || observe_liveness_with_retry(&probe_name))
         .await

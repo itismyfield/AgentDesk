@@ -6557,6 +6557,7 @@ services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offs
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_prefers_newer_saved_last_offset
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_rewinds_only_when_output_truncated_below_floor
 services::discord::recovery_engine::terminal_watcher::tests::recovery_start_offset_uses_turn_start_floor_when_last_offset_is_zero
+services::discord::recovery_engine::tmux_probe::tests::a_blocked_probe_leaves_the_runtime_worker_free
 services::discord::recovery_engine::tmux_probe::tests::a_codex_row_on_a_herdr_pane_defers_while_codex_turns_run_there
 services::discord::recovery_engine::tmux_probe::tests::restart_probes_read_dead_only_on_a_confirmed_tmux_answer
 services::discord::recovery_known_ids::recovery_known_message_ids_tests::active_turn_outranks_a_stale_queue_entry_for_the_same_id
@@ -11458,6 +11459,7 @@ services::git::repo_resolver::no_repo_mapping_classification_tests::classifies_t
 services::git::repo_resolver::no_repo_mapping_classification_tests::keeps_persistent_misconfiguration_errors_as_real_warns
 services::git::runner::tests::run_text_captures_stdout
 services::git::runner::tests::status_error_preserves_stderr
+services::git::worktree_resolver::automation_worktree_tests::a_panicked_lookup_task_is_an_error_not_a_missing_worktree
 services::git::worktree_resolver::automation_worktree_tests::branch_name_format
 services::github_issue_creation::tests::gh_create_failure_is_reported_without_sync_side_effects
 services::github_issue_creation::tests::gh_unavailable_short_circuits_before_side_effects

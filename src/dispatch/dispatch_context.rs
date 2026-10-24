@@ -1296,6 +1296,7 @@ pub(crate) async fn resolve_card_worktree(
     Ok(
         crate::services::git::find_worktree_for_issue_async(repo_dir, issue_number)
             .await
+            .map_err(anyhow::Error::msg)?
             .map(|wt| (wt.path, wt.branch, wt.commit)),
     )
 }

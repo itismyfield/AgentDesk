@@ -254,32 +254,34 @@ pub fn ensure_worktree_for_issue(
     })
 }
 
-// ── Automation-candidate worktree helpers ────────────────────────────────────
+/// Runs blocking git work on the blocking pool; a panicked or cancelled task is an `Err`.
+async fn off_worker<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("worktree task failed: {error}"))
+}
 
-/// Canonical branch name for an automation candidate iteration.
-/// [`find_worktree_for_issue`] on the blocking pool for async callers: it shells out to
-/// `git worktree list` (#7348 P2). A failed task reads as no worktree.
+/// [`find_worktree_for_issue`] for async callers; it shells out to `git worktree list`.
 pub async fn find_worktree_for_issue_async(
     repo_dir: String,
     issue_number: i64,
-) -> Option<WorktreeInfo> {
-    tokio::task::spawn_blocking(move || find_worktree_for_issue(&repo_dir, issue_number))
-        .await
-        .ok()
-        .flatten()
+) -> Result<Option<WorktreeInfo>, String> {
+    off_worker(move || find_worktree_for_issue(&repo_dir, issue_number)).await
 }
 
-/// [`ensure_worktree_for_issue`] on the blocking pool for async callers: `git worktree add`
-/// can block until the git runner times out (#7348 P2).
+/// [`ensure_worktree_for_issue`] for async callers; `git worktree add` can block until timeout.
 pub async fn ensure_worktree_for_issue_async(
     repo_dir: String,
     issue_number: i64,
 ) -> Result<EnsuredWorktreeInfo, String> {
-    tokio::task::spawn_blocking(move || ensure_worktree_for_issue(&repo_dir, issue_number))
-        .await
-        .map_err(|error| format!("worktree task failed: {error}"))?
+    off_worker(move || ensure_worktree_for_issue(&repo_dir, issue_number)).await?
 }
 
+// ── Automation-candidate worktree helpers ────────────────────────────────────
+
+/// Canonical branch name for an automation candidate iteration.
 pub fn automation_branch_name(card_id: &str, iteration: i32) -> String {
     format!("automation/{card_id}/iter-{iteration}")
 }
@@ -475,6 +477,16 @@ pub fn cleanup_managed_worktree(repo_dir: &str, worktree_path: &str) -> ManagedW
 #[cfg(test)]
 mod automation_worktree_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicked_lookup_task_is_an_error_not_a_missing_worktree() {
+        let lookup = off_worker(|| -> Option<WorktreeInfo> { panic!("injected lookup panic") });
+        let error = lookup
+            .await
+            .err()
+            .expect("a failed task must not read as no worktree");
+        assert!(error.contains("worktree task failed"), "{error}");
+    }
 
     #[test]
     fn branch_name_format() {
