@@ -10,22 +10,37 @@ use std::path::PathBuf;
 const CHANNEL: u64 = 7;
 const ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
 pub(crate) struct Fixture {
-    _root: crate::config::TestRuntimeRootGuard,
+    _config: crate::config::TestEnvVarGuard,
     _host: crate::config::TestEnvVarGuard,
     _p5: crate::config::TestEnvVarGuard,
     _path: crate::config::TestEnvVarGuard,
     bin: tempfile::TempDir,
     context: BindingContext,
     pub(crate) source: crate::services::tui_o::shadow::SourceId,
+    // Release the environment lock only after all other guards restore their values.
+    _root: crate::config::TestRuntimeRootGuard,
 }
 impl Fixture {
     pub(crate) fn new(herdr: bool) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
+        let runtime_root = crate::config::runtime_root().unwrap();
+        let config = runtime_root.join("config.yaml");
+        std::fs::write(
+            &config,
+            format!(
+                "server: {{}}\ncluster: {{instance_id: bo-test-host}}\ndata: {{dir: {}}}\n",
+                serde_json::to_string(&runtime_root.join("data")).unwrap(),
+            ),
+        )
+        .unwrap();
+        let config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &config,
+        );
         let host = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
             "AGENTDESK_INSTANCE_ID",
             std::ffi::OsStr::new("bo-test-host"),
         );
-        let runtime_root = crate::config::runtime_root().unwrap();
         let p5 = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_TEST_CODEX_BINDING_ROOT",
             &runtime_root,
@@ -121,13 +136,14 @@ impl Fixture {
         )
         .unwrap();
         Self {
-            _root: root,
+            _config: config,
             _host: host,
             _p5: p5,
             _path: path,
             bin,
             context,
             source,
+            _root: root,
         }
     }
     pub(crate) fn shared(&self, pool: Option<sqlx::PgPool>) -> Arc<SharedData> {
@@ -344,7 +360,14 @@ fn codex_fixture_pins_identity_when_inherited_host_source_is_missing() {
 fn codex_prepare_without_explicit_identity_refuses_host_identity() {
     let fixture = Fixture::new(false);
     let config = fixture.bin.path().join("no-identity.yaml");
-    std::fs::write(&config, "server: {}\n").unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            "server: {{}}\ndata: {{dir: {}}}\n",
+            serde_json::to_string(&fixture.bin.path().join("data")).unwrap(),
+        ),
+    )
+    .unwrap();
     let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &config,

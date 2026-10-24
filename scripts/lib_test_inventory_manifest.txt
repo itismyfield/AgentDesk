@@ -4019,7 +4019,9 @@ services::discord::health::o_transition::automatic_idle::tests::automatic_idle_k
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_missing_closed_and_unanswered_mailboxes
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_queued_input_or_recovery
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_reads_the_live_runtime_snapshot
+services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
 services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
+services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity
 services::discord::health::o_transition::codex_context::tests::codex_sweep_classifies_existing_and_inflight_suspension
 services::discord::health::o_transition::codex_context::tests::codex_sweep_timeout_keeps_later_observations_running
 services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence

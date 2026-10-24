@@ -430,7 +430,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_report::consent_clear_tests::legacy_actual_clear_ignores_unreadable_consent_storage
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_keeps_unrelated_error_on_first_observation
   services::discord::commands::control::codex_clear_relaunch_tests::owner_epoch_retry_rechecks_one_transient_before_stable_hold
+  services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
   services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
+  services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity
   services::discord::health::o_transition::codex_context::tests::codex_sweep_classifies_existing_and_inflight_suspension
   services::discord::health::o_transition::codex_context::tests::codex_sweep_timeout_keeps_later_observations_running
   services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
