@@ -165,7 +165,9 @@ impl ManagedHome {
         )
         .and_then(|()| Ok(fs::metadata(&personal.home)?.uid()));
         let mut targets = Vec::new();
-        let mut homes: BTreeMap<PathBuf, (Vec<String>, (PathBuf, PathBuf), bool)> = BTreeMap::new();
+        // Resolved home -> (endpoint keys, first (socket, home) declaration, declarations conflict).
+        type Group = (Vec<String>, (PathBuf, PathBuf), bool);
+        let mut homes: BTreeMap<PathBuf, Group> = BTreeMap::new();
         for (key, endpoint) in endpoints {
             let resolved = uid
                 .as_ref()

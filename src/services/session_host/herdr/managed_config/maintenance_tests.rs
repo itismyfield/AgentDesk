@@ -435,7 +435,7 @@ fn the_process_starts_one_upkeep_task() {
         assert!(spawn(), "the first start runs the task");
         assert!(!spawn(), "a second start adds no task");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        while records().get("task").is_none() {
+        while !records().contains_key("task") {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the task never ran a pass"
