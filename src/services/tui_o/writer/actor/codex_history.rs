@@ -247,4 +247,5 @@ fn mutant(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[path = "codex_history/tests.rs"]
 mod tests;

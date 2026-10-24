@@ -479,7 +479,7 @@ mod recovery_tests;
 #[path = "renumber_tests.rs"]
 mod renumber_tests;
 #[path = "retire_tests.rs"]
-mod retire_tests;
+pub(crate) mod retire_tests;
 #[cfg(unix)]
 #[path = "source_identity_tests.rs"]
 mod source_identity_tests;

@@ -9,6 +9,9 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::transition_port::Context;
 
+#[path = "transition_scope/codex.rs"]
+pub(crate) mod codex;
+
 const DOMAIN: &[u8] = b"agentdesk/hrot/transition-scope\0";
 const VERSION: u8 = 1;
 const PREFIX: &str = "hrot-scope-v1:";
@@ -66,6 +69,9 @@ pub(crate) fn approve(
     request: &Request,
     context: &Context,
 ) -> Result<ScopeApproval, String> {
+    if snapshot.provider == ShadowProvider::Codex {
+        return Err("Codex apply is deferred; observation identity is not an approval".into());
+    }
     if request.channel != snapshot.channel {
         return Err("the request names another channel".into());
     }

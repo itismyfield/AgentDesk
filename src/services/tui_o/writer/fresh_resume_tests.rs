@@ -1021,6 +1021,7 @@ async fn selection_install_fault(after_rename: bool) {
         termination: None,
     });
     let context = Context {
+        codex: None,
         tmux: CANARY_TMUX.into(),
         nonce: current.execution_nonce.clone(),
         lock: Arc::default(),

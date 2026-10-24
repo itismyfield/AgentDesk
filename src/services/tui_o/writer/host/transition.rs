@@ -23,7 +23,9 @@ impl<I: HostIo> Hosted<'_, I> {
         let stopping = self.stopping.clone();
         let (transition, receiver) =
             TransitionPort::new(generation, Arc::clone(self.gate), wall, stopping);
-        let transition = transition.with_suspension(suspension.clone());
+        let transition = transition
+            .with_provider(self.provider)
+            .with_suspension(suspension.clone());
         let (submission, spawned) = if self.provider == ShadowProvider::Codex {
             let (submission, commands) = actor::codex_submission::Port::new(generation);
             let submission = submission.with_suspension(suspension);
@@ -136,6 +138,9 @@ mod test_support {
             port: TransitionPort,
             (resumed, stopping): (watch::Receiver<bool>, watch::Receiver<bool>),
         ) -> HostedForTest {
+            let port = port
+                .clone()
+                .with_provider(port.provider().unwrap_or(ShadowProvider::Claude));
             let owing = Owing::default();
             let owed = OwedView {
                 published: owing.published.subscribe(),

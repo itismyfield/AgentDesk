@@ -116,6 +116,7 @@ impl Chain {
 
     fn context(&self) -> Context {
         Context {
+            codex: None,
             tmux: self.pane.clone(),
             nonce: "nonce".into(),
             lock: Arc::default(),
@@ -146,6 +147,8 @@ impl Chain {
             });
         }
         let snapshot = Snapshot {
+            reading: 0,
+            codex: None,
             channel: CHANNEL,
             provider: ShadowProvider::Claude,
             home: Home::Settled,
@@ -249,10 +252,22 @@ fn run(chain: &Chain) -> Run {
 /// The actor of `chain` with its run's mailbox. Its probes are stamped with a wall clock that
 /// follows tokio's paused time, read only once `held` is clear.
 fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>) -> Run {
-    run_writer(chain, readers, held, chain.harness.writer(), ShadowProvider::Claude)
+    run_writer(
+        chain,
+        readers,
+        held,
+        chain.harness.writer(),
+        ShadowProvider::Claude,
+    )
 }
 
-fn run_writer(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>, writer: Writer, provider: ShadowProvider) -> Run {
+fn run_writer(
+    chain: &Chain,
+    readers: Option<ReaderConfig>,
+    held: Arc<AtomicBool>,
+    writer: Writer,
+    provider: ShadowProvider,
+) -> Run {
     let (t0, w0) = (tokio::time::Instant::now(), SystemTime::now());
     let wall: transition_port::Wall = Arc::new(move || {
         while held.load(Ordering::Acquire) {
@@ -273,9 +288,7 @@ fn run_writer(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool
     );
     let config = WriterConfig { enabled: true };
     let bindings = Arc::clone(&chain.bindings);
-    let spawn = || {
-        spawn_projecting(&config, readers, writer, provider, bindings, projections)
-    };
+    let spawn = || spawn_projecting(&config, readers, writer, provider, bindings, projections);
     let task = transition_port::spawning(receiver, spawn).unwrap();
     Run {
         port,
@@ -980,6 +993,7 @@ async fn transition_judges_uncounted_posts_unknown() {
     let _current = chain.current();
     let actor = run(&chain);
     settle(&chain).await;
+    crate::services::tui_o::writer::deliver::forget_posts_for_test(CHANNEL);
     let reply = ask(
         &actor,
         Operation::Inspect(chain.request(JOB)),
@@ -1236,19 +1250,42 @@ async fn codex_observation_real_not_found_retry_is_owed_before_due_and_after_res
     let _current = chain.current();
     chain.harness.gate.acquired();
     chain.harness.port.say(BOT + 1, "history readable");
-    chain.harness.port.replies.lock().unwrap().push_back(super::Reply::Unsent);
+    chain
+        .harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(super::Reply::Unsent);
     let mut writer = chain.harness.writer();
-    assert_eq!(writer.deliver(&piece("retry-observation", "owed retry")).await, super::Step::Done);
+    assert_eq!(
+        writer
+            .deliver(&piece("retry-observation", "owed retry"))
+            .await,
+        super::Step::Done
+    );
     assert!(writer.has_local_retry());
     assert_eq!(writer.store().ledger().unresolved(), None);
     for reopen in 0..2 {
         let actor = run_writer(&chain, None, Arc::default(), writer, ShadowProvider::Claude);
         polls(2).await;
         tokio::time::sleep(std::time::Duration::from_secs(11)).await;
-        let reply = ask(&actor, Operation::Inspect(chain.request(JOB)), chain.context()).await;
-        assert_eq!(reply.summary.unwrap().obligations.unwrap().owed, 1, "retry survives queue0 and reopen {reopen}");
+        let reply = ask(
+            &actor,
+            Operation::Inspect(chain.request(JOB)),
+            chain.context(),
+        )
+        .await;
+        assert_eq!(
+            reply.summary.unwrap().obligations.unwrap().owed,
+            1,
+            "retry survives queue0 and reopen {reopen}"
+        );
         assert_eq!(chain.harness.port.posts().len(), 1, "retry not due");
         halt(actor.stop, actor.task).await;
         writer = chain.harness.writer();
     }
 }
+
+#[path = "transition_actor_bo_tests.rs"]
+pub(crate) mod bo;

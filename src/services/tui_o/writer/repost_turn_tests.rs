@@ -10,12 +10,12 @@ use tokio::sync::{Notify, watch};
 
 use super::*;
 
+#[path = "bo_post_tests.rs"]
+mod bo_post;
 #[path = "local_retry_repost_tests.rs"]
 mod local_retry;
 #[path = "scoped_repost_tests.rs"]
 mod scoped;
-#[path = "bo_post_tests.rs"]
-mod bo_post;
 #[path = "tool_result_repost_tests.rs"]
 mod tool_result;
 use crate::db::auto_queue::test_support::TestPostgresDb;

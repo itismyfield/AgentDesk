@@ -32,6 +32,7 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
             termination: None,
         });
         let context = Context {
+            codex: None,
             tmux: "test-pane".into(),
             nonce: "old-execution".into(),
             lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -134,6 +135,7 @@ where
     assert!(!actor.deriver.has_unsealed());
     assert!(actor.sources.quiescent_for_rescope());
     let context = Context {
+        codex: None,
         tmux: tmux.into(),
         nonce: initial_nonce.into(),
         lock: Arc::default(),

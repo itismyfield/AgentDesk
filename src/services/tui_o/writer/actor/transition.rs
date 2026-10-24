@@ -242,7 +242,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 Some(Refused::JobConflict)
             }
             Some(_) => Some(Refused::Busy),
-            None if self.sources.transition_provider() == ShadowProvider::Codex => {
+            None if apply && self.sources.transition_provider() == ShadowProvider::Codex => {
                 Some(Refused::CodexDeferred)
             }
             None if conflicts(self.writer.store().cursors(), &request) => {
