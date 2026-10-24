@@ -5,7 +5,7 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::tests::with_ready_codex_backlog;
 use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, registry_purge::MailboxRefusal};
 
-fn backlog(fixture: &Fixture, count: usize) -> Vec<SourceId> {
+fn backlog(fixture: &Fixture, count: usize) -> (Vec<SourceId>, chrono::DateTime<chrono::Utc>) {
     let now = chrono::Utc::now();
     let older = now - chrono::TimeDelta::days(8);
     let root = crate::config::runtime_root().unwrap();
@@ -19,11 +19,41 @@ fn backlog(fixture: &Fixture, count: usize) -> Vec<SourceId> {
             .as_ref()
             .unwrap()
             .join(format!("rollout-old-{id}.jsonl"));
-        let bytes = format!(
-            "{}\n{}\n",
-            json!({"type":"session_meta","payload":{"id":id,"cwd":"/test","source":"cli","timestamp":older.to_rfc3339()}}),
-            json!({"timestamp":older.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"assistant","id":format!("old-{index}"),"content":[{"type":"output_text","text":format!("old native dialogue {index}")}]}})
-        );
+        let golden = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/codex_retention/activity_rollout_016x.jsonl"
+        ));
+        let rows: Vec<serde_json::Value> = golden
+            .lines()
+            .enumerate()
+            .map(|(row_index, line)| {
+                let mut row: serde_json::Value = serde_json::from_str(line).unwrap();
+                let timestamp = (older + chrono::TimeDelta::seconds(row_index as i64)).to_rfc3339();
+                row["timestamp"] = json!(timestamp);
+                if row["type"] == "session_meta" {
+                    row["payload"]["id"] = json!(id);
+                    row["payload"]["session_id"] = json!(id);
+                    row["payload"]["timestamp"] = json!(timestamp);
+                } else {
+                    // Distinct source executions have distinct native units; mirrors keep that id.
+                    for pointer in ["/payload/id", "/payload/item/id"] {
+                        if let Some(value) = row.pointer_mut(pointer)
+                            && let Some(native) = value.as_str()
+                        {
+                            *value = json!(format!("{native}-source-{index}"));
+                        }
+                    }
+                }
+                if row["payload"].get("thread_id").is_some() {
+                    row["payload"]["thread_id"] = json!(id);
+                }
+                row
+            })
+            .collect();
+        let bytes = rows
+            .iter()
+            .map(|row| format!("{}\n", serde_json::to_string(row).unwrap()))
+            .collect::<String>();
         std::fs::write(&path, bytes).unwrap();
         let meta = std::fs::metadata(&path).unwrap();
         let source = SourceId {
@@ -81,11 +111,11 @@ fn backlog(fixture: &Fixture, count: usize) -> Vec<SourceId> {
             .collect::<String>(),
     )
     .unwrap();
-    sources
+    (sources, older + chrono::TimeDelta::seconds(11))
 }
 
 async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, configured: bool) {
-    let sources = backlog(fixture, count);
+    let (sources, activity_at) = backlog(fixture, count);
     shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
     shared.mailboxes.insert_idle_snapshot_for_test(
         ChannelId::new(CHANNEL),
@@ -103,6 +133,25 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
                 .await
                 .unwrap();
             assert!(first.refused.is_none(), "{first:?}");
+            let owed = first
+                .summary
+                .as_ref()
+                .unwrap()
+                .obligations
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                (
+                    owed.owed,
+                    owed.prepared,
+                    owed.unsealed,
+                    owed.posting,
+                    owed.verified_work
+                ),
+                (0, 0, 0, 0, 0),
+                "the actual discovery confirms every output obligation drained before retention"
+            );
+            assert!(owed.protected.is_empty());
             first
         },
     )
@@ -117,6 +166,11 @@ async fn assert_sweep(fixture: &Fixture, shared: Arc<SharedData>, count: usize, 
             .transition_cleanup
             .as_ref()
             .expect("durable retention audit");
+        assert_eq!(
+            audit.retention.as_ref().unwrap().last_dialogue,
+            activity_at,
+            "durable age is the latest activity, including terminal metadata"
+        );
         let retention = serde_json::to_value(audit).unwrap();
         assert!(
             retention["retention"].is_object(),

@@ -13448,10 +13448,12 @@ services::tui_o::turn_mode::tests::n1a_only_confirmation_enables_turn_mode
 services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_confirm_turn_mode
 services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_native_dialogue_formats_and_legacy_are_timestamped
 services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_native_identity_header_root_and_descriptor_are_required
+services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_operating_rollout_016x_activity_is_known_and_maximal
 services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_real_native_mirrors_and_terminal_fallback_are_pure
+services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_repeated_headers_must_keep_native_session_identity
 services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_shared_exact_cursor_hash_eof_and_budget_guards_hold
-services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_unknown_rows_roles_content_and_dialogue_times_fail_closed
-services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_uses_maximum_dialogue_time_and_never_metadata_or_empty_terminal
+services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_unknown_shapes_are_activity_but_every_timestamp_is_required
+services::tui_o::writer::actor::automatic_age::codex_tests::automatic_codex_age_uses_maximum_activity_time_including_metadata_and_empty_terminal
 services::tui_o::writer::actor::automatic_age::tests::automatic_age_keeps_sources_without_dialogue_or_a_complete_tail
 services::tui_o::writer::actor::automatic_age::tests::automatic_age_reads_captured_claude_rows_and_uses_the_latest_dialogue
 services::tui_o::writer::actor::automatic_age::tests::automatic_age_rejects_any_unreadable_dialogue_or_json_row

@@ -1,4 +1,4 @@
-//! Dialogue age is known only from a complete, unchanged transcript at its captured cursor.
+//! Age is known only from a complete, unchanged transcript at its captured cursor.
 
 use std::fs::File;
 use std::io::Read;
@@ -48,6 +48,7 @@ pub(super) fn last_dialogue_for(
     }
     match provider {
         ShadowProvider::Claude => claude_dialogue(&bytes),
+        // Native activity is an upper bound on dialogue; the audit field remains compatible.
         ShadowProvider::Codex => {
             super::codex_age::last_dialogue(&bytes, &cursor.source, provider_root?)
         }
@@ -85,4 +86,4 @@ mod tests;
 
 #[cfg(all(test, unix))]
 #[path = "codex_age_tests.rs"]
-mod codex_tests;
+pub(super) mod codex_tests;

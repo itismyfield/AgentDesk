@@ -645,8 +645,8 @@ async fn ba_unknown_native_dialogue_age_never_becomes_retired() {
     append(
         &chain.paths[1],
         &codex_line(serde_json::json!({
-            "type":"future_dialogue_envelope", "timestamp":Utc::now().to_rfc3339(),
-            "payload":{"message":"a newer dialogue shape is unknown"}
+            "type":"future_dialogue_envelope",
+            "payload":{"message":"activity without its own timestamp is unknown"}
         })),
     );
     let path = root.join(format!("binding_events/{CHANNEL}.log"));

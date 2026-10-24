@@ -96,7 +96,7 @@ fn automatic_codex_age_native_dialogue_formats_and_legacy_are_timestamped() {
 }
 
 #[test]
-fn automatic_codex_age_uses_maximum_dialogue_time_and_never_metadata_or_empty_terminal() {
+fn automatic_codex_age_uses_maximum_activity_time_including_metadata_and_empty_terminal() {
     let root = tempfile::tempdir().unwrap();
     let mut older = message();
     older["timestamp"] = json!("2026-09-26T00:00:00Z");
@@ -133,18 +133,19 @@ fn automatic_codex_age_uses_maximum_dialogue_time_and_never_metadata_or_empty_te
             json!({"type":"item_completed","item":{"type":"CommandExecution","id":"tool"}}),
         ),
     ];
-    let mut rows = vec![message(), older];
+    let mut rows = vec![message(), older.clone()];
     rows.extend(metadata.map(|mut row| {
         row["timestamp"] = json!(future);
         row
     }));
+    rows.push(older);
     let cursor = native(root.path(), &header(), &rows);
-    assert_eq!(age(&cursor, root.path()), Some(at(AT)));
-    let cursor = native(root.path(), &header(), &rows[2..]);
+    assert_eq!(age(&cursor, root.path()), Some(at(future)));
+    let cursor = native(root.path(), &header(), &rows[2..rows.len() - 1]);
     assert_eq!(
         age(&cursor, root.path()),
-        None,
-        "metadata never supplies an age"
+        Some(at(future)),
+        "metadata activity conservatively bounds dialogue age"
     );
 }
 
@@ -170,17 +171,16 @@ fn automatic_codex_age_real_native_mirrors_and_terminal_fallback_are_pure() {
 }
 
 #[test]
-fn automatic_codex_age_unknown_rows_roles_content_and_dialogue_times_fail_closed() {
+fn automatic_codex_age_unknown_shapes_are_activity_but_every_timestamp_is_required() {
     let mut wrong_role = message();
     wrong_role["payload"]["role"] = json!("future_role");
     let mut wrong_content = message();
     wrong_content["payload"]["content"][0]["type"] = json!("future_message_body");
-    let mut missing_time = message();
-    missing_time.as_object_mut().unwrap().remove("timestamp");
-    let mut bad_time = message();
-    bad_time["timestamp"] = json!("2026-09-28T00:00:00");
-    for bad in [
-        row("new_dialogue_envelope", json!({"message":"newer"})),
+    for candidate in [
+        row(
+            "new_dialogue_envelope",
+            json!({"message":"future activity"}),
+        ),
         row("response_item", json!({"type":"future_message"})),
         row("event_msg", json!({"type":"future_message"})),
         row(
@@ -192,16 +192,51 @@ fn automatic_codex_age_unknown_rows_roles_content_and_dialogue_times_fail_closed
             json!({"type":"task_complete","last_agent_message":12}),
         ),
         row("event_msg", json!({"type":"agent_message"})),
+        row("turn_context", json!({})),
         wrong_role,
         wrong_content,
-        missing_time,
-        bad_time,
-        header(),
-        Value::Null,
+        json!({"timestamp":AT}),
     ] {
         let root = tempfile::tempdir().unwrap();
+        let cursor = native(root.path(), &header(), &[message(), candidate.clone()]);
+        assert_eq!(
+            age(&cursor, root.path()),
+            Some(at(AT)),
+            "every timestamped shape is activity: {candidate}"
+        );
+        for invalid in [
+            None,
+            Some(Value::Null),
+            Some(json!(12)),
+            Some(json!("bad")),
+            Some(json!("2026-09-28T00:00:00")),
+        ] {
+            let mut bad = candidate.clone();
+            let fields = bad.as_object_mut().unwrap();
+            match invalid {
+                Some(value) => {
+                    fields.insert("timestamp".into(), value);
+                }
+                None => {
+                    fields.remove("timestamp");
+                }
+            }
+            let cursor = native(root.path(), &header(), &[message(), bad.clone()]);
+            assert_eq!(
+                age(&cursor, root.path()),
+                None,
+                "every activity timestamp is required: {bad}"
+            );
+        }
+    }
+    for bad in [Value::Null, json!(true), json!(7), json!([])] {
+        let root = tempfile::tempdir().unwrap();
         let cursor = native(root.path(), &header(), &[message(), bad.clone()]);
-        assert_eq!(age(&cursor, root.path()), None, "{bad}");
+        assert_eq!(
+            age(&cursor, root.path()),
+            None,
+            "no activity timestamp: {bad}"
+        );
     }
 }
 
@@ -274,4 +309,104 @@ fn automatic_codex_age_shared_exact_cursor_hash_eof_and_budget_guards_hold() {
     malformed.captured_through = bytes.len() as u64;
     malformed.prefix_hash = hex::encode(Sha256::digest(&bytes));
     assert_eq!(age(&malformed, root.path()), None, "torn tail");
+}
+
+#[test]
+fn automatic_codex_age_operating_rollout_016x_activity_is_known_and_maximal() {
+    let fixture = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/codex_retention/activity_rollout_016x.jsonl"
+    ));
+    let mut rows: Vec<Value> = fixture
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    rows[0]["payload"]["id"] = json!(SESSION);
+    rows[0]["payload"]["session_id"] = json!(SESSION);
+    for row in &mut rows {
+        if row["payload"].get("thread_id").is_some() {
+            row["payload"]["thread_id"] = json!(SESSION);
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cursor = native(root.path(), &rows[0], &rows[1..]);
+    assert_eq!(
+        age(&cursor, root.path()),
+        Some(at("2026-10-01T00:00:11Z")),
+        "[ba:r2:operating_activity] all native non-header activity contributes"
+    );
+    let last = age(&cursor, root.path());
+    let exact = at("2026-10-01T00:00:11Z") + Duration::from_secs(7 * 24 * 60 * 60);
+    assert!(!old_enough(last, exact - Duration::from_nanos(1)));
+    assert!(old_enough(last, exact));
+    assert!(old_enough(last, exact + Duration::from_nanos(1)));
+}
+
+#[test]
+fn automatic_codex_age_repeated_headers_must_keep_native_session_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut repeated = header();
+    repeated["timestamp"] = json!("2026-10-23T00:00:00Z");
+    let cursor = native(root.path(), &header(), &[message(), repeated.clone()]);
+    assert_eq!(
+        age(&cursor, root.path()),
+        Some(at(AT)),
+        "matching header timestamps do not supply activity"
+    );
+    let cursor = native(root.path(), &header(), &[repeated]);
+    assert_eq!(
+        age(&cursor, root.path()),
+        None,
+        "headers alone do not supply activity"
+    );
+    for (field, value) in [
+        ("id", json!("01900000-0000-7000-8000-999999999999")),
+        ("source", json!({"subagent":{"thread_spawn":{}}})),
+        ("parent_thread_id", json!("synthetic-parent")),
+        ("cwd", json!("relative")),
+    ] {
+        let mut bad = header();
+        bad["timestamp"] = json!(AT);
+        bad["payload"][field] = value;
+        let cursor = native(root.path(), &header(), &[message(), bad.clone()]);
+        assert_eq!(
+            age(&cursor, root.path()),
+            None,
+            "later native header must still match: {bad}"
+        );
+    }
+}
+
+// Narrow item and content checks reintroduce rejected native shapes only in mutants.
+pub(crate) fn legacy_completed_shape(item: &Value) -> Option<bool> {
+    match item["type"].as_str()? {
+        "UserMessage" | "AgentMessage" => {
+            if let Some(body) = item.get("content") {
+                legacy_content_shape(body).then_some(true)
+            } else {
+                item["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(|_| true)
+            }
+        }
+        "user_message" | "agent_message" => item["text"].is_string().then_some(true),
+        "Reasoning" | "CommandExecution" | "FileChange" | "McpToolCall" | "WebSearch"
+        | "ContextCompaction" | "EnteredReviewMode" | "ExitedReviewMode" | "reasoning"
+        | "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => Some(false),
+        _ => None,
+    }
+}
+
+fn legacy_content_shape(value: &Value) -> bool {
+    value.as_array().is_some_and(|items| {
+        !items.is_empty()
+            && items.iter().all(|item| match item["type"].as_str() {
+                Some("text" | "input_text" | "output_text") => item["text"].is_string(),
+                Some("input_image" | "image") => {
+                    item["image_url"].is_string() || item["url"].is_string()
+                }
+                _ => false,
+            })
+    })
 }
