@@ -371,7 +371,7 @@ fn preview_text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     let mut preview = text.trim().to_string();
     if preview.len() > STDERR_PREVIEW_BYTES {
-        preview.truncate(STDERR_PREVIEW_BYTES);
+        crate::utils::format::safe_truncate(&mut preview, STDERR_PREVIEW_BYTES);
         preview.push_str("...");
     }
     preview
@@ -379,8 +379,23 @@ fn preview_text(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::GitCommand;
+    use super::{GitCommand, STDERR_PREVIEW_BYTES, preview_text};
     use std::time::Duration;
+
+    // A multi-byte char straddling the cap used to panic in `String::truncate`.
+    #[test]
+    fn preview_text_truncates_multibyte_stderr_on_a_char_boundary() {
+        let stderr = "한".repeat(STDERR_PREVIEW_BYTES);
+        assert!(!stderr.is_char_boundary(STDERR_PREVIEW_BYTES));
+
+        let preview = preview_text(stderr.as_bytes());
+
+        let body = preview
+            .strip_suffix("...")
+            .expect("truncated preview ends with ...");
+        assert!(body.len() <= STDERR_PREVIEW_BYTES);
+        assert!(stderr.starts_with(body));
+    }
 
     #[test]
     fn run_text_captures_stdout() {
