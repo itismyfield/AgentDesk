@@ -485,8 +485,8 @@ fn paused() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// `restart_required → NoPeer → stale → restart_required → Off`: the cause and its one notice hold
-/// through every unverifiable reading and only a fresh `Off` ends the episode.
+/// `restart_required → NoPeer → stale → restart_required → process restart → NoPeer →
+/// restart_required → Off`: the cause and its one notice hold until a fresh `Off`.
 #[test]
 fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fresh_off() {
     let f = Fixture::new();
@@ -546,6 +546,25 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
             sends().len(),
             1,
             "uncertainty and staleness are not a new episode"
+        );
+
+        // A new process keeps only the receipt, and its first reading proves nothing.
+        RECORDS.lock().unwrap().remove("episode");
+        let posted = OperatorNotice {
+            root: Some(receipts.clone()),
+            ..OperatorNotice::herdr_home("episode-node", &home, 7_189_041)
+        };
+        assert!(posted.restart_for_test());
+        tick(&unverified).await;
+        assert_eq!(record("episode").cause, None);
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(61)).await;
+            tick(&restart).await;
+        }
+        assert_eq!(
+            (sends().len(), record("episode").notice),
+            (1, "sent"),
+            "a restart's unverifiable first reading is not a recovery"
         );
 
         tick(&off).await;

@@ -30,6 +30,14 @@ impl OperatorNotice {
     ) -> impl Drop {
         Restore(SENDER.with(|sender| sender.borrow_mut().replace(Arc::new(send))))
     }
+
+    /// Test-only: a new process, where this fault's owner is gone and only its receipt is left.
+    pub(crate) fn restart_for_test(&self) -> bool {
+        let mut owners = lock(&OPERATOR);
+        let before = owners.len();
+        owners.retain(|scope, _| scope.token_hash != self.fault);
+        owners.len() < before
+    }
 }
 
 fn notice(root: &Path, home: &str, channel: u64) -> OperatorNotice {
@@ -37,11 +45,6 @@ fn notice(root: &Path, home: &str, channel: u64) -> OperatorNotice {
         root: Some(root.to_path_buf()),
         ..OperatorNotice::herdr_home("notice-node", &PathBuf::from(home), channel)
     }
-}
-
-/// A new process: the owner and its in-memory episode are gone, only the receipt file is left.
-fn restart(notice: &OperatorNotice) {
-    lock(&OPERATOR).retain(|scope, _| scope.token_hash != notice.fault);
 }
 
 fn paused() -> tokio::runtime::Runtime {
@@ -89,7 +92,7 @@ fn one_operator_notice_per_cause_episode_across_ticks_restarts_and_retries() {
         }
         assert_eq!(count(), 1);
 
-        restart(&notice);
+        assert!(notice.restart_for_test());
         for _ in 0..3 {
             notice.observe(Some(RESTART)).await;
             advance(Duration::from_secs(61)).await;

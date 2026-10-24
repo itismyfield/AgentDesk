@@ -156,6 +156,8 @@ impl OperatorNotice {
 pub(crate) struct Fault {
     keys: Vec<String>,
     cause: Option<&'static str>,
+    /// Every endpoint read a fresh `Off`: only then does a pass without a cause end the episode.
+    cleared: bool,
     notice: Option<OperatorNotice>,
 }
 
@@ -190,10 +192,12 @@ fn pass_with(
             _ => None,
         };
         let mut home_cause = None;
+        let mut cleared = true;
         for key in &target.keys {
             let e7 = matches!(file, File::Ensured(_))
                 .then(|| read(key))
                 .flatten();
+            cleared &= matches!(e7, Some(RestoreResume::Off { .. }));
             let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
             let previous = records.get(key).cloned();
             let was = previous.as_ref().and_then(|record| record.cause);
@@ -244,6 +248,7 @@ fn pass_with(
                 .map(|(node, channel)| OperatorNotice::herdr_home(node, &target.declared, channel)),
             keys: target.keys,
             cause: home_cause,
+            cleared,
         });
     }
     faults
@@ -253,10 +258,12 @@ fn pass_with(
 /// notice stays pending and nothing counts as sent.
 pub(crate) async fn notify(faults: Vec<Fault>) {
     for fault in faults {
-        let state = match &fault.notice {
-            Some(notice) => notice.observe(fault.cause).await,
-            None if fault.cause.is_some() => "pending",
-            None => "none",
+        let state = match (&fault.notice, fault.cause) {
+            // A restart's first unverifiable reading has no cause yet and must not end the episode.
+            (Some(_), None) if !fault.cleared => continue,
+            (Some(notice), cause) => notice.observe(cause).await,
+            (None, Some(_)) => "pending",
+            (None, None) => "none",
         };
         let mut records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
         for key in &fault.keys {
