@@ -217,6 +217,9 @@ class Plan(Fixture):
         self.assertEqual((plan["identity"]["rust"], plan["identity"]["nextest"]), ("1.94.1", "0.9.149"))
         plan, err = self.plan(self.NAMES, build={**BUILD, "--build-option": "RUSTFLAGS=-C x"})
         self.assertIn("KEY=VALUE", err)
+        plan, err = self.plan(self.NAMES, build={**BUILD, "--nextest-profile": "default"})
+        self.assertIsNone(plan)
+        self.assertIn("generated for profile ci", err)
 
     def test_empty_or_ignored_only_universe_is_rejected(self):
         plan, err = self.plan([], ignored=["m::manual"])
@@ -568,11 +571,13 @@ class RustSources(unittest.TestCase):
     def test_unreached_test_file_is_an_orphan(self):
         self.tree({"src/lib.rs": "mod used;\n", "src/used.rs": "#[test]\nfn ok() {}\n",
                    "src/forgotten.rs": "#[test]\nfn never_compiled() {}\n",
+                   "src/forgotten_attr.rs": "#[cfg_attr(test, test)]\nfn lost() {}\n",
                    "src/plain.rs": "fn helper() {}\n",
                    "src/main.rs": "mod bin_only;\n", "src/bin_only.rs": "#[test]\nfn bin_test() {}\n"})
         rc, err = self.cli("check")
         self.assertEqual(rc, 1)
         self.assertIn("orphan test file: src/forgotten.rs", err)
+        self.assertIn("orphan test file: src/forgotten_attr.rs", err)
         self.assertNotIn("plain.rs", err)
         self.assertNotIn("bin_only.rs", err)
 
@@ -587,7 +592,8 @@ class RustSources(unittest.TestCase):
         self.tree({"src/lib.rs": "mod t {\n    include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n}\n"
                                  "#[cfg_attr(unix, path = \"u.rs\")]\nmod u;\n"
                                  "#[cfg_attr(not(test), allow(dead_code))]\nfn quiet() {}\n"
-                                 "#[cfg_attr(test, derive(Default))]\nstruct Probe;\n",
+                                 "#[cfg_attr(test, derive(Default))]\nstruct Probe;\n"
+                                 "#[cfg_attr(test, cfg_attr(unix, test))]\nfn nested() {}\n",
                    "src/u.rs": ""})
         rc, err = self.cli("check")
         self.assertEqual(rc, 1)
@@ -595,6 +601,25 @@ class RustSources(unittest.TestCase):
         self.assertIn("src/lib.rs:4 cfg_attr can change compilation", err)
         self.assertNotIn("src/lib.rs:6", err)
         self.assertNotIn("src/lib.rs:8", err)
+        self.assertIn("src/lib.rs:10 cfg_attr can change compilation", err)
+
+    def test_unreadable_source_under_main_or_bin_fails_the_check(self):
+        self.tree({"src/lib.rs": "#[test]\nfn ok() {}\n",
+                   "src/main.rs": "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n",
+                   "src/bin/tool.rs": "#[cfg_attr(unix, path = \"t.rs\")]\nmod t;\n", "src/bin/t.rs": ""})
+        rc, err = self.cli("check")
+        self.assertEqual(rc, 1)
+        self.assertIn("src/main.rs:1 include! with a non-literal path", err)
+        self.assertIn("src/bin/tool.rs:1 cfg_attr can change compilation", err)
+
+    def test_path_inside_an_inline_module_resolves_under_that_module(self):
+        self.tree({"src/lib.rs": "#[path = \"custom\"]\nmod outer {\n    mod inner;\n}\n"
+                                 "mod other {\n    #[path = \"leaf.rs\"]\n    mod leaf;\n}\n",
+                   "src/custom/inner.rs": "#[test]\nfn right() {}\n", "src/outer/inner.rs": "#[test]\nfn decoy() {}\n",
+                   "src/other/leaf.rs": "#[test]\nfn right() {}\n", "src/leaf.rs": "#[test]\nfn decoy() {}\n"})
+        inv = rts.lib_inventory(self.root)
+        self.assertEqual(sorted(inv.tests), ["other::leaf::right", "outer::inner::right"])
+        self.assertEqual((inv.errors, inv.unreadable), ([], []))
 
     def test_cfg_chain_decides_the_platform(self):
         self.tree({
@@ -657,7 +682,8 @@ class RustSources(unittest.TestCase):
                  ("( any ( windows target_os = macos ) )", "macos", True),
                  ("( all ( test target_family = unix ) )", "windows", False),
                  ("( feature = voice )", "linux", True), ("( any ( windows target_pointer_width = 64 ) )", "linux", None),
-                 ("( all ( test sanitize ) )", "linux", None), ("( not ( unix windows ) )", "linux", None)]
+                 ("( all ( test sanitize ) )", "linux", None), ("( not ( unix windows ) )", "linux", None),
+                 ("( all ( ) )", "linux", True), ("( any ( ) )", "linux", False), ("( not ( any ( ) ) )", "linux", True)]
         for text, os_name, want in cases:
             with self.subTest(text):
                 self.assertIs(rts.cfg_holds(tuple(text.split()), os_name, frozenset({"voice"})), want)
@@ -733,6 +759,41 @@ mod tests {
         _, problems = pgc.classify(self.root, exempt={})
         self.assertEqual(len(problems), 1)
         self.assertIn("unresolved-external-test-module: src/lib.rs:3", problems[0])
+
+    def test_every_supported_test_attribute_is_classified(self):
+        attrs = ("test", "tokio::test", "async_std::test", "actix_rt::test")
+        body = "".join(f"    #[{a}]\n    async fn pg_{i}() {{ TestPostgresDb::new(); }}\n" for i, a in enumerate(attrs))
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod attrs;\n",
+                   "src/attrs.rs": "#[cfg(test)]\nmod tests {\n" + body + "}\n"})
+        names = [f"attrs::tests::pg_{i}" for i in range(len(attrs))]
+        listed = {"rust-suites": {"x": {"binary-id": "x", "kind": "lib", "testcases": {
+            name: {"ignored": False} for name in (*names, "db::tests::pure")}}}}
+        (self.root / "list.json").write_text(json.dumps(listed))
+        rc, err = self.cli("classify", "--json-out", self.root / "out.json", "--list", self.root / "list.json")
+        self.assertEqual(rc, 0, err)
+        out = json.loads((self.root / "out.json").read_text())
+        self.assertLessEqual(set(names), set(out["pg"]))
+        self.assertEqual(out["non_pg"], ["db::tests::pure"])
+
+    def test_recognised_test_missing_from_the_inventory_fails_the_cli(self):
+        bin_tests = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn bin_only() {}\n}\n"
+        self.tree({"src/main.rs": "mod cli;\n", "src/cli.rs": bin_tests})
+        self.assertEqual(self.cli("classify", "--json-out", self.root / "out.json"), (0, ""))
+        self.tree({"src/lib.rs": "mod db;\nmod support;\nmod attrs;\n",
+                   "src/attrs.rs": "#[cfg(test)]\nmod tests {\n    #[async_std::test]\n    async fn pg() {}\n}\n"})
+        with mock.patch.object(pgc.rust_test_sources, "TEST_ATTRS", {("test",), ("tokio", "test")}):
+            rc, err = self.cli("classify", "--json-out", self.root / "out.json")
+        self.assertEqual(rc, 1)
+        self.assertIn("test-not-in-inventory: attrs::tests::pg", err)
+        self.assertNotIn("bin_only", err)
+
+    def test_child_of_a_path_loaded_file_keeps_its_real_module_name(self):
+        self.tree({"src/lib.rs": "mod db;\nmod support;\n#[path = \"w/outer.rs\"]\nmod outer;\n",
+                   "src/w/outer.rs": "mod inner;\n",
+                   "src/w/inner.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn pg() { TestPostgresDb::new(); }\n}\n"})
+        pg, problems = pgc.classify(self.root, exempt={})
+        self.assertEqual(problems, [])
+        self.assertEqual(pg.get("outer::inner::tests::pg"), "src/w/inner.rs")
 
     def cli(self, *argv):
         err = io.StringIO()

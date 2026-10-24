@@ -31,7 +31,7 @@ EXEMPT = {
         "the lazy pool is never queried; leader workers are rejected and only the DB-free WsBatchFlusher starts",
 }
 # Findings that mean part of the tree was not analysed; omitted scope must not read as non-PG.
-UNANALYZABLE = frozenset({"unresolved-external-test-module", "pg-reach-depth-exhausted"})
+UNANALYZABLE = frozenset({"unresolved-external-test-module", "pg-reach-depth-exhausted", "test-not-in-inventory"})
 
 
 _RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
@@ -609,7 +609,8 @@ def discover_pg_inventory(
     aliases = _aliases(repo_root)
     brace_counter = [0]
     external_tests = _external_test_files(repo_root, brace_counter, findings)
-    declared_tests = set(rust_test_sources.lib_inventory(repo_root).tests)
+    inventory = rust_test_sources.lib_inventory(repo_root)
+    declared_tests = set(inventory.tests)
     item_bodies: dict[tuple[tuple[str, ...], str, str], str] = {}
     seeded: set[tuple[tuple[str, ...], str, str]] = set()
     records: list[tuple[str, str, tuple[str, ...], str]] = []
@@ -659,6 +660,13 @@ def discover_pg_inventory(
         ranges = _module_ranges(source, clean, brace_counter)
         external = path.resolve() in external_tests
         physical_base = file_module_path(src_root, path)
+        reached_base = inventory.modules.get(path.resolve())
+
+        def logical_at(*tail: str, physical_base=physical_base, reached_base=reached_base) -> tuple[str, ...]:
+            # The root walk knows a reached file's real module; #[path] aliasing is the fallback.
+            if reached_base is not None:
+                return (*reached_base, *tail)
+            return _normalize_alias_path((*physical_base, *tail), aliases)
 
         fn_ranges: list[tuple[int, int, re.Match[str], int]] = []
         for match in _FN.finditer(clean):
@@ -685,8 +693,7 @@ def discover_pg_inventory(
                 use.start(), impl_ranges
             ):
                 continue
-            physical_module = (*physical_base, *_scope_at(use.start(), ranges))
-            module = _normalize_alias_path(physical_module, aliases)
+            module = logical_at(*_scope_at(use.start(), ranges))
             for binding, target in import_bindings(module, use.group("path")):
                 if binding == "*":
                     wildcard_uses.setdefault(module, []).append(target[:-1])
@@ -702,8 +709,7 @@ def discover_pg_inventory(
                 continue
             if not _inside_test_region(start, ranges, external):
                 continue
-            physical_module = (*physical_base, *_scope_at(start, ranges))
-            module = _normalize_alias_path(physical_module, aliases)
+            module = logical_at(*_scope_at(start, ranges))
             key = (module, match.group("name"), "fn")
             body = _edge_boundary(clean, opening, brace_counter)
             item_bodies[key] = body
@@ -719,8 +725,7 @@ def discover_pg_inventory(
             if opening is None:
                 continue
             body = _edge_boundary(clean, opening, brace_counter)
-            physical_module = (*physical_base, *_scope_at(match.start(), ranges))
-            module = _normalize_alias_path(physical_module, aliases)
+            module = logical_at(*_scope_at(match.start(), ranges))
             key = (module, match.group(1), "struct")
             item_bodies[key] = body
             if seed_match(body):
@@ -732,8 +737,7 @@ def discover_pg_inventory(
                 continue
             opening = match.end() - 1
             body = _edge_boundary(clean, opening, brace_counter)
-            physical_module = (*physical_base, *_scope_at(match.start(), ranges))
-            module = _normalize_alias_path(physical_module, aliases)
+            module = logical_at(*_scope_at(match.start(), ranges))
             key = (module, match.group(1), "impl")
             item_bodies[key] = body
             if seed_match(body):
@@ -748,13 +752,17 @@ def discover_pg_inventory(
             if opening is None:
                 continue
             body = _edge_boundary(clean, opening, brace_counter)
-            physical = (*physical_base, *_scope_at(match.start(), ranges), match.group("name"))
-            logical = _normalize_alias_path(physical, aliases)
+            logical = logical_at(*_scope_at(match.start(), ranges), match.group("name"))
             name = "::".join(logical)
             # Reaching an external file through a cfg(test) declaration already
             # proves that its direct tests are part of the library test target.
             if name in declared_tests or external:
                 records.append((name, path.relative_to(repo_root).as_posix(), logical[:-1], body))
+            elif findings is not None and reached_base is not None:
+                # A recognised test in a file the lib walk reached must be listed, else it would run as non-PG.
+                findings.append(Finding(
+                    "test-not-in-inventory", name,
+                    f"{path.relative_to(repo_root).as_posix()}: a test the root inventory does not list"))
 
     by_path: dict[tuple[tuple[str, ...], str], set[tuple[tuple[str, ...], str, str]]] = {}
     for key in item_bodies:

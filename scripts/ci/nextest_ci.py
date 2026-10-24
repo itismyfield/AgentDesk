@@ -274,6 +274,8 @@ def build_identity(args):
     missing = sorted(key for key, value in required.items() if not (value or "").strip())
     if missing:
         raise PlanError(f"plan identity needs {', '.join(missing)}")
+    if args.nextest_profile != "ci":
+        raise PlanError(f"worker configs are generated for profile ci, not {args.nextest_profile!r}")
     options = sorted(set(args.build_option or []))
     bad = [o for o in options if not BUILD_OPTION_RE.match(o)]
     if bad:

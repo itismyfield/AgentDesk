@@ -18,7 +18,7 @@ import sys
 import tomllib
 
 
-TEST_ATTRS = {("test",), ("tokio", "test")}
+TEST_ATTRS = {("test",), ("tokio", "test"), ("async_std", "test"), ("actix_rt", "test")}
 # Rust `target_os` value per supported CI platform.
 PLATFORMS = {"linux": "linux", "macos": "macos", "windows": "windows"}
 RAW_STRING = re.compile(r'b?r(#{0,255})"')
@@ -115,7 +115,7 @@ def attribute_span(tokens, index):
 
 
 def cfg_attr_payload(tokens):
-    """Top-level attribute names after the predicate of `(PRED, attr, ...)`; commas are not tokens."""
+    """Attribute names after the predicate of `(PRED, attr, ...)`, nested cfg_attr included; commas are not tokens."""
     values = [t.value for t in tokens]
     if len(values) < 3 or values[0] != "(":
         return {"cfg"}
@@ -127,11 +127,16 @@ def cfg_attr_payload(tokens):
             i += 1
     elif values[2:3] == ["="]:
         i = 4
-    names, depth = set(), 0
-    for value, token in zip(values[i:-1], tokens[i:-1]):
-        if depth == 0 and token.kind == "ident":
-            names.add(value)
-        depth += (value == "(") - (value == ")")
+    names, depth, nested = set(), 0, None
+    for n in range(i, len(values) - 1):
+        if depth == 0 and tokens[n].kind == "ident":
+            names.add(values[n])
+            if values[n] == "cfg_attr":
+                nested = n + 1
+        depth += (values[n] == "(") - (values[n] == ")")
+        if nested is not None and depth == 0 and n >= nested:
+            names |= cfg_attr_payload(tokens[nested:n + 1])
+            nested = None
     return names
 
 
@@ -140,6 +145,8 @@ class Inventory:
     # Test ID -> every (site, cfg chain) that declares it; cfg-disjoint duplicates keep one entry each.
     tests: dict = field(default_factory=dict)
     reached: set = field(default_factory=set)
+    # Reached file -> the module path its items live in, from the first walk that reached it.
+    modules: dict = field(default_factory=dict)
     errors: list = field(default_factory=list)
     unreadable: list = field(default_factory=list)
 
@@ -157,15 +164,17 @@ def _include_target(tokens, index, source, repo_root):
 def walk(root, repo_root, inventory=None):
     """Add every test the crate root reaches to the inventory, following mod, #[path] and include!."""
     inv = inventory if inventory is not None else Inventory()
-    queue = [(root, (), root.parent, ())]
+    # (file, module names, children directory, directory its own #[path] resolves against, cfg chain)
+    queue = [(root, (), root.parent, root.parent, ())]
     seen = set()
     while queue:
-        source, outer, base_dir, file_cfgs = queue.pop()
+        source, outer, base_dir, path_dir, file_cfgs = queue.pop()
         identity = (source.resolve(), outer, file_cfgs)
         if identity in seen or not source.is_file():
             continue
         seen.add(identity)
         inv.reached.add(source.resolve())
+        inv.modules.setdefault(source.resolve(), outer)
         tokens = rust_tokens(source.read_text("utf-8"))
         rel = source.relative_to(repo_root)
         scopes, cfg_stack = [], [(0, file_cfgs)]
@@ -175,6 +184,8 @@ def walk(root, repo_root, inventory=None):
             token = tokens[index]
             names = outer + tuple(s[1] for s in scopes)
             directory = scopes[-1][2] if scopes else base_dir
+            # A #[path] in an inline module resolves under that module; at file level, beside the file.
+            redirect_dir = scopes[-1][2] if scopes else path_dir
             cfgs = cfg_stack[-1][1]
             site = f"{rel}:{token.line}"
             span = attribute_span(tokens, index)
@@ -210,13 +221,13 @@ def walk(root, repo_root, inventory=None):
                     cursor += 1
                 if cursor < len(tokens) and tokens[cursor].value == "{":
                     depth += 1
-                    scopes.append((depth, name, directory / name))
+                    scopes.append((depth, name, redirect_dir / pending_path if pending_path else directory / name))
                     cfg_stack.append((depth, cfgs + pending_cfgs))
                     index = cursor + 1
                     pending_path, pending_test, pending_cfgs = None, False, ()
                     continue
                 if cursor < len(tokens):
-                    candidates = ((source.parent / pending_path, directory / pending_path) if pending_path
+                    candidates = ((redirect_dir / pending_path,) if pending_path
                                   else (directory / f"{name}.rs", directory / name / "mod.rs"))
                     child = next((c for c in candidates if c.is_file()), None)
                     if child is None:
@@ -225,7 +236,7 @@ def walk(root, repo_root, inventory=None):
                     else:
                         owns_dir = pending_path is not None or child.name == "mod.rs"
                         queue.append((child, names + (name,), child.parent if owns_dir else child.parent / child.stem,
-                                      cfgs + pending_cfgs))
+                                      child.parent, cfgs + pending_cfgs))
                     pending_path, pending_test, pending_cfgs = None, False, ()
             elif token.kind == "ident" and token.value == "include" and index + 3 < len(tokens) \
                     and tokens[index + 1].value == "!" and tokens[index + 2].value == "(":
@@ -236,7 +247,7 @@ def walk(root, repo_root, inventory=None):
                     inv.errors.append(f"{site} include! names missing file {target}")
                 else:
                     # Included text is spliced into this module, so it keeps this module's names and directory.
-                    queue.append((target, names, directory, cfgs + pending_cfgs))
+                    queue.append((target, names, directory, redirect_dir, cfgs + pending_cfgs))
             if token.kind == "punct" and token.value == "{":
                 depth += 1
                 if pending_cfgs:
@@ -269,7 +280,8 @@ def has_test_attr(path):
         if span is not None:
             attr = tokens[span[0] + 1:span[1] - 1]
             path_end = next((n for n, item in enumerate(attr) if item.value in ("(", "=", "]")), len(attr))
-            if tuple(item.value for item in attr[:path_end] if item.kind == "ident") in TEST_ATTRS:
+            attr_path = tuple(item.value for item in attr[:path_end] if item.kind == "ident")
+            if attr_path in TEST_ATTRS or attr_path == ("cfg_attr",) and "test" in cfg_attr_payload(attr[path_end:]):
                 return True
     return False
 
@@ -283,6 +295,7 @@ def lib_inventory(repo_root):
             walk(root, repo_root, reached)
     lib.reached = reached.reached
     lib.errors += [e for e in reached.errors if e not in lib.errors]
+    lib.unreadable += [u for u in reached.unreadable if u not in lib.unreadable]
     return lib
 
 
@@ -313,7 +326,7 @@ def cfg_holds(predicate, target_os, features):
             decided = word == "any"
             if decided in values:
                 return decided, i + 1
-            return (None if None in values or not values else not decided), i + 1
+            return (None if None in values else not decided), i + 1
         if tokens[i + 1] == "=":
             key, value = word, tokens[i + 2]
             if key == "feature":
