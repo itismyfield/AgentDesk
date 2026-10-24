@@ -145,7 +145,7 @@ impl Fixture {
         crate::services::discord::tmux::tmux_watcher::completion_producer::complete_watcher_terminal_footer_or_status_panel_with_sniffer(
             &self.recorder.http, &self.shared, self.channel, &ProviderKind::Claude,
             0, false, &mut spin, None, None, "answer", panel, &mut last_panel, None,
-            None, sniffer, Some(11), false, false, false, Some(self.summary), self.actor.as_ref(),
+            None, sniffer, Some(11), false, false, false, Some(self.summary.clone()), self.actor.as_ref(),
         ).await;
     }
 
