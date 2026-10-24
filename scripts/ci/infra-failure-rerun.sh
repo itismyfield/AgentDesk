@@ -155,8 +155,7 @@ INFRA_ACTION_TIMEOUT_REGEX="the action '.+' has timed out after [0-9]+ minutes"
 #                          Service Unavailable` is `Error: ` followed by a bare
 #                          reason phrase, i.e. the V2 shape. Claim scope: TRUE
 #                          ON V2, UNPROVEN ON V1 — not "true of every runner".
-# `temporarily unavailable` and `429` stay out: neither has a cited log on this line, and a 429
-# dies in `Set up job`, which the zero-step path already treats as infrastructure.
+# `temporarily unavailable` and `429` stay out: no cited log here; a 429 dies in `Set up job` (zero-step path).
 INFRA_ACTION_DOWNLOAD_REGEX='failed to resolve action download info.*(service unavailable|bad gateway|gateway time-?out|internal server error)'
 
 # #5207 (F1): repo-configuration faults that kill a job before any repo step.
@@ -283,14 +282,8 @@ log_has_repo_config_fault() {
 #
 # Narrowness: bare `abandoned` is an ordinary English word, so each alternation
 # binds it to the mirror's `<X>_RESULT:` echo or its quoted result message.
-# #5207 (r3, P3-2): `_result:[[:space:]]+abandoned` also matches any other
-# `<x>_result:  abandoned` echo, e.g. `session_result:  abandoned`. No producer
-# of such a line exists in this repo today; if one appears, tighten the prefix.
-# #5207 (r3, P3-1): on a worker job this label is unreachable by construction —
-# `run_classifier` overwrites it with `unclassified-worker-failure` (steps >= 1) or
-# `infra-no-steps` (steps == 0). That is intended: the label diagnoses the
-# required-check MIRROR jobs, and a worker job's own label must stay tied to the
-# retry decision. Nothing is lost — the mirror jobs still carry it.
+# `_result:` also matches any `<x>_result:  abandoned` echo; none exists today. A worker
+# job's own label is overwritten by the retry decision, so this only labels judge jobs.
 UPSTREAM_ABANDONED_REGEX="result (is unexpected: |is |was )'abandoned'|_result:[[:space:]]+abandoned"
 
 log_has_upstream_abandoned() {
@@ -443,6 +436,12 @@ is_worker_job() {
   [[ "$1" =~ $WORKER_JOB_REGEX ]]
 }
 
+# A nextest failure the test step logged vetoes the retry even when its result artifact never uploaded.
+NEXTEST_FAILURE_REGEX='(^|[^[:alnum:]-])LEAK-FAIL([^[:alnum:]-]|$)|error: test run failed|Process completed with exit code 100\.'
+worker_log_has_test_failure() {
+  awk '/##\[group\]Run /{step=0} /cargo nextest run --archive-file/{step=1} step' "$1" | grep -a -E -q -- "$NEXTEST_FAILURE_REGEX"
+}
+
 # Log evidence alone never retries: classify-worker reads the worker artifacts, and any
 # recorded test failure, unreadable result or failed download vetoes every worker.
 worker_artifacts_allow_retry() {
@@ -458,6 +457,7 @@ worker_artifacts_allow_retry() {
   gh api "repos/$repo/actions/runs/$run_id/artifacts?per_page=100" >"$listing" 2>/dev/null || return 1
   jq -e '.total_count == (.artifacts | length)' "$listing" >/dev/null || return 1
   for name in "${names[@]}"; do
+    ! jq -e --arg n "$name" 'any(.artifacts[]; .name == $n and .expired != false)' "$listing" >/dev/null || return 1
     jq -e --arg n "$name" 'any(.artifacts[]; .name == $n and .expired == false)' "$listing" >/dev/null || continue
     gh run download "$run_id" --repo "$repo" --name "$name" --dir "$dir/$name" >/dev/null 2>&1 || return 1
   done
@@ -622,7 +622,9 @@ run_classifier() {
       fi
       seen_worker_names+="$job_name"$'\n'
       worker_failed_count=$((worker_failed_count + 1))
-      if job_is_infra_failure "$log_path" "$executed_steps"; then
+      if worker_log_has_test_failure "$log_path"; then
+        regression_count=$((regression_count + 1)) job_class="nextest-test-failure"
+      elif job_is_infra_failure "$log_path" "$executed_steps"; then
         worker_classified_count=$((worker_classified_count + 1))
         worker_job_ids+=("$job_id")
         worker_index+=":infra"

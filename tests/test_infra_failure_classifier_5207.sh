@@ -585,6 +585,27 @@ new_shard_case
 printf '%s\n' '{"total_count":0,"artifacts":[]}' >"$E2E_CASE/artifacts.json"
 assert_e2e "a run without its plan artifact vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
 
+# A nextest failure logged by the test step vetoes even when the worker's result upload then died.
+new_shard_case
+printf '%s\n' '##[group]Run set +e' 'cargo nextest run --archive-file "$NEXTEST_DIR/lib-tests.tar.zst" \\' \
+  '    LEAK-FAIL [   2.003s] agentdesk m::a' 'test result: ok. 1 passed; 0 failed' 'error: test run failed' \
+  '##[error]Process completed with exit code 100.' '##[group]Run actions/upload-artifact@v4' \
+  'The operation was canceled.' >"$E2E_CASE/job-902.log"
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "a logged nextest failure vetoes despite a missing artifact" "no-op:regression" "nextest-test-failure"
+[[ ! -e "$E2E_CASE/rerun.log" ]] || fail "logged nextest failure made a retry request"
+
+# Only the test step's own output counts: an exit 100 from another step stays an infra retry.
+new_shard_case
+printf '%s\n' '##[group]Run ./scripts/ci/postgres-service.sh start' '##[error]Process completed with exit code 100.' \
+  'The runner has received a shutdown signal.' >"$E2E_CASE/job-902.log"
+GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "an exit 100 outside the test step is not a test failure" "rerun-requested:infra" "infra-shutdown"
+assert_rerun_ids '901,902'
+
+# A worker artifact the run lists as expired is unreadable evidence, not a missing upload.
+new_shard_case
+printf '%s\n' '{"total_count":2,"artifacts":[{"name":"nextest-plan","expired":false},{"name":"nextest-worker-1-attempt-1","expired":true}]}' >"$E2E_CASE/artifacts.json"
+assert_e2e "an expired worker artifact vetoes" "no-op:worker-artifact-veto" "infra-shutdown"
+
 new_shard_case
 printf '%s\n' 'test result: FAILED. 1 passed; 1 failed' > "$E2E_CASE/job-902.log"
 GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "one real regression blocks both workers" "no-op:regression" "regression"
