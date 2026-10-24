@@ -501,42 +501,15 @@ if run_check contracts "Giant deadline warning reporter contract"; then
 "$PYTHON" -m unittest -v tests.test_report_giant_deadlines
 fi
 
-if run_check contracts "Rust test-lane coverage ratchet (#4846/#4910)"; then
-if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
-  echo "ERROR: TEST_LANE_BASELINE_REF must name an immutable comparison snapshot" >&2
-  exit 1
-fi
-"$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
-"$PYTHON" -m unittest tests.test_test_lane_coverage
-"$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
-"$PYTHON" -m unittest tests.test_required_id_exception_fragments
+if run_check contracts "Nested libtest declarations"; then
+"$PYTHON" -m unittest tests.test_nested_libtest
 fi
 
-if run_check contracts "PR test selection plan (main runs every lane in full)"; then
-"$PYTHON" -m unittest tests.test_test_selection tests.test_nested_libtest
-fi
-
-if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
-# Zero-match cargo is green; verify selectors and the shared compiled oracle.
-# Mutation tests retain the static/compiled and artifact fallback contracts.
-"$PYTHON" scripts/check_test_target_integrity.py --enforce
-"$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
-AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
-"$PYTHON" -m unittest tests.test_non_pg_test_filter
-fi
-
-if run_check contracts "PostgreSQL test-lane membership gate (#4979, enforced)"; then
-# The default mode also verifies the generated `pg_db` region of ci-pr.yml
-# against the manifest, so a new PG source path fails here rather than
-# skipping the PG lane on its own PR.
-"$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
-# #6014: regenerate and demand an empty diff. The check above proves the region
-# is derivable; this proves the COMMITTED workflow is the derived one, and that
-# regenerating an in-sync tree is a no-op. Same shape as the SQL inventory above.
-"$PYTHON" scripts/check_pg_test_lane_membership.py --write-pg-db-paths
-git diff --exit-code HEAD -- .github/workflows/ci-pr.yml
-"$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
+if run_check contracts "Rust test source wiring and PG classification"; then
+# Every reached test is in the single nextest run; an unlinked test file, unknown cfg or unreadable include fails.
+"$PYTHON" scripts/ci/rust_test_sources.py check
+# The native-OS split needs every PG test classified; an unanalyzable test fails instead of running as non-PG.
+"$PYTHON" scripts/ci/pg_test_classifier.py classify --json-out "$(mktemp)"
 fi
 
 if run_check contracts "Shared CI shell lexer tests"; then

@@ -212,5 +212,38 @@ class ClassifyWorker(Fixture):
         self.assertEqual(self.classify(1, evidence=[0]), ("unknown", "false"))
 
 
+class CollectAndSelectors(Fixture):
+    """The evidence job audits each worker's newest attempt and every targeted selector."""
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.plan_ok(["m::a", "m::b"], workers=2)
+
+    def record(self, worker, attempt):
+        rc, err = self.run_cli("verify-archive", "--plan", self.dir / "plan/plan.json", "--worker", worker,
+                               "--archive", self.archive, "--config", self.dir / f"plan/worker-{worker}.toml",
+                               "--sha", SHA, "--run-id", "7", "--run-attempt", attempt,
+                               "--record", self.dir / "art" / nreq.artifact_name(worker, attempt))
+        self.assertEqual(rc, 0, err)
+
+    def collected(self, attempt):
+        out = self.dir / f"res-{attempt}"
+        self.assertEqual(self.run_cli("collect-results", "--plan", self.dir / "plan/plan.json", "--artifacts",
+                                      self.dir / "art", "--run-attempt", attempt, "--output", out)[0], 0)
+        return {p.name: json.loads((p / "worker.json").read_text())["run_attempt"] for p in sorted(out.iterdir())}
+
+    def test_newest_attempt_up_to_this_one_is_collected_per_worker(self):
+        for worker, attempt in ((0, 1), (0, 2), (1, 1), (1, 3)):
+            self.record(worker, attempt)
+        self.assertEqual(self.collected(2), {"worker-0": "2", "worker-1": "1"})
+        self.assertEqual(self.collected(1), {"worker-0": "1", "worker-1": "1"})
+
+    def test_every_selector_must_match_a_planned_test(self):
+        for text, rc in (("[s]\nm::\n=m::a\n", 0), ("[s]\n=m::\n", 1), ("[s]\nm::a\nnowhere\n", 1), ("# none\n", 1)):
+            self.write("sel.txt", text)
+            got = self.run_cli("selector-audit", "--plan", self.dir / "plan/plan.json", "--selectors", self.dir / "sel.txt")
+            self.assertEqual(got[0], rc, text)
+
+
 if __name__ == "__main__":
     unittest.main()

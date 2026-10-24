@@ -4,6 +4,8 @@
   comparison-base   the SHA a plan is compared with: merge ref -> HEAD^1, PR head -> merge-base
   classify-worker   infra / test / unknown / pass per worker attempt; a run is retryable only when
                     every failed worker is infra, and infra needs the caller's log evidence
+  collect-results   copy each worker's newest attempt artifact (up to this attempt) to worker-<i>/ for audit
+  selector-audit    every targeted selector (scripts/ci/targeted-test-selectors.txt) matches a planned test
 
 nextest_ci.py registers these subcommands; this module holds no state of its own.
 """
@@ -11,6 +13,7 @@ nextest_ci.py registers these subcommands; this module holds no state of its own
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 # Jobs whose success is N: one archive build, every planned worker, and the result audit.
@@ -190,6 +193,46 @@ def cmd_classify_worker(ci, args):
     return 0
 
 
+def cmd_collect_results(ci, args):
+    plan = ci.load_plan(args.plan)
+    out = Path(args.output)
+    for worker in range(len(plan["workers"])):
+        for attempt in range(int(args.run_attempt), 0, -1):
+            src = Path(args.artifacts) / artifact_name(worker, attempt)
+            if src.is_dir():
+                # A job not rerun keeps its earlier attempt; the audit still checks every file's identity.
+                shutil.copytree(src, out / f"worker-{worker}")
+                print(f"worker {worker}: attempt {attempt}")
+                break
+        else:
+            print(f"worker {worker}: no artifact up to attempt {args.run_attempt}")
+    return 0
+
+
+def load_selectors(path):
+    """(section, selector) pairs; a leading = marks an exact test ID."""
+    section, rows = None, []
+    for raw in Path(path).read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif line and not line.startswith("#"):
+            rows.append((section, line))
+    return rows
+
+
+def cmd_selector_audit(ci, args):
+    plan = ci.load_plan(args.plan)
+    names = [name for w in plan["workers"] for _, name in w["tests"]]
+    rows = load_selectors(args.selectors)
+    missing = [(section, sel) for section, sel in rows
+               if not any(name == sel[1:] if sel.startswith("=") else sel in name for name in names)]
+    for section, sel in missing:
+        print(f"::error::targeted selector {sel!r} ({section}) matches no planned test")
+    print(f"{len(rows) - len(missing)}/{len(rows)} targeted selectors match planned tests")
+    return 1 if missing or not rows else 0
+
+
 def register(sub):
     """Add the subcommands to nextest_ci's parser; returns name -> handler(ci, args)."""
     r = sub.add_parser("required-context")
@@ -211,5 +254,14 @@ def register(sub):
                    help="a worker whose job log the caller's classifier proved infra (repeatable)")
     w.add_argument("--run-attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
     w.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
+    o = sub.add_parser("collect-results")
+    o.add_argument("--plan", required=True)
+    o.add_argument("--artifacts", required=True)
+    o.add_argument("--run-attempt", default=os.environ.get("GITHUB_RUN_ATTEMPT", "1"))
+    o.add_argument("--output", required=True)
+    t = sub.add_parser("selector-audit")
+    t.add_argument("--plan", required=True)
+    t.add_argument("--selectors", default="scripts/ci/targeted-test-selectors.txt")
     return {"required-context": cmd_required_context, "comparison-base": cmd_comparison_base,
-            "classify-worker": cmd_classify_worker}
+            "classify-worker": cmd_classify_worker, "collect-results": cmd_collect_results,
+            "selector-audit": cmd_selector_audit}
