@@ -248,6 +248,17 @@ fn codex_retention_other_pane_requires_exact_local_context_and_known_host_death(
     old.tmux_session = pane.into();
     let prepared = PreparedIncarnation::create(old.clone()).unwrap();
     let marker = crate::services::tmux_common::session_temp_path(pane, "host_kind");
+    assert_eq!(
+        requested(&snapshot, &events, 2).unwrap_err(),
+        "codex_retention_historical_not_local"
+    );
+    for value in ["", "future-host", "herdr"] {
+        std::fs::write(&marker, value).unwrap();
+        assert_eq!(
+            requested(&snapshot, &events, 2).unwrap_err(),
+            "codex_retention_historical_not_local"
+        );
+    }
     std::fs::write(&marker, "process").unwrap();
     assert!(matches!(
         requested(&snapshot, &events, 2).unwrap().basis,

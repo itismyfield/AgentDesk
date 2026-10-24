@@ -203,14 +203,10 @@ pub(crate) fn historical(
     if mismatch {
         return Err("codex_retention_old_context_not_local");
     }
-    use crate::services::session_host::{HostKind, HostLiveness, HostSessionRef, host_for};
-    use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
-    let HostKindMarker::Known(kind @ (HostKind::Tmux | HostKind::Process)) =
-        read_host_kind_marker(pane)
-    else {
-        return Err("codex_retention_historical_not_local");
-    };
-    if host_for(kind).liveness(HostSessionRef { kind, name: pane }) != HostLiveness::DeadOrAbsent {
+    use crate::services::session_host::HostLiveness;
+    let liveness = crate::services::discord::host_liveness::historical_execution_liveness(pane)
+        .ok_or("codex_retention_historical_not_local")?;
+    if liveness != HostLiveness::DeadOrAbsent {
         return Err("codex_retention_historical_not_ended");
     }
     use sha2::{Digest, Sha256};
