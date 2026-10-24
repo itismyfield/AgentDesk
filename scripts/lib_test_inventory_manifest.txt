@@ -2377,10 +2377,14 @@ services::claude_tui::hosting::warm_followup::pre_submit_cancel_tests::only_a_so
 services::claude_tui::input::active_turn_wait_extension_tests::extends_only_when_pane_alive_and_turn_active_within_ceiling
 services::claude_tui::input::final_ready_tests::final_readiness_vetoes_spinner_auth_draft_blind_and_dead_panes
 services::claude_tui::input::hold_lifecycle_tests::a2_cancel_before_payload_keeps_the_existing_cancellation_outcome
+services::claude_tui::input::hold_lifecycle_tests::a2_fresh_busy_waits_for_a_user_record_after_five_seconds
 services::claude_tui::input::hold_lifecycle_tests::a2_fresh_empty_echo_waits_for_receipt_or_retries_owned_literal
+services::claude_tui::input::hold_lifecycle_tests::a2_fresh_empty_recheck_waits_and_accepts_the_last_receipt_veto
+services::claude_tui::input::hold_lifecycle_tests::a2_fresh_receipt_wait_has_independent_ready_and_busy_boundaries
 services::claude_tui::input::hold_lifecycle_tests::a2_last_cleanup_capture_must_still_prove_the_draft_is_ours
 services::claude_tui::input::hold_lifecycle_tests::a2_legacy_confirmation_rechecks_person_ownership_before_enter
 services::claude_tui::input::hold_lifecycle_tests::a2_legacy_send_errors_never_erase_uncertain_paste
+services::claude_tui::input::hold_lifecycle_tests::a2_ownerless_fresh_confirmation_keeps_the_legacy_empty_composer_result
 services::claude_tui::input::tests::busy_followup_wait_session_died_error_is_not_a_timeout
 services::claude_tui::input::tests::busy_followup_wait_timeout_message_uses_followup_label
 services::claude_tui::input::tests::cancel_uses_escape

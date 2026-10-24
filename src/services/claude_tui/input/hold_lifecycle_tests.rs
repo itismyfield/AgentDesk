@@ -305,3 +305,259 @@ impl guarded_outcome::Owner for ReceiptOwner {
         *self.0.lock().unwrap() = Some(receipt);
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn a2_fresh_busy_waits_for_a_user_record_after_five_seconds() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let session = format!("a2-busy-receipt-{}", uuid::Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("busy.jsonl");
+    let prompt = "[User: test] delayed hook record";
+    let busy = empty().replace("⏺ Done.", "✳ Architecting… (esc to interrupt)");
+    assert!(crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&busy));
+    let writer = Arc::new(std::sync::Mutex::new(None));
+    let task = writer.clone();
+    let mut output = Some(path.clone());
+    let spy = SpyGuard::install(SpyState {
+        captures_after_send: Some(
+            std::iter::once(Some(empty()))
+                .chain(std::iter::repeat_n(Some(busy), 256))
+                .collect(),
+        ),
+        on_send: Some(Box::new(move |call| {
+            if call == "keys:Enter"
+                && let Some(path) = output.take()
+            {
+                *task.lock().unwrap() = Some(std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    std::fs::write(path, serde_json::json!({"type":"user","sessionId":"sid","message":{"content":prompt}}).to_string()+"\n").unwrap();
+                }));
+            }
+        })),
+        ..SpyState::default()
+    });
+    let owner = Arc::new(ReceiptOwner(std::sync::Mutex::new(None)));
+    let result = guarded_outcome::with_owner(Some(owner), || {
+        guarded_outcome::fresh_receipt(&session, prompt, path.to_str().unwrap(), "sid");
+        run_actions_with_submission_confirmation(
+            &session,
+            &[
+                TuiInputAction::Literal(prompt.into()),
+                TuiInputAction::Enter,
+            ],
+            Some(prompt),
+            Some(&CancelToken::new()),
+        )
+    });
+    writer.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(
+        result.is_ok(),
+        "busy native turn waits beyond four seconds without abandoning its receipt: {result:?}"
+    );
+    assert_eq!(
+        spy.calls()
+            .iter()
+            .filter(|c| c.as_str() == "keys:Enter")
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a2_fresh_empty_recheck_waits_and_accepts_the_last_receipt_veto() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct RecheckOwner {
+        receipt: std::sync::Mutex<Option<UserReceipt>>,
+        queries: AtomicUsize,
+        path: std::path::PathBuf,
+        record: String,
+        immediate: bool,
+        token: Arc<CancelToken>,
+    }
+    impl guarded_outcome::Owner for RecheckOwner {
+        fn started(&self) {}
+        fn finished(&self, _: &host_input::InputRun) {}
+        fn receipt(&self, receipt: UserReceipt) {
+            *self.receipt.lock().unwrap() = Some(receipt);
+        }
+        fn submission_record_observed(&self) -> bool {
+            let query = self.queries.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut receipt = self.receipt.lock().unwrap();
+            let before = receipt.as_mut().is_some_and(UserReceipt::observed);
+            if query == 2 {
+                // The second lookup follows the empty attributed recheck, after the prefix probe.
+                std::fs::write(&self.path, &self.record).unwrap();
+                if self.immediate {
+                    // Another poll would observe cancellation; the existing receipt veto suffices.
+                    self.token.cancelled.store(true, Ordering::SeqCst);
+                    return receipt.as_mut().is_some_and(UserReceipt::observed);
+                }
+            }
+            before
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let view = crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::view;
+    let prompt = "[User: test] recheck race";
+    for (immediate, styled) in [(true, false), (false, false), (false, true)] {
+        let session = format!("a2-recheck-receipt-{}", uuid::Uuid::new_v4());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recheck.jsonl");
+        let token = Arc::new(CancelToken::new());
+        let owner = Arc::new(RecheckOwner {
+            receipt: std::sync::Mutex::new(None),
+            queries: AtomicUsize::new(0),
+            path: path.clone(),
+            record:
+                serde_json::json!({"type":"user","sessionId":"sid","message":{"content":prompt}})
+                    .to_string()
+                    + "\n",
+            immediate,
+            token: token.clone(),
+        });
+        let recheck = if styled {
+            empty().replace("❯", "\x1b[37m❯\x1b[0m")
+        } else {
+            empty()
+        };
+        let spy = SpyGuard::install(SpyState {
+            captures_after_send: Some(
+                std::iter::once(Some(view(prompt, false)))
+                    .chain(std::iter::repeat_n(Some(empty()), 40))
+                    .collect(),
+            ),
+            draft_capture_at: Some((1, Some(recheck))),
+            ..SpyState::default()
+        });
+        let result = guarded_outcome::with_owner(Some(owner), || {
+            guarded_outcome::fresh_receipt(&session, prompt, path.to_str().unwrap(), "sid");
+            run_actions_with_submission_confirmation(
+                &session,
+                &[
+                    TuiInputAction::Literal(prompt.into()),
+                    TuiInputAction::Enter,
+                ],
+                Some(prompt),
+                Some(&token),
+            )
+        });
+        assert!(
+            result.is_ok(),
+            "empty recheck must await the native receipt and retain its immediate veto: immediate={immediate} styled={styled} {result:?}"
+        );
+        let calls = spy.calls();
+        assert_eq!(
+            calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.as_str() == "capture:draft")
+                .count(),
+            1
+        );
+    }
+    let session = format!("a2-recheck-person-{}", uuid::Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("person.jsonl");
+    let person = view("person draft", false);
+    assert_eq!(
+        crate::services::claude_tui::busy_inject::composer_owner_in_session(&session, &person),
+        crate::services::claude_tui::busy_inject::ComposerOwner::Person
+    );
+    let spy = SpyGuard::install(SpyState {
+        captures_after_send: Some([Some(view(prompt, false))].into()),
+        draft_capture_at: Some((1, Some(person))),
+        ..SpyState::default()
+    });
+    let owner = Arc::new(ReceiptOwner(std::sync::Mutex::new(None)));
+    let result = guarded_outcome::with_owner(Some(owner), || {
+        guarded_outcome::fresh_receipt(&session, prompt, path.to_str().unwrap(), "sid");
+        run_actions_with_submission_confirmation(
+            &session,
+            &[
+                TuiInputAction::Literal(prompt.into()),
+                TuiInputAction::Enter,
+            ],
+            Some(prompt),
+            Some(&CancelToken::new()),
+        )
+    });
+    assert!(result.is_err(), "Person ownership remains a fresh refusal");
+    assert_eq!(
+        spy.calls()
+            .iter()
+            .filter(|c| c.as_str() == "keys:Enter")
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a2_ownerless_fresh_confirmation_keeps_the_legacy_empty_composer_result() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let session = format!("a2-ownerless-receipt-{}", uuid::Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ownerless.jsonl");
+    let prompt = "[User: test] ownerless";
+    let spy = SpyGuard::install(SpyState {
+        captures_after_send: Some(std::iter::repeat_n(Some(empty()), 80).collect()),
+        ..SpyState::default()
+    });
+    let result = guarded_outcome::with_owner(None, || {
+        guarded_outcome::fresh_receipt(&session, prompt, path.to_str().unwrap(), "sid");
+        run_actions_with_submission_confirmation(
+            &session,
+            &[
+                TuiInputAction::Literal(prompt.into()),
+                TuiInputAction::Enter,
+            ],
+            Some(prompt),
+            Some(&CancelToken::new()),
+        )
+    });
+    assert!(
+        result.is_ok(),
+        "ownerless fresh scope must retain legacy submission confirmation: {result:?}"
+    );
+    assert_eq!(
+        spy.calls()
+            .iter()
+            .filter(|c| c.as_str() == "keys:Enter")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a2_fresh_receipt_wait_has_independent_ready_and_busy_boundaries() {
+    let busy = empty().replace("⏺ Done.", "✳ Architecting… (esc to interrupt)");
+    assert!(legacy_submission::fresh_receipt_may_wait(
+        &empty(),
+        Duration::from_millis(3999)
+    ));
+    assert!(!legacy_submission::fresh_receipt_may_wait(
+        &empty(),
+        Duration::from_secs(4)
+    ));
+    assert!(legacy_submission::fresh_receipt_may_wait(
+        &busy,
+        Duration::from_secs(5)
+    ));
+    assert!(!legacy_submission::fresh_receipt_may_wait(
+        &busy,
+        Duration::from_secs(30)
+    ));
+    assert!(legacy_submission::fresh_receipt_may_wait(
+        "unrecognized overlay",
+        Duration::from_secs(5)
+    ));
+    assert!(!legacy_submission::fresh_receipt_may_wait(
+        "unrecognized overlay",
+        Duration::from_secs(30)
+    ));
+}

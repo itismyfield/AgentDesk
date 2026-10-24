@@ -221,12 +221,7 @@ pub(crate) fn fresh_submission_observed() -> Option<bool> {
     OWNER.with(|slot| {
         let scope = slot.borrow();
         let scope = scope.as_ref().filter(|scope| scope.fresh_path.is_some())?;
-        Some(
-            scope
-                .owner
-                .as_ref()
-                .is_some_and(|owner| owner.submission_record_observed()),
-        )
+        Some(scope.owner.as_ref()?.submission_record_observed())
     })
 }
 pub(crate) fn begin() {

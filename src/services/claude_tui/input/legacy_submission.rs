@@ -1,5 +1,22 @@
 use super::*;
 
+const FRESH_SUBMIT_IDLE_RECEIPT_WAIT: Duration = Duration::from_secs(4);
+// Busy execution merits a bounded grace period; this is independent of pre-submit readiness.
+const FRESH_SUBMIT_BUSY_RECEIPT_WAIT: Duration = Duration::from_secs(30);
+
+pub(super) fn fresh_receipt_may_wait(pane: &str, elapsed: Duration) -> bool {
+    let busy = crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane);
+    let ready_empty = final_prompt_ready(&prompt_readiness_snapshot_from_capture(Some(pane), true))
+        && crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+            pane,
+        );
+    let budget = match (busy, ready_empty) {
+        (false, true) => FRESH_SUBMIT_IDLE_RECEIPT_WAIT,
+        _ => FRESH_SUBMIT_BUSY_RECEIPT_WAIT,
+    };
+    elapsed < budget
+}
+
 pub(super) fn run_actions_with_submission_confirmation(
     session_name: &str,
     actions: &[TuiInputAction],
@@ -61,7 +78,11 @@ pub(super) fn confirm_prompt_submission_left_editor(
         ) {
             PromptSubmitConfirmationDecision::Submitted => {
                 if receipt == Some(false) {
-                    if !prompt_left && started.elapsed() < Duration::from_secs(4) {
+                    if !prompt_left
+                        && pane
+                            .as_deref()
+                            .is_some_and(|pane| fresh_receipt_may_wait(pane, started.elapsed()))
+                    {
                         continue;
                     }
                     return Err("fresh Claude submit has no exact native user record".into());
@@ -110,8 +131,19 @@ pub(super) fn confirm_prompt_submission_left_editor(
                             )
                     },
                 );
-                if guarded_outcome::fresh_submission_observed() == Some(true) {
+                let rechecked_receipt = guarded_outcome::fresh_submission_observed();
+                if rechecked_receipt == Some(true) {
                     return Ok(());
+                }
+                if rechecked_receipt.is_some()
+                    && owner != Some(crate::services::claude_tui::busy_inject::ComposerOwner::Person)
+                    && capture.as_deref().is_some_and(|pane| {
+                        let pane = crate::services::codex_tui::input::strip_ansi_escape_sequences(pane);
+                        crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(&pane)
+                            && fresh_receipt_may_wait(&pane, started.elapsed())
+                    })
+                {
+                    continue;
                 }
                 if !owned_prompt {
                     tracing::warn!(tmux_session_name=session_name, owner=?owner, "claude tui Enter retry held: submitted composer ownership is unproven");
