@@ -65,6 +65,7 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── build_info.rs
 │   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
@@ -1542,6 +1543,12 @@ src/
 │   │   ├── queued_dequeue_dispatch_guard_wiring_tests/
 │   │   │   └── source_guard_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── herdr_row_end/
+│   │   │   │   ├── diagnostics.rs
+│   │   │   │   ├── diagnostics_tests.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   ├── owner.rs
+│   │   │   │   └── placeholder.rs
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
@@ -1593,9 +1600,11 @@ src/
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
+│   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
+│   │   │   ├── herdr_row_end_settle_tests.rs
 │   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
@@ -2163,6 +2172,7 @@ src/
 │   │   │   │   └── clear_waiting.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
+│   │   │   │   ├── restarted_herdr_sweep_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── turn_retirement/
 │   │   │   │   ├── codex.rs

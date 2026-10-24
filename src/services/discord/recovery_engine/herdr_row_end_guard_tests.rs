@@ -283,13 +283,13 @@ fn the_pass_never_waits_on_an_end_task_pg() {
 
 const O_OWNED: u64 = 1_479_671_399_000_111;
 
-/// An O-owned channel shows only the body-free marker, never the recovered body or the saved
-/// partial, and still ends.
+/// An O-owned channel whose turn closed with its terminal shows nothing at all: O relayed the turn,
+/// so the row ends without the marker, the recovered body or the saved partial.
 #[test]
-fn an_o_owned_channel_shows_only_the_marker_pg() {
+fn an_o_owned_relayed_turn_ends_without_a_notice_pg() {
     let path = concat!(
         module_path!(),
-        "::an_o_owned_channel_shows_only_the_marker_pg"
+        "::an_o_owned_relayed_turn_ends_without_a_notice_pg"
     );
     in_child(
         path,
@@ -310,14 +310,27 @@ fn an_o_owned_channel_shows_only_the_marker_pg() {
             run.relay.set(|pane| pane.screen = Some(READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.pass().await;
+            let ended = wait(Duration::from_secs(30), || run.durable().is_none()).await;
+            assert!(ended, "the row ends: {:?}", run.texts());
             let marker = interrupted_recovery_message(&run.row, "");
-            assert_ended(&run, &marker, &taken).await;
+            let texts = run.texts();
             assert!(
-                !run.texts()
-                    .iter()
-                    .any(|t| t.contains(ANSWER) || t.contains(PARTIAL)),
-                "{:?}",
-                run.texts()
+                !texts.iter().any(|t| t.contains(&marker)
+                    || t.contains(ANSWER)
+                    || t.contains(PARTIAL)
+                    || t.contains("완료 여부는 확인하지 못했습니다")),
+                "{texts:?}"
+            );
+            assert!(!herdr::held(), "the execution's input hold is released");
+            let once = wait(Duration::from_secs(20), || {
+                !taken.lock().unwrap().is_empty()
+            })
+            .await;
+            assert!(once, "the next input was taken");
+            assert_eq!(
+                *taken.lock().unwrap(),
+                vec![false],
+                "taken once, after the clear"
             );
             run.close().await;
         },
@@ -326,8 +339,8 @@ fn an_o_owned_channel_shows_only_the_marker_pg() {
 
 const TAIL: u64 = 1_479_671_399_000_112;
 
-/// The previous turn's tail stamped in the same second as the input mixes the read: the notice
-/// falls back to the interrupt message instead of another turn's text.
+/// The previous turn's tail stamped in the same second as the input mixes the read: the neutral
+/// notice, neither the interrupt message nor another turn's text.
 #[test]
 fn a_same_second_previous_tail_falls_back_to_the_notice_pg() {
     let path = concat!(
@@ -363,10 +376,14 @@ fn a_same_second_previous_tail_falls_back_to_the_notice_pg() {
             run.relay.set(|pane| pane.screen = Some(READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.pass().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            assert_ended(&run, "이전 요청의 완료 여부는 확인하지 못했습니다", &taken).await;
+            let texts = run.texts();
             assert!(
-                !run.texts()
+                !texts.iter().any(|t| t.contains(&run.interrupted())),
+                "{texts:?}"
+            );
+            assert!(
+                !texts
                     .iter()
                     .any(|t| t.contains(ANSWER) || t.contains("previous turn"))
             );
