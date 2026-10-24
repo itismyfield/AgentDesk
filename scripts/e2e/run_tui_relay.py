@@ -52,7 +52,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
-from tui_relay import health_readiness, herdr_restart, http_auth  # noqa: E402
+from tui_relay import health_readiness, herdr_restart, http_auth, restart_guard  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -4562,12 +4562,7 @@ def _guard_no_foreign_active_turns(
                 f"for foreign mailbox guard (cell={cell}, channel={channel_id}): "
                 f"{type(error).__name__}: {error}"
             ) from error
-        mailboxes = detail.get("mailboxes")
-        if not isinstance(mailboxes, list):
-            raise assertions.AssertionError(
-                "refusing to restart dcserver: /api/health/detail mailboxes is not a list "
-                f"(payload={_payload_summary(detail)})"
-            )
+        mailboxes = restart_guard.observed_mailboxes(detail)
 
         busy: list[str] = []
         for mailbox in mailboxes:

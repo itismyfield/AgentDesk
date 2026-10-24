@@ -24,8 +24,8 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 
 import run_tui_relay as driver  # noqa: E402
-from tui_relay import assertions  # noqa: E402
-from tui_relay import normal_intake_evidence as e36  # noqa: E402
+from tui_relay import assertions, normal_intake_evidence as e36  # noqa: E402
+from tui_relay.tests.restart_guard_cases import RestartObservationGuard  # noqa: E402, F401
 
 
 class E36DriverContract(unittest.TestCase):
