@@ -1712,7 +1712,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(outcome.dropped, [name.clone()]);
+        assert_eq!(outcome.dropped, std::slice::from_ref(&name));
         assert!(!env.exists(&name).await);
         let lines = std::fs::read_to_string(&log_path).expect("read audit log");
         let phases: Vec<String> = lines
@@ -1768,7 +1768,7 @@ mod tests {
             let alive = env.verdict(&paused).await;
             child.kill();
             let dead = env.verdict(&paused).await;
-            drop_all(&env, &[paused.clone()]).await;
+            drop_all(&env, std::slice::from_ref(&paused)).await;
             let while_alive = if stage == "after_create" {
                 Verdict::OwnerUnproven
             } else {
@@ -1867,7 +1867,7 @@ mod tests {
         )
         .await;
         let survived = env.exists(&orphan).await;
-        drop_all(&env, &[orphan.clone()]).await;
+        drop_all(&env, std::slice::from_ref(&orphan)).await;
         assert!(outcome.dropped.is_empty(), "{outcome:?}");
         assert!(survived);
     }
@@ -1922,9 +1922,9 @@ mod tests {
         let session_alive = sqlx::query("SELECT 1").execute(&mut late).await.is_ok();
         let survived = env.exists(&orphan).await;
         drop(late);
-        drop_all(&env, &[orphan.clone()]).await;
+        drop_all(&env, std::slice::from_ref(&orphan)).await;
         assert!(!listed, "{orphan} listed while a session is open");
-        assert_eq!(planned, [orphan.clone()]);
+        assert_eq!(planned, std::slice::from_ref(&orphan));
         assert!(outcome.dropped.is_empty(), "{outcome:?}");
         assert!(
             outcome
