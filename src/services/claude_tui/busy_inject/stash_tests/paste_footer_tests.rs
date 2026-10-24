@@ -21,8 +21,6 @@ fn folded_tui(footer: &str) -> Tui {
     tui.put("fold", "");
     tui.put("next-footer", &format!("{footer}\n"));
     tui.put("human.after-paste", "cp \"$d/next-footer\" \"$d/footer\"");
-    // Claude submits the stored paste payload when Enter accepts its folded chip.
-    tui.put("human.before-Enter", "cp \"$d/buffer\" \"$d/composer\"");
     tui
 }
 
@@ -30,13 +28,12 @@ fn folded_tui(footer: &str) -> Tui {
 fn folded_paste_footer_measured_capture_reads_chip_and_ownership() {
     let text = frame("iMessage", "200", "ann", NONCE, &long_text());
     assert_eq!(text.matches('\n').count(), 14);
+    let shown = screen::read(CAPTURE);
     assert_eq!(
-        screen::read(CAPTURE),
-        screen::Screen {
-            composer: Composer::Text(vec!["[Pasted text #1 +14 lines]".to_string()]),
-            stash: Stash::Unknown,
-        }
+        shown.composer,
+        Composer::Text(vec!["[Pasted text #1 +14 lines]".to_string()])
     );
+    assert_eq!(shown.stash, Stash::AbsentInRecognizedLayout);
     assert!(screen::owns_direct(CAPTURE, &text, &screen::Drawn::Folded));
 }
 

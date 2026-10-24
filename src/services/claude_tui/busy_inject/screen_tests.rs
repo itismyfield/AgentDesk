@@ -10,6 +10,78 @@ const HEADER: &str = "[📱 s · a · n1]";
 const PANE: Option<(usize, usize)> = Some((80, 24));
 const HANGUL: &str = "가나다라마바사아자차";
 
+#[test]
+fn measured_effort_status_proves_absent_stash_only_when_whole_and_right_aligned() {
+    let border = "─".repeat(114);
+    let view = |status: &str| {
+        format!("{status}\n{border}\n❯ \n{border}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)")
+    };
+    let status = format!("{:>112}", "◉ xhigh · /effort");
+    let capture = view(&status);
+    assert_eq!(
+        screen::read(&capture).stash,
+        Stash::AbsentInRecognizedLayout
+    );
+    assert_eq!(screen::read(&capture).composer, Composer::Empty);
+    use crate::services::claude_tui::composer_lock::{self, ComposerAdmission, DraftGuard};
+    let session = format!("effort-status-{}", uuid::Uuid::new_v4());
+    composer_lock::guard_draft(&session, DraftGuard::RecoveryRequired);
+    assert_eq!(
+        composer_lock::composer_admission(&session, || Some(capture)),
+        ComposerAdmission::Any,
+        "a measured empty composer releases its previous guard"
+    );
+    for status in [
+        status.replacen('◉', "●", 1),
+        status.trim_start().to_string(),
+        format!(" {status}"),
+        format!("{:>112}", "◉ xhigh · /effor"),
+        format!("{:>112}", "◉ arbitrary content"),
+    ] {
+        assert_eq!(
+            screen::read(&view(&status)).stash,
+            Stash::Unknown,
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn paste_hint_proves_only_one_exact_chip_inside_the_current_attempt() {
+    let border = "─".repeat(80);
+    let text = "[User: ann (ID: 7)]\nfirst line\nsecond line";
+    let view = |body: &str, footer: &str| {
+        format!(
+            "\n{border}\n❯ {}\n{border}\n{footer}",
+            body.replace('\n', "\n  ")
+        )
+    };
+    let hint = "  paste again to expand";
+    let normal = "  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    assert!(screen::owns_direct(&view(text, normal), text, &Drawn::Body));
+    assert!(!screen::owns_direct(&view(text, hint), text, &Drawn::Body));
+    for body in [
+        "",
+        "[Pasted text #1 +1 lines]",
+        "[Pasted text # +2 lines]",
+        "[Pasted text #1 +2 lines]\nforeign",
+    ] {
+        assert!(
+            !screen::owns_direct(&view(body, hint), text, &Drawn::Body),
+            "{body}"
+        );
+    }
+    let chip = view("[Pasted text #17 +2 lines]", hint);
+    assert_eq!(screen::read(&chip).footer, screen::Footer::PasteExpand);
+    assert!(screen::owns_direct(&chip, text, &Drawn::Body));
+    let empty = view("", hint);
+    assert_eq!(super::composer_owner(&empty), super::ComposerOwner::Unread);
+    assert_eq!(
+        super::draft_sighting(&empty),
+        crate::services::claude_tui::composer_lock::DraftSighting::Unsettled
+    );
+}
+
 fn x(n: usize) -> String {
     "x".repeat(n)
 }
@@ -223,7 +295,7 @@ fn plan_for(capture: &str, text: &str, size: (usize, usize)) -> Result<Option<Ve
 }
 
 /// A Discord input header wider than an 80-column pane wraps into rows a direct paste can still
-/// predict; a person's draft is stashed only where the whole header renders flat.
+/// predict; a person's draft can be stashed even when the outgoing header wraps.
 #[test]
 fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits() {
     let source = "discord:1479671298497183835:1561196979327869080";
@@ -242,7 +314,10 @@ fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits
     assert!(rows.len() > 2, "{rows:?}");
     assert_eq!(folded(&rows.concat()), folded(&frame));
     let draft = BUSY_DRAFT.replace(TOAST, "");
-    assert_eq!(plan_for(&draft, &frame, (46, 37)), Err(Veto::Draft));
+    assert_eq!(
+        plan_for(&draft, &frame, (46, 37)),
+        Ok(Some(vec!["js".to_string()]))
+    );
     let fits = plan_for(&draft, &frame, (160, 37));
     assert_eq!(fits, Ok(Some(vec!["js".to_string()])));
 }

@@ -678,6 +678,7 @@ src/
 │   │   │   ├── screen/
 │   │   │   │   └── paste_footer.rs
 │   │   │   ├── stash_tests/
+│   │   │   │   ├── a1_stash_tests.rs
 │   │   │   │   ├── hold_tests.rs
 │   │   │   │   └── paste_footer_tests.rs
 │   │   │   ├── ownership.rs
