@@ -33,6 +33,7 @@ pub(super) fn confirm_prompt_submission_left_editor(
     cancel_token: Option<&CancelToken>,
 ) -> Result<(), String> {
     let mut attempt = 0usize;
+    let started = Instant::now();
     loop {
         std::thread::sleep(prompt_submit_settle_for_attempt(attempt));
         check_prompt_cancel(cancel_token)?;
@@ -48,13 +49,25 @@ pub(super) fn confirm_prompt_submission_left_editor(
             });
         check_prompt_cancel(cancel_token)?;
 
+        let receipt = guarded_outcome::fresh_submission_observed();
+        if receipt == Some(true) && snapshot.tmux_pane_alive {
+            return Ok(());
+        }
         match prompt_submit_confirmation_decision(
             &snapshot,
             prompt_left,
             attempt,
             PROMPT_SUBMIT_CONFIRM_RETRIES,
         ) {
-            PromptSubmitConfirmationDecision::Submitted => return Ok(()),
+            PromptSubmitConfirmationDecision::Submitted => {
+                if receipt == Some(false) {
+                    if !prompt_left && started.elapsed() < Duration::from_secs(4) {
+                        continue;
+                    }
+                    return Err("fresh Claude submit has no exact native user record".into());
+                }
+                return Ok(());
+            }
             PromptSubmitConfirmationDecision::FailedSessionDead => {
                 return Err("claude tui session died after prompt submit".to_string());
             }
@@ -81,19 +94,35 @@ pub(super) fn confirm_prompt_submission_left_editor(
             }
             PromptSubmitConfirmationDecision::RetryEnter => {
                 let capture = host_input::observe_draft(session_name);
+                let owner = capture.as_deref().map(|pane| {
+                    crate::services::claude_tui::busy_inject::composer_owner_in_session(
+                        session_name,
+                        pane,
+                    )
+                });
                 let owned_prompt = submitted_prompt.zip(capture.as_deref()).is_some_and(
                     |(prompt, pane)| {
                         crate::services::claude_tui::prompt_readiness::composer_still_holds_prompt(
                             pane, prompt,
-                        ) && crate::services::claude_tui::busy_inject::composer_owner_in_session(
-                            session_name,
-                            pane,
-                        ) == crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk
+                        ) && owner
+                            == Some(
+                                crate::services::claude_tui::busy_inject::ComposerOwner::AgentDesk,
+                            )
                     },
                 );
+                if guarded_outcome::fresh_submission_observed() == Some(true) {
+                    return Ok(());
+                }
                 if !owned_prompt {
+                    tracing::warn!(tmux_session_name=session_name, owner=?owner, "claude tui Enter retry held: submitted composer ownership is unproven");
                     return Err("claude tui prompt retry held: composer no longer proves the submitted prompt is ours".into());
                 }
+                tracing::warn!(
+                    tmux_session_name = session_name,
+                    retry = attempt + 1,
+                    max_retries = PROMPT_SUBMIT_CONFIRM_RETRIES,
+                    "claude_tui prompt submit left a draft after Enter; retrying Enter"
+                );
                 run_actions(session_name, &[TuiInputAction::Enter], cancel_token)?;
                 attempt += 1;
             }

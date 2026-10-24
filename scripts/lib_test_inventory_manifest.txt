@@ -2377,6 +2377,7 @@ services::claude_tui::hosting::warm_followup::pre_submit_cancel_tests::only_a_so
 services::claude_tui::input::active_turn_wait_extension_tests::extends_only_when_pane_alive_and_turn_active_within_ceiling
 services::claude_tui::input::final_ready_tests::final_readiness_vetoes_spinner_auth_draft_blind_and_dead_panes
 services::claude_tui::input::hold_lifecycle_tests::a2_cancel_before_payload_keeps_the_existing_cancellation_outcome
+services::claude_tui::input::hold_lifecycle_tests::a2_fresh_empty_echo_waits_for_receipt_or_retries_owned_literal
 services::claude_tui::input::hold_lifecycle_tests::a2_last_cleanup_capture_must_still_prove_the_draft_is_ours
 services::claude_tui::input::hold_lifecycle_tests::a2_legacy_confirmation_rechecks_person_ownership_before_enter
 services::claude_tui::input::hold_lifecycle_tests::a2_legacy_send_errors_never_erase_uncertain_paste
@@ -4902,6 +4903,7 @@ services::discord::inflight::host_recovery_guard::tests::a_tmux_name_disagreemen
 services::discord::inflight::host_recovery_guard::tests::caller_runtime_evidence_survives_the_inflight_row_merge
 services::discord::inflight::host_recovery_guard::tests::host_kind_marker_maps_without_reading_a_failure_as_absent
 services::discord::inflight::host_recovery_guard::tests::inflight_row_host_evidence_reaches_the_guard_verdict
+services::discord::inflight::managed_submission::tests::a2_fresh_launch_receipt_survives_stale_binding_until_real_handoff
 services::discord::inflight::managed_submission::tests::a2_resolved_fresh_sid_survives_nested_receipt_recapture
 services::discord::inflight::managed_submission::tests::a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence
 services::discord::inflight::managed_submission::tests::a_composer_change_after_readiness_fails_before_the_fence

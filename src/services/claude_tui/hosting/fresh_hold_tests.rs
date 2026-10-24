@@ -16,6 +16,20 @@ fn a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker() {
     let owner = f.root.path().join("a2-owner");
     std::fs::write(&transcript, "").unwrap();
     std::fs::write(&owner, "owner").unwrap();
+    let previous = f.root.path().join("previous-native.jsonl");
+    std::fs::write(&previous, "old transcript\n").unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: previous.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
     let calls = f.root.path().join("a2-calls");
     let shim = f.root.path().join("tmux");
     let script = std::fs::read_to_string(&shim).unwrap();
@@ -82,6 +96,14 @@ fn a2_fresh_readiness_hold_never_kills_the_session_or_owner_marker() {
         "preparation holds must not kill: {calls}"
     );
     assert!(owner.exists(), "the held session retains its owner marker");
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(name)
+            .unwrap()
+            .output_path,
+        previous.display().to_string(),
+        "preparation hold retains the old binding without killing or resetting it"
+    );
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(name);
     assert_eq!(
         crate::services::platform::tmux::session_presence(name),
         crate::services::platform::tmux::SessionPresence::Present

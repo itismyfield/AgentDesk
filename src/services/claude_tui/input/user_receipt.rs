@@ -62,7 +62,6 @@ impl UserReceipt {
     }
 
     /// The launch already names its native session and transcript, which may not exist yet.
-    #[cfg(unix)]
     pub(crate) fn before_fresh(session: &str, prompt: &str, path: &str, sid: &str) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |_| {
             Self::snapshot(
@@ -148,7 +147,8 @@ impl UserReceipt {
         let Some(end) = self.end else {
             return false;
         };
-        crate::services::tmux_common::with_tmux_source_authority(&self.session, |authority| {
+        let session = self.session.clone();
+        crate::services::tmux_common::with_tmux_source_authority(&session, |authority| {
             let Some(current) =
                 tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
                     authority,
@@ -159,43 +159,74 @@ impl UserReceipt {
             if PaneIdentity::from_binding(&self.session, &current).as_ref() != Some(&self.pane) {
                 return false;
             }
-            let Some(file) = self.file.as_mut() else {
+            self.matches_through(end, false)
+        })
+    }
+
+    /// Observe only this live attempt; the terminal byte window is sealed separately.
+    pub(crate) fn observed(&mut self) -> bool {
+        if self.ended
+            || binding_context::observe_spawn_nonce_marker(&self.session) != self.pane.nonce
+        {
+            return false;
+        }
+        if self.file.is_none() {
+            self.file = open(&self.pane.output_path).ok();
+        }
+        let Some(end) = self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len())
+        else {
+            return false;
+        };
+        end >= self.offset && self.matches_through(end, true)
+    }
+
+    fn matches_through(&mut self, end: u64, live: bool) -> bool {
+        let Some(file) = self.file.as_mut() else {
+            return false;
+        };
+        if !same_file(file, &self.pane.output_path)
+            || !file.metadata().is_ok_and(|m| m.len() >= end)
+            || file.seek(SeekFrom::Start(self.offset)).is_err()
+        {
+            return false;
+        }
+        let mut reader = BufReader::new((&mut *file).take(end - self.offset));
+        let mut line = Vec::new();
+        let mut read = 0;
+        let mut matches = 0;
+        loop {
+            let Ok(n) = reader.read_until(b'\n', &mut line) else {
                 return false;
             };
-            if !same_file(file, &current.output_path)
-                || !file.metadata().is_ok_and(|m| m.len() >= end)
-                || file.seek(SeekFrom::Start(self.offset)).is_err()
-            {
+            if n == 0 {
+                break;
+            }
+            read += n;
+            if read > 16 * 1024 * 1024 {
                 return false;
             }
-            let mut reader = BufReader::new((&mut *file).take(end - self.offset));
-            let mut line = Vec::new();
-            let mut read = 0;
-            let mut matches = 0;
-            loop {
-                let Ok(n) = reader.read_until(b'\n', &mut line) else {
-                    return false;
-                };
-                if n == 0 {
+            if !line.ends_with(b"\n") {
+                if live {
                     break;
                 }
-                read += n;
-                if read > 16 * 1024 * 1024 || !line.ends_with(b"\n") {
-                    return false;
-                }
-                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
-                    return false;
-                };
-                if record["sessionId"].as_str() == Some(self.sid.as_str())
-                    && let Some(text) = user_text(&record)
-                    && super::super::busy_inject::exact_receipt(&text, &self.frame)
-                {
-                    matches += 1;
-                }
-                line.clear();
+                return false;
             }
-            matches == 1 && same_file(file, &current.output_path)
-        })
+            let Ok(record) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                return false;
+            };
+            if record["sessionId"].as_str() == Some(self.sid.as_str())
+                && let Some(text) = user_text(&record)
+                && super::super::busy_inject::exact_receipt(&text, &self.frame)
+            {
+                matches += 1;
+            }
+            line.clear();
+        }
+        (if live { matches > 0 } else { matches == 1 }) && same_file(file, &self.pane.output_path)
     }
 }
 
@@ -314,6 +345,10 @@ mod tests {
             UserReceipt::before_fresh(&session, "fresh input", path.to_str().unwrap(), "sid")
                 .unwrap();
         assert!(!receipt.confirmed());
+        assert!(
+            !receipt.observed(),
+            "missing fresh file is not an acknowledgement"
+        );
         std::fs::write(
             &path,
             format!(
@@ -322,6 +357,26 @@ mod tests {
             ),
         )
         .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":")
+            .unwrap();
+        assert!(
+            receipt.observed(),
+            "live receipt works before watcher binding registration"
+        );
+        assert!(
+            !receipt.confirmed(),
+            "observing input must not seal the terminal window"
+        );
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\"assistant\"}\n")
+            .unwrap();
         tui_prompt_dedupe::register_tmux_runtime_binding(
             &session,
             TuiRuntimeBinding {
@@ -410,6 +465,11 @@ mod tests {
                 .unwrap()
                 .write_all(after.as_bytes())
                 .unwrap();
+            assert_eq!(
+                receipt.observed(),
+                expected || case == "duplicate",
+                "live exact receipt: {case}"
+            );
             receipt.seal();
             assert_eq!(receipt.confirmed(), expected, "{case}");
             if expected {

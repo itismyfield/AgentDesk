@@ -580,13 +580,15 @@ fn a2_resolved_fresh_sid_survives_nested_receipt_recapture() {
         );
         guarded_outcome::capture_preparation(|| {
             guarded_outcome::receipt(session, &row.user_text);
+            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(false));
+            cap.fence().before_first_payload().unwrap();
+            writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
+                serde_json::json!({"type":"user", "sessionId":"resolved-fresh-sid", "message":{"content":row.user_text}})).unwrap();
+            assert_eq!(guarded_outcome::fresh_submission_observed(), Some(true), "real attempt owner exposes its live exact input receipt");
             Ok(())
         })
         .unwrap();
     });
-    cap.fence().before_first_payload().unwrap();
-    writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}",
-        serde_json::json!({"type":"user", "sessionId":"resolved-fresh-sid", "message":{"content":row.user_text}})).unwrap();
     let (sender, _rx) = std::sync::mpsc::channel();
     crate::services::claude::emit_claude_tui_watcher_handoff(
         &sender,
@@ -600,4 +602,62 @@ fn a2_resolved_fresh_sid_survives_nested_receipt_recapture() {
         "resolved fresh SID survives nested adapters and an older inflight SID"
     );
     tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+}
+
+#[test]
+fn a2_fresh_launch_receipt_survives_stale_binding_until_real_handoff() {
+    use crate::services::claude_tui::guarded_outcome;
+    use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (index, old_sid) in [None, Some("old-sid".to_string())].into_iter().enumerate() {
+        let (row, cap) = managed_row(7_314_294 + index as u64);
+        let session = row.tmux_session_name.as_deref().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("previous.jsonl");
+        let new = dir.path().join("launch.jsonl");
+        std::fs::write(&old, "previous transcript\n").unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            session,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: old.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: old_sid.clone(),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        guarded_outcome::with_owner(Some(cap.observer()), || {
+            guarded_outcome::fresh_receipt(
+                session,
+                &row.user_text,
+                new.to_str().unwrap(),
+                "launch-sid",
+            );
+            guarded_outcome::capture_preparation(|| {
+                // Repeat all submission snapshots while the old binding is still live.
+                for _ in 0..3 {
+                    guarded_outcome::receipt(session, &row.user_text);
+                }
+                Ok(())
+            })
+            .unwrap();
+            cap.fence().before_first_payload().unwrap();
+            std::fs::write(&new, serde_json::json!({"type":"user", "sessionId":"launch-sid", "message":{"content":row.user_text}}).to_string()+"\n").unwrap();
+            let (sender, _rx) = std::sync::mpsc::channel();
+            crate::services::claude::emit_claude_tui_watcher_handoff(
+                &sender,
+                new.to_str().unwrap(),
+                session,
+                &new,
+            );
+            cap.observer().receipt_finished(session);
+            assert!(
+                cap.exact_user_receipt(),
+                "fresh launch transcript must survive stale binding recapture: old_sid={old_sid:?}"
+            );
+        });
+        tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    }
 }

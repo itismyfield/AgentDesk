@@ -50,6 +50,9 @@ pub(crate) trait Owner: Send + Sync {
     fn finished(&self, run: &InputRun);
     fn preparation_held(&self, _hold: &PreparationHold) {}
     fn receipt(&self, _receipt: UserReceipt) {}
+    fn submission_record_observed(&self) -> bool {
+        false
+    }
     fn native_session_id(&self) -> Option<String> {
         None
     }
@@ -83,6 +86,7 @@ struct Scope {
     result: Option<InputRun>,
     preparation: Option<PreparationHold>,
     receipt_sid: Option<String>,
+    fresh_path: Option<String>,
 }
 thread_local! { static OWNER: RefCell<Option<Scope>> = const { RefCell::new(None) }; }
 struct Restore(Option<Scope>);
@@ -119,7 +123,7 @@ pub(crate) fn capture_preparation(
 }
 fn scoped<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> (R, Scope) {
     let previous = OWNER.with(|slot| {
-        let receipt_sid = slot
+        let (receipt_sid, fresh_path) = slot
             .borrow()
             .as_ref()
             .filter(|scope| {
@@ -129,12 +133,14 @@ fn scoped<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> (R, Scop
                     .zip(owner.as_ref())
                     .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
             })
-            .and_then(|scope| scope.receipt_sid.clone());
+            .map(|scope| (scope.receipt_sid.clone(), scope.fresh_path.clone()))
+            .unwrap_or_default();
         slot.replace(Some(Scope {
             owner,
             result: None,
             preparation: None,
             receipt_sid,
+            fresh_path,
         }))
     });
     let _restore = Restore(previous);
@@ -173,32 +179,55 @@ pub(crate) fn set_receipt_session_id(sid: &str) {
     });
 }
 pub(crate) fn receipt(session: &str, prompt: &str) {
-    let (owner, sid) = OWNER.with(|slot| {
+    let (owner, sid, fresh_path) = OWNER.with(|slot| {
         let scope = slot.borrow();
         (
             scope.as_ref().and_then(|s| s.owner.clone()),
             scope.as_ref().and_then(|s| s.receipt_sid.clone()),
+            scope.as_ref().and_then(|s| s.fresh_path.clone()),
         )
     });
-    if let Some(owner) = owner
-        && let Some(receipt) = UserReceipt::before(
-            session,
-            prompt,
-            sid.or_else(|| owner.native_session_id()).as_deref(),
-        )
-    {
-        owner.receipt(receipt);
+    if let Some(owner) = owner {
+        let sid = sid.or_else(|| owner.native_session_id());
+        let receipt = if let Some(path) = fresh_path {
+            sid.as_deref()
+                .and_then(|sid| UserReceipt::before_fresh(session, prompt, &path, sid))
+        } else {
+            UserReceipt::before(session, prompt, sid.as_deref())
+        };
+        if let Some(receipt) = receipt {
+            owner.receipt(receipt);
+        }
     }
 }
+
 #[cfg(unix)]
 pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
     set_receipt_session_id(sid);
+    OWNER.with(|slot| {
+        if let Some(scope) = slot.borrow_mut().as_mut() {
+            scope.fresh_path = Some(path.to_owned());
+        }
+    });
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner
         && let Some(receipt) = UserReceipt::before_fresh(session, prompt, path, sid)
     {
         owner.receipt(receipt);
     }
+}
+/// A fresh composer redraw is not evidence that its native user record exists.
+pub(crate) fn fresh_submission_observed() -> Option<bool> {
+    OWNER.with(|slot| {
+        let scope = slot.borrow();
+        let scope = scope.as_ref().filter(|scope| scope.fresh_path.is_some())?;
+        Some(
+            scope
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.submission_record_observed()),
+        )
+    })
 }
 pub(crate) fn begin() {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));

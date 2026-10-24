@@ -102,6 +102,16 @@ pub(super) fn receipt(attempt: &Attempt, receipt: UserReceipt) {
     }
 }
 
+pub(super) fn submission_record_observed(attempt: &Attempt) -> bool {
+    attempt
+        .evidence
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .receipt
+        .as_mut()
+        .is_some_and(UserReceipt::observed)
+}
+
 pub(super) fn finish_receipt(attempt: &Attempt, session: &str) {
     if attempt.target != session {
         return;
