@@ -665,12 +665,24 @@ impl LegacyQueued {
         let native = legacy_rollout(ID);
         std::fs::remove_file(&install.output).unwrap();
         write_marker(&install.session, &native);
-        // The pane's last launch left its option evidence (default compact limit), so a
-        // follow-up with the same options reuses the pane.
+        // The pane's last launch left its option evidence, so a follow-up with the same options
+        // reuses the pane; the compact limit is derived as intake derives it on this host.
+        let codex = ProviderKind::Codex;
+        let thresholds = crate::services::discord::adk_session::fetch_context_thresholds(
+            install.shared.api_port,
+        )
+        .await;
+        let compact_limit = codex
+            .compact_cli_config(
+                thresholds.compact_pct_for(&codex),
+                codex.resolve_context_window(None),
+            )
+            .first()
+            .map(|(_, limit)| limit.parse::<u64>().unwrap());
         crate::services::codex_tui::warm_followup::write_codex_tui_launch_options_evidence(
             &install.session,
             &crate::services::codex::CodexLaunchOptions::new("")
-                .with_compact_token_limit(Some(500_000))
+                .with_compact_token_limit(compact_limit)
                 .with_cwd(Some(&install::root().display().to_string())),
         )
         .unwrap();
