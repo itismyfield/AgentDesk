@@ -236,7 +236,7 @@ async fn hosted(
         }),
     )
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:?}"))?
     .ok_or("hosted Codex identity unavailable")?;
     let HostedLookup::Found(row) =
         load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(&key)).await
