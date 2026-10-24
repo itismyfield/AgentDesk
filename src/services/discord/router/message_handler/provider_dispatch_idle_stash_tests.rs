@@ -865,6 +865,8 @@ async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
     let pane = renderer(&f, name, "normal");
     let path = pane.join("transcript");
     let shared = crate::services::discord::make_shared_data_for_tests();
+    let unsupported = "unmeasured\tcolumn";
+    assert!(input::plan_prompt_submit(unsupported).is_ok());
     let mut held = InflightTurnState::new(
         ProviderKind::Claude,
         id,
@@ -872,7 +874,7 @@ async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
         7,
         id + 10,
         id + 11,
-        "x".repeat(801),
+        unsupported.to_string(),
         None,
         Some(name.into()),
         Some(path.display().to_string()),
@@ -1008,5 +1010,5 @@ async fn unsupported_body_reholds_without_repeated_wake_or_mutation() {
     ));
     let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
     assert_eq!(queued.intervention_queue.len(), 1);
-    assert_eq!(queued.intervention_queue[0].text, "x".repeat(801));
+    assert_eq!(queued.intervention_queue[0].text, unsupported.to_string());
 }

@@ -408,12 +408,11 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 "listed={listed}, fault={fault}: unexpected viewport observation"
             );
             if matches!(fault, "continuation" | "viewport_read" | "viewport_resize") {
-                assert!(matches!(
-                    result,
-                    Err(guarded_outcome::SubmissionError::Guarded(
-                        InputRun::Refused(InputRefusal::Composer(Refusal::NotReady))
-                    ))
-                ));
+                assert!(
+                    matches!(result, Err(guarded_outcome::SubmissionError::Held(ref hold))
+                        if hold.reason == "composer_not_ready" && hold.may_requeue()),
+                    "not-ready stays a typed pre-payload hold: {result:?}"
+                );
                 assert!(events(&root).is_empty());
                 assert_eq!(attempt.fenced.load(Ordering::SeqCst), 0);
                 if fault == "continuation" {
