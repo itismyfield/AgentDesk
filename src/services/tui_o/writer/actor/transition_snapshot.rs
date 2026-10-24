@@ -2,6 +2,9 @@
 //! stored rotation, the pane's current execution, and the probes a job took so far.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[path = "codex_history.rs"]
+mod codex_history;
+use crate::services::tui_o::writer::codex_snapshot::Observation as CodexObservation;
 
 use super::*;
 use crate::services::claude_tui::source_verify::SourceHistory;
@@ -31,6 +34,7 @@ pub(super) struct Common {
     rotation: Rotation,
     checkpoint: Option<u64>,
     execution: Execution,
+    codex: Option<CodexObservation>,
 }
 
 /// What the probes of one source assumed: its whole cursor, its reader and FD, and its successor.
@@ -64,6 +68,12 @@ impl Common {
             history: history.map_err(Clone::clone),
             overlaps,
             candidates: candidates(snapshot),
+            codex: snapshot.codex.clone(),
+            observation_id: self
+                .codex
+                .as_ref()
+                .map(super::super::transition_cleanup::scope::codex::identity),
+            reading: snapshot.reading,
         }
     }
 }
@@ -158,11 +168,28 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if facts.checkpoint? != checkpoint {
             return Err("the stored binding checkpoint is not the readers'".into());
         }
-        let execution = execution_read(channel, context);
+        let codex = (self.sources.transition_provider() == ShadowProvider::Codex)
+            .then(|| codex_read(channel, context));
+        let execution = if codex.is_some() {
+            Err("Codex has typed observation diagnostics".into())
+        } else {
+            execution_read(channel, context)
+        };
         let sessions = (cursors.iter().filter(old)).map(|c| c.source.session_id.as_str());
         let sessions: BTreeSet<&str> = sessions.collect();
-        let held =
-            (execution.clone()).and_then(|(_, history)| execution_sources(&history, &sessions));
+        let (pinned, held) = match &codex {
+            Some(CodexObservation::Complete(snapshot)) => (
+                Ok(Some(snapshot.current.clone())),
+                Ok(snapshot.held.clone()),
+            ),
+            Some(CodexObservation::Unknown(detail)) => (Err(detail.clone()), Err(detail.clone())),
+            None => (
+                execution.clone().map(|(pin, _)| pin),
+                execution
+                    .clone()
+                    .and_then(|(_, history)| execution_sources(&history, &sessions)),
+            ),
+        };
         let mut sources = BTreeMap::new();
         for cursor in &cursors {
             let key = source_key(&cursor.source);
@@ -186,9 +213,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             channel,
             provider: self.sources.transition_provider(),
             home: home_now(gate),
+            reading: self.sources.reading_count(),
+            codex: codex.clone(),
             rotation: rotation.clone(),
             cursors,
-            pinned: execution.clone().map(|(pin, _)| pin),
+            pinned,
             execution: held,
             sources,
             legacy_hops,
@@ -198,6 +227,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             rotation,
             checkpoint,
             execution,
+            codex,
         };
         Ok((snapshot, common))
     }
@@ -223,8 +253,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let posting = super::super::deliver::posts_in_flight(channel)
             .ok_or("the channel's POSTs in flight are not counted")?;
         let protected = self.verified.as_ref().map(super::super::owed::protected);
+        let retry = usize::from(self.writer.has_local_retry());
+        #[cfg(test)]
+        let retry = if super::super::deliver::bo_mutant("owed_retry") {
+            0
+        } else {
+            retry
+        };
         Ok(Obligations {
-            owed: self.owed.len(),
+            owed: self.owed.len() + retry,
             prepared: usize::from(self.writer.store().ledger().unresolved().is_some()),
             unsealed: usize::from(self.deriver.has_unsealed()),
             posting,
@@ -303,4 +340,25 @@ pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
         }
     }
     Restore(FORCED_EXECUTION.with(|forced| forced.borrow_mut().replace(read)))
+}
+
+fn codex_read(channel: u64, context: &Context) -> CodexObservation {
+    let read = || {
+        let observer = context
+            .codex
+            .as_ref()
+            .ok_or("Codex context observer unavailable")?;
+        crate::services::tmux_common::try_with_tmux_source_authority(&context.tmux, |authority| {
+            let input = observer.observe(authority)?;
+            if input.target.channel != channel
+                || input.target.tmux != context.tmux
+                || input.target.nonce != context.nonce
+            {
+                return Err("Codex observer target differs from actor request".to_owned());
+            }
+            Ok(codex_history::assess(input))
+        })
+        .ok_or("Codex source authority busy")?
+    };
+    read().unwrap_or_else(CodexObservation::Unknown)
 }

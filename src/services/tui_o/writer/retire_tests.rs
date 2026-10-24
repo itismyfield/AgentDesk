@@ -14,7 +14,7 @@ mod codex_end_proof_tests;
 #[path = "legacy_hop_retry_tests.rs"]
 mod legacy_hop_retry_tests;
 #[path = "transition_actor_tests.rs"]
-mod transition_actor_tests;
+pub(crate) mod transition_actor_tests;
 
 fn session_start() -> String {
     HookEventKind::SessionStart.as_str().to_owned()

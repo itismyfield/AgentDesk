@@ -4057,10 +4057,21 @@ services::discord::health::liveness_authority::tests::transient_unknown_expires_
 services::discord::health::liveness_authority::tests::verdict_overwrite_child
 services::discord::health::liveness_authority::tests::vouch_enforces_freshness_and_identity_without_turn_age_cap
 services::discord::health::mailbox::tests::agent_turn_status_separates_releasable_and_permanently_held_residue
+services::discord::health::o_transition::automatic::test_support::provider_ticks_only_observe_the_matching_ready_actor
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_an_active_turn_or_reserved_dispatch
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_missing_closed_and_unanswered_mailboxes
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_keeps_queued_input_or_recovery
 services::discord::health::o_transition::automatic_idle::tests::automatic_idle_reads_the_live_runtime_snapshot
+services::discord::health::o_transition::codex_context::tests::codex_fixture_pins_identity_when_inherited_host_source_is_missing
+services::discord::health::o_transition::codex_context::tests::codex_prepare_unknown_preserves_nonce_component_in_stats_and_log
+services::discord::health::o_transition::codex_context::tests::codex_prepare_without_explicit_identity_refuses_host_identity
+services::discord::health::o_transition::codex_context::tests::codex_sweep_classifies_existing_and_inflight_suspension
+services::discord::health::o_transition::codex_context::tests::codex_sweep_timeout_keeps_later_observations_running
+services::discord::health::o_transition::codex_context::tests::existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence
+services::discord::health::o_transition::codex_context::tests::legacy_production_prepare_is_complete_without_pg_and_changes_fail_closed
+services::discord::health::o_transition::codex_context::tests::pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown
+services::discord::health::o_transition::codex_context::tests::same_source_resume_keeps_p5_bytes_and_reaches_actual_codex_sweep
+services::discord::health::o_transition::codex_context::tests::verified_fresh_durable_claim_and_marker_reach_actual_codex_sweep
 services::discord::health::presence_unknown::tests::agent_components_escape_utf8_and_preserve_unknown_identity
 services::discord::health::presence_unknown::tests::groups_distinct_channels_and_projects_the_same_oldest_age
 services::discord::health::presence_unknown::tests::public_projection_adds_only_the_group_and_recovery_keeps_other_causes
@@ -12826,6 +12837,8 @@ services::session_host::herdr_host::tests::teardown_census_tests::authority_swee
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::herdr_host::tests::u_observer_callers_confined
 services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation
+services::session_host::herdr_registry::census_tests::complete_registered_census_preserves_extra_pane_and_exact_budget
+services::session_host::herdr_registry::census_tests::partial_mismatched_witness_protocol_id_and_duplicate_are_not_complete
 services::session_host::herdr_socket_rig_tests::t14_client::t14_cleanup_requires_positive_process_absence
 services::session_host::herdr_socket_rig_tests::t14_client::t14_client_control_rejects_external_hooks_and_source_escape
 services::session_host::herdr_terminate_real_tests::a_p11_m2_confirmation_required_has_no_escalation
@@ -13444,6 +13457,15 @@ services::tui_o::writer::actor::p5a2_tests::p5a2_source_snapshot_is_rechecked_af
 services::tui_o::writer::actor::p5a2_tests::p5a2_stale_actor_reply_never_issues_effect
 services::tui_o::writer::actor::p5a2_tests::p5a2_verified_source_reads_with_unknown_delivery_permission
 services::tui_o::writer::actor::transition::scoped_tests::queued_transition_is_refused_when_selection_freezes_before_actor_poll
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_fresh_holds_all_visits_but_not_the_initial_predecessor
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_full_channel_tail_and_census_survive_the_fold
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_herdr_and_legacy_keep_separate_context_policies
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_incomplete_or_additional_live_census_is_unknown
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_pending_must_resolve_the_exact_original_claim
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_preserves_the_full_immutable_context
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_resume_holds_the_expected_source_and_later_visits
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_same_source_resume_needs_no_current_nonce_record
+services::tui_o::writer::actor::transition_snapshot::codex_history::tests::codex_observation_source_chain_and_runtime_tip_must_agree
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_cursor_requires_eof_frontier_and_remains_positive_when_delivered
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_lagging_frontier_quiet_tail_and_owed_range_retry
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_recheck_rejects_cursor_or_frontier_change
@@ -13629,6 +13651,7 @@ services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::sh
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::negative::startup_pending_resolved_anchor_survives_later_same_nonce_warm_proof
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::new_root_waiting_alarm_clears_once_after_transition_job_finishes
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::obligations::durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::readonly_inspect_in_quiet_rescopes_the_fresh_root_without_waiting_alarm
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_and_unretired_denied_sources_stay_untouched_while_fresh_work_posts
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::retired_source_with_an_actual_owed_piece_cannot_enter_suspension
 services::tui_o::writer::tests::actor::canary_policy::fresh_resume::same_actor_scopes_two_fresh_incarnations_without_clear_or_restart
@@ -13655,6 +13678,7 @@ services::tui_o::writer::tests::actor::host_start::a_resume_the_log_keeps_unchan
 services::tui_o::writer::tests::actor::host_start::a_writer_that_stops_takes_no_work_before_its_next_poll
 services::tui_o::writer::tests::actor::host_start::an_actor_that_cannot_resume_its_sources_is_never_ready
 services::tui_o::writer::tests::actor::host_start::another_providers_channel_is_left_to_its_own_bot
+services::tui_o::writer::tests::actor::host_start::bo_provider::bo_production_host_registers_only_its_provider_on_the_ready_transition_port
 services::tui_o::writer::tests::actor::host_start::clear_launch::fresh_launch_after_clear_posts_once_across_old_tail_and_restart
 services::tui_o::writer::tests::actor::host_start::clear_launch::replaced_nonce_refuses_stale_launch_without_consuming_the_current_launch
 services::tui_o::writer::tests::actor::host_start::clear_launch::unseen_resume_and_unproven_launches_keep_their_bodies_pending
@@ -13871,6 +13895,8 @@ services::tui_o::writer::tests::actor::repost_turn::activation::f6_unsent_and_42
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_first_post_confirmed_never_reposts_pg
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_missing_post_reposts_once_at_confirmation_boundary_pg
 services::tui_o::writer::tests::actor::repost_turn::always_on::always_on_restart_requires_fresh_confirmation_before_one_repost_pg
+services::tui_o::writer::tests::actor::repost_turn::bo_post::bo_legacy_hosted_post_is_counted_before_the_http_future_exists
+services::tui_o::writer::tests::actor::repost_turn::bo_post::bo_legacy_hosted_repost_counter_survives_writer_recreation_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_a_dropped_writer_never_lets_its_repost_send_again_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_general_auto_and_resume_never_overlap_posts_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_block_auto_pg
@@ -14010,6 +14036,9 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_retires_every_source_from_two_historical_panes
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_retires_old_noncurrent_source
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::automatic_tests::automatic_retention_uses_the_superseded_nonce_of_a_live_herdr_logical_key
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::bo::bo_codex_identity_observes_full_tail_context_and_census_without_writing
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::bo::bo_codex_inspect_returns_complete_but_automatic_apply_keeps_the_backlog
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::codex_observation_real_not_found_retry_is_owed_before_due_and_after_restore
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
@@ -14196,6 +14225,8 @@ services::tui_prompt_control::tests::quoted_mid_sentence_and_multiline_slashes_s
 services::tui_prompt_control::tests::recognizes_known_local_controls_without_matching_prefixes_or_mid_body_text
 services::tui_prompt_control::tests::recognizes_raw_and_envelope_without_using_them_as_a_dedup_key
 services::tui_prompt_control::tests::splitting_the_primitive_leaves_the_claude_lowercasing_contract_intact
+services::tui_prompt_dedupe::binding_context::inventory::tests::complete_context_inventory_requires_eof_at_the_exact_entry_budget
+services::tui_prompt_dedupe::binding_context::inventory::tests::context_inventory_refuses_partial_corrupt_and_mismatched_entries
 services::tui_prompt_dedupe::binding_context::tests::binding_context_capture_errors_and_header_codec_are_bounded
 services::tui_prompt_dedupe::binding_context::tests::binding_context_fake_tmux_keeps_system_tools_resolvable
 services::tui_prompt_dedupe::binding_context::tests::binding_context_new_launch_preserves_retired_verified_and_temp_evidence
@@ -14214,6 +14245,9 @@ services::tui_prompt_dedupe::binding_events::admission_tests::b2_warm_seq_admiss
 services::tui_prompt_dedupe::binding_events::admission_tests::b2b1_seq_admission_loads_a_cold_writer_before_handoff
 services::tui_prompt_dedupe::binding_events::admission_tests::cold_admission_recovers_only_the_uncommitted_tail
 services::tui_prompt_dedupe::binding_events::admission_tests::cold_admission_uses_loaded_seq_and_rejects_load_errors_or_taint
+services::tui_prompt_dedupe::binding_events::codex::observation::tests::whole_channel_observation_binds_full_tail_and_refuses_record_budget_truncation
+services::tui_prompt_dedupe::binding_events::codex::observation::tests::whole_channel_observation_refuses_torn_corrupt_mismatched_and_over_byte_budget_logs
+services::tui_prompt_dedupe::binding_events::codex::observation::tests::whole_channel_observation_validates_typed_ownership_envelopes_alongside_legacy_rows
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::actual_current_source_replacement_still_blocks_a_returning_claim
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::canonical_witness_must_reference_the_exact_observation_and_proof
 services::tui_prompt_dedupe::binding_events::codex_claim_tests::commit_revalidates_current_context_after_the_optimistic_read
@@ -14366,6 +14400,8 @@ services::tui_prompt_dedupe::prompt_identity::tests::hooks_without_prompt_id_kee
 services::tui_prompt_dedupe::prompt_identity::tests::prompt_ids_outlive_the_uuid_window_until_the_four_hour_budget
 services::tui_prompt_dedupe::prompt_identity::tests::suppressed_hook_observations_do_not_record_their_prompt_id
 services::tui_prompt_dedupe::prompt_identity::tests::the_prompt_id_ring_keeps_the_newest_512_ids_per_pane
+services::tui_prompt_dedupe::runtime_binding::binding_access::tests::runtime_observation_distinguishes_missing_expired_and_withheld_without_purging
+services::tui_prompt_dedupe::runtime_binding::binding_access::tests::verified_runtime_observation_checks_durable_proof_and_exact_marker_without_publication
 services::tui_prompt_dedupe::runtime_binding::codex_legacy_lock_tests::legacy_canonical_read_failure_completes_ingress_and_another_getter
 services::tui_prompt_dedupe::runtime_binding::codex_legacy_lock_tests::legacy_channel_registration_serializes_hook_disk_and_memory_publication
 services::tui_prompt_dedupe::runtime_binding::codex_legacy_lock_tests::marker_io_guard_rejects_only_this_threads_binding_publication
@@ -14549,6 +14585,7 @@ services::tui_prompt_dedupe::tests::no_deferred_completion_when_completion_did_n
 services::tui_prompt_dedupe::tests::observe_publishes_user_prefixed_subagent_notification_machine_event_3818
 services::tui_prompt_dedupe::tests::observe_skips_discord_relayed_user_line_without_ledger_3527
 services::tui_prompt_dedupe::tests::pending_match_leaves_recent_tombstone_for_second_observer
+services::tui_prompt_dedupe::tests::private_registry_tests_run_their_bodies_only_in_a_private_process
 services::tui_prompt_dedupe::tests::prompt_anchor_can_be_peeked_until_delivery_commits
 services::tui_prompt_dedupe::tests::prompt_anchor_is_consumed_for_matching_tmux_and_channel
 services::tui_prompt_dedupe::tests::prompt_anchor_survives_long_streaming_turn_past_legacy_30min_ttl

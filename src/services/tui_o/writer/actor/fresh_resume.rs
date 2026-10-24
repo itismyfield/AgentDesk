@@ -51,7 +51,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             && !self.writer.has_local_retry()
             && self.writer.resume_pieces().is_empty()
             && self.writer.store().ledger().unresolved().is_none()
-            && !self.transitions.has_job()
+            && !self.transitions.has_apply_job()
             && self.sources.quiescent_for_rescope();
         #[cfg(test)]
         let quiescent = quiescent
